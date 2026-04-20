@@ -1,0 +1,123 @@
+[project]
+name = "owl"
+version = "0.1.0"
+description = "An RL library for the Kaggle 2026 Orbit Wars competition"
+readme = "README.md"
+authors = [
+    { name = "IsaiahPressman" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.4.4",
+    "pydantic>=2.13.2",
+    "pyyaml>=6.0.3",
+    "torch==2.9.0",
+    "tqdm>=4.67.3",
+    "wandb>=0.26.0",
+]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.13.1,<2.0",
+    "mypy",
+    "pytest>=9.0.3",
+    "types-pyyaml>=6.0.12.20260408",
+    "types-tqdm>=4.67.3.20260408",
+]
+
+[project.optional-dependencies]
+flash-attn = [
+    "flash-attn>=2.8.3",
+]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+module-name = "owl._core"
+python-packages = ["owl"]
+python-source = "src"
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
+no-build-isolation-package = ["flash-attn"]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+  { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.extra-build-variables]
+flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "A",
+    "B",
+    "D",
+    "E",
+    "F",
+    "G",
+    "I",
+    "PT",
+    "UP",
+    "ARG",
+    "ERA",
+    "PIE",
+    "RET",
+    "RSE",
+    "RUF",
+    "SIM",
+]
+ignore = [
+    "D1",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+plugins = ["pydantic.mypy"]
+strict_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+allow_redefinition = true
+
+[[tool.mypy.overrides]]
+module = ["owl.*"]
+no_implicit_reexport = true
+
+[[tool.mypy.overrides]]
+module = [
+    "flash_attn.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+strict_markers = true
+markers = [
+    "slow: long-running tests excluded from the default fast test target",
+]

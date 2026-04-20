@@ -1,0 +1,18 @@
+# Compilation artifacts and link files
+target/
+src/owl/_core*.so
+
+# Lockfiles
+Cargo.lock
+uv.lock
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
