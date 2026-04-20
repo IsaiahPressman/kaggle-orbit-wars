@@ -3,7 +3,7 @@ use numpy::{IntoPyArray, PyArray2};
 use pyo3::prelude::*;
 
 #[pyfunction]
-fn hello_from_bin() -> String {
+fn hello_from_rust() -> String {
     "Hello from owl!".to_string()
 }
 
@@ -24,8 +24,8 @@ fn assert_release_build() {
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
 /// import the module.
 #[pymodule]
-fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(hello_from_bin, m)?)?;
+fn rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(hello_from_rust, m)?)?;
     m.add_function(wrap_pyfunction!(hello_numpy, m)?)?;
     m.add_function(wrap_pyfunction!(assert_release_build, m)?)?;
     Ok(())

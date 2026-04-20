@@ -1,6 +1,6 @@
 # Compilation artifacts and link files
 target/
-src/owl/_core*.so
+python/owl/rs*.so
 
 # Lockfiles
 Cargo.lock

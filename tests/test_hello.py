@@ -1,10 +1,9 @@
 import numpy as np
+from owl.rs import hello_from_rust, hello_numpy
 
-from owl._core import hello_from_bin, hello_numpy
 
-
-def test_hello_from_bin() -> None:
-    assert hello_from_bin() == "Hello from owl!"
+def test_hello_from_rust() -> None:
+    assert hello_from_rust() == "Hello from owl!"
 
 
 def test_hello_numpy() -> None:

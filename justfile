@@ -1,4 +1,4 @@
-py_src := "src/"
+py_src := "python/"
 py_scripts := "scripts/"
 py_tests := "tests/"
 all_py_code := f"{{py_src}} {{py_scripts}} {{py_tests}}"

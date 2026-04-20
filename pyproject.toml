@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "kaggle-environments>=1.28.0",
     "numpy>=2.4.4",
     "pydantic>=2.13.2",
     "pyyaml>=6.0.3",
@@ -35,9 +36,9 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]
-module-name = "owl._core"
+module-name = "owl.rs"
 python-packages = ["owl"]
-python-source = "src"
+python-source = "python"
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
