@@ -74,3 +74,39 @@ uv run python scripts/generate_reference_fixtures.py
 
 The generated fixture is small and checked in at
 `tests/fixtures/generation/reference_generation.json`.
+
+## Updating tests after Python rule changes
+
+When `orbit_wars.py` or the official Orbit Wars environment changes, update the
+Rust parity tests in this order:
+
+1. Replace the local reference files if needed:
+
+```sh
+# update orbit_wars.py and orbit_wars_rules.md first
+uv run python scripts/generate_reference_fixtures.py
+```
+
+2. Download fresh replay fixtures from games produced by the updated
+   environment:
+
+```sh
+uv run python scripts/download_replays.py NEW_EPISODE_ID_1 NEW_EPISODE_ID_2 --save-dir tests/fixtures/orbit_wars_replays
+```
+
+3. Update the documented episode IDs in this README and
+   `docs/rules-engine-plan.md`. If changing the default replay set, also update
+   `DEFAULT_EPISODES` in `src/rules_engine/replay_tests.rs`.
+
+4. Run the full checks with the new fixtures present:
+
+```sh
+just prepare
+```
+
+5. Fix any failing Rust parity tests by matching the updated Python behavior,
+   then rerun `just prepare`.
+
+The checked-in generation fixture should be committed when it changes. The
+replay JSONL fixtures remain ignored by Git; keep only the episode IDs and setup
+commands in source control.
