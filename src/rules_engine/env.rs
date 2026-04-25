@@ -1,22 +1,36 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
+use super::generation::{
+    assign_home_planets, generate_comet_paths, generate_planets, spawn_comet_group, RandomSource,
+};
 use super::state::{
     Fleet, LaunchAction, Planet, Point, ResetConfig, State, StepResult, BOARD_SIZE, CENTER,
-    ROTATION_RADIUS_LIMIT, SUN_RADIUS,
+    COMET_SPAWN_STEPS, ROTATION_RADIUS_LIMIT, SUN_RADIUS,
 };
 use super::utils::{fleet_speed, point_to_segment_distance};
 
 pub type PlayerAction = Vec<LaunchAction>;
 
 pub fn reset(config: ResetConfig) -> State {
-    let planets = config.planets.unwrap_or_default();
+    let mut rng = rand::rng();
+    reset_with_rng(config, &mut rng)
+}
+
+pub fn reset_with_rng(config: ResetConfig, rng: &mut impl RandomSource) -> State {
+    let generated = config.planets.is_none();
+    let mut planets = config.planets.unwrap_or_else(|| generate_planets(rng));
     let initial_planets = config.initial_planets.unwrap_or_else(|| planets.clone());
+    if generated {
+        assign_home_planets(&mut planets, config.sim.player_count, rng);
+    }
 
     State {
         config: config.sim,
-        step: 0,
-        angular_velocity: config.angular_velocity.unwrap_or(0.0),
+        step: config.step.unwrap_or(if generated { 1 } else { 0 }),
+        angular_velocity: config
+            .angular_velocity
+            .unwrap_or_else(|| rng.uniform(0.025, 0.05)),
         planets,
         initial_planets,
         fleets: Vec::new(),
@@ -27,6 +41,15 @@ pub fn reset(config: ResetConfig) -> State {
 }
 
 pub fn step(state: &mut State, actions: &[PlayerAction]) -> StepResult {
+    let mut rng = rand::rng();
+    step_with_rng(state, actions, &mut rng)
+}
+
+pub fn step_with_rng(
+    state: &mut State,
+    actions: &[PlayerAction],
+    rng: &mut impl RandomSource,
+) -> StepResult {
     assert_eq!(
         actions.len(),
         state.config.player_count,
@@ -34,6 +57,7 @@ pub fn step(state: &mut State, actions: &[PlayerAction]) -> StepResult {
     );
 
     remove_expired_comets(state);
+    spawn_comets(state, rng);
     process_launches(state, actions);
     produce_ships(state);
     let mut combat_lists = move_fleets(state);
@@ -46,6 +70,37 @@ pub fn step(state: &mut State, actions: &[PlayerAction]) -> StepResult {
     state.step += 1;
 
     StepResult { done }
+}
+
+fn spawn_comets(state: &mut State, rng: &mut impl RandomSource) {
+    if !COMET_SPAWN_STEPS.contains(&(state.step + 1)) {
+        return;
+    }
+
+    let Some(paths) = generate_comet_paths(
+        &state.initial_planets,
+        state.angular_velocity,
+        state.step + 1,
+        &state.comet_planet_ids,
+        state.config.comet_speed,
+        rng,
+    ) else {
+        return;
+    };
+
+    let ships = rng
+        .randint(1, 99)
+        .min(rng.randint(1, 99))
+        .min(rng.randint(1, 99))
+        .min(rng.randint(1, 99));
+    let group = spawn_comet_group(
+        &mut state.planets,
+        &mut state.initial_planets,
+        &mut state.comet_planet_ids,
+        paths,
+        ships,
+    );
+    state.comets.push(group);
 }
 
 fn remove_expired_comets(state: &mut State) {
@@ -380,11 +435,28 @@ fn remaining_alive_players(state: &State) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules_engine::generation::RandomSource;
     use crate::rules_engine::state::{CometGroup, SimConfig};
+
+    struct RepeatingRandom {
+        int: i32,
+        float: f64,
+    }
+
+    impl RandomSource for RepeatingRandom {
+        fn randint(&mut self, _low: i32, _high: i32) -> i32 {
+            self.int
+        }
+
+        fn uniform(&mut self, low: f64, high: f64) -> f64 {
+            low + (high - low) * self.float
+        }
+    }
 
     fn base_state(player_count: usize) -> State {
         reset(ResetConfig {
             sim: SimConfig::new(player_count),
+            step: None,
             angular_velocity: Some(0.0),
             planets: Some(vec![
                 Planet {
@@ -521,6 +593,7 @@ mod tests {
     fn orbiting_planets_rotate_from_initial_position() {
         let mut state = reset(ResetConfig {
             sim: SimConfig::new(2),
+            step: None,
             angular_velocity: Some(0.5),
             planets: Some(vec![Planet {
                 id: 0,
@@ -545,6 +618,7 @@ mod tests {
     fn comet_moves_along_existing_path_and_expires() {
         let mut state = reset(ResetConfig {
             sim: SimConfig::new(2),
+            step: None,
             angular_velocity: Some(0.0),
             planets: Some(vec![Planet {
                 id: 10,
@@ -580,5 +654,49 @@ mod tests {
         let result = step(&mut state, &[vec![], vec![]]);
 
         assert_eq!(result.done, vec![true, true]);
+    }
+
+    #[test]
+    fn generated_reset_creates_first_playable_state_with_homes() {
+        let mut rng = rand::rng();
+        let state = reset_with_rng(ResetConfig::new(4), &mut rng);
+
+        assert_eq!(state.step, 1);
+        assert!((0.025..0.05).contains(&state.angular_velocity));
+        assert!(!state.planets.is_empty());
+        assert_eq!(state.initial_planets.len(), state.planets.len());
+        assert_eq!(
+            state
+                .planets
+                .iter()
+                .filter(|planet| planet.owner != -1)
+                .count(),
+            4
+        );
+        assert!(state
+            .initial_planets
+            .iter()
+            .all(|planet| planet.owner == -1));
+    }
+
+    #[test]
+    fn step_spawns_comets_before_same_step_comet_movement() {
+        let mut state = reset(ResetConfig {
+            sim: SimConfig::new(2),
+            step: Some(49),
+            angular_velocity: Some(0.04),
+            planets: Some(Vec::new()),
+            initial_planets: Some(Vec::new()),
+        });
+        let mut rng = RepeatingRandom { int: 7, float: 0.5 };
+
+        step_with_rng(&mut state, &[vec![], vec![]], &mut rng);
+
+        assert_eq!(state.comets.len(), 1);
+        assert_eq!(state.comets[0].path_index, 0);
+        assert_eq!(state.planets.len(), 4);
+        assert_eq!(state.comet_planet_ids, vec![1, 2, 3, 4]);
+        assert_eq!(state.planets[0].ships, 7);
+        assert_ne!(state.planets[0].position(), Point::new(-99.0, -99.0));
     }
 }

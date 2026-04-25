@@ -70,10 +70,22 @@ Then add replay parity tests:
 - Use `steps[t - 1][0].observation` as the transition input, actions from
   `steps[t][player].action`, and `steps[t][0].observation` as the canonical
   expected state.
-- Keep replay downloads out of Git. Store only episode ids and fixture extraction
-  instructions in docs/README.
-- Make fixture paths configurable so updated rule replays can replace old ones
-  without rewriting test code.
+- Keep raw replay downloads out of Git. Download `replay-<episode-id>.json`
+  files to the repo root, where `.gitignore` already excludes them.
+- Add a small fixture extractor that reads the raw Kaggle replay and writes one
+  JSONL row per transition: `episode_id`, `step`, typed per-player actions, the
+  pre-step observation, and the canonical post-step player 0 observation.
+- Keep checked-in fixture files compact. If they become too large, keep them out
+  of Git too and make the test print the extraction command when the fixture is
+  missing.
+- Recommended test environment variables:
+  `ORBIT_WARS_REPLAY_DIR` for raw `replay-*.json` downloads,
+  `ORBIT_WARS_PARITY_FIXTURE_DIR` for extracted JSONL fixtures, and
+  `ORBIT_WARS_PARITY_EPISODES` for an optional comma-separated episode allowlist.
+- Replay parity tests should discover fixtures through those variables instead
+  of hardcoded episode paths. When rules change, download new Kaggle episodes,
+  regenerate the JSONL fixtures from them, update the episode id list below, and
+  leave the test code unchanged unless the fixture schema itself changes.
 
 The current downloaded reference episodes are:
 

@@ -1,3 +1,5 @@
+pub mod rules_engine;
+
 use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray2};
 use pyo3::prelude::*;

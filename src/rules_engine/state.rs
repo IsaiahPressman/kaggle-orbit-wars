@@ -97,6 +97,7 @@ impl SimConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResetConfig {
     pub sim: SimConfig,
+    pub step: Option<u32>,
     pub angular_velocity: Option<f64>,
     pub planets: Option<Vec<Planet>>,
     pub initial_planets: Option<Vec<Planet>>,
@@ -106,6 +107,7 @@ impl ResetConfig {
     pub fn new(player_count: usize) -> Self {
         Self {
             sim: SimConfig::new(player_count),
+            step: None,
             angular_velocity: None,
             planets: None,
             initial_planets: None,
