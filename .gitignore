@@ -14,5 +14,8 @@ dist/
 wheels/
 *.egg-info
 
+# Large Kaggle replay downloads used by parity tests.
+replay-*.json
+
 # Virtual environments
 .venv
