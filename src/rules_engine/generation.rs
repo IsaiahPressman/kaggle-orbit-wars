@@ -467,6 +467,38 @@ mod tests {
         float: f64,
     }
 
+    struct CyclingRandom {
+        ints: Vec<i32>,
+        floats: Vec<f64>,
+        int_index: usize,
+        float_index: usize,
+    }
+
+    impl CyclingRandom {
+        fn new(ints: Vec<i32>, floats: Vec<f64>) -> Self {
+            Self {
+                ints,
+                floats,
+                int_index: 0,
+                float_index: 0,
+            }
+        }
+    }
+
+    impl RandomSource for CyclingRandom {
+        fn randint(&mut self, low: i32, high: i32) -> i32 {
+            let raw = self.ints[self.int_index % self.ints.len()];
+            self.int_index += 1;
+            low + raw.rem_euclid(high - low + 1)
+        }
+
+        fn uniform(&mut self, low: f64, high: f64) -> f64 {
+            let unit = self.floats[self.float_index % self.floats.len()];
+            self.float_index += 1;
+            low + (high - low) * unit
+        }
+    }
+
     impl RandomSource for RepeatingRandom {
         fn randint(&mut self, _low: i32, _high: i32) -> i32 {
             self.int
@@ -605,5 +637,51 @@ mod tests {
             assert_eq!(group[3].x, BOARD_SIZE - q1.x);
             assert_eq!(group[3].y, BOARD_SIZE - q1.y);
         }
+    }
+
+    #[test]
+    fn generate_planets_matches_scripted_random_stream_snapshot() {
+        let mut rng = CyclingRandom::new(
+            vec![5, 3, 11, 17, 4, 23, 29, 2, 31, 37, 5, 13, 19],
+            vec![0.13, 0.61, 0.27, 0.79, 0.42, 0.91, 0.18, 0.54],
+        );
+
+        let planets = generate_planets(&mut rng);
+        let fingerprint = planets
+            .chunks_exact(4)
+            .map(|group| {
+                let q1 = &group[0];
+                format!(
+                    "{}:{:.6}:{:.6}:{:.6}:{}:{}",
+                    q1.id, q1.x, q1.y, q1.radius, q1.ships, q1.production
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+
+        assert_eq!(
+            fingerprint,
+            "0:97.227887:59.780425:2.386294:16:4|4:96.996720:86.454393:2.098612:36:3|8:97.408089:71.405573:1.693147:9:2|12:73.321659:73.321659:2.386294:7:4"
+        );
+    }
+
+    #[test]
+    fn generate_comet_paths_matches_scripted_random_stream_snapshot() {
+        let mut rng = RepeatingRandom { int: 1, float: 0.5 };
+
+        let paths = generate_comet_paths(&[], 0.04, 50, &[], 4.0, &mut rng)
+            .expect("deterministic comet path");
+        let first = paths[0].first().expect("first point");
+        let last = paths[0].last().expect("last point");
+        let fingerprint = format!(
+            "{}:{:.6}:{:.6}:{:.6}:{:.6}",
+            paths[0].len(),
+            first.x,
+            first.y,
+            last.x,
+            last.y
+        );
+
+        assert_eq!(fingerprint, "33:35.361619:99.499009:97.592785:34.587569");
     }
 }

@@ -56,6 +56,8 @@ Start with component tests:
 - Fleet speed curve.
 - Planet generation helpers driven by an injectable random source.
 - Comet path generation driven by an injectable random source.
+- Scripted RNG snapshots for planet and comet generation, so future changes that
+  alter random call order or random-value interpretation fail loudly.
 - Action validation and launch side effects.
 - Production.
 - Fleet movement, out-of-bounds removal, sun collision, planet collision.
@@ -65,27 +67,27 @@ Start with component tests:
 
 Then add replay parity tests:
 
-- Convert Kaggle replay JSON into compact JSONL fixtures containing typed
+- Download Kaggle replays directly into compact JSONL fixtures containing typed
   actions and post-step reference observations.
 - Use `steps[t - 1][0].observation` as the transition input, actions from
   `steps[t][player].action`, and `steps[t][0].observation` as the canonical
   expected state.
-- Keep raw replay downloads out of Git. Download `replay-<episode-id>.json`
-  files to the repo root, where `.gitignore` already excludes them.
-- Add a small fixture extractor that reads the raw Kaggle replay and writes one
-  JSONL row per transition: `episode_id`, `step`, typed per-player actions, the
-  pre-step observation, and the canonical post-step player 0 observation.
+- Keep replay fixture downloads out of Git. Download `replay-<episode-id>.jsonl`
+  files to the fixture directory or repo root, where `.gitignore` excludes them.
+- `scripts/download_replays.py` writes the JSONL fixture format directly. The
+  companion extractor reads raw Kaggle JSON for older local downloads and writes
+  one JSONL row per transition: `episode_id`, `step`, typed per-player actions,
+  the pre-step observation, and the canonical post-step player 0 observation.
 - Keep checked-in fixture files compact. If they become too large, keep them out
   of Git too and make the test print the extraction command when the fixture is
   missing.
 - Recommended test environment variables:
-  `ORBIT_WARS_REPLAY_DIR` for raw `replay-*.json` downloads,
   `ORBIT_WARS_PARITY_FIXTURE_DIR` for extracted JSONL fixtures, and
   `ORBIT_WARS_PARITY_EPISODES` for an optional comma-separated episode allowlist.
 - Replay parity tests should discover fixtures through those variables instead
-  of hardcoded episode paths. When rules change, download new Kaggle episodes,
-  regenerate the JSONL fixtures from them, update the episode id list below, and
-  leave the test code unchanged unless the fixture schema itself changes.
+  of hardcoded episode paths. When rules change, download new Kaggle episodes as
+  JSONL fixtures, update the episode id list below, and leave the test code
+  unchanged unless the fixture schema itself changes.
 
 The current downloaded reference episodes are:
 

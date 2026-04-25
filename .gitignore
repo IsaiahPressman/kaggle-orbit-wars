@@ -16,6 +16,7 @@ wheels/
 
 # Large Kaggle replay downloads used by parity tests.
 replay-*.json
+replay-*.jsonl
 tests/fixtures/orbit_wars_replays/*.jsonl
 
 # Virtual environments

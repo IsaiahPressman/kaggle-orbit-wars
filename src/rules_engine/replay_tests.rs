@@ -76,7 +76,8 @@ fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
     if fixture_paths.is_empty() {
         eprintln!(
             "No replay parity fixtures found. Generate them with: \
-             uv run python scripts/extract_replay_fixtures.py --fixture-dir {DEFAULT_FIXTURE_DIR}"
+             uv run python scripts/download_replays.py 75373897 75377525 \
+             --save-dir {DEFAULT_FIXTURE_DIR}"
         );
         return Ok(());
     }
@@ -222,10 +223,13 @@ fn python_validated_actions(
 
     for (player_id, player_actions) in raw_actions.iter().enumerate() {
         for action in player_actions {
-            let from_planet_id = action[0] as u32;
+            let from_planet_raw = action[0];
             let angle = action[1];
             let ships = action[2] as i32;
-            let Some((owner, available_ships)) = planet_ships.get_mut(&from_planet_id) else {
+            let Some((&from_planet_id, (owner, available_ships))) = planet_ships
+                .iter_mut()
+                .find(|(planet_id, _)| f64::from(**planet_id) == from_planet_raw)
+            else {
                 continue;
             };
             if *owner != player_id as i32 || *available_ships < ships || ships <= 0 {
@@ -242,6 +246,54 @@ fn python_validated_actions(
     }
 
     Ok(actions)
+}
+
+#[test]
+fn python_validated_actions_does_not_truncate_planet_ids() -> Result<(), String> {
+    let state = State {
+        config: SimConfig::new(2),
+        step: 1,
+        angular_velocity: 0.0,
+        planets: vec![Planet {
+            id: 0,
+            owner: 0,
+            x: 20.0,
+            y: 20.0,
+            radius: 2.0,
+            ships: 10,
+            production: 1,
+        }],
+        initial_planets: Vec::new(),
+        fleets: Vec::new(),
+        next_fleet_id: 0,
+        comets: Vec::new(),
+        comet_planet_ids: Vec::new(),
+    };
+    let actions = python_validated_actions(
+        &state,
+        &[
+            vec![
+                [0.9, 0.0, 5.0],
+                [-0.1, 0.0, 5.0],
+                [0.0, 0.25, 5.9],
+                [0.0, 0.5, 6.0],
+            ],
+            vec![],
+        ],
+    )?;
+
+    assert_eq!(
+        actions,
+        vec![
+            vec![LaunchAction {
+                from_planet_id: 0,
+                angle: 0.25,
+                ships: 5,
+            }],
+            vec![],
+        ]
+    );
+    Ok(())
 }
 
 fn injections_from_expected(row: &FixtureRow) -> Result<StepInjections, String> {
