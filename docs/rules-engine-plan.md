@@ -56,8 +56,9 @@ Start with component tests:
 - Fleet speed curve.
 - Planet generation helpers driven by an injectable random source.
 - Comet path generation driven by an injectable random source.
-- Scripted RNG snapshots for planet and comet generation, so future changes that
-  alter random call order or random-value interpretation fail loudly.
+- Python-reference generation fixtures for planet and comet generation, so Rust
+  must consume the same recorded random calls and match Python's generated
+  outputs.
 - Action validation and launch side effects.
 - Production.
 - Fleet movement, out-of-bounds removal, sun collision, planet collision.
@@ -102,7 +103,9 @@ The current downloaded reference episodes are:
 4. Port reset/generation using an injectable RNG trait.
 5. Port turn stepping in Python turn-order order.
 6. Add replay parity integration tests.
-7. Run `just rs-prepare` after Rust edits and `just py-prepare` after Python
+7. Regenerate Python-reference generation fixtures with
+   `scripts/generate_reference_fixtures.py` when upstream generation changes.
+8. Run `just rs-prepare` after Rust edits and `just py-prepare` after Python
    edits.
 
 ## Known Risk Areas

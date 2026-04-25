@@ -61,3 +61,16 @@ episodes as JSONL fixtures, move them into the fixture directory if needed,
 update the reference episode id list in this README and
 `docs/rules-engine-plan.md`, and run the parity tests against the new fixture
 directory.
+
+## Generation parity
+
+Map generation and comet path generation are checked against fixtures produced
+by the Python reference implementation under recorded random streams. Regenerate
+those fixtures after intentional upstream rule changes:
+
+```sh
+uv run python scripts/generate_reference_fixtures.py
+```
+
+The generated fixture is small and checked in at
+`tests/fixtures/generation/reference_generation.json`.

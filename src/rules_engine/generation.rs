@@ -456,6 +456,7 @@ fn comet_path_is_valid(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
 
     struct ScriptedRandom {
         ints: std::collections::VecDeque<i32>,
@@ -465,38 +466,6 @@ mod tests {
     struct RepeatingRandom {
         int: i32,
         float: f64,
-    }
-
-    struct CyclingRandom {
-        ints: Vec<i32>,
-        floats: Vec<f64>,
-        int_index: usize,
-        float_index: usize,
-    }
-
-    impl CyclingRandom {
-        fn new(ints: Vec<i32>, floats: Vec<f64>) -> Self {
-            Self {
-                ints,
-                floats,
-                int_index: 0,
-                float_index: 0,
-            }
-        }
-    }
-
-    impl RandomSource for CyclingRandom {
-        fn randint(&mut self, low: i32, high: i32) -> i32 {
-            let raw = self.ints[self.int_index % self.ints.len()];
-            self.int_index += 1;
-            low + raw.rem_euclid(high - low + 1)
-        }
-
-        fn uniform(&mut self, low: f64, high: f64) -> f64 {
-            let unit = self.floats[self.float_index % self.floats.len()];
-            self.float_index += 1;
-            low + (high - low) * unit
-        }
     }
 
     impl RandomSource for RepeatingRandom {
@@ -639,49 +608,180 @@ mod tests {
         }
     }
 
-    #[test]
-    fn generate_planets_matches_scripted_random_stream_snapshot() {
-        let mut rng = CyclingRandom::new(
-            vec![5, 3, 11, 17, 4, 23, 29, 2, 31, 37, 5, 13, 19],
-            vec![0.13, 0.61, 0.27, 0.79, 0.42, 0.91, 0.18, 0.54],
-        );
+    #[derive(Debug, Deserialize)]
+    struct GenerationFixture {
+        planet_generation: PlanetGenerationFixture,
+        comet_path_generation: CometPathGenerationFixture,
+    }
 
-        let planets = generate_planets(&mut rng);
-        let fingerprint = planets
-            .chunks_exact(4)
-            .map(|group| {
-                let q1 = &group[0];
-                format!(
-                    "{}:{:.6}:{:.6}:{:.6}:{}:{}",
-                    q1.id, q1.x, q1.y, q1.radius, q1.ships, q1.production
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("|");
+    #[derive(Debug, Deserialize)]
+    struct PlanetGenerationFixture {
+        random_calls: Vec<RandomCall>,
+        planets: Vec<[f64; 7]>,
+    }
 
-        assert_eq!(
-            fingerprint,
-            "0:97.227887:59.780425:2.386294:16:4|4:96.996720:86.454393:2.098612:36:3|8:97.408089:71.405573:1.693147:9:2|12:73.321659:73.321659:2.386294:7:4"
-        );
+    #[derive(Debug, Deserialize)]
+    struct CometPathGenerationFixture {
+        inputs: CometPathInputs,
+        initial_planets: Vec<[f64; 7]>,
+        random_calls: Vec<RandomCall>,
+        paths: Vec<Vec<[f64; 2]>>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CometPathInputs {
+        angular_velocity: f64,
+        spawn_step: u32,
+        comet_planet_ids: Vec<u32>,
+        comet_speed: f64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "kind")]
+    enum RandomCall {
+        #[serde(rename = "randint")]
+        Randint { low: i32, high: i32, value: i32 },
+        #[serde(rename = "uniform")]
+        Uniform { low: f64, high: f64, value: f64 },
+    }
+
+    struct FixtureRandom {
+        calls: std::collections::VecDeque<RandomCall>,
+    }
+
+    impl FixtureRandom {
+        fn new(calls: Vec<RandomCall>) -> Self {
+            Self {
+                calls: calls.into_iter().collect(),
+            }
+        }
+
+        fn assert_finished(&self) {
+            assert!(
+                self.calls.is_empty(),
+                "{} fixture random calls were not consumed",
+                self.calls.len()
+            );
+        }
+    }
+
+    impl RandomSource for FixtureRandom {
+        fn randint(&mut self, low: i32, high: i32) -> i32 {
+            let call = self.calls.pop_front().expect("fixture random call");
+            let RandomCall::Randint {
+                low: expected_low,
+                high: expected_high,
+                value,
+            } = call
+            else {
+                panic!("expected randint fixture call");
+            };
+            assert_eq!(low, expected_low);
+            assert_eq!(high, expected_high);
+            value
+        }
+
+        fn uniform(&mut self, low: f64, high: f64) -> f64 {
+            let call = self.calls.pop_front().expect("fixture random call");
+            let RandomCall::Uniform {
+                low: expected_low,
+                high: expected_high,
+                value,
+            } = call
+            else {
+                panic!("expected uniform fixture call");
+            };
+            close(low, expected_low);
+            close(high, expected_high);
+            value
+        }
     }
 
     #[test]
-    fn generate_comet_paths_matches_scripted_random_stream_snapshot() {
-        let mut rng = RepeatingRandom { int: 1, float: 0.5 };
+    fn generate_planets_matches_python_reference_fixture() {
+        let fixture = reference_fixture();
+        let mut rng = FixtureRandom::new(fixture.planet_generation.random_calls);
 
-        let paths = generate_comet_paths(&[], 0.04, 50, &[], 4.0, &mut rng)
-            .expect("deterministic comet path");
-        let first = paths[0].first().expect("first point");
-        let last = paths[0].last().expect("last point");
-        let fingerprint = format!(
-            "{}:{:.6}:{:.6}:{:.6}:{:.6}",
-            paths[0].len(),
-            first.x,
-            first.y,
-            last.x,
-            last.y
+        let planets = generate_planets(&mut rng);
+
+        rng.assert_finished();
+        compare_planets(&planets, &fixture.planet_generation.planets);
+    }
+
+    #[test]
+    fn generate_comet_paths_matches_python_reference_fixture() {
+        let fixture = reference_fixture();
+        let mut rng = FixtureRandom::new(fixture.comet_path_generation.random_calls);
+        let initial_planets = fixture
+            .comet_path_generation
+            .initial_planets
+            .iter()
+            .map(planet_from_array)
+            .collect::<Vec<_>>();
+        let inputs = fixture.comet_path_generation.inputs;
+
+        let paths = generate_comet_paths(
+            &initial_planets,
+            inputs.angular_velocity,
+            inputs.spawn_step,
+            &inputs.comet_planet_ids,
+            inputs.comet_speed,
+            &mut rng,
+        )
+        .expect("fixture comet paths");
+
+        rng.assert_finished();
+        compare_paths(&paths, &fixture.comet_path_generation.paths);
+    }
+
+    fn reference_fixture() -> GenerationFixture {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/generation/reference_generation.json"
+        ))
+        .expect("valid generation fixture")
+    }
+
+    fn planet_from_array(raw: &[f64; 7]) -> Planet {
+        Planet {
+            id: raw[0] as u32,
+            owner: raw[1] as i32,
+            x: raw[2],
+            y: raw[3],
+            radius: raw[4],
+            ships: raw[5] as i32,
+            production: raw[6] as i32,
+        }
+    }
+
+    fn compare_planets(actual: &[Planet], expected: &[[f64; 7]]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_eq!(actual.id, expected[0] as u32);
+            assert_eq!(actual.owner, expected[1] as i32);
+            close(actual.x, expected[2]);
+            close(actual.y, expected[3]);
+            close(actual.radius, expected[4]);
+            assert_eq!(actual.ships, expected[5] as i32);
+            assert_eq!(actual.production, expected[6] as i32);
+        }
+    }
+
+    fn compare_paths(actual: &[Vec<Point>], expected: &[Vec<[f64; 2]>]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual_path, expected_path) in actual.iter().zip(expected) {
+            assert_eq!(actual_path.len(), expected_path.len());
+            for (actual, expected) in actual_path.iter().zip(expected_path) {
+                close(actual.x, expected[0]);
+                close(actual.y, expected[1]);
+            }
+        }
+    }
+
+    fn close(actual: f64, expected: f64) {
+        let tolerance = 1e-9_f64.max(1e-9 * actual.abs().max(expected.abs()));
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "{actual} != {expected}"
         );
-
-        assert_eq!(fingerprint, "33:35.361619:99.499009:97.592785:34.587569");
     }
 }
