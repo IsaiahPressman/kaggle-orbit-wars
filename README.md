@@ -44,6 +44,15 @@ with one row per transition: episode id, step, typed player actions from
 `steps[t - 1][0].observation`, and the expected state from
 `steps[t][0].observation`.
 
+Generate local fixtures with:
+
+```sh
+uv run python scripts/extract_replay_fixtures.py --fixture-dir tests/fixtures/orbit_wars_replays
+```
+
+The generated JSONL fixtures are also ignored by Git. `cargo test` skips replay
+parity when fixtures are absent and runs it when matching fixture files exist.
+
 Recommended test environment variables:
 
 - `ORBIT_WARS_REPLAY_DIR`: directory containing raw `replay-*.json` downloads.

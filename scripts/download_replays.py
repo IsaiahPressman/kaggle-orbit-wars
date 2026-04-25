@@ -60,5 +60,6 @@ def main() -> None:
             outfile = download_replay(kaggle, episode_id, args.save_dir)
             print(f"Replay downloaded to: {outfile}")
 
+
 if __name__ == "__main__":
     main()

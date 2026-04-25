@@ -5,8 +5,8 @@ use super::generation::{
     assign_home_planets, generate_comet_paths, generate_planets, spawn_comet_group, RandomSource,
 };
 use super::state::{
-    Fleet, LaunchAction, Planet, Point, ResetConfig, State, StepResult, BOARD_SIZE, CENTER,
-    COMET_SPAWN_STEPS, ROTATION_RADIUS_LIMIT, SUN_RADIUS,
+    CometSpawnInjection, Fleet, LaunchAction, Planet, Point, ResetConfig, State, StepInjections,
+    StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS, ROTATION_RADIUS_LIMIT, SUN_RADIUS,
 };
 use super::utils::{fleet_speed, point_to_segment_distance};
 
@@ -50,6 +50,15 @@ pub fn step_with_rng(
     actions: &[PlayerAction],
     rng: &mut impl RandomSource,
 ) -> StepResult {
+    step_with_injections(state, actions, rng, StepInjections::default())
+}
+
+pub fn step_with_injections(
+    state: &mut State,
+    actions: &[PlayerAction],
+    rng: &mut impl RandomSource,
+    injections: StepInjections,
+) -> StepResult {
     assert_eq!(
         actions.len(),
         state.config.player_count,
@@ -57,7 +66,7 @@ pub fn step_with_rng(
     );
 
     remove_expired_comets(state);
-    spawn_comets(state, rng);
+    spawn_comets(state, rng, injections.comet_spawn);
     process_launches(state, actions);
     produce_ships(state);
     let mut combat_lists = move_fleets(state);
@@ -72,27 +81,37 @@ pub fn step_with_rng(
     StepResult { done }
 }
 
-fn spawn_comets(state: &mut State, rng: &mut impl RandomSource) {
+fn spawn_comets(
+    state: &mut State,
+    rng: &mut impl RandomSource,
+    comet_spawn: Option<CometSpawnInjection>,
+) {
     if !COMET_SPAWN_STEPS.contains(&(state.step + 1)) {
         return;
     }
 
-    let Some(paths) = generate_comet_paths(
-        &state.initial_planets,
-        state.angular_velocity,
-        state.step + 1,
-        &state.comet_planet_ids,
-        state.config.comet_speed,
-        rng,
-    ) else {
-        return;
+    let (paths, ships) = if let Some(comet_spawn) = comet_spawn {
+        (comet_spawn.paths, comet_spawn.ships)
+    } else {
+        let Some(paths) = generate_comet_paths(
+            &state.initial_planets,
+            state.angular_velocity,
+            state.step + 1,
+            &state.comet_planet_ids,
+            state.config.comet_speed,
+            rng,
+        ) else {
+            return;
+        };
+
+        let ships = rng
+            .randint(1, 99)
+            .min(rng.randint(1, 99))
+            .min(rng.randint(1, 99))
+            .min(rng.randint(1, 99));
+        (paths, ships)
     };
 
-    let ships = rng
-        .randint(1, 99)
-        .min(rng.randint(1, 99))
-        .min(rng.randint(1, 99))
-        .min(rng.randint(1, 99));
     let group = spawn_comet_group(
         &mut state.planets,
         &mut state.initial_planets,
@@ -587,6 +606,122 @@ mod tests {
         assert!(state.fleets.is_empty());
         assert_eq!(state.planets[1].owner, -1);
         assert_eq!(state.planets[1].ships, 7);
+    }
+
+    #[test]
+    fn same_owner_arrival_reinforces_planet() {
+        let mut state = base_state(2);
+        state.fleets = vec![Fleet {
+            id: 0,
+            owner: 0,
+            x: 24.0,
+            y: 20.0,
+            angle: 0.0,
+            from_planet_id: 0,
+            ships: 6,
+        }];
+        state.planets[1].owner = 0;
+        state.planets[1].x = 25.0;
+        state.planets[1].ships = 8;
+
+        step(&mut state, &[vec![], vec![]]);
+
+        assert!(state.fleets.is_empty());
+        assert_eq!(state.planets[1].owner, 0);
+        assert_eq!(state.planets[1].ships, 16);
+    }
+
+    #[test]
+    fn attacker_tie_with_garrison_leaves_zero_ship_owner_unchanged() {
+        let mut state = base_state(2);
+        state.fleets = vec![Fleet {
+            id: 0,
+            owner: 0,
+            x: 24.0,
+            y: 20.0,
+            angle: 0.0,
+            from_planet_id: 0,
+            ships: 10,
+        }];
+        state.planets[1].owner = 1;
+        state.planets[1].x = 25.0;
+        state.planets[1].ships = 9;
+        state.planets[1].production = 1;
+
+        step(&mut state, &[vec![], vec![]]);
+
+        assert!(state.fleets.is_empty());
+        assert_eq!(state.planets[1].owner, 1);
+        assert_eq!(state.planets[1].ships, 0);
+    }
+
+    #[test]
+    fn exact_boundary_planet_contact_does_not_collide() {
+        let mut state = base_state(2);
+        state.planets[0].x = 10.0;
+        state.planets[0].y = 10.0;
+        state.planets[1].x = 20.5;
+        state.planets[1].y = 21.0;
+        state.planets[1].radius = 1.0;
+        state.initial_planets = state.planets.clone();
+        state.fleets = vec![Fleet {
+            id: 0,
+            owner: 0,
+            x: 20.0,
+            y: 20.0,
+            angle: 0.0,
+            from_planet_id: 0,
+            ships: 1,
+        }];
+
+        step(&mut state, &[vec![], vec![]]);
+
+        assert_eq!(state.fleets.len(), 1);
+        assert_eq!(state.fleets[0].position(), Point::new(21.0, 20.0));
+    }
+
+    #[test]
+    fn moving_planet_sweeps_fleet_into_combat() {
+        let mut state = reset(ResetConfig {
+            sim: SimConfig::new(2),
+            step: Some(1),
+            angular_velocity: Some(0.2),
+            planets: Some(vec![
+                Planet {
+                    id: 0,
+                    owner: 0,
+                    x: CENTER + 20.0,
+                    y: CENTER,
+                    radius: 2.0,
+                    ships: 10,
+                    production: 0,
+                },
+                Planet {
+                    id: 1,
+                    owner: 1,
+                    x: 90.0,
+                    y: 90.0,
+                    radius: 2.0,
+                    ships: 10,
+                    production: 0,
+                },
+            ]),
+            initial_planets: None,
+        });
+        state.fleets = vec![Fleet {
+            id: 0,
+            owner: 1,
+            x: CENTER + 19.8,
+            y: CENTER + 2.0,
+            angle: 0.0,
+            from_planet_id: 1,
+            ships: 3,
+        }];
+
+        step(&mut state, &[vec![], vec![]]);
+
+        assert!(state.fleets.is_empty());
+        assert_eq!(state.planets[0].ships, 7);
     }
 
     #[test]

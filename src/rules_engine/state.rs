@@ -132,3 +132,14 @@ pub struct State {
 pub struct StepResult {
     pub done: Vec<bool>,
 }
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StepInjections {
+    pub comet_spawn: Option<CometSpawnInjection>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CometSpawnInjection {
+    pub paths: Vec<Vec<Point>>,
+    pub ships: i32,
+}
