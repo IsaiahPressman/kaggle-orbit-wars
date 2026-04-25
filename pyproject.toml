@@ -19,6 +19,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "kaggle>=2.1.0",
     "maturin>=1.13.1,<2.0",
     "mypy",
     "pytest>=9.0.3",
@@ -113,6 +114,7 @@ no_implicit_reexport = true
 [[tool.mypy.overrides]]
 module = [
     "flash_attn.*",
+    "kaggle.*",
 ]
 ignore_missing_imports = true
 
