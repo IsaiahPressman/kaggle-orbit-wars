@@ -29,33 +29,16 @@ def parse_args() -> argparse.Namespace:
         default=Path.cwd(),
         help="Directory to save replay-<episode-id>.jsonl fixtures in",
     )
-    parser.add_argument(
-        "--steps",
-        type=str,
-        default=None,
-        help="Optional comma-separated transition step numbers to save",
-    )
     return parser.parse_args()
 
 
-def parse_steps(raw_steps: str | None) -> set[int] | None:
-    if raw_steps is None:
-        return None
-    return {int(step.strip()) for step in raw_steps.split(",") if step.strip()}
-
-
-def extract_rows(
-    replay: dict[str, Any], selected_steps: set[int] | None
-) -> Iterable[dict[str, Any]]:
+def extract_rows(replay: dict[str, Any]) -> Iterable[dict[str, Any]]:
     episode_id = int(replay["info"]["EpisodeId"])
     configuration = replay["configuration"]
     steps = replay["steps"]
     player_count = len(steps[0])
 
     for step in range(1, len(steps)):
-        if selected_steps is not None and step not in selected_steps:
-            continue
-
         before = steps[step - 1][0]["observation"]
         expected = steps[step][0]["observation"]
         if not isinstance(before, dict) or not before.get("planets"):
@@ -80,7 +63,6 @@ def download_replay_fixture(
     kaggle: Any,
     episode_id: int,
     save_dir: Path,
-    selected_steps: set[int] | None,
 ) -> Path:
     save_dir.mkdir(parents=True, exist_ok=True)
     outfile = save_dir / f"replay-{episode_id}.jsonl"
@@ -96,7 +78,7 @@ def download_replay_fixture(
         raise TypeError(f"Replay {episode_id} response was not a JSON object")
 
     with outfile.open("w", encoding="utf-8") as replay_file:
-        for row in extract_rows(replay, selected_steps):
+        for row in extract_rows(replay):
             replay_file.write(json.dumps(row, separators=(",", ":")))
             replay_file.write("\n")
 
@@ -105,7 +87,6 @@ def download_replay_fixture(
 
 def main() -> None:
     args = parse_args()
-    selected_steps = parse_steps(args.steps)
 
     api = KaggleApi()
     api.authenticate()
@@ -116,7 +97,6 @@ def main() -> None:
                 kaggle,
                 episode_id,
                 args.save_dir,
-                selected_steps,
             )
             print(f"Replay fixture downloaded to: {outfile}")
 
