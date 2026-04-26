@@ -9,7 +9,7 @@ use super::env::{step_with_injections, PlayerAction};
 use super::generation::RandomSource;
 use super::state::{
     CometGroup, CometSpawnInjection, Fleet, LaunchAction, Planet, Point, SimConfig, State,
-    StepInjections,
+    StepInjections, StepResult,
 };
 
 const DEFAULT_FIXTURE_DIR: &str = "tests/fixtures/orbit_wars_replays";
@@ -131,9 +131,9 @@ fn check_transition(row: &FixtureRow) -> Result<(), String> {
     let injections = injections_from_expected(row)?;
     let mut rng = PanicRandom;
 
-    step_with_injections(&mut state, &actions, &mut rng, injections);
+    let result = step_with_injections(&mut state, &actions, &mut rng, injections);
 
-    compare_state(&state, row)
+    compare_state(&state, &result, row)
 }
 
 fn state_from_observation(row: &FixtureRow) -> Result<State, String> {
@@ -333,7 +333,20 @@ fn injections_from_expected(row: &FixtureRow) -> Result<StepInjections, String> 
     })
 }
 
-fn compare_state(state: &State, row: &FixtureRow) -> Result<(), String> {
+fn compare_state(state: &State, result: &StepResult, row: &FixtureRow) -> Result<(), String> {
+    if state.step != row.expected.step {
+        return Err(format!(
+            "step mismatch: {} != {}",
+            state.step, row.expected.step
+        ));
+    }
+    let expected_done = expected_done_flags(row);
+    if result.done != expected_done {
+        return Err(format!(
+            "done mismatch: {:?} != {:?}",
+            result.done, expected_done
+        ));
+    }
     compare_planets(
         &state.planets,
         &row.expected
@@ -378,6 +391,26 @@ fn compare_state(state: &State, row: &FixtureRow) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn expected_done_flags(row: &FixtureRow) -> Vec<bool> {
+    let reached_step_limit =
+        row.expected.step.saturating_sub(1) >= row.configuration.episode_steps.saturating_sub(2);
+    let terminated = reached_step_limit || alive_players(&row.expected) <= 1;
+    vec![terminated; row.players]
+}
+
+fn alive_players(observation: &ObservationFixture) -> usize {
+    let mut alive_players = std::collections::HashSet::new();
+    for planet in &observation.planets {
+        if planet[1] != -1.0 {
+            alive_players.insert(planet[1] as i32);
+        }
+    }
+    for fleet in &observation.fleets {
+        alive_players.insert(fleet[1] as i32);
+    }
+    alive_players.len()
 }
 
 fn compare_planets(actual: &[Planet], expected: &[Planet]) -> Result<(), String> {
