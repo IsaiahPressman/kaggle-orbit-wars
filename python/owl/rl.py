@@ -63,6 +63,9 @@ class ActionV1Config(BaseModel):
     action_dim: int = 0
 
 
+OUTER_PLAYER_SLOTS = 4
+
+
 class ObsBatch(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
@@ -80,7 +83,7 @@ class VectorizedEnv:
         self,
         *,
         n_envs: int,
-        n_players: int,
+        two_player_weight: float = 0.5,
         obs_spec: ObsV1Config | None = None,
         action_spec: ActionV1Config | None = None,
         pin_memory: bool = True,
@@ -89,19 +92,19 @@ class VectorizedEnv:
         self.action_spec = action_spec or ActionV1Config()
         self._rust = _RustRlVecEnv(
             n_envs,
-            n_players,
+            two_player_weight,
             self.obs_spec.obs_spec,
             self.obs_spec.max_entities,
             self.action_spec.action_dim,
         )
         self.n_envs = n_envs
-        self.n_players = n_players
+        self.n_players = OUTER_PLAYER_SLOTS
         self.observations = self._allocate_observations(pin_memory=pin_memory)
         self.rewards = torch.zeros(
-            (n_envs, n_players), dtype=torch.float32, pin_memory=pin_memory
+            (n_envs, self.n_players), dtype=torch.float32, pin_memory=pin_memory
         )
         self.dones = torch.zeros(
-            (n_envs, n_players), dtype=torch.bool, pin_memory=pin_memory
+            (n_envs, self.n_players), dtype=torch.bool, pin_memory=pin_memory
         )
 
         self._planet_obs_np = self.observations.planets.numpy()

@@ -11,7 +11,7 @@ class RlVecEnv:
     def __init__(
         self,
         n_envs: int,
-        n_players: int,
+        two_player_weight: float = ...,
         obs_spec: str = ...,
         max_entities: int = ...,
         action_dim: int = ...,

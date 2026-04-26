@@ -23,6 +23,7 @@ pub const PLANET_CHANNELS: usize = 16;
 pub const FLEET_CHANNELS: usize = 10;
 pub const COMET_CHANNELS: usize = OWNER_CHANNELS_WITH_NEUTRAL + 2 + MAX_COMET_PATH_LENGTH * 2;
 pub const GLOBAL_CHANNELS: usize = 5;
+pub const OUTER_PLAYER_SLOTS: usize = 4;
 type ObsShapes = (
     (usize, usize, usize),
     (usize, usize, usize),
@@ -53,11 +54,10 @@ const ANGULAR_VELOCITY_SPAN: f32 = 0.025;
 #[pyclass(name = "RlVecEnv")]
 pub struct PyRlVecEnv {
     n_envs: usize,
-    n_players: usize,
+    two_player_weight: f64,
     max_entities: usize,
     max_fleets: usize,
     action_dim: usize,
-    reset_config: ResetConfig,
     states: Vec<State>,
     player_finished: Vec<Vec<bool>>,
 }
@@ -65,10 +65,10 @@ pub struct PyRlVecEnv {
 #[pymethods]
 impl PyRlVecEnv {
     #[new]
-    #[pyo3(signature = (n_envs, n_players, obs_spec="obs_v1", max_entities=DEFAULT_MAX_ENTITIES, action_dim=0))]
+    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="obs_v1", max_entities=DEFAULT_MAX_ENTITIES, action_dim=0))]
     fn new(
         n_envs: usize,
-        n_players: usize,
+        two_player_weight: f64,
         obs_spec: &str,
         max_entities: usize,
         action_dim: usize,
@@ -76,10 +76,8 @@ impl PyRlVecEnv {
         if n_envs == 0 {
             return Err(PyValueError::new_err("n_envs must be positive"));
         }
-        if n_players != 2 && n_players != 4 {
-            return Err(PyValueError::new_err(
-                "Orbit Wars supports exactly 2 or 4 players",
-            ));
+        if !(0.0..=1.0).contains(&two_player_weight) {
+            return Err(PyValueError::new_err("two_player_weight must be in [0, 1]"));
         }
         if obs_spec != "obs_v1" {
             return Err(PyValueError::new_err(format!(
@@ -93,20 +91,18 @@ impl PyRlVecEnv {
             )));
         }
 
-        let reset_config = ResetConfig::new(n_players);
         let states = (0..n_envs)
-            .map(|_| reset(reset_config.clone()))
+            .map(|_| reset(sample_reset_config(two_player_weight)))
             .collect::<Vec<_>>();
 
         Ok(Self {
             n_envs,
-            n_players,
+            two_player_weight,
             max_entities,
             max_fleets: max_entities - (MAX_PLANETS + MAX_COMETS),
             action_dim,
-            reset_config,
             states,
-            player_finished: vec![vec![false; n_players]; n_envs],
+            player_finished: vec![vec![false; OUTER_PLAYER_SLOTS]; n_envs],
         })
     }
 
@@ -117,7 +113,7 @@ impl PyRlVecEnv {
 
     #[getter]
     fn n_players(&self) -> usize {
-        self.n_players
+        OUTER_PLAYER_SLOTS
     }
 
     #[getter]
@@ -143,7 +139,6 @@ impl PyRlVecEnv {
     #[allow(clippy::too_many_arguments)]
     fn reset(
         &mut self,
-        _py: Python<'_>,
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
         comet_obs: PyReadwriteArrayDyn<'_, f32>,
@@ -156,11 +151,10 @@ impl PyRlVecEnv {
             .par_iter_mut()
             .zip_eq(self.player_finished.par_iter_mut())
             .for_each(|(state, player_finished)| {
-                *state = reset(self.reset_config.clone());
+                *state = reset(sample_reset_config(self.two_player_weight));
                 player_finished.fill(false);
             });
         self.write_obs(
-            _py,
             planet_obs,
             fleet_obs,
             comet_obs,
@@ -174,7 +168,6 @@ impl PyRlVecEnv {
     #[allow(clippy::too_many_arguments)]
     fn step(
         &mut self,
-        _py: Python<'_>,
         actions: PyReadonlyArrayDyn<'_, f32>,
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
@@ -186,15 +179,19 @@ impl PyRlVecEnv {
         rewards: PyReadwriteArrayDyn<'_, f32>,
         dones: PyReadwriteArrayDyn<'_, bool>,
     ) -> PyResult<()> {
-        let action_shape = [self.n_envs, self.n_players, self.action_dim];
+        let action_shape = [self.n_envs, OUTER_PLAYER_SLOTS, self.action_dim];
         require_shape("actions", actions.shape(), &action_shape)?;
-        require_shape("rewards", rewards.shape(), &[self.n_envs, self.n_players])?;
-        require_shape("dones", dones.shape(), &[self.n_envs, self.n_players])?;
+        require_shape(
+            "rewards",
+            rewards.shape(),
+            &[self.n_envs, OUTER_PLAYER_SLOTS],
+        )?;
+        require_shape("dones", dones.shape(), &[self.n_envs, OUTER_PLAYER_SLOTS])?;
 
         let mut rewards = rewards;
         let mut dones = dones;
-        let reward_chunks = rewards.as_slice_mut()?.par_chunks_mut(self.n_players);
-        let done_chunks = dones.as_slice_mut()?.par_chunks_mut(self.n_players);
+        let reward_chunks = rewards.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
+        let done_chunks = dones.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
 
         if self.action_dim == 0 {
             self.states
@@ -203,19 +200,19 @@ impl PyRlVecEnv {
                 .zip_eq(reward_chunks)
                 .zip_eq(done_chunks)
                 .for_each(|(((state, player_finished), reward_chunk), done_chunk)| {
-                    let decoded = vec![Vec::new(); self.n_players];
+                    let decoded = vec![Vec::new(); state.config.player_count];
                     step_one_env(
                         state,
                         player_finished,
                         &decoded,
                         reward_chunk,
                         done_chunk,
-                        &self.reset_config,
+                        self.two_player_weight,
                     );
                 });
         } else {
             let actions = actions.as_slice()?;
-            let action_chunks = actions.par_chunks(self.n_players * self.action_dim);
+            let action_chunks = actions.par_chunks(OUTER_PLAYER_SLOTS * self.action_dim);
             self.states
                 .par_iter_mut()
                 .zip_eq(self.player_finished.par_iter_mut())
@@ -224,21 +221,25 @@ impl PyRlVecEnv {
                 .zip_eq(done_chunks)
                 .for_each(
                     |((((state, player_finished), action_chunk), reward_chunk), done_chunk)| {
-                        let decoded = decode_actions(action_chunk, self.n_players, self.action_dim);
+                        let action_len = state.config.player_count * self.action_dim;
+                        let decoded = decode_actions(
+                            &action_chunk[..action_len],
+                            state.config.player_count,
+                            self.action_dim,
+                        );
                         step_one_env(
                             state,
                             player_finished,
                             &decoded,
                             reward_chunk,
                             done_chunk,
-                            &self.reset_config,
+                            self.two_player_weight,
                         );
                     },
                 );
         }
 
         self.write_obs(
-            _py,
             planet_obs,
             fleet_obs,
             comet_obs,
@@ -268,12 +269,14 @@ fn step_one_env(
     decoded: &[PlayerAction],
     reward_chunk: &mut [f32],
     done_chunk: &mut [bool],
-    reset_config: &ResetConfig,
+    two_player_weight: f64,
 ) {
     let result = step(state, decoded);
     let should_reset = is_game_terminated(state);
     let alive = player_alive_flags(state);
 
+    reward_chunk.fill(0.0);
+    done_chunk.fill(true);
     for (player_index, result) in result.player_results.iter().enumerate() {
         let (reward, done) =
             player_reward_done(*result, alive[player_index], player_finished[player_index]);
@@ -285,16 +288,24 @@ fn step_one_env(
     }
 
     if should_reset {
-        *state = reset(reset_config.clone());
+        *state = reset(sample_reset_config(two_player_weight));
         player_finished.fill(false);
     }
+}
+
+fn sample_reset_config(two_player_weight: f64) -> ResetConfig {
+    let player_count = if rand::random_bool(two_player_weight) {
+        2
+    } else {
+        4
+    };
+    ResetConfig::new(player_count)
 }
 
 impl PyRlVecEnv {
     #[allow(clippy::too_many_arguments)]
     fn write_obs(
         &self,
-        _py: Python<'_>,
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
         comet_obs: PyReadwriteArrayDyn<'_, f32>,
@@ -965,7 +976,6 @@ mod tests {
 
     #[test]
     fn eliminated_player_gets_one_loss_reward_then_sticky_done() {
-        let reset_config = ResetConfig::new(4);
         let actions = vec![Vec::new(); 4];
         let mut state = state_with_player_three_eliminated();
         let mut finished = vec![false; 4];
@@ -978,7 +988,7 @@ mod tests {
             &actions,
             &mut rewards,
             &mut dones,
-            &reset_config,
+            0.0,
         );
 
         assert_eq!(rewards, vec![0.0, 0.0, 0.0, -1.0]);
@@ -991,7 +1001,7 @@ mod tests {
             &actions,
             &mut rewards,
             &mut dones,
-            &reset_config,
+            0.0,
         );
 
         assert_eq!(rewards[3], 0.0);

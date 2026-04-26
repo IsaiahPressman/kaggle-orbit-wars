@@ -16,7 +16,7 @@ from owl.rl import (
 
 
 def test_vectorized_env_writes_into_preallocated_torch_buffers() -> None:
-    env = VectorizedEnv(n_envs=2, n_players=2, pin_memory=False)
+    env = VectorizedEnv(n_envs=2, pin_memory=False)
     planet_ptr = env.observations.planets.data_ptr()
     comet_ptr = env.observations.comets.data_ptr()
 
@@ -36,10 +36,10 @@ def test_vectorized_env_writes_into_preallocated_torch_buffers() -> None:
 
 
 def test_step_writes_observations_rewards_and_dones_in_place() -> None:
-    env = VectorizedEnv(n_envs=2, n_players=2, pin_memory=False)
+    env = VectorizedEnv(n_envs=2, two_player_weight=0.0, pin_memory=False)
     reward_ptr = env.rewards.data_ptr()
     done_ptr = env.dones.data_ptr()
-    actions = np.zeros((2, 2, 0), dtype=np.float32)
+    actions = np.zeros((2, 4, 0), dtype=np.float32)
 
     env.rewards.fill_(123)
     env.dones.fill_(True)
@@ -51,8 +51,21 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     assert obs.fleets.shape == (2, env.obs_spec.max_fleets, FLEET_CHANNELS)
     assert obs.comets.shape == (2, MAX_COMETS, COMET_CHANNELS)
     assert obs.global_features.shape == (2, GLOBAL_CHANNELS)
+    assert rewards.shape == (2, 4)
+    assert dones.shape == (2, 4)
     assert torch.equal(rewards, torch.zeros_like(rewards))
     assert torch.equal(dones, torch.zeros_like(dones))
+
+
+def test_two_player_sample_marks_unused_player_slots_done() -> None:
+    env = VectorizedEnv(n_envs=2, two_player_weight=1.0, pin_memory=False)
+    actions = np.zeros((2, 4, 0), dtype=np.float32)
+
+    _, rewards, dones = env.step(actions)
+
+    assert torch.equal(rewards, torch.zeros_like(rewards))
+    assert torch.equal(dones[:, :2], torch.zeros_like(dones[:, :2]))
+    assert torch.equal(dones[:, 2:], torch.ones_like(dones[:, 2:]))
 
 
 def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
