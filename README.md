@@ -30,30 +30,29 @@ If fixture files are missing, download them directly into the test fixture
 directory:
 
 ```sh
-uv run python scripts/download_replays.py 75373897 75377525 --save-dir tests/fixtures/orbit_wars_replays
+scripts/regenerate_test_fixtures.sh
 ```
 
-The downloader requires Kaggle API credentials configured for the local user.
+The regeneration script requires Kaggle API credentials configured for the local
+user.
 
 ### Replay parity workflow
 
 The fixture shape is JSONL with one row per transition: episode id, step, typed
 player actions from `steps[t][player].action`, the input observation from
 `steps[t - 1][0].observation`, and the expected state from
-`steps[t][0].observation`. `cargo test` skips replay parity when fixtures are
-absent and runs it when matching fixture files exist.
+`steps[t][0].observation`. `cargo test` discovers all `replay-*.jsonl` files in
+the fixture directory and fails if none are present.
 
-Recommended test environment variables:
+Supported test environment variables:
 
 - `ORBIT_WARS_PARITY_FIXTURE_DIR`: directory containing extracted JSONL parity
   fixtures.
-- `ORBIT_WARS_PARITY_EPISODES`: optional comma-separated episode ids to run, for
-  example `75373897,75377525`.
 
 When the upstream rules change, keep the test code stable: download replacement
 episodes as JSONL fixtures, move them into the fixture directory if needed,
 update the reference episode id list in this README and
-`docs/rules-engine-plan.md`, and run the parity tests against the new fixture
+`docs/rules-engine-plan.md`, and run the parity tests against the fixture
 directory.
 
 ## Generation parity
@@ -74,23 +73,26 @@ The generated fixture is small and checked in at
 When the official Orbit Wars environment changes, update the Rust parity tests
 in this order:
 
-1. Regenerate generation fixtures from the installed `kaggle-environments`
-   package:
+1. Update the installed `kaggle-environments` package to the latest version.
+2. Regenerate all test fixtures. With no arguments, the script uses the current
+   reference episodes listed above:
 
 ```sh
-uv run python scripts/generate_reference_fixtures.py
+scripts/regenerate_test_fixtures.sh
 ```
 
-2. Download fresh replay fixtures from games produced by the updated
-   environment:
+To switch replay episodes, pass the replacement Kaggle episode IDs:
 
 ```sh
-uv run python scripts/download_replays.py NEW_EPISODE_ID_1 NEW_EPISODE_ID_2 --save-dir tests/fixtures/orbit_wars_replays
+scripts/regenerate_test_fixtures.sh NEW_EPISODE_ID_1 NEW_EPISODE_ID_2
 ```
+
+The script removes outdated `replay-*.jsonl` files before downloading the new
+set, and rewrites `tests/fixtures/generation/reference_generation.json` from the
+installed Python environment.
 
 3. Update the documented episode IDs in this README and
-   `docs/rules-engine-plan.md`. If changing the default replay set, also update
-   `DEFAULT_EPISODES` in `src/rules_engine/replay_tests.rs`.
+   `docs/rules-engine-plan.md`.
 
 4. Run the full checks with the new fixtures present:
 

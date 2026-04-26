@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
@@ -13,7 +13,6 @@ use super::state::{
 };
 
 const DEFAULT_FIXTURE_DIR: &str = "tests/fixtures/orbit_wars_replays";
-const DEFAULT_EPISODES: &[u64] = &[75373897, 75377525];
 
 #[derive(Debug, Deserialize)]
 struct FixtureRow {
@@ -72,15 +71,7 @@ impl RandomSource for PanicRandom {
 
 #[test]
 fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
-    let fixture_paths = fixture_paths();
-    if fixture_paths.is_empty() {
-        eprintln!(
-            "No replay parity fixtures found. Generate them with: \
-             uv run python scripts/download_replays.py 75373897 75377525 \
-             --save-dir {DEFAULT_FIXTURE_DIR}"
-        );
-        return Ok(());
-    }
+    let fixture_paths = fixture_paths()?;
 
     let mut checked_rows = 0;
     for fixture_path in fixture_paths {
@@ -105,24 +96,33 @@ fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn fixture_paths() -> Vec<PathBuf> {
+fn fixture_paths() -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let fixture_dir = std::env::var("ORBIT_WARS_PARITY_FIXTURE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_FIXTURE_DIR));
-    let episodes = std::env::var("ORBIT_WARS_PARITY_EPISODES")
-        .ok()
-        .map(|raw| {
-            raw.split(',')
-                .filter_map(|part| part.trim().parse::<u64>().ok())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| DEFAULT_EPISODES.to_vec());
 
-    episodes
-        .into_iter()
-        .map(|episode_id| fixture_dir.join(format!("replay-{episode_id}.jsonl")))
-        .filter(|path| Path::new(path).exists())
-        .collect()
+    let mut fixture_paths = std::fs::read_dir(&fixture_dir)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("replay-") && name.ends_with(".jsonl"))
+        })
+        .collect::<Vec<_>>();
+    fixture_paths.sort();
+
+    if fixture_paths.is_empty() {
+        return Err(format!(
+            "No replay parity fixtures found in {}. Run scripts/regenerate_test_fixtures.sh.",
+            fixture_dir.display()
+        )
+        .into());
+    }
+
+    Ok(fixture_paths)
 }
 
 fn check_transition(row: &FixtureRow) -> Result<(), String> {

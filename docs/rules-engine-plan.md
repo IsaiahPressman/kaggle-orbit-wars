@@ -79,16 +79,18 @@ Then add replay parity tests:
 - `scripts/download_replays.py` writes one JSONL row per transition:
   `episode_id`, `step`, typed per-player actions, the pre-step observation, and
   the canonical post-step player 0 observation.
+- `scripts/regenerate_test_fixtures.sh` removes outdated replay fixtures,
+  regenerates the Python generation fixture, and downloads the selected replay
+  fixture set.
 - Keep checked-in fixture files compact. If they become too large, keep them out
   of Git too and make the test print the extraction command when the fixture is
   missing.
-- Recommended test environment variables:
-  `ORBIT_WARS_PARITY_FIXTURE_DIR` for extracted JSONL fixtures, and
-  `ORBIT_WARS_PARITY_EPISODES` for an optional comma-separated episode allowlist.
-- Replay parity tests should discover fixtures through those variables instead
-  of hardcoded episode paths. When rules change, download new Kaggle episodes as
-  JSONL fixtures, update the episode id list below, and leave the test code
-  unchanged unless the fixture schema itself changes.
+- Replay parity tests discover all `replay-*.jsonl` files in
+  `ORBIT_WARS_PARITY_FIXTURE_DIR`, or
+  `tests/fixtures/orbit_wars_replays` by default, and fail if no fixtures are
+  present. When rules change, download new Kaggle episodes as JSONL fixtures,
+  update the episode id list below, and leave the test code unchanged unless the
+  fixture schema itself changes.
 
 The current downloaded reference episodes are:
 
@@ -104,7 +106,7 @@ The current downloaded reference episodes are:
 5. Port turn stepping in Python turn-order order.
 6. Add replay parity integration tests.
 7. Regenerate Python-reference generation fixtures with
-   `scripts/generate_reference_fixtures.py` when upstream generation changes.
+   `scripts/regenerate_test_fixtures.sh` when upstream generation changes.
 8. Run `just rs-prepare` after Rust edits and `just py-prepare` after Python
    edits.
 
