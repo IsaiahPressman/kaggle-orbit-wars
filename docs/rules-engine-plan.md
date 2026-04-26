@@ -1,8 +1,9 @@
 # Rust Rules Engine Plan
 
 This document is the working map for implementing the Rust Orbit Wars simulator.
-The Python reference is `orbit_wars.py`; gameplay prose lives in
-`orbit_wars_rules.md`.
+The Python reference is the installed
+`kaggle_environments.envs.orbit_wars.orbit_wars` module; gameplay prose lives
+in `orbit_wars_rules.md`.
 
 ## Assumptions
 

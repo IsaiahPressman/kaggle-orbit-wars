@@ -71,13 +71,13 @@ The generated fixture is small and checked in at
 
 ## Updating tests after Python rule changes
 
-When `orbit_wars.py` or the official Orbit Wars environment changes, update the
-Rust parity tests in this order:
+When the official Orbit Wars environment changes, update the Rust parity tests
+in this order:
 
-1. Replace the local reference files if needed:
+1. Regenerate generation fixtures from the installed `kaggle-environments`
+   package:
 
 ```sh
-# update orbit_wars.py and orbit_wars_rules.md first
 uv run python scripts/generate_reference_fixtures.py
 ```
 

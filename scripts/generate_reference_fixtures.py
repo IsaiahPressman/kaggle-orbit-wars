@@ -2,12 +2,30 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import random
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 DEFAULT_OUTFILE = Path("tests/fixtures/generation/reference_generation.json")
+ORBIT_WARS_MODULE = "kaggle_environments.envs.orbit_wars.orbit_wars"
+
+
+class OrbitWarsModule(Protocol):
+    __file__: str
+    random: Any
+
+    def generate_planets(self) -> list[list[int | float]]: ...
+
+    def generate_comet_paths(
+        self,
+        initial_planets: list[list[int | float]],
+        angular_velocity: float,
+        spawn_step: int,
+        comet_planet_ids: list[int],
+        comet_speed: float,
+    ) -> list[list[list[float]]] | None: ...
 
 
 class RecordingRandom:
@@ -31,59 +49,46 @@ def parse_args() -> argparse.Namespace:
         description="Generate Python-reference fixtures for Rust generation parity."
     )
     parser.add_argument(
-        "--reference",
-        type=Path,
-        default=Path("orbit_wars.py"),
-        help="Path to the reference orbit_wars.py implementation.",
-    )
-    parser.add_argument(
         "--outfile",
         type=Path,
         default=DEFAULT_OUTFILE,
         help="Fixture JSON path to write.",
     )
-    parser.add_argument("--planet-seed", type=int, default=20260425)
-    parser.add_argument("--comet-seed", type=int, default=20260426)
+    parser.add_argument("--planet-seed", type=int, default=42)
+    parser.add_argument("--comet-seed", type=int, default=43)
     return parser.parse_args()
 
 
-def load_reference(reference_path: Path) -> dict[str, Any]:
-    source = reference_path.read_text(encoding="utf-8")
-    cutoff = source.index("\ndef interpreter(")
-    namespace: dict[str, Any] = {
-        "__file__": str(reference_path),
-        "__name__": "orbit_wars_reference_fixture",
-    }
-    exec(source[:cutoff], namespace)
-    return namespace
+def load_reference() -> OrbitWarsModule:
+    return cast(OrbitWarsModule, importlib.import_module(ORBIT_WARS_MODULE))
 
 
 def run_with_recording_random(
-    namespace: dict[str, Any],
+    module: OrbitWarsModule,
     seed: int,
     function_name: str,
     *args: Any,
 ) -> tuple[Any, list[dict[str, int | float | str]]]:
     recorder = RecordingRandom(seed)
-    original_random = namespace["random"]
-    namespace["random"] = recorder
+    original_random = module.random
+    module.random = recorder
     try:
-        return namespace[function_name](*args), recorder.calls
+        return getattr(module, function_name)(*args), recorder.calls
     finally:
-        namespace["random"] = original_random
+        module.random = original_random
 
 
 def main() -> None:
     args = parse_args()
-    namespace = load_reference(args.reference)
+    module = load_reference()
 
     planets, planet_calls = run_with_recording_random(
-        namespace,
+        module,
         args.planet_seed,
         "generate_planets",
     )
     comet_paths, comet_calls = run_with_recording_random(
-        namespace,
+        module,
         args.comet_seed,
         "generate_comet_paths",
         planets,
@@ -96,7 +101,8 @@ def main() -> None:
         raise RuntimeError("chosen comet seed did not produce a valid comet path")
 
     fixture = {
-        "reference": str(args.reference),
+        "reference": ORBIT_WARS_MODULE,
+        "reference_file": module.__file__,
         "planet_generation": {
             "seed": args.planet_seed,
             "random_calls": planet_calls,
