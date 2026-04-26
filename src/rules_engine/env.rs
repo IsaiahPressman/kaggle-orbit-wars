@@ -2,11 +2,13 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use super::generation::{
-    assign_home_planets, generate_comet_paths, generate_planets, spawn_comet_group, RandomSource,
+    assign_home_planets, generate_comet_paths, generate_planets, sample_comet_ships,
+    spawn_comet_group, RandomSource,
 };
 use super::state::{
-    CometSpawnInjection, Fleet, LaunchAction, Planet, Point, ResetConfig, State, StepInjections,
-    StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS, ROTATION_RADIUS_LIMIT, SUN_RADIUS,
+    CometSpawnInjection, Fleet, LaunchAction, Planet, PlayerResult, Point, ResetConfig, State,
+    StepInjections, StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS, ROTATION_RADIUS_LIMIT,
+    SUN_RADIUS,
 };
 use super::utils::{fleet_speed, point_to_segment_distance};
 
@@ -19,6 +21,9 @@ pub fn reset(config: ResetConfig) -> State {
 
 pub fn reset_with_rng(config: ResetConfig, rng: &mut impl RandomSource) -> State {
     let generated = config.planets.is_none();
+    let angular_velocity = config
+        .angular_velocity
+        .unwrap_or_else(|| rng.uniform(0.025, 0.05));
     let mut planets = config.planets.unwrap_or_else(|| generate_planets(rng));
     let initial_planets = config.initial_planets.unwrap_or_else(|| planets.clone());
     if generated {
@@ -28,9 +33,7 @@ pub fn reset_with_rng(config: ResetConfig, rng: &mut impl RandomSource) -> State
     State {
         config: config.sim,
         step: config.step.unwrap_or(if generated { 1 } else { 0 }),
-        angular_velocity: config
-            .angular_velocity
-            .unwrap_or_else(|| rng.uniform(0.025, 0.05)),
+        angular_velocity,
         planets,
         initial_planets,
         fleets: Vec::new(),
@@ -75,10 +78,10 @@ pub fn step_with_injections(
     remove_marked_fleets(state, &combat_lists);
     resolve_combats(state, combat_lists);
 
-    let done = done_flags(state);
+    let player_results = player_results(state);
     state.step += 1;
 
-    StepResult { done }
+    StepResult { player_results }
 }
 
 fn spawn_comets(
@@ -104,11 +107,7 @@ fn spawn_comets(
             return;
         };
 
-        let ships = rng
-            .randint(1, 99)
-            .min(rng.randint(1, 99))
-            .min(rng.randint(1, 99))
-            .min(rng.randint(1, 99));
+        let ships = sample_comet_ships(rng);
         (paths, ships)
     };
 
@@ -429,9 +428,24 @@ fn resolve_combats(state: &mut State, combat_lists: HashMap<u32, Vec<Fleet>>) {
     }
 }
 
-fn done_flags(state: &State) -> Vec<bool> {
+fn player_results(state: &State) -> Vec<PlayerResult> {
     let terminated = reached_step_limit(state) || remaining_alive_players(state) <= 1;
-    vec![terminated; state.config.player_count]
+    if !terminated {
+        return vec![PlayerResult::NotDone; state.config.player_count];
+    }
+
+    let scores = player_scores(state);
+    let max_score = scores.iter().copied().max().unwrap_or(0);
+    scores
+        .into_iter()
+        .map(|score| {
+            if score == max_score && max_score > 0 {
+                PlayerResult::Win
+            } else {
+                PlayerResult::Loss
+            }
+        })
+        .collect()
 }
 
 fn reached_step_limit(state: &State) -> bool {
@@ -449,6 +463,19 @@ fn remaining_alive_players(state: &State) -> usize {
         alive_players.insert(fleet.owner);
     }
     alive_players.len()
+}
+
+fn player_scores(state: &State) -> Vec<i32> {
+    let mut scores = vec![0; state.config.player_count];
+    for planet in &state.planets {
+        if planet.owner != -1 {
+            scores[planet.owner as usize] += planet.ships;
+        }
+    }
+    for fleet in &state.fleets {
+        scores[fleet.owner as usize] += fleet.ships;
+    }
+    scores
 }
 
 #[cfg(test)]
@@ -525,7 +552,10 @@ mod tests {
             ],
         );
 
-        assert_eq!(result.done, vec![false, false]);
+        assert_eq!(
+            result.player_results,
+            vec![PlayerResult::NotDone, PlayerResult::NotDone]
+        );
         assert_eq!(state.planets[0].ships, 33);
         assert_eq!(state.fleets.len(), 1);
         assert_eq!(state.fleets[0].owner, 0);
@@ -782,13 +812,58 @@ mod tests {
     }
 
     #[test]
-    fn step_limit_sets_all_done_flags_for_actual_player_count() {
+    fn step_limit_sets_player_results_for_actual_player_count() {
         let mut state = base_state(2);
         state.step = 498;
 
         let result = step(&mut state, &[vec![], vec![]]);
 
-        assert_eq!(result.done, vec![true, true]);
+        assert_eq!(
+            result.player_results,
+            vec![PlayerResult::Win, PlayerResult::Loss]
+        );
+    }
+
+    #[test]
+    fn no_op_score_tie_marks_all_tied_players_as_winners() {
+        let mut state = reset(ResetConfig {
+            sim: SimConfig {
+                player_count: 2,
+                episode_steps: 4,
+                ship_speed: 6.0,
+                comet_speed: 4.0,
+            },
+            step: Some(2),
+            angular_velocity: Some(0.0),
+            planets: Some(vec![
+                Planet {
+                    id: 0,
+                    owner: 0,
+                    x: 20.0,
+                    y: 20.0,
+                    radius: 2.0,
+                    ships: 10,
+                    production: 0,
+                },
+                Planet {
+                    id: 1,
+                    owner: 1,
+                    x: 80.0,
+                    y: 80.0,
+                    radius: 2.0,
+                    ships: 10,
+                    production: 0,
+                },
+            ]),
+            initial_planets: None,
+        });
+
+        let result = step(&mut state, &[vec![], vec![]]);
+
+        assert_eq!(
+            result.player_results,
+            vec![PlayerResult::Win, PlayerResult::Win]
+        );
     }
 
     #[test]

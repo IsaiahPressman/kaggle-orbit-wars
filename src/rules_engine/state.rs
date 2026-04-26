@@ -130,7 +130,14 @@ pub struct State {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepResult {
-    pub done: Vec<bool>,
+    pub player_results: Vec<PlayerResult>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayerResult {
+    NotDone,
+    Loss,
+    Win,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

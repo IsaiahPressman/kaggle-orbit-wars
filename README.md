@@ -57,9 +57,10 @@ directory.
 
 ## Generation parity
 
-Map generation and comet path generation are checked against fixtures produced
-by the Python reference implementation under recorded random streams. Regenerate
-those fixtures after intentional upstream rule changes:
+Map generation, reset/home assignment, comet path generation, and comet ship
+sampling are checked against fixtures produced by the Python reference
+implementation under recorded random streams. Regenerate those fixtures after
+intentional upstream rule changes:
 
 ```sh
 uv run python scripts/generate_reference_fixtures.py

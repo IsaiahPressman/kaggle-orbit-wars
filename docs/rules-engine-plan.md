@@ -30,10 +30,10 @@ pub fn step(state: &mut State, actions: &[PlayerAction]) -> StepResult;
 `State` owns planets, fleets, comet metadata, the current step, the player
 count, generation constants, and ids needed for deterministic progression.
 
-`StepResult` should use `Vec<bool>` for per-player done flags. This matches the
-actual player count without making 2-player games carry ignored entries. The
-Python/RL adapter can widen this to `[bool; 4]` later if a fixed tensor shape is
-more convenient.
+`StepResult` should return one terminal result per player: not done, loss, or
+win. This matches the actual player count without making 2-player games carry
+ignored entries. The Python/RL adapter can widen this to a fixed tensor shape
+later if that is more convenient.
 
 ## Agentic Workflow
 

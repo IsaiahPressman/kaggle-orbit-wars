@@ -8,8 +8,8 @@ use serde::Deserialize;
 use super::env::{step_with_injections, PlayerAction};
 use super::generation::RandomSource;
 use super::state::{
-    CometGroup, CometSpawnInjection, Fleet, LaunchAction, Planet, Point, SimConfig, State,
-    StepInjections, StepResult,
+    CometGroup, CometSpawnInjection, Fleet, LaunchAction, Planet, PlayerResult, Point, SimConfig,
+    State, StepInjections, StepResult,
 };
 
 const DEFAULT_FIXTURE_DIR: &str = "tests/fixtures/orbit_wars_replays";
@@ -41,11 +41,8 @@ struct ObservationFixture {
     fleets: Vec<[f64; 7]>,
     angular_velocity: f64,
     initial_planets: Vec<[f64; 7]>,
-    #[serde(default)]
     next_fleet_id: u32,
-    #[serde(default)]
     comets: Vec<CometFixture>,
-    #[serde(default)]
     comet_planet_ids: Vec<u32>,
     step: u32,
 }
@@ -340,17 +337,30 @@ fn compare_state(state: &State, result: &StepResult, row: &FixtureRow) -> Result
             state.step, row.expected.step
         ));
     }
-    let expected_done = expected_done_flags(row);
-    if result.done != expected_done {
+    let expected_player_results = expected_player_results(row);
+    if result.player_results != expected_player_results {
         return Err(format!(
-            "done mismatch: {:?} != {:?}",
-            result.done, expected_done
+            "player results mismatch: {:?} != {:?}",
+            result.player_results, expected_player_results
         ));
     }
+    close(
+        state.angular_velocity,
+        row.expected.angular_velocity,
+        "angular_velocity",
+    )?;
     compare_planets(
         &state.planets,
         &row.expected
             .planets
+            .iter()
+            .map(planet_from_array)
+            .collect::<Vec<_>>(),
+    )?;
+    compare_planets(
+        &state.initial_planets,
+        &row.expected
+            .initial_planets
             .iter()
             .map(planet_from_array)
             .collect::<Vec<_>>(),
@@ -389,15 +399,31 @@ fn compare_state(state: &State, result: &StepResult, row: &FixtureRow) -> Result
                 actual.path_index, expected.path_index
             ));
         }
+        compare_paths(&actual.paths, &expected.paths)?;
     }
     Ok(())
 }
 
-fn expected_done_flags(row: &FixtureRow) -> Vec<bool> {
+fn expected_player_results(row: &FixtureRow) -> Vec<PlayerResult> {
     let reached_step_limit =
         row.expected.step.saturating_sub(1) >= row.configuration.episode_steps.saturating_sub(2);
     let terminated = reached_step_limit || alive_players(&row.expected) <= 1;
-    vec![terminated; row.players]
+    if !terminated {
+        return vec![PlayerResult::NotDone; row.players];
+    }
+
+    let scores = player_scores(row);
+    let max_score = scores.iter().copied().max().unwrap_or(0);
+    scores
+        .into_iter()
+        .map(|score| {
+            if score == max_score && max_score > 0 {
+                PlayerResult::Win
+            } else {
+                PlayerResult::Loss
+            }
+        })
+        .collect()
 }
 
 fn alive_players(observation: &ObservationFixture) -> usize {
@@ -411,6 +437,19 @@ fn alive_players(observation: &ObservationFixture) -> usize {
         alive_players.insert(fleet[1] as i32);
     }
     alive_players.len()
+}
+
+fn player_scores(row: &FixtureRow) -> Vec<i32> {
+    let mut scores = vec![0; row.players];
+    for planet in &row.expected.planets {
+        if planet[1] != -1.0 {
+            scores[planet[1] as usize] += planet[5] as i32;
+        }
+    }
+    for fleet in &row.expected.fleets {
+        scores[fleet[1] as usize] += fleet[6] as i32;
+    }
+    scores
 }
 
 fn compare_planets(actual: &[Planet], expected: &[Planet]) -> Result<(), String> {
@@ -462,6 +501,32 @@ fn compare_fleets(actual: &[Fleet], expected: &[Fleet]) -> Result<(), String> {
         close(actual.y, expected.y, "fleet y")?;
         close(actual.angle, expected.angle, "fleet angle")?;
     }
+    Ok(())
+}
+
+fn compare_paths(actual: &[Vec<Point>], expected: &[Vec<[f64; 2]>]) -> Result<(), String> {
+    if actual.len() != expected.len() {
+        return Err(format!(
+            "comet path count mismatch: {} != {}",
+            actual.len(),
+            expected.len()
+        ));
+    }
+
+    for (actual_path, expected_path) in actual.iter().zip(expected) {
+        if actual_path.len() != expected_path.len() {
+            return Err(format!(
+                "comet path length mismatch: {} != {}",
+                actual_path.len(),
+                expected_path.len()
+            ));
+        }
+        for (actual_point, expected_point) in actual_path.iter().zip(expected_path) {
+            close(actual_point.x, expected_point[0], "comet path x")?;
+            close(actual_point.y, expected_point[1], "comet path y")?;
+        }
+    }
+
     Ok(())
 }
 

@@ -259,6 +259,13 @@ pub fn generate_comet_paths(
     None
 }
 
+pub fn sample_comet_ships(rng: &mut impl RandomSource) -> i32 {
+    rng.randint(1, 99)
+        .min(rng.randint(1, 99))
+        .min(rng.randint(1, 99))
+        .min(rng.randint(1, 99))
+}
+
 pub fn spawn_comet_group(
     planets: &mut Vec<Planet>,
     initial_planets: &mut Vec<Planet>,
@@ -456,6 +463,9 @@ fn comet_path_is_valid(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules_engine::env::{reset_with_rng, step};
+    use crate::rules_engine::state::{PlayerResult, ResetConfig, SimConfig, State};
+
     use serde::Deserialize;
 
     struct ScriptedRandom {
@@ -612,6 +622,10 @@ mod tests {
     struct GenerationFixture {
         planet_generation: PlanetGenerationFixture,
         comet_path_generation: CometPathGenerationFixture,
+        reset_cases: Vec<ResetCaseFixture>,
+        comet_path_cases: Vec<CometPathGenerationFixture>,
+        comet_ship_cases: Vec<CometShipCaseFixture>,
+        terminal_cases: TerminalCasesFixture,
     }
 
     #[derive(Debug, Deserialize)]
@@ -622,10 +636,68 @@ mod tests {
 
     #[derive(Debug, Deserialize)]
     struct CometPathGenerationFixture {
+        #[serde(default)]
+        name: String,
         inputs: CometPathInputs,
         initial_planets: Vec<[f64; 7]>,
         random_calls: Vec<RandomCall>,
         paths: Vec<Vec<[f64; 2]>>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ResetCaseFixture {
+        players: usize,
+        random_calls: Vec<RandomCall>,
+        state: ResetStateFixture,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ResetStateFixture {
+        angular_velocity: f64,
+        planets: Vec<[f64; 7]>,
+        initial_planets: Vec<[f64; 7]>,
+        fleets: Vec<[f64; 7]>,
+        next_fleet_id: u32,
+        comets: Vec<CometFixture>,
+        comet_planet_ids: Vec<u32>,
+        step: u32,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CometFixture {
+        planet_ids: Vec<u32>,
+        paths: Vec<Vec<[f64; 2]>>,
+        path_index: i32,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CometShipCaseFixture {
+        random_calls: Vec<RandomCall>,
+        ships: i32,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TerminalCasesFixture {
+        no_op_tie: TerminalCaseFixture,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TerminalCaseFixture {
+        players: usize,
+        configuration: TerminalConfigFixture,
+        before: ResetStateFixture,
+        rewards: Vec<i32>,
+        statuses: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TerminalConfigFixture {
+        #[serde(rename = "episodeSteps")]
+        episode_steps: u32,
+        #[serde(rename = "shipSpeed")]
+        ship_speed: f64,
+        #[serde(rename = "cometSpeed")]
+        comet_speed: f64,
     }
 
     #[derive(Debug, Deserialize)]
@@ -636,7 +708,7 @@ mod tests {
         comet_speed: f64,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Clone, Debug, Deserialize)]
     #[serde(tag = "kind")]
     enum RandomCall {
         #[serde(rename = "randint")]
@@ -711,14 +783,99 @@ mod tests {
     #[test]
     fn generate_comet_paths_matches_python_reference_fixture() {
         let fixture = reference_fixture();
-        let mut rng = FixtureRandom::new(fixture.comet_path_generation.random_calls);
-        let initial_planets = fixture
-            .comet_path_generation
+        check_comet_path_case(&fixture.comet_path_generation);
+    }
+
+    #[test]
+    fn reset_cases_match_python_reference_fixtures() {
+        let fixture = reference_fixture();
+
+        for case in fixture.reset_cases {
+            let mut rng = FixtureRandom::new(case.random_calls);
+            let state = reset_with_rng(
+                ResetConfig {
+                    sim: SimConfig::new(case.players),
+                    step: None,
+                    angular_velocity: None,
+                    planets: None,
+                    initial_planets: None,
+                },
+                &mut rng,
+            );
+
+            rng.assert_finished();
+            compare_reset_state(&state, &case.state);
+        }
+    }
+
+    #[test]
+    fn comet_path_cases_match_python_reference_fixtures() {
+        let fixture = reference_fixture();
+
+        for case in &fixture.comet_path_cases {
+            check_comet_path_case(case);
+        }
+    }
+
+    #[test]
+    fn comet_ship_sampling_matches_python_reference_fixtures() {
+        let fixture = reference_fixture();
+
+        for case in fixture.comet_ship_cases {
+            let mut rng = FixtureRandom::new(case.random_calls);
+            let ships = sample_comet_ships(&mut rng);
+
+            rng.assert_finished();
+            assert_eq!(ships, case.ships);
+        }
+    }
+
+    #[test]
+    fn no_op_terminal_tie_matches_python_reference_fixture() {
+        let fixture = reference_fixture();
+        let case = fixture.terminal_cases.no_op_tie;
+        let mut state = State {
+            config: SimConfig {
+                player_count: case.players,
+                episode_steps: case.configuration.episode_steps,
+                ship_speed: case.configuration.ship_speed,
+                comet_speed: case.configuration.comet_speed,
+            },
+            step: case.before.step,
+            angular_velocity: case.before.angular_velocity,
+            planets: case.before.planets.iter().map(planet_from_array).collect(),
+            initial_planets: case
+                .before
+                .initial_planets
+                .iter()
+                .map(planet_from_array)
+                .collect(),
+            fleets: Vec::new(),
+            next_fleet_id: case.before.next_fleet_id,
+            comets: Vec::new(),
+            comet_planet_ids: case.before.comet_planet_ids,
+        };
+
+        let result = step(&mut state, &vec![Vec::new(); case.players]);
+
+        assert_eq!(case.statuses, vec!["DONE"; case.players]);
+        assert_eq!(
+            result.player_results,
+            case.rewards
+                .into_iter()
+                .map(player_result_from_reward)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    fn check_comet_path_case(case: &CometPathGenerationFixture) {
+        let mut rng = FixtureRandom::new(case.random_calls.clone());
+        let initial_planets = case
             .initial_planets
             .iter()
             .map(planet_from_array)
             .collect::<Vec<_>>();
-        let inputs = fixture.comet_path_generation.inputs;
+        let inputs = &case.inputs;
 
         let paths = generate_comet_paths(
             &initial_planets,
@@ -728,10 +885,10 @@ mod tests {
             inputs.comet_speed,
             &mut rng,
         )
-        .expect("fixture comet paths");
+        .unwrap_or_else(|| panic!("{} fixture comet paths", case.name));
 
         rng.assert_finished();
-        compare_paths(&paths, &fixture.comet_path_generation.paths);
+        compare_paths(&paths, &case.paths);
     }
 
     fn reference_fixture() -> GenerationFixture {
@@ -750,6 +907,30 @@ mod tests {
             radius: raw[4],
             ships: raw[5] as i32,
             production: raw[6] as i32,
+        }
+    }
+
+    fn compare_reset_state(actual: &State, expected: &ResetStateFixture) {
+        assert_eq!(actual.step, expected.step);
+        close(actual.angular_velocity, expected.angular_velocity);
+        compare_planets(&actual.planets, &expected.planets);
+        compare_planets(&actual.initial_planets, &expected.initial_planets);
+        assert_eq!(actual.fleets.len(), expected.fleets.len());
+        assert_eq!(actual.next_fleet_id, expected.next_fleet_id);
+        assert_eq!(actual.comet_planet_ids, expected.comet_planet_ids);
+        assert_eq!(actual.comets.len(), expected.comets.len());
+        for (actual, expected) in actual.comets.iter().zip(&expected.comets) {
+            assert_eq!(actual.planet_ids, expected.planet_ids);
+            assert_eq!(actual.path_index, expected.path_index);
+            compare_paths(&actual.paths, &expected.paths);
+        }
+    }
+
+    fn player_result_from_reward(reward: i32) -> PlayerResult {
+        match reward {
+            1 => PlayerResult::Win,
+            -1 => PlayerResult::Loss,
+            _ => PlayerResult::NotDone,
         }
     }
 
