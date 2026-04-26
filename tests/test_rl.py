@@ -88,6 +88,8 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     assert fleets[0, 6] == pytest.approx(1.0)
     assert fleets[0, 7] == pytest.approx(0.0, abs=1e-7)
     assert global_features[0] == pytest.approx(0.1)
+    assert global_features[1] == pytest.approx(1.0)
+    assert global_features[2] == pytest.approx(1.0)
 
 
 def test_python_observation_encoder_keeps_largest_fleets_first() -> None:

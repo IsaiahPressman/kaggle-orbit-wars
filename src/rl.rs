@@ -25,7 +25,7 @@ pub const DEFAULT_MAX_ENTITIES: usize = 512;
 pub const PLANET_CHANNELS: usize = 16;
 pub const FLEET_CHANNELS: usize = 10;
 pub const COMET_CHANNELS: usize = OWNER_CHANNELS_WITH_NEUTRAL + 2 + MAX_COMET_PATH_LENGTH * 2;
-pub const GLOBAL_CHANNELS: usize = 6;
+pub const GLOBAL_CHANNELS: usize = 5;
 type ObsShapes = (
     (usize, usize, usize),
     (usize, usize, usize),
@@ -574,11 +574,10 @@ fn encode_comets(state: &State, comet_obs: &mut [f32], comet_mask: &mut [bool]) 
 
 fn encode_global(state: &State, global_obs: &mut [f32]) {
     global_obs[0] = state.step as f32 / state.config.episode_steps as f32;
-    global_obs[1] = (state.step % 50) as f32 / 49.0;
-    global_obs[2] = steps_until_next_comet_spawn(state.step) as f32 / 100.0;
-    global_obs[3] = normalize_angular_velocity(state.angular_velocity);
-    global_obs[4] = active_comet_count(state) as f32 / MAX_COMETS as f32;
-    global_obs[5] = player_alive_flags(state)
+    global_obs[1] = steps_until_next_comet_spawn(state.step) as f32 / 100.0;
+    global_obs[2] = normalize_angular_velocity(state.angular_velocity);
+    global_obs[3] = active_comet_count(state) as f32 / MAX_COMETS as f32;
+    global_obs[4] = player_alive_flags(state)
         .into_iter()
         .filter(|alive| *alive)
         .count() as f32
