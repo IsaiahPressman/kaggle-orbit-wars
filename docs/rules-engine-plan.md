@@ -75,10 +75,9 @@ Then add replay parity tests:
   expected state.
 - Keep replay fixture downloads out of Git. Download `replay-<episode-id>.jsonl`
   files to the fixture directory or repo root, where `.gitignore` excludes them.
-- `scripts/download_replays.py` writes the JSONL fixture format directly. The
-  companion extractor reads raw Kaggle JSON for older local downloads and writes
-  one JSONL row per transition: `episode_id`, `step`, typed per-player actions,
-  the pre-step observation, and the canonical post-step player 0 observation.
+- `scripts/download_replays.py` writes one JSONL row per transition:
+  `episode_id`, `step`, typed per-player actions, the pre-step observation, and
+  the canonical post-step player 0 observation.
 - Keep checked-in fixture files compact. If they become too large, keep them out
   of Git too and make the test print the extraction command when the fixture is
   missing.
@@ -97,7 +96,7 @@ The current downloaded reference episodes are:
 
 ## Implementation Order
 
-1. Add serializable fixture extraction helpers around the Python reference.
+1. Add serializable fixture helpers around the Python reference.
 2. Define Rust state/action/config/result types.
 3. Port stateless math helpers and unit-test them.
 4. Port reset/generation using an injectable RNG trait.

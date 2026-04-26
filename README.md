@@ -43,12 +43,6 @@ player actions from `steps[t][player].action`, the input observation from
 `steps[t][0].observation`. `cargo test` skips replay parity when fixtures are
 absent and runs it when matching fixture files exist.
 
-If you already have raw Kaggle `replay-*.json` files, convert them with:
-
-```sh
-uv run python scripts/extract_replay_fixtures.py --fixture-dir tests/fixtures/orbit_wars_replays
-```
-
 Recommended test environment variables:
 
 - `ORBIT_WARS_PARITY_FIXTURE_DIR`: directory containing extracted JSONL parity

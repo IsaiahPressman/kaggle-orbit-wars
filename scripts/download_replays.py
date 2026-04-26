@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from extract_replay_fixtures import extract_rows, parse_steps
 from kaggle.api.kaggle_api_extended import (
     ApiGetEpisodeReplayRequest,
     KaggleApi,
@@ -36,6 +36,44 @@ def parse_args() -> argparse.Namespace:
         help="Optional comma-separated transition step numbers to save",
     )
     return parser.parse_args()
+
+
+def parse_steps(raw_steps: str | None) -> set[int] | None:
+    if raw_steps is None:
+        return None
+    return {int(step.strip()) for step in raw_steps.split(",") if step.strip()}
+
+
+def extract_rows(
+    replay: dict[str, Any], selected_steps: set[int] | None
+) -> Iterable[dict[str, Any]]:
+    episode_id = int(replay["info"]["EpisodeId"])
+    configuration = replay["configuration"]
+    steps = replay["steps"]
+    player_count = len(steps[0])
+
+    for step in range(1, len(steps)):
+        if selected_steps is not None and step not in selected_steps:
+            continue
+
+        before = steps[step - 1][0]["observation"]
+        expected = steps[step][0]["observation"]
+        if not isinstance(before, dict) or not before.get("planets"):
+            continue
+        if not isinstance(expected, dict) or not expected.get("planets"):
+            continue
+
+        yield {
+            "episode_id": episode_id,
+            "players": player_count,
+            "step": step,
+            "configuration": configuration,
+            "before": before,
+            "actions": [
+                steps[step][player]["action"] for player in range(player_count)
+            ],
+            "expected": expected,
+        }
 
 
 def download_replay_fixture(
