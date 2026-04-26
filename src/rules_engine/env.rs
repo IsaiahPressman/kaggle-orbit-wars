@@ -429,7 +429,7 @@ fn resolve_combats(state: &mut State, combat_lists: HashMap<u32, Vec<Fleet>>) {
 }
 
 fn player_results(state: &State) -> Vec<PlayerResult> {
-    let terminated = reached_step_limit(state) || remaining_alive_players(state) <= 1;
+    let terminated = is_game_terminated(state);
     if !terminated {
         return vec![PlayerResult::NotDone; state.config.player_count];
     }
@@ -448,21 +448,32 @@ fn player_results(state: &State) -> Vec<PlayerResult> {
         .collect()
 }
 
+pub fn is_game_terminated(state: &State) -> bool {
+    reached_step_limit(state) || remaining_alive_players(state) <= 1
+}
+
 fn reached_step_limit(state: &State) -> bool {
     state.step >= state.config.episode_steps.saturating_sub(2)
 }
 
 fn remaining_alive_players(state: &State) -> usize {
-    let mut alive_players = HashSet::new();
+    player_alive_flags(state)
+        .into_iter()
+        .filter(|alive| *alive)
+        .count()
+}
+
+pub fn player_alive_flags(state: &State) -> Vec<bool> {
+    let mut alive_players = vec![false; state.config.player_count];
     for planet in &state.planets {
         if planet.owner != -1 {
-            alive_players.insert(planet.owner);
+            alive_players[planet.owner as usize] = true;
         }
     }
     for fleet in &state.fleets {
-        alive_players.insert(fleet.owner);
+        alive_players[fleet.owner as usize] = true;
     }
-    alive_players.len()
+    alive_players
 }
 
 fn player_scores(state: &State) -> Vec<i32> {

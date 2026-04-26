@@ -1,3 +1,4 @@
+mod rl;
 pub mod rules_engine;
 
 use numpy::ndarray::Array2;
@@ -30,5 +31,6 @@ fn rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hello_from_rust, m)?)?;
     m.add_function(wrap_pyfunction!(hello_numpy, m)?)?;
     m.add_function(wrap_pyfunction!(assert_release_build, m)?)?;
+    rl::add_to_module(m)?;
     Ok(())
 }
