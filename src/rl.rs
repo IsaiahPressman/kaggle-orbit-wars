@@ -1,5 +1,3 @@
-use std::ffi::CString;
-
 use std::collections::{HashMap, HashSet};
 
 use numpy::ndarray::{Array1, Array2};
@@ -7,9 +5,8 @@ use numpy::{
     IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray4,
     PyReadonlyArrayDyn, PyReadwriteArrayDyn, PyUntypedArrayMethods,
 };
-use pyo3::exceptions::{PyUserWarning, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::PyErr;
 use rayon::prelude::*;
 
 use crate::rules_engine::env::{is_game_terminated, player_alive_flags, reset, step, PlayerAction};
@@ -146,7 +143,7 @@ impl PyRlVecEnv {
     #[allow(clippy::too_many_arguments)]
     fn reset(
         &mut self,
-        py: Python<'_>,
+        _py: Python<'_>,
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
         comet_obs: PyReadwriteArrayDyn<'_, f32>,
@@ -163,7 +160,7 @@ impl PyRlVecEnv {
                 player_finished.fill(false);
             });
         self.write_obs(
-            py,
+            _py,
             planet_obs,
             fleet_obs,
             comet_obs,
@@ -177,7 +174,7 @@ impl PyRlVecEnv {
     #[allow(clippy::too_many_arguments)]
     fn step(
         &mut self,
-        py: Python<'_>,
+        _py: Python<'_>,
         actions: PyReadonlyArrayDyn<'_, f32>,
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
@@ -241,7 +238,7 @@ impl PyRlVecEnv {
         }
 
         self.write_obs(
-            py,
+            _py,
             planet_obs,
             fleet_obs,
             comet_obs,
@@ -297,7 +294,7 @@ impl PyRlVecEnv {
     #[allow(clippy::too_many_arguments)]
     fn write_obs(
         &self,
-        py: Python<'_>,
+        _py: Python<'_>,
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
         comet_obs: PyReadwriteArrayDyn<'_, f32>,
@@ -399,7 +396,8 @@ impl PyRlVecEnv {
             )
             .sum();
 
-        warn_ignored_fleets(py, ignored_fleets)
+        log_ignored_fleets(ignored_fleets);
+        Ok(())
     }
 }
 
@@ -626,15 +624,11 @@ fn require_shape_suffix(name: &str, actual: &[usize], expected_last_dim: usize) 
     )))
 }
 
-fn warn_ignored_fleets(py: Python<'_>, ignored_fleets: usize) -> PyResult<()> {
+fn log_ignored_fleets(ignored_fleets: usize) {
     if ignored_fleets == 0 {
-        return Ok(());
+        return;
     }
-    let message = CString::new(format!(
-        "max_entities exceeded: {ignored_fleets} fleets ignored"
-    ))
-    .expect("warning message does not contain nul bytes");
-    PyErr::warn(py, &py.get_type::<PyUserWarning>(), &message, 0)
+    eprintln!("max_entities exceeded: {ignored_fleets} fleets ignored");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -902,7 +896,7 @@ pub fn encode_obs_v1<'py>(
             .as_slice_mut()
             .expect("newly allocated global array is contiguous"),
     );
-    warn_ignored_fleets(py, ignored_fleets)?;
+    log_ignored_fleets(ignored_fleets);
 
     Ok((
         planet_obs.into_pyarray(py),

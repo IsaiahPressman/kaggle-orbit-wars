@@ -92,24 +92,26 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     assert global_features[2] == pytest.approx(1.0)
 
 
-def test_python_observation_encoder_keeps_largest_fleets_first() -> None:
+def test_python_observation_encoder_keeps_largest_fleets_first(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
     spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
 
-    with pytest.warns(UserWarning, match="max_entities exceeded: 1 fleets ignored"):
-        _, fleets, _, _, fleet_mask, _, _ = encode_python_observation(
-            {
-                "planets": [],
-                "fleets": [
-                    [1, 0, 10.0, 20.0, 0.0, 0, 5],
-                    [2, 1, 30.0, 40.0, 0.0, 0, 20],
-                ],
-            },
-            spec,
-        )
+    _, fleets, _, _, fleet_mask, _, _ = encode_python_observation(
+        {
+            "planets": [],
+            "fleets": [
+                [1, 0, 10.0, 20.0, 0.0, 0, 5],
+                [2, 1, 30.0, 40.0, 0.0, 0, 20],
+            ],
+        },
+        spec,
+    )
 
     assert fleet_mask.tolist() == [True]
     assert fleets[0, 1] == 1
     assert fleets[0, 8] == pytest.approx(0.1)
+    assert "max_entities exceeded: 1 fleets ignored" in capfd.readouterr().err
 
 
 def test_python_observation_encoder_writes_comet_future_paths() -> None:
