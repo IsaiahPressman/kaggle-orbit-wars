@@ -83,6 +83,8 @@ Start with component tests:
 - Python-reference generation fixtures for planet and comet generation, so Rust
   must consume the same recorded random calls and match Python's generated
   outputs.
+- Planet generation reserves static and orbiting y=x diagonal groups before the
+  random static and fill phases, matching the current Python reference.
 - Action validation and launch side effects.
 - Production.
 - Fleet movement, out-of-bounds removal, sun collision, planet collision.
@@ -142,6 +144,8 @@ The current downloaded reference episodes are:
   both before launches and immediately after movement.
 - Planet movement uses `initial_planets` as the orbital anchor, not last turn's
   position.
+- Four-player home assignment chooses among y=x diagonal groups only, using the
+  reference RNG stream after planet generation.
 - Combat is queued during fleet movement and sweep, then resolved after all
   movement.
 - Termination happens at `episodeSteps - 2`, which is earlier than the prose

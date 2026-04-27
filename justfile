@@ -56,5 +56,5 @@ prepare-rl: prepare build-release
 [group: 'misc']
 clean:
     cargo clean
-    rm -rf .mypy_cache .pytest_cache .ruff_cache
-    rm tests/fixtures/orbit_wars_replays/*
+    rm -rf .mypy_cache .pytest_cache .ruff_cache .venv/
+    rm tests/fixtures/**/*.{json,jsonl}

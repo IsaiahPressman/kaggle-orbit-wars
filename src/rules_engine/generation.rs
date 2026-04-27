@@ -35,6 +35,19 @@ pub fn generate_planets(rng: &mut impl RandomSource) -> Vec<Planet> {
     let num_q1 = rng.randint(MIN_PLANET_GROUPS, MAX_PLANET_GROUPS) as usize;
     let mut next_id = 0;
 
+    if let Some(group) = place_diagonal_group(&planets, next_id, static_diagonal_orbital_range, rng)
+    {
+        planets.extend(group);
+        next_id += 4;
+    }
+
+    if let Some(group) =
+        place_diagonal_group(&planets, next_id, orbiting_diagonal_orbital_range, rng)
+    {
+        planets.extend(group);
+        next_id += 4;
+    }
+
     let mut static_groups = 0;
     for _ in 0..5000 {
         if static_groups >= MIN_STATIC_GROUPS {
@@ -74,28 +87,6 @@ pub fn generate_planets(rng: &mut impl RandomSource) -> Vec<Planet> {
             planets.extend(group);
             next_id += 4;
             static_groups += 1;
-        }
-    }
-
-    for _ in 0..1000 {
-        let production = rng.randint(1, 5);
-        let radius = planet_radius(production);
-        let min_orbital = SUN_RADIUS + radius + 10.0;
-        let max_orbital = ROTATION_RADIUS_LIMIT - radius;
-        if min_orbital >= max_orbital {
-            continue;
-        }
-
-        let orbital_radius = rng.uniform(min_orbital, max_orbital);
-        let x = CENTER + orbital_radius * std::f64::consts::FRAC_1_SQRT_2;
-        let y = CENTER + orbital_radius * std::f64::consts::FRAC_1_SQRT_2;
-        let ships = rng.randint(5, 99).min(rng.randint(5, 99));
-        let group = symmetric_planets(next_id, -1, x, y, radius, ships, production);
-
-        if valid_diagonal_orbiting_group(&group, &planets) {
-            planets.extend(group);
-            next_id += 4;
-            break;
         }
     }
 
@@ -154,20 +145,23 @@ pub fn assign_home_planets(
         return;
     }
 
-    let mut home_group = rng.randint(0, num_groups as i32 - 1) as usize;
-    let mut base = home_group * 4;
-
-    if player_count == 4 && is_orbiting(&planets[base]) {
-        for group_index in 0..num_groups {
-            let group_base = group_index * 4;
-            let planet = &planets[group_base];
-            if is_orbiting(planet) && ((planet.x - CENTER) - (planet.y - CENTER)).abs() < 0.01 {
-                home_group = group_index;
-                base = home_group * 4;
-                break;
-            }
-        }
-    }
+    let home_group = if player_count == 4 {
+        let diagonal_groups = (0..num_groups)
+            .filter(|group_index| {
+                let planet = &planets[group_index * 4];
+                ((planet.x - CENTER) - (planet.y - CENTER)).abs() < 0.01
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !diagonal_groups.is_empty(),
+            "4p requires at least one y=x diagonal group"
+        );
+        let diagonal_index = rng.randint(0, diagonal_groups.len() as i32 - 1) as usize;
+        diagonal_groups[diagonal_index]
+    } else {
+        rng.randint(0, num_groups as i32 - 1) as usize
+    };
+    let base = home_group * 4;
 
     if player_count == 2 {
         planets[base].owner = 0;
@@ -180,6 +174,45 @@ pub fn assign_home_planets(
             planets[base + player_id].ships = 10;
         }
     }
+}
+
+fn place_diagonal_group(
+    planets: &[Planet],
+    next_id: u32,
+    orbital_range: fn(f64) -> (f64, f64),
+    rng: &mut impl RandomSource,
+) -> Option<Vec<Planet>> {
+    for _ in 0..1000 {
+        let production = rng.randint(1, 5);
+        let radius = planet_radius(production);
+        let (min_orbital, max_orbital) = orbital_range(radius);
+        if min_orbital >= max_orbital {
+            continue;
+        }
+
+        let orbital_radius = rng.uniform(min_orbital, max_orbital);
+        let x = CENTER + orbital_radius * std::f64::consts::FRAC_1_SQRT_2;
+        let y = CENTER + orbital_radius * std::f64::consts::FRAC_1_SQRT_2;
+        let ships = rng.randint(5, 99).min(rng.randint(5, 99));
+        let group = symmetric_planets(next_id, -1, x, y, radius, ships, production);
+
+        if valid_diagonal_group(&group, planets) {
+            return Some(group);
+        }
+    }
+
+    None
+}
+
+fn static_diagonal_orbital_range(radius: f64) -> (f64, f64) {
+    (
+        (ROTATION_RADIUS_LIMIT - radius).max((radius + 5.0) * std::f64::consts::SQRT_2),
+        (BOARD_SIZE - CENTER - radius) * std::f64::consts::SQRT_2,
+    )
+}
+
+fn orbiting_diagonal_orbital_range(radius: f64) -> (f64, f64) {
+    (SUN_RADIUS + radius + 10.0, ROTATION_RADIUS_LIMIT - radius)
 }
 
 pub fn generate_comet_paths(
@@ -346,16 +379,17 @@ fn no_initial_overlap(group: &[Planet], planets: &[Planet]) -> bool {
     })
 }
 
-fn valid_diagonal_orbiting_group(group: &[Planet], planets: &[Planet]) -> bool {
+fn valid_diagonal_group(group: &[Planet], planets: &[Planet]) -> bool {
     group.iter().all(|candidate| {
         let candidate_orbital = distance(candidate.position(), Point::new(CENTER, CENTER));
+        let candidate_rotating = candidate_orbital + candidate.radius < ROTATION_RADIUS_LIMIT;
         planets.iter().all(|planet| {
             let planet_orbital = distance(planet.position(), Point::new(CENTER, CENTER));
-            let planet_static = planet_orbital + planet.radius >= ROTATION_RADIUS_LIMIT;
+            let planet_rotating = planet_orbital + planet.radius < ROTATION_RADIUS_LIMIT;
 
             distance(candidate.position(), planet.position())
                 >= candidate.radius + planet.radius + PLANET_CLEARANCE
-                && (!planet_static
+                && (candidate_rotating == planet_rotating
                     || (candidate_orbital - planet_orbital).abs()
                         >= candidate.radius + planet.radius + PLANET_CLEARANCE)
         })
@@ -530,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_home_planets_redirects_four_player_orbiting_home_to_diagonal_group() {
+    fn assign_home_planets_selects_four_player_home_from_diagonal_groups() {
         let radius = planet_radius(2);
         let mut planets = symmetric_planets(0, -1, 95.0, 95.0, radius, 20, 2);
         planets.extend(symmetric_planets(4, -1, 75.0, 55.0, radius, 20, 2));
