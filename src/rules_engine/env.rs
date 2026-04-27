@@ -7,10 +7,9 @@ use super::generation::{
 };
 use super::state::{
     CometSpawnInjection, Fleet, LaunchAction, Planet, PlayerResult, Point, ResetConfig, State,
-    StepInjections, StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS, ROTATION_RADIUS_LIMIT,
-    SUN_RADIUS,
+    StepInjections, StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS, SUN_RADIUS,
 };
-use super::utils::{fleet_speed, point_to_segment_distance};
+use super::utils::{fleet_speed, is_orbiting, orbit_position, point_to_segment_distance};
 
 pub type PlayerAction = Vec<LaunchAction>;
 
@@ -276,16 +275,16 @@ fn move_planets_and_sweep(state: &mut State, combat_lists: &mut HashMap<u32, Vec
             continue;
         };
 
-        let dx = initial_planet.x - CENTER;
-        let dy = initial_planet.y - CENTER;
-        let orbital_radius = (dx.powi(2) + dy.powi(2)).sqrt();
         let old_pos = planet.position();
 
-        if orbital_radius + planet.radius < ROTATION_RADIUS_LIMIT {
-            let initial_angle = dy.atan2(dx);
-            let current_angle = initial_angle + state.angular_velocity * f64::from(state.step);
-            planet.x = CENTER + orbital_radius * current_angle.cos();
-            planet.y = CENTER + orbital_radius * current_angle.sin();
+        if is_orbiting(initial_planet.position(), planet.radius) {
+            let position = orbit_position(
+                initial_planet.position(),
+                state.angular_velocity,
+                state.step.into(),
+            );
+            planet.x = position.x;
+            planet.y = position.y;
         }
 
         sweep_checks.push((planet.id, planet.radius, old_pos, planet.position()));
@@ -429,7 +428,7 @@ fn resolve_combats(state: &mut State, combat_lists: HashMap<u32, Vec<Fleet>>) {
 }
 
 fn player_results(state: &State) -> Vec<PlayerResult> {
-    let terminated = reached_step_limit(state) || remaining_alive_players(state) <= 1;
+    let terminated = is_game_terminated(state);
     if !terminated {
         return vec![PlayerResult::NotDone; state.config.player_count];
     }
@@ -448,21 +447,32 @@ fn player_results(state: &State) -> Vec<PlayerResult> {
         .collect()
 }
 
+fn is_game_terminated(state: &State) -> bool {
+    reached_step_limit(state) || remaining_alive_players(state) <= 1
+}
+
 fn reached_step_limit(state: &State) -> bool {
     state.step >= state.config.episode_steps.saturating_sub(2)
 }
 
 fn remaining_alive_players(state: &State) -> usize {
-    let mut alive_players = HashSet::new();
+    player_alive_flags(state)
+        .into_iter()
+        .filter(|alive| *alive)
+        .count()
+}
+
+pub fn player_alive_flags(state: &State) -> Vec<bool> {
+    let mut alive_players = vec![false; state.config.player_count];
     for planet in &state.planets {
         if planet.owner != -1 {
-            alive_players.insert(planet.owner);
+            alive_players[planet.owner as usize] = true;
         }
     }
     for fleet in &state.fleets {
-        alive_players.insert(fleet.owner);
+        alive_players[fleet.owner as usize] = true;
     }
-    alive_players.len()
+    alive_players
 }
 
 fn player_scores(state: &State) -> Vec<i32> {

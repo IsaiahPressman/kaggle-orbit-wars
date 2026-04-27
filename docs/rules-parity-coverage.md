@@ -9,6 +9,10 @@ changes.
 Replay fixtures are generated with `scripts/download_replays.py` and loaded from
 `tests/fixtures/orbit_wars_replays/replay-*.jsonl`.
 
+The parity tests fail by default when required fixtures are missing. Set
+`REQUIRE_PARITY_FIXTURES=0` to skip fixture-backed parity on machines that do not
+have local fixtures.
+
 The replay parity test checks each transition against the Python reference for:
 
 - step counter
@@ -28,14 +32,17 @@ and step-limit termination.
 ## Covered By Generation Fixtures
 
 Generation fixtures are produced by `scripts/generate_reference_fixtures.py`
-from the installed `kaggle-environments` Orbit Wars implementation. Rust
-consumes the recorded random call stream and compares generated output.
+from the installed `kaggle-environments` Orbit Wars implementation and written
+to `tests/fixtures/generation/reference_generation.json`. Rust consumes the
+recorded random call stream and compares generated output.
 
-The checked-in fixture currently covers:
+The generated fixture currently covers:
 
 - planet generation from seed `42`
+- static and orbiting y=x diagonal group reservation before random static
+  groups
 - full reset for 2-player and 4-player games, including angular velocity,
-  planet generation, initial planets, and home assignment
+  planet generation, initial planets, and diagonal-only 4-player home assignment
 - comet paths at spawn steps `50`, `150`, `250`, `350`, and `450`
 - comet path generation with existing comet ids excluded
 - comet path generation where failed attempts occur before success
@@ -72,6 +79,8 @@ Floating-point parity uses close comparisons rather than bit-for-bit equality.
 Discrete ids, owners, ship counts, production, removals, and terminal results
 must match exactly.
 
-Replay fixtures are ignored by Git because full episodes can be large. A fresh
-checkout must run `scripts/regenerate_test_fixtures.sh` before `just prepare`,
-or restore replay fixtures from cache.
+Replay and generation fixtures are ignored by Git because full episodes and
+recorded reference streams can be large. A fresh checkout must run
+`scripts/regenerate_test_fixtures.sh` or restore fixtures from cache before
+running required parity. Use `REQUIRE_PARITY_FIXTURES=0 just rs-test` only when
+intentionally skipping fixture-backed parity.

@@ -51,7 +51,7 @@ class OrbitWarsModule(Protocol):
 
 
 class RecordingRandom:
-    def __init__(self, seed: int) -> None:
+    def __init__(self, seed: int | str) -> None:
         self._rng = random.Random(seed)
         self.calls: list[dict[str, int | float | str]] = []
 
@@ -64,6 +64,16 @@ class RecordingRandom:
         value = self._rng.uniform(low, high)
         self.calls.append({"kind": "uniform", "low": low, "high": high, "value": value})
         return value
+
+
+class RecordingRandomFactory:
+    def __init__(self) -> None:
+        self.recorders: list[RecordingRandom] = []
+
+    def Random(self, seed: int | str) -> RecordingRandom:
+        recorder = RecordingRandom(seed)
+        self.recorders.append(recorder)
+        return recorder
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,9 +111,9 @@ def run_with_recording_random(
 
 
 def reset_case(module: OrbitWarsModule, seed: int, players: int) -> dict[str, Any]:
-    recorder = RecordingRandom(seed)
+    recorder_factory = RecordingRandomFactory()
     original_random = module.random
-    module.random = recorder
+    module.random = recorder_factory
     try:
         state = [
             SimpleNamespace(
@@ -119,6 +129,7 @@ def reset_case(module: OrbitWarsModule, seed: int, players: int) -> dict[str, An
                 episodeSteps=500,
                 shipSpeed=6.0,
                 cometSpeed=4.0,
+                seed=seed,
             ),
             done=False,
         )
@@ -130,7 +141,7 @@ def reset_case(module: OrbitWarsModule, seed: int, players: int) -> dict[str, An
     return {
         "seed": seed,
         "players": players,
-        "random_calls": recorder.calls,
+        "random_calls": recorder_factory.recorders[0].calls,
         "state": {
             "angular_velocity": obs.angular_velocity,
             "planets": obs.planets,

@@ -1,9 +1,12 @@
 # Rust Rules Engine Plan
 
-This document is the working map for implementing the Rust Orbit Wars simulator.
-The Python reference is the installed
-`kaggle_environments.envs.orbit_wars.orbit_wars` module; gameplay prose lives
-in `orbit_wars_rules.md`.
+This document is the current map for the Rust Orbit Wars simulator. The Python
+reference is the installed `kaggle_environments.envs.orbit_wars.orbit_wars`
+module. Resolve the exact local module path and gameplay prose path with:
+
+```sh
+uv run python -c 'from importlib import import_module; from pathlib import Path; m = import_module("kaggle_environments.envs.orbit_wars.orbit_wars"); print(Path(m.__file__).resolve()); print(Path(m.__file__).with_name("README.md").resolve())'
+```
 
 ## Assumptions
 
@@ -35,16 +38,36 @@ win. This matches the actual player count without making 2-player games carry
 ignored entries. The Python/RL adapter can widen this to a fixed tensor shape
 later if that is more convenient.
 
+## Current Status
+
+Implemented:
+
+- Rust state/action/config/result types.
+- Reset and procedural generation with injectable random sources.
+- Turn stepping in Python reference order.
+- Focused Rust unit tests for rules components.
+- Generation parity over ignored Python-reference fixtures.
+- Replay parity over ignored Kaggle JSONL fixtures.
+- Python RL observation/action wrappers and vectorized environment.
+
+Not yet implemented:
+
+- Benchmarks and data-structure optimization for training throughput.
+- Mechanical doc freshness checks beyond `docs/pr-checklist.md`.
+- CI-owned parity fixture cache or checked-in minimal parity fixtures.
+
 ## Agentic Workflow
 
-Use focused agents for separable work:
+For rules changes, work in this order:
 
-1. Planner/spec writer: keep this plan and parity checklist current.
-2. Test writer: add unit and replay tests before simulator implementation.
-3. Implementation writer: port one rules component at a time.
-4. Reviewer: compare behavior against the Python reference and call out drift.
-5. Optimizer: add benchmarks and improve data structures only after parity is
-   covered.
+1. Update or add parity/unit tests that state the expected behavior.
+2. Change the Rust simulator or fixture generator.
+3. Update this plan and `docs/rules-parity-coverage.md` in the same change.
+4. Run `just rs-prepare` with parity fixtures present. Use
+   `REQUIRE_PARITY_FIXTURES=0 just rs-test` only when intentionally skipping
+   fixture-backed parity.
+5. Use a reviewer pass to compare behavior against the Python reference and call
+   out drift.
 
 Human review should focus on acceptance criteria and rule interpretation. Agents
 should own implementation, test updates, and documentation corrections.
@@ -60,6 +83,8 @@ Start with component tests:
 - Python-reference generation fixtures for planet and comet generation, so Rust
   must consume the same recorded random calls and match Python's generated
   outputs.
+- Planet generation reserves static and orbiting y=x diagonal groups before the
+  random static and fill phases, matching the current Python reference.
 - Action validation and launch side effects.
 - Production.
 - Fleet movement, out-of-bounds removal, sun collision, planet collision.
@@ -67,7 +92,7 @@ Start with component tests:
 - Combat resolution, including tied attackers and same-owner reinforcement.
 - Termination and scoring.
 
-Then add replay parity tests:
+Replay parity tests:
 
 - Download Kaggle replays directly into compact JSONL fixtures containing typed
   actions and post-step reference observations.
@@ -82,33 +107,32 @@ Then add replay parity tests:
 - `scripts/regenerate_test_fixtures.sh` removes outdated replay fixtures,
   regenerates the Python generation fixture, and downloads the selected replay
   fixture set.
-- Keep checked-in fixture files compact. If they become too large, keep them out
-  of Git too and make the test print the extraction command when the fixture is
-  missing.
+- Keep fixture files out of Git and make tests print the regeneration command
+  when required fixtures are missing.
 - Replay parity tests discover all `replay-*.jsonl` files in
   `ORBIT_WARS_PARITY_FIXTURE_DIR`, or
-  `tests/fixtures/orbit_wars_replays` by default, and fail if no fixtures are
-  present. When rules change, download new Kaggle episodes as JSONL fixtures,
-  update the episode id list below, and leave the test code unchanged unless the
-  fixture schema itself changes.
+  `tests/fixtures/orbit_wars_replays` by default. If no fixtures are present,
+  the test fails by default. Set `REQUIRE_PARITY_FIXTURES=0` to skip
+  fixture-backed parity. When rules change, download new Kaggle episodes as
+  JSONL fixtures, update the episode id list below, and leave the test code
+  unchanged unless the fixture schema itself changes.
 
 The current downloaded reference episodes are:
 
 - `75373897`: 4-player, 500 recorded steps.
 - `75377525`: 2-player, 296 recorded steps.
 
-## Implementation Order
+## Maintenance Rules
 
-1. Add serializable fixture helpers around the Python reference.
-2. Define Rust state/action/config/result types.
-3. Port stateless math helpers and unit-test them.
-4. Port reset/generation using an injectable RNG trait.
-5. Port turn stepping in Python turn-order order.
-6. Add replay parity integration tests.
-7. Regenerate Python-reference generation fixtures with
-   `scripts/regenerate_test_fixtures.sh` when upstream generation changes.
-8. Run `just rs-prepare` after Rust edits and `just py-prepare` after Python
-   edits.
+- Treat this file as a current-state map, not a historical plan. When a listed
+  implementation step is completed, move it into `Current Status` or remove it.
+- Any rules-engine change should update this file and
+  `docs/rules-parity-coverage.md`, or explicitly state why no docs changed in
+  the PR checklist.
+- Regenerate Python-reference generation fixtures with
+  `scripts/regenerate_test_fixtures.sh` when upstream generation changes.
+- Run `just rs-prepare` after Rust edits and `just py-prepare` after Python
+  edits.
 
 ## Known Risk Areas
 
@@ -119,6 +143,8 @@ The current downloaded reference episodes are:
   both before launches and immediately after movement.
 - Planet movement uses `initial_planets` as the orbital anchor, not last turn's
   position.
+- Four-player home assignment chooses among y=x diagonal groups only, using the
+  reference RNG stream after planet generation.
 - Combat is queued during fleet movement and sweep, then resolved after all
   movement.
 - Termination happens at `episodeSteps - 2`, which is earlier than the prose

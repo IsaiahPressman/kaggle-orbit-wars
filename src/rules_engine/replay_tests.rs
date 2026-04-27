@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -68,7 +68,12 @@ impl RandomSource for PanicRandom {
 
 #[test]
 fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
-    let fixture_paths = fixture_paths()?;
+    let fixture_dir = fixture_dir();
+    let fixture_paths = fixture_paths(&fixture_dir)?;
+    if fixture_paths.is_empty() {
+        warn_or_fail_missing_fixtures(&fixture_dir)?;
+        return Ok(());
+    }
 
     let mut checked_rows = 0;
     for fixture_path in fixture_paths {
@@ -93,12 +98,18 @@ fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn fixture_paths() -> Result<Vec<PathBuf>, Box<dyn Error>> {
-    let fixture_dir = std::env::var("ORBIT_WARS_PARITY_FIXTURE_DIR")
+fn fixture_dir() -> PathBuf {
+    std::env::var("ORBIT_WARS_PARITY_FIXTURE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_FIXTURE_DIR));
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_FIXTURE_DIR))
+}
 
-    let mut fixture_paths = std::fs::read_dir(&fixture_dir)?
+fn fixture_paths(fixture_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    let Ok(entries) = std::fs::read_dir(fixture_dir) else {
+        return Ok(Vec::new());
+    };
+
+    let mut fixture_paths = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
@@ -111,15 +122,34 @@ fn fixture_paths() -> Result<Vec<PathBuf>, Box<dyn Error>> {
         .collect::<Vec<_>>();
     fixture_paths.sort();
 
-    if fixture_paths.is_empty() {
-        return Err(format!(
-            "No replay parity fixtures found in {}. Run scripts/regenerate_test_fixtures.sh.",
-            fixture_dir.display()
-        )
-        .into());
-    }
-
     Ok(fixture_paths)
+}
+
+fn warn_or_fail_missing_fixtures(fixture_dir: &Path) -> Result<(), Box<dyn Error>> {
+    if require_parity_fixtures()? {
+        let message = format!(
+            "No replay parity fixtures found in {}. \
+            Run scripts/regenerate_test_fixtures.sh to enable replay parity, \
+            or set REQUIRE_PARITY_FIXTURES=0 to skip replay parity.",
+            fixture_dir.display()
+        );
+        Err(message.into())
+    } else {
+        Ok(())
+    }
+}
+
+fn require_parity_fixtures() -> Result<bool, Box<dyn Error>> {
+    let Ok(value) = std::env::var("REQUIRE_PARITY_FIXTURES") else {
+        return Ok(true);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => {
+            Err(format!("REQUIRE_PARITY_FIXTURES must be 1/true or 0/false, got {value:?}").into())
+        },
+    }
 }
 
 fn check_transition(row: &FixtureRow) -> Result<(), String> {

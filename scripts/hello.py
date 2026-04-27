@@ -1,4 +1,0 @@
-from owl.rs import hello_from_rust
-
-if __name__ == "__main__":
-    print(hello_from_rust())

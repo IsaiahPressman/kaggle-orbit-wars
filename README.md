@@ -3,9 +3,9 @@
 ## Setup instructions
 
 1. Install prerequisites:
-    * [Rust](https://www.rust-lang.org/tools/install)
-    * [uv](https://docs.astral.sh/uv/getting-started/installation/)
-    * [just](https://github.com/casey/just)
+   - [Rust](https://www.rust-lang.org/tools/install)
+   - [uv](https://docs.astral.sh/uv/getting-started/installation/)
+   - [just](https://github.com/casey/just)
 2. Add nightly toolchain for `rustfmt`:
 
 ```sh
@@ -13,7 +13,22 @@ rustup update nightly
 rustup component add rustfmt --toolchain nightly
 ```
 
-3. `just prepare` should run without errors
+3. Generate replay fixtures:
+
+```sh
+scripts/regenerate_test_fixtures.sh
+```
+
+4. `just prepare` should run without errors
+
+## Orbit Wars reference
+
+The Rust rules engine targets the installed `kaggle-environments` Orbit Wars
+implementation. Resolve the local module and gameplay prose paths with:
+
+```sh
+uv run python -c 'from importlib import import_module; from pathlib import Path; m = import_module("kaggle_environments.envs.orbit_wars.orbit_wars"); print(Path(m.__file__).resolve()); print(Path(m.__file__).with_name("README.md").resolve())'
+```
 
 ## Orbit Wars replay parity
 
@@ -48,6 +63,8 @@ Supported test environment variables:
 
 - `ORBIT_WARS_PARITY_FIXTURE_DIR`: directory containing extracted JSONL parity
   fixtures.
+- `REQUIRE_PARITY_FIXTURES=0`: skip replay and generation parity when fixtures
+  are missing. Missing fixtures fail by default.
 
 When the upstream rules change, keep the test code stable: download replacement
 episodes as JSONL fixtures, move them into the fixture directory if needed,
@@ -66,8 +83,8 @@ intentional upstream rule changes:
 uv run python scripts/generate_reference_fixtures.py
 ```
 
-The generated fixture is small and checked in at
-`tests/fixtures/generation/reference_generation.json`.
+The generated fixture is written to
+`tests/fixtures/generation/reference_generation.json` and ignored by Git.
 
 ## Updating tests after Python rule changes
 
@@ -104,6 +121,5 @@ just prepare
 5. Fix any failing Rust parity tests by matching the updated Python behavior,
    then rerun `just prepare`.
 
-The checked-in generation fixture should be committed when it changes. The
-replay JSONL fixtures remain ignored by Git; keep only the episode IDs and setup
-commands in source control.
+Generation and replay fixtures remain ignored by Git; keep only the episode IDs
+and setup commands in source control.

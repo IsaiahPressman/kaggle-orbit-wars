@@ -2,10 +2,6 @@
 target/
 python/owl/rs*.so
 
-# Lockfiles
-Cargo.lock
-uv.lock
-
 # Python-generated files
 __pycache__/
 *.py[oc]
@@ -18,6 +14,7 @@ wheels/
 replay-*.json
 replay-*.jsonl
 tests/fixtures/orbit_wars_replays/*.jsonl
+tests/fixtures/generation/reference_generation.json
 
 # Virtual environments
 .venv

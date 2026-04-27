@@ -5,7 +5,7 @@ use super::state::{
     MAX_PLANET_GROUPS, MIN_PLANET_GROUPS, MIN_STATIC_GROUPS, PLANET_CLEARANCE,
     ROTATION_RADIUS_LIMIT, SUN_RADIUS,
 };
-use super::utils::distance;
+use super::utils::{distance, fourfold_symmetric_points, is_orbiting, orbit_position};
 
 pub trait RandomSource {
     fn randint(&mut self, low: i32, high: i32) -> i32;
@@ -26,14 +26,23 @@ pub fn planet_radius(production: i32) -> f64 {
     1.0 + f64::from(production).ln()
 }
 
-pub fn is_orbiting(planet: &Planet) -> bool {
-    distance(planet.position(), Point::new(CENTER, CENTER)) + planet.radius < ROTATION_RADIUS_LIMIT
-}
-
 pub fn generate_planets(rng: &mut impl RandomSource) -> Vec<Planet> {
     let mut planets = Vec::new();
     let num_q1 = rng.randint(MIN_PLANET_GROUPS, MAX_PLANET_GROUPS) as usize;
     let mut next_id = 0;
+
+    if let Some(group) = place_diagonal_group(&planets, next_id, static_diagonal_orbital_range, rng)
+    {
+        planets.extend(group);
+        next_id += 4;
+    }
+
+    if let Some(group) =
+        place_diagonal_group(&planets, next_id, orbiting_diagonal_orbital_range, rng)
+    {
+        planets.extend(group);
+        next_id += 4;
+    }
 
     let mut static_groups = 0;
     for _ in 0..5000 {
@@ -77,28 +86,6 @@ pub fn generate_planets(rng: &mut impl RandomSource) -> Vec<Planet> {
         }
     }
 
-    for _ in 0..1000 {
-        let production = rng.randint(1, 5);
-        let radius = planet_radius(production);
-        let min_orbital = SUN_RADIUS + radius + 10.0;
-        let max_orbital = ROTATION_RADIUS_LIMIT - radius;
-        if min_orbital >= max_orbital {
-            continue;
-        }
-
-        let orbital_radius = rng.uniform(min_orbital, max_orbital);
-        let x = CENTER + orbital_radius * std::f64::consts::FRAC_1_SQRT_2;
-        let y = CENTER + orbital_radius * std::f64::consts::FRAC_1_SQRT_2;
-        let ships = rng.randint(5, 99).min(rng.randint(5, 99));
-        let group = symmetric_planets(next_id, -1, x, y, radius, ships, production);
-
-        if valid_diagonal_orbiting_group(&group, &planets) {
-            planets.extend(group);
-            next_id += 4;
-            break;
-        }
-    }
-
     let mut attempts = 0;
     let mut has_orbiting = false;
     while planets.len() < num_q1 * 4 || (!has_orbiting && attempts < 5000) {
@@ -117,7 +104,7 @@ pub fn generate_planets(rng: &mut impl RandomSource) -> Vec<Planet> {
             continue;
         }
 
-        if orbital_radius + radius >= ROTATION_RADIUS_LIMIT
+        if !is_orbiting(Point::new(x, y), radius)
             && (x + radius > BOARD_SIZE
                 || x - radius < 0.0
                 || y + radius > BOARD_SIZE
@@ -128,8 +115,8 @@ pub fn generate_planets(rng: &mut impl RandomSource) -> Vec<Planet> {
 
         let ships = rng.randint(5, 30);
         let group = symmetric_planets(next_id, -1, x, y, radius, ships, production);
-        if valid_fill_group(&group, &planets) {
-            if orbital_radius + radius < ROTATION_RADIUS_LIMIT {
+        if valid_group(&group, &planets) {
+            if is_orbiting(Point::new(x, y), radius) {
                 has_orbiting = true;
             }
             planets.extend(group);
@@ -154,20 +141,23 @@ pub fn assign_home_planets(
         return;
     }
 
-    let mut home_group = rng.randint(0, num_groups as i32 - 1) as usize;
-    let mut base = home_group * 4;
-
-    if player_count == 4 && is_orbiting(&planets[base]) {
-        for group_index in 0..num_groups {
-            let group_base = group_index * 4;
-            let planet = &planets[group_base];
-            if is_orbiting(planet) && ((planet.x - CENTER) - (planet.y - CENTER)).abs() < 0.01 {
-                home_group = group_index;
-                base = home_group * 4;
-                break;
-            }
-        }
-    }
+    let home_group = if player_count == 4 {
+        let diagonal_groups = (0..num_groups)
+            .filter(|group_index| {
+                let planet = &planets[group_index * 4];
+                ((planet.x - CENTER) - (planet.y - CENTER)).abs() < 0.01
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !diagonal_groups.is_empty(),
+            "4p requires at least one y=x diagonal group"
+        );
+        let diagonal_index = rng.randint(0, diagonal_groups.len() as i32 - 1) as usize;
+        diagonal_groups[diagonal_index]
+    } else {
+        rng.randint(0, num_groups as i32 - 1) as usize
+    };
+    let base = home_group * 4;
 
     if player_count == 2 {
         planets[base].owner = 0;
@@ -180,6 +170,45 @@ pub fn assign_home_planets(
             planets[base + player_id].ships = 10;
         }
     }
+}
+
+fn place_diagonal_group(
+    planets: &[Planet],
+    next_id: u32,
+    orbital_range: fn(f64) -> (f64, f64),
+    rng: &mut impl RandomSource,
+) -> Option<Vec<Planet>> {
+    for _ in 0..1000 {
+        let production = rng.randint(1, 5);
+        let radius = planet_radius(production);
+        let (min_orbital, max_orbital) = orbital_range(radius);
+        if min_orbital >= max_orbital {
+            continue;
+        }
+
+        let orbital_radius = rng.uniform(min_orbital, max_orbital);
+        let x = CENTER + orbital_radius * std::f64::consts::FRAC_1_SQRT_2;
+        let y = CENTER + orbital_radius * std::f64::consts::FRAC_1_SQRT_2;
+        let ships = rng.randint(5, 99).min(rng.randint(5, 99));
+        let group = symmetric_planets(next_id, -1, x, y, radius, ships, production);
+
+        if valid_group(&group, planets) {
+            return Some(group);
+        }
+    }
+
+    None
+}
+
+fn static_diagonal_orbital_range(radius: f64) -> (f64, f64) {
+    (
+        (ROTATION_RADIUS_LIMIT - radius).max((radius + 5.0) * std::f64::consts::SQRT_2),
+        (BOARD_SIZE - CENTER - radius) * std::f64::consts::SQRT_2,
+    )
+}
+
+fn orbiting_diagonal_orbital_range(radius: f64) -> (f64, f64) {
+    (SUN_RADIUS + radius + 10.0, ROTATION_RADIUS_LIMIT - radius)
 }
 
 pub fn generate_comet_paths(
@@ -309,20 +338,21 @@ fn symmetric_planets(
     ships: i32,
     production: i32,
 ) -> Vec<Planet> {
-    vec![
-        planet(id, owner, x, y, radius, ships, production),
-        planet(id + 1, owner, BOARD_SIZE - x, y, radius, ships, production),
-        planet(id + 2, owner, x, BOARD_SIZE - y, radius, ships, production),
-        planet(
-            id + 3,
-            owner,
-            BOARD_SIZE - x,
-            BOARD_SIZE - y,
-            radius,
-            ships,
-            production,
-        ),
-    ]
+    fourfold_symmetric_points(Point::new(x, y))
+        .into_iter()
+        .enumerate()
+        .map(|(index, point)| {
+            planet(
+                id + index as u32,
+                owner,
+                point.x,
+                point.y,
+                radius,
+                ships,
+                production,
+            )
+        })
+        .collect()
 }
 
 fn planet(id: u32, owner: i32, x: f64, y: f64, radius: f64, ships: i32, production: i32) -> Planet {
@@ -346,30 +376,13 @@ fn no_initial_overlap(group: &[Planet], planets: &[Planet]) -> bool {
     })
 }
 
-fn valid_diagonal_orbiting_group(group: &[Planet], planets: &[Planet]) -> bool {
+fn valid_group(group: &[Planet], planets: &[Planet]) -> bool {
     group.iter().all(|candidate| {
         let candidate_orbital = distance(candidate.position(), Point::new(CENTER, CENTER));
+        let candidate_rotating = is_orbiting(candidate.position(), candidate.radius);
         planets.iter().all(|planet| {
             let planet_orbital = distance(planet.position(), Point::new(CENTER, CENTER));
-            let planet_static = planet_orbital + planet.radius >= ROTATION_RADIUS_LIMIT;
-
-            distance(candidate.position(), planet.position())
-                >= candidate.radius + planet.radius + PLANET_CLEARANCE
-                && (!planet_static
-                    || (candidate_orbital - planet_orbital).abs()
-                        >= candidate.radius + planet.radius + PLANET_CLEARANCE)
-        })
-    })
-}
-
-fn valid_fill_group(group: &[Planet], planets: &[Planet]) -> bool {
-    group.iter().all(|candidate| {
-        let candidate_orbital = distance(candidate.position(), Point::new(CENTER, CENTER));
-        let candidate_rotating = candidate_orbital + candidate.radius < ROTATION_RADIUS_LIMIT;
-
-        planets.iter().all(|planet| {
-            let planet_orbital = distance(planet.position(), Point::new(CENTER, CENTER));
-            let planet_rotating = planet_orbital + planet.radius < ROTATION_RADIUS_LIMIT;
+            let planet_rotating = is_orbiting(planet.position(), planet.radius);
 
             distance(candidate.position(), planet.position())
                 >= candidate.radius + planet.radius + PLANET_CLEARANCE
@@ -381,21 +394,15 @@ fn valid_fill_group(group: &[Planet], planets: &[Planet]) -> bool {
 }
 
 fn symmetric_paths(visible: &[Point]) -> Vec<Vec<Point>> {
-    vec![
-        visible.to_vec(),
-        visible
-            .iter()
-            .map(|point| Point::new(BOARD_SIZE - point.x, point.y))
-            .collect(),
-        visible
-            .iter()
-            .map(|point| Point::new(point.x, BOARD_SIZE - point.y))
-            .collect(),
-        visible
-            .iter()
-            .map(|point| Point::new(BOARD_SIZE - point.x, BOARD_SIZE - point.y))
-            .collect(),
-    ]
+    let mut paths = (0..4)
+        .map(|_| Vec::with_capacity(visible.len()))
+        .collect::<Vec<_>>();
+    for point in visible {
+        for (path, symmetric_point) in paths.iter_mut().zip(fourfold_symmetric_points(*point)) {
+            path.push(symmetric_point);
+        }
+    }
+    paths
 }
 
 fn comet_path_is_valid(
@@ -411,7 +418,7 @@ fn comet_path_is_valid(
         if comet_ids.contains(&planet.id) {
             continue;
         }
-        if is_orbiting(planet) {
+        if is_orbiting(planet.position(), planet.radius) {
             orbiting_planets.push(planet);
         } else {
             static_planets.push(planet);
@@ -423,12 +430,7 @@ fn comet_path_is_valid(
             return false;
         }
 
-        let sym_points = [
-            *point,
-            Point::new(BOARD_SIZE - point.x, point.y),
-            Point::new(point.x, BOARD_SIZE - point.y),
-            Point::new(BOARD_SIZE - point.x, BOARD_SIZE - point.y),
-        ];
+        let sym_points = fourfold_symmetric_points(*point);
 
         for planet in &static_planets {
             for sym_point in sym_points {
@@ -440,15 +442,7 @@ fn comet_path_is_valid(
 
         let game_step = f64::from(spawn_step - 1 + index as u32);
         for planet in &orbiting_planets {
-            let dx = planet.x - CENTER;
-            let dy = planet.y - CENTER;
-            let orbital_radius = (dx.powi(2) + dy.powi(2)).sqrt();
-            let initial_angle = dy.atan2(dx);
-            let current_angle = initial_angle + angular_velocity * game_step;
-            let planet_position = Point::new(
-                CENTER + orbital_radius * current_angle.cos(),
-                CENTER + orbital_radius * current_angle.sin(),
-            );
+            let planet_position = orbit_position(planet.position(), angular_velocity, game_step);
             for sym_point in sym_points {
                 if distance(sym_point, planet_position) < planet.radius + COMET_RADIUS {
                     return false;
@@ -530,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_home_planets_redirects_four_player_orbiting_home_to_diagonal_group() {
+    fn assign_home_planets_selects_four_player_home_from_diagonal_groups() {
         let radius = planet_radius(2);
         let mut planets = symmetric_planets(0, -1, 95.0, 95.0, radius, 20, 2);
         planets.extend(symmetric_planets(4, -1, 75.0, 55.0, radius, 20, 2));
@@ -599,11 +593,13 @@ mod tests {
         assert!(planets.len() >= MIN_PLANET_GROUPS as usize * 4);
         assert!(planets.len() <= MAX_PLANET_GROUPS as usize * 4);
         assert_eq!(planets.len() % 4, 0);
-        assert!(planets.iter().any(is_orbiting));
+        assert!(planets
+            .iter()
+            .any(|planet| is_orbiting(planet.position(), planet.radius)));
 
         let static_groups = planets
             .chunks_exact(4)
-            .filter(|group| !is_orbiting(&group[0]))
+            .filter(|group| !is_orbiting(group[0].position(), group[0].radius))
             .count();
         assert!(static_groups >= MIN_STATIC_GROUPS);
 
@@ -769,26 +765,38 @@ mod tests {
         }
     }
 
+    const GENERATION_FIXTURE_PATH: &str = "tests/fixtures/generation/reference_generation.json";
+
     #[test]
-    fn generate_planets_matches_python_reference_fixture() {
-        let fixture = reference_fixture();
+    fn generate_planets_matches_python_reference_fixture() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let Some(fixture) = reference_fixture()? else {
+            return Ok(());
+        };
         let mut rng = FixtureRandom::new(fixture.planet_generation.random_calls);
 
         let planets = generate_planets(&mut rng);
 
         rng.assert_finished();
         compare_planets(&planets, &fixture.planet_generation.planets);
+        Ok(())
     }
 
     #[test]
-    fn generate_comet_paths_matches_python_reference_fixture() {
-        let fixture = reference_fixture();
+    fn generate_comet_paths_matches_python_reference_fixture(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(fixture) = reference_fixture()? else {
+            return Ok(());
+        };
         check_comet_path_case(&fixture.comet_path_generation);
+        Ok(())
     }
 
     #[test]
-    fn reset_cases_match_python_reference_fixtures() {
-        let fixture = reference_fixture();
+    fn reset_cases_match_python_reference_fixtures() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(fixture) = reference_fixture()? else {
+            return Ok(());
+        };
 
         for case in fixture.reset_cases {
             let mut rng = FixtureRandom::new(case.random_calls);
@@ -806,20 +814,28 @@ mod tests {
             rng.assert_finished();
             compare_reset_state(&state, &case.state);
         }
+        Ok(())
     }
 
     #[test]
-    fn comet_path_cases_match_python_reference_fixtures() {
-        let fixture = reference_fixture();
+    fn comet_path_cases_match_python_reference_fixtures() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let Some(fixture) = reference_fixture()? else {
+            return Ok(());
+        };
 
         for case in &fixture.comet_path_cases {
             check_comet_path_case(case);
         }
+        Ok(())
     }
 
     #[test]
-    fn comet_ship_sampling_matches_python_reference_fixtures() {
-        let fixture = reference_fixture();
+    fn comet_ship_sampling_matches_python_reference_fixtures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(fixture) = reference_fixture()? else {
+            return Ok(());
+        };
 
         for case in fixture.comet_ship_cases {
             let mut rng = FixtureRandom::new(case.random_calls);
@@ -828,11 +844,15 @@ mod tests {
             rng.assert_finished();
             assert_eq!(ships, case.ships);
         }
+        Ok(())
     }
 
     #[test]
-    fn no_op_terminal_tie_matches_python_reference_fixture() {
-        let fixture = reference_fixture();
+    fn no_op_terminal_tie_matches_python_reference_fixture(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(fixture) = reference_fixture()? else {
+            return Ok(());
+        };
         let case = fixture.terminal_cases.no_op_tie;
         let mut state = State {
             config: SimConfig {
@@ -866,6 +886,7 @@ mod tests {
                 .map(player_result_from_reward)
                 .collect::<Vec<_>>()
         );
+        Ok(())
     }
 
     fn check_comet_path_case(case: &CometPathGenerationFixture) {
@@ -891,11 +912,42 @@ mod tests {
         compare_paths(&paths, &case.paths);
     }
 
-    fn reference_fixture() -> GenerationFixture {
-        serde_json::from_str(include_str!(
-            "../../tests/fixtures/generation/reference_generation.json"
-        ))
-        .expect("valid generation fixture")
+    fn reference_fixture() -> Result<Option<GenerationFixture>, Box<dyn std::error::Error>> {
+        let contents = match std::fs::read_to_string(GENERATION_FIXTURE_PATH) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                warn_or_fail_missing_generation_fixture()?;
+                return Ok(None);
+            },
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Some(serde_json::from_str(&contents)?))
+    }
+
+    fn warn_or_fail_missing_generation_fixture() -> Result<(), Box<dyn std::error::Error>> {
+        if require_parity_fixtures()? {
+            let message = format!(
+                "No generation parity fixture found at {GENERATION_FIXTURE_PATH}. \
+                Run scripts/regenerate_test_fixtures.sh to enable generation parity, \
+                or set REQUIRE_PARITY_FIXTURES=0 to skip generation parity."
+            );
+            Err(message.into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn require_parity_fixtures() -> Result<bool, Box<dyn std::error::Error>> {
+        let Ok(value) = std::env::var("REQUIRE_PARITY_FIXTURES") else {
+            return Ok(true);
+        };
+        match value.to_ascii_lowercase().as_str() {
+            "1" | "true" => Ok(true),
+            "0" | "false" => Ok(false),
+            _ => Err(
+                format!("REQUIRE_PARITY_FIXTURES must be 1/true or 0/false, got {value:?}").into(),
+            ),
+        }
     }
 
     fn planet_from_array(raw: &[f64; 7]) -> Planet {

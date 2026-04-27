@@ -1,7 +1,9 @@
+docs := "docs/"
 py_src := "python/"
 py_scripts := "scripts/"
 py_tests := "tests/"
 all_py_code := f"{{py_src}} {{py_scripts}} {{py_tests}}"
+all_rs_code := "src/"
 
 [group: 'python']
 py-format:
@@ -32,9 +34,6 @@ rs-lint:
 rs-test:
 	cargo test
 [group: 'rust']
-rs-test-full:
-	cargo test -- --include-ignored
-[group: 'rust']
 rs-prepare: rs-format rs-lint rs-test
 
 [group: 'build']
@@ -44,12 +43,18 @@ build:
 build-release:
 	RUSTFLAGS="-C target-cpu=native" uv run maturin develop --release
 
+[group: 'misc']
+docs-lint:
+	uvx pymarkdownlnt scan *.md
+	uvx pymarkdownlnt scan --recurse {{all_py_code}} {{all_rs_code}} {{docs}}
+
 [group: 'build']
-prepare: build rs-format py-format rs-lint py-lint py-static rs-test-full py-test-full
+prepare: build rs-format py-format rs-lint py-lint docs-lint py-static rs-test py-test-full
 [group: 'build']
 prepare-rl: prepare build-release
 
 [group: 'misc']
 clean:
     cargo clean
-    rm -rf .mypy_cache .pytest_cache .ruff_cache
+    rm -rf .mypy_cache .pytest_cache .ruff_cache .venv/
+    rm tests/fixtures/**/*.{json,jsonl}

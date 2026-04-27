@@ -1,7 +1,32 @@
-use super::state::Point;
+use super::state::{Point, BOARD_SIZE, CENTER, ROTATION_RADIUS_LIMIT};
 
 pub fn distance(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+}
+
+pub fn is_orbiting(position: Point, radius: f64) -> bool {
+    distance(position, Point::new(CENTER, CENTER)) + radius < ROTATION_RADIUS_LIMIT
+}
+
+pub fn orbit_position(initial_position: Point, angular_velocity: f64, step: f64) -> Point {
+    let dx = initial_position.x - CENTER;
+    let dy = initial_position.y - CENTER;
+    let orbital_radius = (dx.powi(2) + dy.powi(2)).sqrt();
+    let initial_angle = dy.atan2(dx);
+    let current_angle = initial_angle + angular_velocity * step;
+    Point::new(
+        CENTER + orbital_radius * current_angle.cos(),
+        CENTER + orbital_radius * current_angle.sin(),
+    )
+}
+
+pub fn fourfold_symmetric_points(point: Point) -> [Point; 4] {
+    [
+        point,
+        Point::new(BOARD_SIZE - point.x, point.y),
+        Point::new(point.x, BOARD_SIZE - point.y),
+        Point::new(BOARD_SIZE - point.x, BOARD_SIZE - point.y),
+    ]
 }
 
 pub fn point_to_segment_distance(point: Point, start: Point, end: Point) -> f64 {
