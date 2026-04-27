@@ -980,9 +980,9 @@ mod tests {
 
     fn player_result_from_reward(reward: i32) -> PlayerResult {
         match reward {
-            1 => PlayerResult::Win,
-            -1 => PlayerResult::Loss,
-            _ => PlayerResult::NotDone,
+            1 => PlayerResult::Won,
+            -1 => PlayerResult::Lost,
+            _ => PlayerResult::Active,
         }
     }
 

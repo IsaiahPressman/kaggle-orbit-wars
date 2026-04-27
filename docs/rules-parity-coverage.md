@@ -16,7 +16,7 @@ have local fixtures.
 The replay parity test checks each transition against the Python reference for:
 
 - step counter
-- per-player terminal result: not done, loss, or win
+- per-player status: active, won, or lost
 - angular velocity
 - planets: id, owner, position, radius, ships, production
 - initial planets
@@ -76,7 +76,7 @@ harness mirrors Python's accepted-action filtering only to turn historical
 Kaggle replay actions into typed Rust actions.
 
 Floating-point parity uses close comparisons rather than bit-for-bit equality.
-Discrete ids, owners, ship counts, production, removals, and terminal results
+Discrete ids, owners, ship counts, production, removals, and player statuses
 must match exactly.
 
 Replay and generation fixtures are ignored by Git because full episodes and

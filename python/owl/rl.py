@@ -87,6 +87,7 @@ class ObsBatch(BaseModel):
     planet_mask: torch.Tensor
     fleet_mask: torch.Tensor
     comet_mask: torch.Tensor
+    still_playing: torch.Tensor
     global_features: torch.Tensor
     can_act: torch.Tensor
     max_launch: torch.Tensor
@@ -135,6 +136,7 @@ class VectorizedEnv:
         self._planet_mask_np = self.observations.planet_mask.numpy()
         self._fleet_mask_np = self.observations.fleet_mask.numpy()
         self._comet_mask_np = self.observations.comet_mask.numpy()
+        self._still_playing_np = self.observations.still_playing.numpy()
         self._global_obs_np = self.observations.global_features.numpy()
         self._can_act_np = self.observations.can_act.numpy()
         self._max_launch_np = self.observations.max_launch.numpy()
@@ -149,6 +151,7 @@ class VectorizedEnv:
             self._planet_mask_np,
             self._fleet_mask_np,
             self._comet_mask_np,
+            self._still_playing_np,
             self._global_obs_np,
             self._can_act_np,
             self._max_launch_np,
@@ -184,6 +187,7 @@ class VectorizedEnv:
             self._planet_mask_np,
             self._fleet_mask_np,
             self._comet_mask_np,
+            self._still_playing_np,
             self._global_obs_np,
             self._can_act_np,
             self._max_launch_np,
@@ -233,6 +237,11 @@ class VectorizedEnv:
             ),
             comet_mask=torch.zeros(
                 (self.n_envs, self.obs_spec.max_comets),
+                dtype=torch.bool,
+                pin_memory=pin_memory,
+            ),
+            still_playing=torch.zeros(
+                (self.n_envs, self.n_players),
                 dtype=torch.bool,
                 pin_memory=pin_memory,
             ),
@@ -299,8 +308,9 @@ def _require_action_shape(
 ) -> None:
     if action_array.shape == expected_shape:
         return
-    msg = f"{name} must have shape {expected_shape}, got {action_array.shape}"
-    raise ValueError(msg)
+    raise ValueError(
+        f"{name} must have shape {expected_shape}, got {action_array.shape}"
+    )
 
 
 def _rows_to_array(rows: object, *, name: str) -> np.ndarray:

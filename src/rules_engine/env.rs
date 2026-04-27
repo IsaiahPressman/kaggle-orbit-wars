@@ -429,8 +429,18 @@ fn resolve_combats(state: &mut State, combat_lists: HashMap<u32, Vec<Fleet>>) {
 
 fn player_results(state: &State) -> Vec<PlayerResult> {
     let terminated = is_game_terminated(state);
+    let alive_players = player_alive_flags(state);
     if !terminated {
-        return vec![PlayerResult::NotDone; state.config.player_count];
+        return alive_players
+            .into_iter()
+            .map(|alive| {
+                if alive {
+                    PlayerResult::Active
+                } else {
+                    PlayerResult::Lost
+                }
+            })
+            .collect();
     }
 
     let scores = player_scores(state);
@@ -439,9 +449,9 @@ fn player_results(state: &State) -> Vec<PlayerResult> {
         .into_iter()
         .map(|score| {
             if score == max_score && max_score > 0 {
-                PlayerResult::Win
+                PlayerResult::Won
             } else {
-                PlayerResult::Loss
+                PlayerResult::Lost
             }
         })
         .collect()
@@ -564,7 +574,7 @@ mod tests {
 
         assert_eq!(
             result.player_results,
-            vec![PlayerResult::NotDone, PlayerResult::NotDone]
+            vec![PlayerResult::Active, PlayerResult::Active]
         );
         assert_eq!(state.planets[0].ships, 33);
         assert_eq!(state.fleets.len(), 1);
@@ -573,6 +583,57 @@ mod tests {
         assert!((state.fleets[0].x - (22.1 + fleet_speed(20, 6.0))).abs() <= 1e-12);
         assert_eq!(state.next_fleet_id, 1);
         assert_eq!(state.step, 1);
+    }
+
+    #[test]
+    fn nonterminal_eliminated_player_is_lost() {
+        let mut state = reset(ResetConfig {
+            sim: SimConfig::new(4),
+            step: Some(0),
+            angular_velocity: Some(0.0),
+            planets: Some(vec![
+                Planet {
+                    id: 0,
+                    owner: 0,
+                    x: 20.0,
+                    y: 20.0,
+                    radius: 2.0,
+                    ships: 10,
+                    production: 1,
+                },
+                Planet {
+                    id: 1,
+                    owner: 1,
+                    x: 80.0,
+                    y: 20.0,
+                    radius: 2.0,
+                    ships: 10,
+                    production: 1,
+                },
+                Planet {
+                    id: 2,
+                    owner: 2,
+                    x: 20.0,
+                    y: 80.0,
+                    radius: 2.0,
+                    ships: 10,
+                    production: 1,
+                },
+            ]),
+            initial_planets: None,
+        });
+
+        let result = step(&mut state, &[vec![], vec![], vec![], vec![]]);
+
+        assert_eq!(
+            result.player_results,
+            vec![
+                PlayerResult::Active,
+                PlayerResult::Active,
+                PlayerResult::Active,
+                PlayerResult::Lost,
+            ]
+        );
     }
 
     #[test]
@@ -830,7 +891,7 @@ mod tests {
 
         assert_eq!(
             result.player_results,
-            vec![PlayerResult::Win, PlayerResult::Loss]
+            vec![PlayerResult::Won, PlayerResult::Lost]
         );
     }
 
@@ -872,7 +933,7 @@ mod tests {
 
         assert_eq!(
             result.player_results,
-            vec![PlayerResult::Win, PlayerResult::Win]
+            vec![PlayerResult::Won, PlayerResult::Won]
         );
     }
 

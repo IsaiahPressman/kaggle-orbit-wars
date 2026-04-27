@@ -86,12 +86,34 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     assert obs.fleets.shape == (2, env.obs_spec.max_fleets, FLEET_CHANNELS)
     assert obs.comets.shape == (2, MAX_COMETS, COMET_CHANNELS)
     assert obs.global_features.shape == (2, GLOBAL_CHANNELS)
+    assert obs.still_playing.shape == (2, 4)
     assert obs.can_act.shape == (2, 4, ACTION_ENTITY_SLOTS)
     assert obs.max_launch.shape == (2, 4, ACTION_ENTITY_SLOTS)
     assert rewards.shape == (2, 4)
     assert dones.shape == (2, 4)
     assert torch.equal(rewards, torch.zeros_like(rewards))
     assert torch.equal(dones, torch.zeros_like(dones))
+
+
+def test_reset_writes_still_playing_from_rust_env_state() -> None:
+    env = VectorizedEnv(
+        n_envs=2,
+        obs_spec=ObsV1Config(),
+        action_spec=ActionPureConfig(),
+        two_player_weight=1.0,
+        pin_memory=False,
+    )
+    still_playing_ptr = env.observations.still_playing.data_ptr()
+
+    env.observations.still_playing.fill_(True)
+    obs = env.reset()
+
+    assert obs.still_playing.data_ptr() == still_playing_ptr
+    assert np.shares_memory(obs.still_playing.numpy(), env._still_playing_np)
+    assert torch.equal(
+        obs.still_playing,
+        torch.tensor([[True, True, False, False], [True, True, False, False]]),
+    )
 
 
 def test_two_player_sample_marks_unused_player_slots_done() -> None:
@@ -111,6 +133,7 @@ def test_two_player_sample_marks_unused_player_slots_done() -> None:
     assert torch.equal(rewards, torch.zeros_like(rewards))
     assert torch.equal(dones[:, :2], torch.zeros_like(dones[:, :2]))
     assert torch.equal(dones[:, 2:], torch.ones_like(dones[:, 2:]))
+    assert torch.equal(env.observations.still_playing, ~dones)
 
 
 def test_vectorized_env_accepts_discriminated_config_dicts() -> None:

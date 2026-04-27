@@ -3,7 +3,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-use crate::rules_engine::env::{player_alive_flags, reset, step, PlayerAction};
+use crate::rules_engine::env::{reset, step, PlayerAction};
 use crate::rules_engine::state::{PlayerResult, ResetConfig, State};
 
 use super::action_spec::decode_pure_actions;
@@ -17,6 +17,7 @@ type ObsShapes = (
     (usize, usize, usize),
     (usize, usize, usize),
     (usize, usize, usize),
+    (usize, usize),
     (usize, usize),
     (usize, usize),
     (usize, usize),
@@ -130,6 +131,7 @@ impl PyRlVecEnv {
         planet_mask: PyReadwriteArrayDyn<'_, bool>,
         fleet_mask: PyReadwriteArrayDyn<'_, bool>,
         comet_mask: PyReadwriteArrayDyn<'_, bool>,
+        still_playing: PyReadwriteArrayDyn<'_, bool>,
         global_obs: PyReadwriteArrayDyn<'_, f32>,
         can_act: PyReadwriteArrayDyn<'_, bool>,
         max_launch: PyReadwriteArrayDyn<'_, i64>,
@@ -148,6 +150,7 @@ impl PyRlVecEnv {
             planet_mask,
             fleet_mask,
             comet_mask,
+            still_playing,
             global_obs,
             can_act,
             max_launch,
@@ -166,6 +169,7 @@ impl PyRlVecEnv {
         planet_mask: PyReadwriteArrayDyn<'_, bool>,
         fleet_mask: PyReadwriteArrayDyn<'_, bool>,
         comet_mask: PyReadwriteArrayDyn<'_, bool>,
+        still_playing: PyReadwriteArrayDyn<'_, bool>,
         global_obs: PyReadwriteArrayDyn<'_, f32>,
         can_act: PyReadwriteArrayDyn<'_, bool>,
         max_launch: PyReadwriteArrayDyn<'_, i64>,
@@ -239,6 +243,7 @@ impl PyRlVecEnv {
             planet_mask,
             fleet_mask,
             comet_mask,
+            still_playing,
             global_obs,
             can_act,
             max_launch,
@@ -253,6 +258,7 @@ impl PyRlVecEnv {
             (self.n_envs, MAX_PLANETS),
             (self.n_envs, self.max_fleets),
             (self.n_envs, MAX_COMETS),
+            (self.n_envs, OUTER_PLAYER_SLOTS),
             (self.n_envs, GLOBAL_CHANNELS),
             (self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
             (self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
@@ -270,6 +276,7 @@ impl PyRlVecEnv {
         planet_mask: PyReadwriteArrayDyn<'_, bool>,
         fleet_mask: PyReadwriteArrayDyn<'_, bool>,
         comet_mask: PyReadwriteArrayDyn<'_, bool>,
+        still_playing: PyReadwriteArrayDyn<'_, bool>,
         global_obs: PyReadwriteArrayDyn<'_, f32>,
         can_act: PyReadwriteArrayDyn<'_, bool>,
         max_launch: PyReadwriteArrayDyn<'_, i64>,
@@ -301,6 +308,11 @@ impl PyRlVecEnv {
         )?;
         require_shape("comet_mask", comet_mask.shape(), &[self.n_envs, MAX_COMETS])?;
         require_shape(
+            "still_playing",
+            still_playing.shape(),
+            &[self.n_envs, OUTER_PLAYER_SLOTS],
+        )?;
+        require_shape(
             "global_obs",
             global_obs.shape(),
             &[self.n_envs, GLOBAL_CHANNELS],
@@ -322,6 +334,7 @@ impl PyRlVecEnv {
         let mut planet_mask = planet_mask;
         let mut fleet_mask = fleet_mask;
         let mut comet_mask = comet_mask;
+        let mut still_playing = still_playing;
         let mut global_obs = global_obs;
         let mut can_act = can_act;
         let mut max_launch = max_launch;
@@ -332,12 +345,14 @@ impl PyRlVecEnv {
         let planet_masks_per_env = MAX_PLANETS;
         let fleet_masks_per_env = self.max_fleets;
         let comet_masks_per_env = MAX_COMETS;
+        let still_playing_per_env = OUTER_PLAYER_SLOTS;
         let globals_per_env = GLOBAL_CHANNELS;
         let action_masks_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
 
         let ignored_fleets: usize = self
             .states
             .par_iter()
+            .zip_eq(self.player_finished.par_iter())
             .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
             .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
             .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
@@ -356,6 +371,11 @@ impl PyRlVecEnv {
                     .as_slice_mut()?
                     .par_chunks_mut(comet_masks_per_env),
             )
+            .zip_eq(
+                still_playing
+                    .as_slice_mut()?
+                    .par_chunks_mut(still_playing_per_env),
+            )
             .zip_eq(global_obs.as_slice_mut()?.par_chunks_mut(globals_per_env))
             .zip_eq(can_act.as_slice_mut()?.par_chunks_mut(action_masks_per_env))
             .zip_eq(
@@ -369,10 +389,19 @@ impl PyRlVecEnv {
                         (
                             (
                                 (
-                                    ((((state, planet_obs), fleet_obs), comet_obs), planet_mask),
-                                    fleet_mask,
+                                    (
+                                        (
+                                            (
+                                                (((state, player_finished), planet_obs), fleet_obs),
+                                                comet_obs,
+                                            ),
+                                            planet_mask,
+                                        ),
+                                        fleet_mask,
+                                    ),
+                                    comet_mask,
                                 ),
-                                comet_mask,
+                                still_playing,
                             ),
                             global_obs,
                         ),
@@ -380,6 +409,7 @@ impl PyRlVecEnv {
                     ),
                     max_launch,
                 )| {
+                    write_still_playing(state, player_finished, still_playing);
                     encode_state(
                         state,
                         self.max_fleets,
@@ -402,6 +432,13 @@ impl PyRlVecEnv {
     }
 }
 
+fn write_still_playing(state: &State, player_finished: &[bool], still_playing: &mut [bool]) {
+    still_playing.fill(false);
+    for player_index in 0..state.config.player_count {
+        still_playing[player_index] = !player_finished[player_index];
+    }
+}
+
 fn step_one_env(
     state: &mut State,
     player_finished: &mut [bool],
@@ -412,13 +449,18 @@ fn step_one_env(
 ) {
     let result = step(state, decoded);
     let should_reset = result_is_terminal(&result.player_results);
-    let alive = player_alive_flags(state);
+    let won_reward = split_won_reward(
+        result
+            .player_results
+            .iter()
+            .filter(|result| matches!(result, PlayerResult::Won))
+            .count(),
+    );
 
     reward_chunk.fill(0.0);
     done_chunk.fill(true);
     for (player_index, result) in result.player_results.iter().enumerate() {
-        let (reward, done) =
-            player_reward_done(*result, alive[player_index], player_finished[player_index]);
+        let (reward, done) = player_reward_done(*result, player_finished[player_index], won_reward);
         reward_chunk[player_index] = reward;
         done_chunk[player_index] = done;
         if done {
@@ -435,7 +477,7 @@ fn step_one_env(
 fn result_is_terminal(results: &[PlayerResult]) -> bool {
     results
         .iter()
-        .all(|result| !matches!(result, PlayerResult::NotDone))
+        .all(|result| !matches!(result, PlayerResult::Active))
 }
 
 fn sample_reset_config(two_player_weight: f64) -> ResetConfig {
@@ -447,15 +489,25 @@ fn sample_reset_config(two_player_weight: f64) -> ResetConfig {
     ResetConfig::new(player_count)
 }
 
-fn player_reward_done(result: PlayerResult, alive: bool, previously_finished: bool) -> (f32, bool) {
+fn split_won_reward(winner_count: usize) -> f32 {
+    if winner_count <= 1 {
+        return 1.0;
+    }
+    (2.0 - winner_count as f32) / winner_count as f32
+}
+
+fn player_reward_done(
+    result: PlayerResult,
+    previously_finished: bool,
+    won_reward: f32,
+) -> (f32, bool) {
     if previously_finished {
         return (0.0, true);
     }
     match result {
-        PlayerResult::NotDone if alive => (0.0, false),
-        PlayerResult::NotDone => (-1.0, true),
-        PlayerResult::Loss => (-1.0, true),
-        PlayerResult::Win => (1.0, true),
+        PlayerResult::Active => (0.0, false),
+        PlayerResult::Lost => (-1.0, true),
+        PlayerResult::Won => (won_reward, true),
     }
 }
 
@@ -559,6 +611,29 @@ mod tests {
         }
     }
 
+    fn state_with_one_player_alive() -> State {
+        let planets = vec![Planet {
+            id: 0,
+            owner: 0,
+            x: 10.0,
+            y: 10.0,
+            radius: 2.0,
+            ships: 10,
+            production: 1,
+        }];
+        State {
+            config: SimConfig::new(4),
+            step: 0,
+            angular_velocity: 0.025,
+            initial_planets: planets.clone(),
+            planets,
+            fleets: Vec::new(),
+            next_fleet_id: 0,
+            comets: Vec::new(),
+            comet_planet_ids: Vec::new(),
+        }
+    }
+
     #[test]
     fn nonterminal_horizon_step_does_not_reset_before_returning_done() {
         let actions = vec![Vec::new(); 4];
@@ -616,5 +691,71 @@ mod tests {
 
         assert_eq!(rewards[3], 0.0);
         assert!(dones[3]);
+    }
+
+    #[test]
+    fn split_won_reward_averages_one_win_with_tied_losses() {
+        assert_eq!(split_won_reward(0), 1.0);
+        assert_eq!(split_won_reward(1), 1.0);
+        assert_eq!(split_won_reward(2), 0.0);
+        assert!((split_won_reward(3) - (-1.0 / 3.0)).abs() <= f32::EPSILON);
+        assert_eq!(split_won_reward(4), -0.5);
+    }
+
+    #[test]
+    fn tied_terminal_winners_get_split_reward() {
+        let actions = vec![Vec::new(); 4];
+        let mut state = state_with_all_players_alive();
+        state.step = state.config.episode_steps.saturating_sub(2);
+        let mut finished = vec![false; 4];
+        let mut rewards = vec![99.0; 4];
+        let mut dones = vec![false; 4];
+
+        step_one_env(
+            &mut state,
+            &mut finished,
+            &actions,
+            &mut rewards,
+            &mut dones,
+            0.0,
+        );
+
+        assert_eq!(rewards, vec![-0.5; 4]);
+        assert_eq!(dones, vec![true; 4]);
+    }
+
+    #[test]
+    fn still_playing_marks_only_current_unfinished_player_slots() {
+        let state = state_with_player_three_eliminated();
+        let finished = vec![false, true, false, true];
+        let mut still_playing = vec![true; 4];
+
+        write_still_playing(&state, &finished, &mut still_playing);
+
+        assert_eq!(still_playing, vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn still_playing_describes_reset_observation_after_terminal_step() {
+        let actions = vec![Vec::new(); 4];
+        let mut state = state_with_one_player_alive();
+        let mut finished = vec![false; 4];
+        let mut rewards = vec![0.0; 4];
+        let mut dones = vec![false; 4];
+
+        step_one_env(
+            &mut state,
+            &mut finished,
+            &actions,
+            &mut rewards,
+            &mut dones,
+            0.0,
+        );
+
+        let mut still_playing = vec![false; 4];
+        write_still_playing(&state, &finished, &mut still_playing);
+
+        assert_eq!(dones, vec![true; 4]);
+        assert_eq!(still_playing, vec![true; 4]);
     }
 }
