@@ -11,6 +11,7 @@ use pyo3::prelude::*;
 use crate::rules_engine::state::{
     CometGroup, Fleet, Planet, Point, SimConfig, State, BOARD_SIZE, COMET_SPAWN_STEPS,
 };
+use crate::rules_engine::utils::{fleet_speed, is_orbiting};
 
 use super::action_spec::encode_action_spec;
 use super::{
@@ -104,6 +105,7 @@ pub(super) fn encode_state(
         row[12] = (planet.radius / 3.0) as f32;
         row[13] = normalize_ships(planet.ships);
         row[14] = normalize_log_ships(planet.ships);
+        row[15] = f32::from(is_orbiting(planet.position(), planet.radius));
     }
 
     for (fleet_index, fleet) in fleets.iter().take(max_fleets).enumerate() {
@@ -114,8 +116,9 @@ pub(super) fn encode_state(
         row[fleet.owner as usize] = 1.0;
         row[OWNER_CHANNELS] = normalize_position(fleet.x);
         row[OWNER_CHANNELS + 1] = normalize_position(fleet.y);
-        row[OWNER_CHANNELS + 2] = fleet.angle.sin() as f32;
-        row[OWNER_CHANNELS + 3] = fleet.angle.cos() as f32;
+        let speed = fleet_speed(fleet.ships, state.config.ship_speed);
+        row[OWNER_CHANNELS + 2] = (fleet.angle.cos() * speed / state.config.ship_speed) as f32;
+        row[OWNER_CHANNELS + 3] = (fleet.angle.sin() * speed / state.config.ship_speed) as f32;
         row[OWNER_CHANNELS + 4] = normalize_ships(fleet.ships);
         row[OWNER_CHANNELS + 5] = normalize_log_ships(fleet.ships);
     }
@@ -169,7 +172,10 @@ fn encode_comets(state: &State, comet_obs: &mut [f32], comet_mask: &mut [bool]) 
             row[OWNER_CHANNELS_WITH_NEUTRAL + 1] = normalize_log_ships(planet.ships);
 
             let path_start = group.path_index.max(0) as usize;
-            let path_values_start = OWNER_CHANNELS_WITH_NEUTRAL + 2;
+            let remaining_steps = path.len().saturating_sub(path_start);
+            row[OWNER_CHANNELS_WITH_NEUTRAL + 2] =
+                remaining_steps as f32 / MAX_COMET_PATH_LENGTH as f32;
+            let path_values_start = OWNER_CHANNELS_WITH_NEUTRAL + 3;
             for (future_index, point) in path
                 .iter()
                 .skip(path_start)

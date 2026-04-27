@@ -5,12 +5,12 @@ The Python config API uses pydantic discriminator fields so future specs can add
 different options without changing the outer `VectorizedEnv` constructor shape.
 
 ```python
-from owl.rl import VectorizedEnv
+from owl.rl import ActionPureConfig, ObsV1Config, VectorizedEnv
 
 env = VectorizedEnv(
     n_envs=128,
-    obs_spec={"obs_spec": "obs_v1", "max_entities": 512},
-    action_spec={"action_spec": "pure"},
+    obs_spec=ObsV1Config(max_entities=512),
+    action_spec=ActionPureConfig(max_per_planet_launches=1),
 )
 ```
 
@@ -49,9 +49,9 @@ environment returns an `ObsBatch` with these tensors:
 
 | Tensor | dtype | Shape |
 | --- | --- | --- |
-| `planets` | `float32` | `(n_envs, MAX_PLANETS, 15)` |
+| `planets` | `float32` | `(n_envs, MAX_PLANETS, 16)` |
 | `fleets` | `float32` | `(n_envs, max_fleets, 10)` |
-| `comets` | `float32` | `(n_envs, MAX_COMETS, 87)` |
+| `comets` | `float32` | `(n_envs, MAX_COMETS, 88)` |
 | `planet_mask` | `bool` | `(n_envs, MAX_PLANETS)` |
 | `fleet_mask` | `bool` | `(n_envs, max_fleets)` |
 | `comet_mask` | `bool` | `(n_envs, MAX_COMETS)` |
@@ -77,7 +77,7 @@ rows are zero-filled and their masks are set to `False`.
 
 ### Planet Tensor
 
-Shape per env: `(MAX_PLANETS, 15)`.
+Shape per env: `(MAX_PLANETS, 16)`.
 
 Only non-comet planets are included. If more than `MAX_PLANETS` non-comet
 planets exist, the encoder panics. Generated games currently produce up to
@@ -94,6 +94,7 @@ order after excluding comet planets.
 | `12` | normalized radius |
 | `13` | normalized ships |
 | `14` | normalized log ships |
+| `15` | `1.0` if orbiting, else `0.0` |
 
 `planet_mask[i]` is `True` only for active planet rows.
 
@@ -114,8 +115,8 @@ max_entities exceeded: N fleets ignored
 | `0..3` | owner one-hot for players `0..3` |
 | `4` | normalized `x` |
 | `5` | normalized `y` |
-| `6` | `sin(angle)` |
-| `7` | `cos(angle)` |
+| `6` | normalized `vx`, divided by `shipSpeed` |
+| `7` | normalized `vy`, divided by `shipSpeed` |
 | `8` | normalized ships |
 | `9` | normalized log ships |
 
@@ -123,7 +124,7 @@ max_entities exceeded: N fleets ignored
 
 ### Comet Tensor
 
-Shape per env: `(MAX_COMETS, 87)`.
+Shape per env: `(MAX_COMETS, 88)`.
 
 Comets are encoded separately from normal planets. They are emitted in comet
 group order, then `planet_ids` order within each comet group, up to
@@ -135,7 +136,8 @@ group order, then `planet_ids` order within each comet group, up to
 | `4` | neutral owner |
 | `5` | normalized ships |
 | `6` | normalized log ships |
-| `7..86` | future path positions as `MAX_COMET_PATH_LENGTH` `(x, y)` pairs |
+| `7` | remaining path steps divided by `MAX_COMET_PATH_LENGTH` |
+| `8..87` | future path positions as `MAX_COMET_PATH_LENGTH` `(x, y)` pairs |
 
 The future path starts at the comet group's current `path_index`. In normal
 post-step observations for an active comet, the first `(x, y)` pair is the
@@ -169,11 +171,13 @@ If no future comet spawn remains, `steps_until_next_comet_spawn` is `0`.
 Config:
 
 ```python
-{"action_spec": "pure"}
+{"action_spec": "pure", "max_per_planet_launches": 1}
 ```
 
 The pure action spec exposes all launch decisions in direct tensor form. The
 same entity axis is used for action masks and submitted actions.
+`max_per_planet_launches` is validated in Python and Rust and must be between
+`1` and `4`, inclusive.
 
 Sharp edge: action entity slots are ordered as all `MAX_PLANETS` planet tokens
 first, followed by `MAX_COMETS` comet tokens. This assumes the model appends
@@ -210,13 +214,15 @@ obs, rewards, dones = env.step(launch, angle, ships)
 
 | Tensor | dtype | Shape | Meaning |
 | --- | --- | --- | --- |
-| `launch` | `bool` | `(n_envs, 4, 44)` | `True` means execute a launch |
-| `angle` | `float32` | `(n_envs, 4, 44)` | launch angle in radians |
-| `ships` | `int64` | `(n_envs, 4, 44)` | requested ship count |
+| `launch` | `bool` | `(n_envs, 4, 44, max_per_planet_launches)` | `True` means execute a launch |
+| `angle` | `float32` | `(n_envs, 4, 44, max_per_planet_launches)` | launch angle in radians |
+| `ships` | `int64` | `(n_envs, 4, 44, max_per_planet_launches)` | requested ship count |
 
 If `launch` is `False`, that slot is a no-op and `angle` / `ships` are ignored.
 If `launch` is `True`, `ships >= 1` is required and the Rust API panics if the
 invariant is violated.
+For each player and source entity, decoding stops at the first `False` launch
+slot, so later slots for that source are ignored.
 
 The pure action decoder currently performs only the explicit `ships >= 1`
 validation itself. Ownership, source validity, and overspending are still

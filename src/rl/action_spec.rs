@@ -10,31 +10,35 @@ pub(super) fn decode_pure_actions(
     launch: &[bool],
     angle: &[f32],
     ships: &[i64],
+    max_per_planet_launches: usize,
 ) -> Vec<PlayerAction> {
     let entities = action_entity_slots(state);
     let mut actions = vec![Vec::new(); state.config.player_count];
     for (player, player_actions) in actions.iter_mut().enumerate() {
-        let player_offset = player * ACTION_ENTITY_SLOTS;
+        let player_offset = player * ACTION_ENTITY_SLOTS * max_per_planet_launches;
         for (entity_index, planet) in entities.iter().enumerate() {
             let Some(planet) = planet else {
                 continue;
             };
-            let action_index = player_offset + entity_index;
-            if !launch[action_index] {
-                continue;
+            let entity_offset = player_offset + entity_index * max_per_planet_launches;
+            for launch_index in 0..max_per_planet_launches {
+                let action_index = entity_offset + launch_index;
+                if !launch[action_index] {
+                    break;
+                }
+                let ship_count = ships[action_index];
+                assert!(
+                    ship_count >= 1,
+                    "pure action ships must be >= 1 when launch is true"
+                );
+                player_actions.push(LaunchAction {
+                    from_planet_id: planet.id,
+                    angle: f64::from(angle[action_index]),
+                    ships: ship_count
+                        .try_into()
+                        .expect("pure action ships must fit in i32"),
+                });
             }
-            let ship_count = ships[action_index];
-            assert!(
-                ship_count >= 1,
-                "pure action ships must be >= 1 when launch is true"
-            );
-            player_actions.push(LaunchAction {
-                from_planet_id: planet.id,
-                angle: f64::from(angle[action_index]),
-                ships: ship_count
-                    .try_into()
-                    .expect("pure action ships must fit in i32"),
-            });
         }
     }
     actions
@@ -131,7 +135,33 @@ mod tests {
         let ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
         launch[0] = true;
 
-        decode_pure_actions(&one_planet_state(), &launch, &angle, &ships);
+        decode_pure_actions(&one_planet_state(), &launch, &angle, &ships, 1);
+    }
+
+    #[test]
+    fn pure_launch_emits_multiple_actions_until_first_false_slot() {
+        let max_per_planet_launches = 3;
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS * max_per_planet_launches];
+        let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS * max_per_planet_launches];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS * max_per_planet_launches];
+        launch[0] = true;
+        ships[0] = 2;
+        launch[1] = true;
+        ships[1] = 3;
+        launch[2] = false;
+        ships[2] = 4;
+
+        let actions = decode_pure_actions(
+            &one_planet_state(),
+            &launch,
+            &angle,
+            &ships,
+            max_per_planet_launches,
+        );
+
+        assert_eq!(actions[0].len(), 2);
+        assert_eq!(actions[0][0].ships, 2);
+        assert_eq!(actions[0][1].ships, 3);
     }
 
     #[test]

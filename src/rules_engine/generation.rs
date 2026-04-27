@@ -5,7 +5,7 @@ use super::state::{
     MAX_PLANET_GROUPS, MIN_PLANET_GROUPS, MIN_STATIC_GROUPS, PLANET_CLEARANCE,
     ROTATION_RADIUS_LIMIT, SUN_RADIUS,
 };
-use super::utils::distance;
+use super::utils::{distance, fourfold_symmetric_points, is_orbiting, orbit_position};
 
 pub trait RandomSource {
     fn randint(&mut self, low: i32, high: i32) -> i32;
@@ -24,10 +24,6 @@ impl<T: rand::Rng + ?Sized> RandomSource for T {
 
 pub fn planet_radius(production: i32) -> f64 {
     1.0 + f64::from(production).ln()
-}
-
-pub fn is_orbiting(planet: &Planet) -> bool {
-    distance(planet.position(), Point::new(CENTER, CENTER)) + planet.radius < ROTATION_RADIUS_LIMIT
 }
 
 pub fn generate_planets(rng: &mut impl RandomSource) -> Vec<Planet> {
@@ -108,7 +104,7 @@ pub fn generate_planets(rng: &mut impl RandomSource) -> Vec<Planet> {
             continue;
         }
 
-        if orbital_radius + radius >= ROTATION_RADIUS_LIMIT
+        if !is_orbiting(Point::new(x, y), radius)
             && (x + radius > BOARD_SIZE
                 || x - radius < 0.0
                 || y + radius > BOARD_SIZE
@@ -119,8 +115,8 @@ pub fn generate_planets(rng: &mut impl RandomSource) -> Vec<Planet> {
 
         let ships = rng.randint(5, 30);
         let group = symmetric_planets(next_id, -1, x, y, radius, ships, production);
-        if valid_fill_group(&group, &planets) {
-            if orbital_radius + radius < ROTATION_RADIUS_LIMIT {
+        if valid_group(&group, &planets) {
+            if is_orbiting(Point::new(x, y), radius) {
                 has_orbiting = true;
             }
             planets.extend(group);
@@ -196,7 +192,7 @@ fn place_diagonal_group(
         let ships = rng.randint(5, 99).min(rng.randint(5, 99));
         let group = symmetric_planets(next_id, -1, x, y, radius, ships, production);
 
-        if valid_diagonal_group(&group, planets) {
+        if valid_group(&group, planets) {
             return Some(group);
         }
     }
@@ -342,20 +338,21 @@ fn symmetric_planets(
     ships: i32,
     production: i32,
 ) -> Vec<Planet> {
-    vec![
-        planet(id, owner, x, y, radius, ships, production),
-        planet(id + 1, owner, BOARD_SIZE - x, y, radius, ships, production),
-        planet(id + 2, owner, x, BOARD_SIZE - y, radius, ships, production),
-        planet(
-            id + 3,
-            owner,
-            BOARD_SIZE - x,
-            BOARD_SIZE - y,
-            radius,
-            ships,
-            production,
-        ),
-    ]
+    fourfold_symmetric_points(Point::new(x, y))
+        .into_iter()
+        .enumerate()
+        .map(|(index, point)| {
+            planet(
+                id + index as u32,
+                owner,
+                point.x,
+                point.y,
+                radius,
+                ships,
+                production,
+            )
+        })
+        .collect()
 }
 
 fn planet(id: u32, owner: i32, x: f64, y: f64, radius: f64, ships: i32, production: i32) -> Planet {
@@ -379,31 +376,13 @@ fn no_initial_overlap(group: &[Planet], planets: &[Planet]) -> bool {
     })
 }
 
-fn valid_diagonal_group(group: &[Planet], planets: &[Planet]) -> bool {
+fn valid_group(group: &[Planet], planets: &[Planet]) -> bool {
     group.iter().all(|candidate| {
         let candidate_orbital = distance(candidate.position(), Point::new(CENTER, CENTER));
-        let candidate_rotating = candidate_orbital + candidate.radius < ROTATION_RADIUS_LIMIT;
+        let candidate_rotating = is_orbiting(candidate.position(), candidate.radius);
         planets.iter().all(|planet| {
             let planet_orbital = distance(planet.position(), Point::new(CENTER, CENTER));
-            let planet_rotating = planet_orbital + planet.radius < ROTATION_RADIUS_LIMIT;
-
-            distance(candidate.position(), planet.position())
-                >= candidate.radius + planet.radius + PLANET_CLEARANCE
-                && (candidate_rotating == planet_rotating
-                    || (candidate_orbital - planet_orbital).abs()
-                        >= candidate.radius + planet.radius + PLANET_CLEARANCE)
-        })
-    })
-}
-
-fn valid_fill_group(group: &[Planet], planets: &[Planet]) -> bool {
-    group.iter().all(|candidate| {
-        let candidate_orbital = distance(candidate.position(), Point::new(CENTER, CENTER));
-        let candidate_rotating = candidate_orbital + candidate.radius < ROTATION_RADIUS_LIMIT;
-
-        planets.iter().all(|planet| {
-            let planet_orbital = distance(planet.position(), Point::new(CENTER, CENTER));
-            let planet_rotating = planet_orbital + planet.radius < ROTATION_RADIUS_LIMIT;
+            let planet_rotating = is_orbiting(planet.position(), planet.radius);
 
             distance(candidate.position(), planet.position())
                 >= candidate.radius + planet.radius + PLANET_CLEARANCE
@@ -415,21 +394,15 @@ fn valid_fill_group(group: &[Planet], planets: &[Planet]) -> bool {
 }
 
 fn symmetric_paths(visible: &[Point]) -> Vec<Vec<Point>> {
-    vec![
-        visible.to_vec(),
-        visible
-            .iter()
-            .map(|point| Point::new(BOARD_SIZE - point.x, point.y))
-            .collect(),
-        visible
-            .iter()
-            .map(|point| Point::new(point.x, BOARD_SIZE - point.y))
-            .collect(),
-        visible
-            .iter()
-            .map(|point| Point::new(BOARD_SIZE - point.x, BOARD_SIZE - point.y))
-            .collect(),
-    ]
+    let mut paths = (0..4)
+        .map(|_| Vec::with_capacity(visible.len()))
+        .collect::<Vec<_>>();
+    for point in visible {
+        for (path, symmetric_point) in paths.iter_mut().zip(fourfold_symmetric_points(*point)) {
+            path.push(symmetric_point);
+        }
+    }
+    paths
 }
 
 fn comet_path_is_valid(
@@ -445,7 +418,7 @@ fn comet_path_is_valid(
         if comet_ids.contains(&planet.id) {
             continue;
         }
-        if is_orbiting(planet) {
+        if is_orbiting(planet.position(), planet.radius) {
             orbiting_planets.push(planet);
         } else {
             static_planets.push(planet);
@@ -457,12 +430,7 @@ fn comet_path_is_valid(
             return false;
         }
 
-        let sym_points = [
-            *point,
-            Point::new(BOARD_SIZE - point.x, point.y),
-            Point::new(point.x, BOARD_SIZE - point.y),
-            Point::new(BOARD_SIZE - point.x, BOARD_SIZE - point.y),
-        ];
+        let sym_points = fourfold_symmetric_points(*point);
 
         for planet in &static_planets {
             for sym_point in sym_points {
@@ -474,15 +442,7 @@ fn comet_path_is_valid(
 
         let game_step = f64::from(spawn_step - 1 + index as u32);
         for planet in &orbiting_planets {
-            let dx = planet.x - CENTER;
-            let dy = planet.y - CENTER;
-            let orbital_radius = (dx.powi(2) + dy.powi(2)).sqrt();
-            let initial_angle = dy.atan2(dx);
-            let current_angle = initial_angle + angular_velocity * game_step;
-            let planet_position = Point::new(
-                CENTER + orbital_radius * current_angle.cos(),
-                CENTER + orbital_radius * current_angle.sin(),
-            );
+            let planet_position = orbit_position(planet.position(), angular_velocity, game_step);
             for sym_point in sym_points {
                 if distance(sym_point, planet_position) < planet.radius + COMET_RADIUS {
                     return false;
@@ -633,11 +593,13 @@ mod tests {
         assert!(planets.len() >= MIN_PLANET_GROUPS as usize * 4);
         assert!(planets.len() <= MAX_PLANET_GROUPS as usize * 4);
         assert_eq!(planets.len() % 4, 0);
-        assert!(planets.iter().any(is_orbiting));
+        assert!(planets
+            .iter()
+            .any(|planet| is_orbiting(planet.position(), planet.radius)));
 
         let static_groups = planets
             .chunks_exact(4)
-            .filter(|group| !is_orbiting(&group[0]))
+            .filter(|group| !is_orbiting(group[0].position(), group[0].radius))
             .count();
         assert!(static_groups >= MIN_STATIC_GROUPS);
 

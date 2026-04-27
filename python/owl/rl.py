@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal, SupportsFloat, SupportsInt, cast
 
 import numpy as np
 import torch
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, Field
 
 from owl.rs import RlVecEnv as _RustRlVecEnv
 from owl.rs import encode_obs_v1, rl_obs_constants
@@ -69,12 +69,11 @@ class ActionPureConfig(BaseModel):
     """
 
     action_spec: Literal["pure"] = "pure"
+    max_per_planet_launches: int = Field(default=1, ge=1, le=4)
 
 
 type ObsConfig = Annotated[ObsV1Config, Field(discriminator="obs_spec")]
 type ActionConfig = Annotated[ActionPureConfig, Field(discriminator="action_spec")]
-_OBS_CONFIG_ADAPTER: TypeAdapter[ObsV1Config] = TypeAdapter(ObsConfig)
-_ACTION_CONFIG_ADAPTER: TypeAdapter[ActionPureConfig] = TypeAdapter(ActionConfig)
 
 OUTER_PLAYER_SLOTS = 4
 
@@ -98,23 +97,20 @@ class VectorizedEnv:
         self,
         *,
         n_envs: int,
+        obs_spec: ObsConfig,
+        action_spec: ActionConfig,
         two_player_weight: float = 0.5,
-        obs_spec: ObsConfig | dict[str, object] | None = None,
-        action_spec: ActionConfig | dict[str, object] | None = None,
         pin_memory: bool = True,
     ) -> None:
-        self.obs_spec = _OBS_CONFIG_ADAPTER.validate_python(
-            ObsV1Config() if obs_spec is None else obs_spec
-        )
-        self.action_spec = _ACTION_CONFIG_ADAPTER.validate_python(
-            ActionPureConfig() if action_spec is None else action_spec
-        )
+        self.obs_spec = obs_spec
+        self.action_spec = action_spec
         self._rust = _RustRlVecEnv(
             n_envs,
             two_player_weight,
             self.obs_spec.obs_spec,
             self.action_spec.action_spec,
             self.obs_spec.max_entities,
+            self.action_spec.max_per_planet_launches,
         )
         if pin_memory and not torch.cuda.is_available():
             warnings.warn(
@@ -168,7 +164,12 @@ class VectorizedEnv:
         launch_array = _actions_to_numpy(launch, dtype=np.bool_)
         angle_array = _actions_to_numpy(angle, dtype=np.float32)
         ship_array = _actions_to_numpy(ships, dtype=np.int64)
-        expected_shape = (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS)
+        expected_shape = (
+            self.n_envs,
+            self.n_players,
+            ACTION_ENTITY_SLOTS,
+            self.action_spec.max_per_planet_launches,
+        )
         _require_action_shape("launch", launch_array, expected_shape)
         _require_action_shape("angle", angle_array, expected_shape)
         _require_action_shape("ships", ship_array, expected_shape)
@@ -294,7 +295,7 @@ def _actions_to_numpy(actions: np.ndarray | torch.Tensor, *, dtype: Any) -> np.n
 
 
 def _require_action_shape(
-    name: str, action_array: np.ndarray, expected_shape: tuple[int, int, int]
+    name: str, action_array: np.ndarray, expected_shape: tuple[int, ...]
 ) -> None:
     if action_array.shape == expected_shape:
         return

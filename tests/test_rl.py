@@ -10,6 +10,7 @@ from owl.rl import (
     MAX_COMETS,
     MAX_PLANETS,
     PLANET_CHANNELS,
+    ActionPureConfig,
     ObsV1Config,
     VectorizedEnv,
     encode_python_observation,
@@ -17,7 +18,12 @@ from owl.rl import (
 
 
 def test_vectorized_env_writes_into_preallocated_torch_buffers() -> None:
-    env = VectorizedEnv(n_envs=2, pin_memory=False)
+    env = VectorizedEnv(
+        n_envs=2,
+        obs_spec=ObsV1Config(),
+        action_spec=ActionPureConfig(),
+        pin_memory=False,
+    )
     planet_ptr = env.observations.planets.data_ptr()
     comet_ptr = env.observations.comets.data_ptr()
 
@@ -46,19 +52,29 @@ def test_vectorized_env_warns_and_disables_pin_memory_without_cuda(
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
     with pytest.warns(RuntimeWarning, match="proceeding without pinned memory"):
-        env = VectorizedEnv(n_envs=1)
+        env = VectorizedEnv(
+            n_envs=1,
+            obs_spec=ObsV1Config(),
+            action_spec=ActionPureConfig(),
+        )
 
     assert not env.observations.planets.is_pinned()
     assert not env.rewards.is_pinned()
 
 
 def test_step_writes_observations_rewards_and_dones_in_place() -> None:
-    env = VectorizedEnv(n_envs=2, two_player_weight=0.0, pin_memory=False)
+    env = VectorizedEnv(
+        n_envs=2,
+        obs_spec=ObsV1Config(),
+        action_spec=ActionPureConfig(),
+        two_player_weight=0.0,
+        pin_memory=False,
+    )
     reward_ptr = env.rewards.data_ptr()
     done_ptr = env.dones.data_ptr()
-    launch = np.zeros((2, 4, ACTION_ENTITY_SLOTS), dtype=np.bool_)
-    angle = np.zeros((2, 4, ACTION_ENTITY_SLOTS), dtype=np.float32)
-    ships = np.zeros((2, 4, ACTION_ENTITY_SLOTS), dtype=np.int64)
+    launch = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.bool_)
+    angle = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.float32)
+    ships = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.int64)
 
     env.rewards.fill_(123)
     env.dones.fill_(True)
@@ -79,10 +95,16 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
 
 
 def test_two_player_sample_marks_unused_player_slots_done() -> None:
-    env = VectorizedEnv(n_envs=2, two_player_weight=1.0, pin_memory=False)
-    launch = np.zeros((2, 4, ACTION_ENTITY_SLOTS), dtype=np.bool_)
-    angle = np.zeros((2, 4, ACTION_ENTITY_SLOTS), dtype=np.float32)
-    ships = np.zeros((2, 4, ACTION_ENTITY_SLOTS), dtype=np.int64)
+    env = VectorizedEnv(
+        n_envs=2,
+        obs_spec=ObsV1Config(),
+        action_spec=ActionPureConfig(),
+        two_player_weight=1.0,
+        pin_memory=False,
+    )
+    launch = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.bool_)
+    angle = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.float32)
+    ships = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.int64)
 
     _, rewards, dones = env.step(launch, angle, ships)
 
@@ -94,21 +116,21 @@ def test_two_player_sample_marks_unused_player_slots_done() -> None:
 def test_vectorized_env_accepts_discriminated_config_dicts() -> None:
     env = VectorizedEnv(
         n_envs=1,
-        obs_spec={"obs_spec": "obs_v1", "max_entities": MAX_PLANETS + MAX_COMETS + 1},
-        action_spec={"action_spec": "pure"},
+        obs_spec=ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1),
+        action_spec=ActionPureConfig(max_per_planet_launches=2),
         pin_memory=False,
     )
 
     assert env.obs_spec.max_fleets == 1
     assert env.action_spec.action_spec == "pure"
+    assert env.action_spec.max_per_planet_launches == 2
 
 
-def test_vectorized_env_rejects_empty_config_dicts() -> None:
-    with pytest.raises(ValueError, match="obs_spec"):
-        VectorizedEnv(n_envs=1, obs_spec={}, pin_memory=False)
+def test_action_config_validates_max_per_planet_launches() -> None:
+    assert ActionPureConfig(max_per_planet_launches=4).max_per_planet_launches == 4
 
-    with pytest.raises(ValueError, match="action_spec"):
-        VectorizedEnv(n_envs=1, action_spec={}, pin_memory=False)
+    with pytest.raises(ValueError, match="less than or equal to 4"):
+        ActionPureConfig(max_per_planet_launches=5)
 
 
 def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
@@ -151,8 +173,9 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     assert fleets[0, 0] == 1
     assert fleets[0, 4] == pytest.approx(-0.8)
     assert fleets[0, 5] == pytest.approx(-0.6)
-    assert fleets[0, 6] == pytest.approx(1.0)
-    assert fleets[0, 7] == pytest.approx(0.0, abs=1e-7)
+    normalized_speed = (1.0 + 5.0 * (np.log(25) / np.log(1000)) ** 1.5) / 6.0
+    assert fleets[0, 6] == pytest.approx(0.0, abs=1e-7)
+    assert fleets[0, 7] == pytest.approx(normalized_speed)
     assert global_features[0] == pytest.approx(0.1)
     assert global_features[1] == pytest.approx(1.0)
     assert global_features[2] == pytest.approx(1.0)
@@ -205,10 +228,11 @@ def test_python_observation_encoder_writes_comet_future_paths() -> None:
     assert planets[0].tolist() == [0.0] * PLANET_CHANNELS
     assert comets[0, 2] == 1.0
     assert comets[0, 5] == pytest.approx(25 / 250)
-    assert comets[0, 7] == pytest.approx(0.0)
+    assert comets[0, 7] == pytest.approx(2 / MAX_COMET_PATH_LENGTH)
     assert comets[0, 8] == pytest.approx(0.0)
-    assert comets[0, 9] == pytest.approx(1.0)
+    assert comets[0, 9] == pytest.approx(0.0)
     assert comets[0, 10] == pytest.approx(1.0)
-    assert np.all(comets[0, 11 : 7 + MAX_COMET_PATH_LENGTH * 2] == 0.0)
+    assert comets[0, 11] == pytest.approx(1.0)
+    assert np.all(comets[0, 12 : 8 + MAX_COMET_PATH_LENGTH * 2] == 0.0)
     assert can_act[2, MAX_PLANETS]
     assert max_launch[2, MAX_PLANETS] == 25

@@ -31,6 +31,7 @@ pub struct PyRlVecEnv {
     two_player_weight: f64,
     max_entities: usize,
     max_fleets: usize,
+    max_per_planet_launches: usize,
     states: Vec<State>,
     player_finished: Vec<Vec<bool>>,
 }
@@ -38,13 +39,14 @@ pub struct PyRlVecEnv {
 #[pymethods]
 impl PyRlVecEnv {
     #[new]
-    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="obs_v1", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES))]
+    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="obs_v1", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=1))]
     fn new(
         n_envs: usize,
         two_player_weight: f64,
         obs_spec: &str,
         action_spec: &str,
         max_entities: usize,
+        max_per_planet_launches: usize,
     ) -> PyResult<Self> {
         if n_envs == 0 {
             return Err(PyValueError::new_err("n_envs must be positive"));
@@ -68,6 +70,11 @@ impl PyRlVecEnv {
                 MAX_PLANETS + MAX_COMETS
             )));
         }
+        if !(1..=4).contains(&max_per_planet_launches) {
+            return Err(PyValueError::new_err(
+                "max_per_planet_launches must be between 1 and 4",
+            ));
+        }
 
         let states = (0..n_envs)
             .map(|_| reset(sample_reset_config(two_player_weight)))
@@ -78,6 +85,7 @@ impl PyRlVecEnv {
             two_player_weight,
             max_entities,
             max_fleets: max_entities - (MAX_PLANETS + MAX_COMETS),
+            max_per_planet_launches,
             states,
             player_finished: vec![vec![false; OUTER_PLAYER_SLOTS]; n_envs],
         })
@@ -106,6 +114,11 @@ impl PyRlVecEnv {
     #[getter]
     fn max_fleets(&self) -> usize {
         self.max_fleets
+    }
+
+    #[getter]
+    fn max_per_planet_launches(&self) -> usize {
+        self.max_per_planet_launches
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -159,7 +172,12 @@ impl PyRlVecEnv {
         rewards: PyReadwriteArrayDyn<'_, f32>,
         dones: PyReadwriteArrayDyn<'_, bool>,
     ) -> PyResult<()> {
-        let action_shape = [self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS];
+        let action_shape = [
+            self.n_envs,
+            OUTER_PLAYER_SLOTS,
+            ACTION_ENTITY_SLOTS,
+            self.max_per_planet_launches,
+        ];
         require_shape("launch", launch.shape(), &action_shape)?;
         require_shape("angle", angle.shape(), &action_shape)?;
         require_shape("ships", ships.shape(), &action_shape)?;
@@ -174,7 +192,8 @@ impl PyRlVecEnv {
         let mut dones = dones;
         let reward_chunks = rewards.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
         let done_chunks = dones.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
-        let actions_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
+        let actions_per_env =
+            OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS * self.max_per_planet_launches;
         let launch_chunks = launch.as_slice()?.par_chunks(actions_per_env);
         let angle_chunks = angle.as_slice()?.par_chunks(actions_per_env);
         let ship_chunks = ships.as_slice()?.par_chunks(actions_per_env);
@@ -195,7 +214,13 @@ impl PyRlVecEnv {
                     ),
                     done_chunk,
                 )| {
-                    let decoded = decode_pure_actions(state, launch_chunk, angle_chunk, ship_chunk);
+                    let decoded = decode_pure_actions(
+                        state,
+                        launch_chunk,
+                        angle_chunk,
+                        ship_chunk,
+                        self.max_per_planet_launches,
+                    );
                     step_one_env(
                         state,
                         player_finished,

@@ -26,7 +26,12 @@ git diff --cached
    cleanup, local reference files, downloaded replay fixtures, or generated
    artifacts that are intentionally ignored.
 
-4. Run the strongest relevant prepare target:
+4. Review the patch for duplicated logic, especially copied rules-engine
+   formulas, geometry, validation, scoring, and terminal-condition behavior.
+   Prefer shared helpers for production code; keep intentionally independent
+   oracle logic only when it is clearly serving parity validation.
+
+5. Run the strongest relevant prepare target:
 
 ```sh
 just prepare
@@ -35,7 +40,7 @@ just prepare
 Use `just py-prepare` or `just rs-prepare` only when the change is strictly
 limited and a full prepare would not add signal.
 
-5. For rules-engine changes, confirm:
+6. For rules-engine changes, confirm:
    - Replay fixtures are present in `tests/fixtures/orbit_wars_replays`.
    - `tests/fixtures/generation/reference_generation.json` is current if
      generation behavior changed.
@@ -44,10 +49,10 @@ limited and a full prepare would not add signal.
    - `docs/rules-parity-coverage.md` still describes the real coverage and
      residual gaps.
 
-6. For RL API changes, confirm `docs/rl-api-specs.md` still matches the public
+7. For RL API changes, confirm `docs/rl-api-specs.md` still matches the public
    Python config shape, tensor shapes, channel order, and action semantics.
 
-7. Summarize residual risk in the final response or PR body. If no meaningful
+8. Summarize residual risk in the final response or PR body. If no meaningful
    risk remains, say so directly.
 
 ## Agent Review Gate

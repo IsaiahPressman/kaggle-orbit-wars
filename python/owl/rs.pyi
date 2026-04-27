@@ -6,6 +6,7 @@ class RlVecEnv:
     max_planets: int
     max_entities: int
     max_fleets: int
+    max_per_planet_launches: int
 
     def __init__(
         self,
@@ -14,6 +15,7 @@ class RlVecEnv:
         obs_spec: str = ...,
         action_spec: str = ...,
         max_entities: int = ...,
+        max_per_planet_launches: int = ...,
     ) -> None: ...
     def reset(
         self,

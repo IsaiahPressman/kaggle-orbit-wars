@@ -7,10 +7,9 @@ use super::generation::{
 };
 use super::state::{
     CometSpawnInjection, Fleet, LaunchAction, Planet, PlayerResult, Point, ResetConfig, State,
-    StepInjections, StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS, ROTATION_RADIUS_LIMIT,
-    SUN_RADIUS,
+    StepInjections, StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS, SUN_RADIUS,
 };
-use super::utils::{fleet_speed, point_to_segment_distance};
+use super::utils::{fleet_speed, is_orbiting, orbit_position, point_to_segment_distance};
 
 pub type PlayerAction = Vec<LaunchAction>;
 
@@ -276,16 +275,16 @@ fn move_planets_and_sweep(state: &mut State, combat_lists: &mut HashMap<u32, Vec
             continue;
         };
 
-        let dx = initial_planet.x - CENTER;
-        let dy = initial_planet.y - CENTER;
-        let orbital_radius = (dx.powi(2) + dy.powi(2)).sqrt();
         let old_pos = planet.position();
 
-        if orbital_radius + planet.radius < ROTATION_RADIUS_LIMIT {
-            let initial_angle = dy.atan2(dx);
-            let current_angle = initial_angle + state.angular_velocity * f64::from(state.step);
-            planet.x = CENTER + orbital_radius * current_angle.cos();
-            planet.y = CENTER + orbital_radius * current_angle.sin();
+        if is_orbiting(initial_planet.position(), planet.radius) {
+            let position = orbit_position(
+                initial_planet.position(),
+                state.angular_velocity,
+                state.step.into(),
+            );
+            planet.x = position.x;
+            planet.y = position.y;
         }
 
         sweep_checks.push((planet.id, planet.radius, old_pos, planet.position()));
