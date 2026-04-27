@@ -1,7 +1,13 @@
 import pytest
 import torch
 from owl.model import ModelConfig, TransformerActorCritic, TransformerV1Config
-from owl.model.transformer_v1 import MinGRUCell
+from owl.model.transformer_v1 import (
+    FeedForward,
+    MinGRUCell,
+    MultiHeadSelfAttention,
+    pack_sequence,
+    unpack_sequence,
+)
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     MAX_COMETS,
@@ -102,6 +108,50 @@ def test_min_gru_cell_matches_paper_equation_without_candidate_tanh() -> None:
     expected = (1.0 - update) * prev + update * x
 
     assert torch.allclose(cell(x, prev), expected)
+
+
+def test_pack_sequence_removes_masked_tokens_and_unpack_restores_layout() -> None:
+    x = torch.arange(2 * 4 * 3, dtype=torch.float32).view(2, 4, 3)
+    mask = torch.tensor(
+        [
+            [True, False, True, False],
+            [False, True, True, True],
+        ]
+    )
+
+    packed_x, packed = pack_sequence(x, mask)
+    unpacked = unpack_sequence(packed_x, packed)
+
+    assert packed_x.tolist() == [
+        x[0, 0].tolist(),
+        x[0, 2].tolist(),
+        x[1, 1].tolist(),
+        x[1, 2].tolist(),
+        x[1, 3].tolist(),
+    ]
+    assert packed.cu_seqlens.tolist() == [0, 2, 5]
+    assert packed.max_seqlen == 3
+    assert torch.equal(unpacked[mask], x[mask])
+    assert torch.equal(unpacked[~mask], torch.zeros_like(unpacked[~mask]))
+
+
+def test_pack_sequence_rejects_fully_masked_rows() -> None:
+    x = torch.zeros((2, 3, 4))
+    mask = torch.tensor([[True, False, False], [False, False, False]])
+
+    with pytest.raises(ValueError, match="at least one unmasked token"):
+        pack_sequence(x, mask)
+
+
+def test_attention_and_swiglu_use_separate_projection_matrices_for_muon() -> None:
+    config = TransformerV1Config(embed_dim=32, n_heads=4, activation="swiglu")
+
+    attn = MultiHeadSelfAttention(config)
+    mlp = FeedForward(config)
+
+    assert attn.q is not attn.k
+    assert attn.k is not attn.v
+    assert mlp.gate is not mlp.value
 
 
 def test_observation_encoder_returns_entity_tokens_plus_player_tokens() -> None:

@@ -15,6 +15,28 @@ The exported `ModelConfig` type is a pydantic discriminated union alias over the
 current config. It is intentionally shaped so future model configs can be added
 without changing callers that validate config dictionaries through the union.
 
+## Config Reference
+
+`TransformerV1Config` fields:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `model_arch` | `"transformer_v1"` | Pydantic discriminator tag. |
+| `obs_spec` | `ObsV1Config()` | Observation schema and entity capacities. |
+| `action_spec` | `ActionPureConfig()` | Action schema and max launches per source. |
+| `embed_dim` | `128` | Hidden width for all projected tokens and transformer blocks. |
+| `depth` | `4` | Number of transformer blocks. |
+| `n_heads` | `8` | Attention heads; must evenly divide `embed_dim`. |
+| `mlp_ratio` | `4.0` | FFN hidden width multiplier. |
+| `activation` | `"gelu"` | FFN activation: `"gelu"`, `"silu"`, or `"swiglu"`. |
+| `n_angle_mixtures` | `4` | Mixture components for angle and fleet-size event heads. |
+| `kappa_min` | `1e-3` | Lower bound added to von Mises concentration. |
+| `kappa_max` | `200.0` | Optional cap for von Mises concentration. |
+| `tau_min` | `1e-3` | Lower bound added to beta-binomial concentration. |
+| `alpha_beta_eps` | `1e-4` | Epsilon added to beta-binomial alpha and beta. |
+| `dir_eps` | `1e-6` | Epsilon for normalizing raw angle direction vectors. |
+| `max_ship_normalizer` | `250.0` | Normalizer for ship-budget actor features. |
+
 ## Input Encoding
 
 `TransformerActorCritic` consumes an `ObsBatch` containing on-device torch tensors
@@ -57,6 +79,11 @@ CPU execution uses torch scaled-dot-product attention. CUDA execution requires
 `flash-attn`; if CUDA is available and `flash-attn` is missing, construction
 raises `RuntimeError`. For CUDA, token packing metadata is built once before the
 transformer stack and reused by each attention block.
+
+Attention uses separate `q`, `k`, and `v` linear layers instead of one packed
+QKV projection. SwiGLU also uses separate gate and value projections. This keeps
+each weight matrix tied to one projection role, which is a better fit for Muon
+optimizer assumptions than packing multiple operations into one parameter.
 
 ## Critic
 

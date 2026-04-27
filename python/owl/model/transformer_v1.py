@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, Self, assert_never
+from typing import Annotated, Literal, Self, assert_never
 
 import torch
 import torch.nn.functional as F
@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 from torch import nn
 from torch.distributions import Bernoulli, Beta, Binomial, Categorical, VonMises
 
+from owl.model.attn import flash_attn_available, varlen_attention
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     OUTER_PLAYER_SLOTS,
@@ -95,7 +96,8 @@ class TransformerActorCritic(nn.Module):
     def __init__(self, config: TransformerV1Config) -> None:
         super().__init__()
         self.config = config
-        _require_flash_attn_if_cuda_available()
+        if torch.cuda.is_available() and not flash_attn_available():
+            raise RuntimeError("flash-attn must be installed when CUDA is available")
 
         dim = self.config.embed_dim
         self.planet_proj = nn.Linear(self.config.obs_spec.planet_channels, dim)
@@ -534,7 +536,8 @@ class FeedForward(nn.Module):
                 self.up = nn.Linear(config.embed_dim, hidden_dim)
                 self.down = nn.Linear(hidden_dim, config.embed_dim)
             case "swiglu":
-                self.up = nn.Linear(config.embed_dim, hidden_dim * 2)
+                self.gate = nn.Linear(config.embed_dim, hidden_dim)
+                self.value = nn.Linear(config.embed_dim, hidden_dim)
                 self.down = nn.Linear(hidden_dim, config.embed_dim)
             case _:
                 assert_never(config.activation)
@@ -546,8 +549,7 @@ class FeedForward(nn.Module):
             case "silu":
                 return self.down(F.silu(self.up(x)))
             case "swiglu":
-                gate, value = self.up(x).chunk(2, dim=-1)
-                return self.down(F.silu(gate) * value)
+                return self.down(F.silu(self.gate(x)) * self.value(x))
             case _:
                 assert_never(self.activation)
 
@@ -557,62 +559,23 @@ class MultiHeadSelfAttention(nn.Module):
         super().__init__()
         self.n_heads = config.n_heads
         self.head_dim = config.embed_dim // config.n_heads
-        self.qkv = nn.Linear(config.embed_dim, config.embed_dim * 3)
+        self.q = nn.Linear(config.embed_dim, config.embed_dim)
+        self.k = nn.Linear(config.embed_dim, config.embed_dim)
+        self.v = nn.Linear(config.embed_dim, config.embed_dim)
         self.out = nn.Linear(config.embed_dim, config.embed_dim)
-        self.flash_attn_varlen_qkvpacked_func = _load_flash_attn_varlen()
 
     def forward(self, x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:
-        qkv = self.qkv(x).view(
-            x.shape[0],
-            3,
-            self.n_heads,
-            self.head_dim,
-        )
-        if self.flash_attn_varlen_qkvpacked_func is not None:
-            attn = self._flash_attention(qkv, packed)
-        else:
-            attn = self._sdpa_varlen(qkv, packed)
-        return self.out(attn.reshape(x.shape[0], self.n_heads * self.head_dim))
-
-    def _flash_attention(
-        self,
-        qkv: torch.Tensor,
-        packed: PackedSequence,
-    ) -> torch.Tensor:
-        assert self.flash_attn_varlen_qkvpacked_func is not None
-        if qkv.dtype not in (torch.float16, torch.bfloat16):
-            raise RuntimeError("flash-attn requires float16 or bfloat16 CUDA tensors")
-
-        return self.flash_attn_varlen_qkvpacked_func(
-            qkv=qkv,
+        q = self.q(x).view(x.shape[0], self.n_heads, self.head_dim)
+        k = self.k(x).view(x.shape[0], self.n_heads, self.head_dim)
+        v = self.v(x).view(x.shape[0], self.n_heads, self.head_dim)
+        attn = varlen_attention(
+            q,
+            k,
+            v,
             cu_seqlens=packed.cu_seqlens,
             max_seqlen=packed.max_seqlen,
-            dropout_p=0.0,
-            causal=False,
         )
-
-    def _sdpa_varlen(
-        self,
-        qkv: torch.Tensor,
-        packed: PackedSequence,
-    ) -> torch.Tensor:
-        assert qkv.device.type == "cpu"
-        outputs = []
-        for start, end in zip(
-            packed.cu_seqlens[:-1].tolist(),
-            packed.cu_seqlens[1:].tolist(),
-            strict=True,
-        ):
-            q, k, v = qkv[start:end].unbind(dim=1)
-            attn = F.scaled_dot_product_attention(
-                q.transpose(0, 1).unsqueeze(0),
-                k.transpose(0, 1).unsqueeze(0),
-                v.transpose(0, 1).unsqueeze(0),
-                dropout_p=0.0,
-            )
-            outputs.append(attn.squeeze(0).transpose(0, 1))
-
-        return torch.cat(outputs, dim=0)
+        return self.out(attn.reshape(x.shape[0], self.n_heads * self.head_dim))
 
 
 class MinGRUStack(nn.Module):
@@ -876,19 +839,3 @@ def _require_valid_action_slot(
     invalid_ships = launch & (ships.lt(1) | ships.gt(remaining))
     if invalid_ships.any().item():
         raise ValueError("actions.ships must be in 1..remaining for launched slots")
-
-
-def _require_flash_attn_if_cuda_available() -> None:
-    if not torch.cuda.is_available():
-        return
-    if _load_flash_attn_varlen() is None:
-        raise RuntimeError("flash-attn must be installed when CUDA is available")
-
-
-def _load_flash_attn_varlen() -> Any | None:
-    try:
-        from flash_attn import flash_attn_varlen_qkvpacked_func
-    except ImportError:
-        return None
-
-    return flash_attn_varlen_qkvpacked_func
