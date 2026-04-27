@@ -1,10 +1,10 @@
-from owl.model.transformer_v1 import (
+from owl.model.stateless_transformer_v1 import (
     ModelActionLogProbs,
     ModelActions,
     ModelConfig,
     ModelOutput,
-    TransformerActorCritic,
-    TransformerV1Config,
+    StatelessTransformerV1,
+    StatelessTransformerV1Config,
 )
 
 __all__ = [
@@ -12,6 +12,6 @@ __all__ = [
     "ModelActions",
     "ModelConfig",
     "ModelOutput",
-    "TransformerActorCritic",
-    "TransformerV1Config",
+    "StatelessTransformerV1",
+    "StatelessTransformerV1Config",
 ]

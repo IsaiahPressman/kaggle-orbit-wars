@@ -3,8 +3,8 @@ from owl.model import (
     ModelActions,
     ModelConfig,
     ModelOutput,
-    TransformerActorCritic,
-    TransformerV1Config,
+    StatelessTransformerV1,
+    StatelessTransformerV1Config,
 )
 from owl.rl import (
     ActionConfig,
@@ -26,8 +26,8 @@ __all__ = [
     "ObsBatch",
     "ObsConfig",
     "ObsV1Config",
-    "TransformerActorCritic",
-    "TransformerV1Config",
+    "StatelessTransformerV1",
+    "StatelessTransformerV1Config",
     "VectorizedEnv",
     "encode_python_observation",
 ]

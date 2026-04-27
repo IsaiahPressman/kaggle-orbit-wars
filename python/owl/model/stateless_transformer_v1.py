@@ -19,11 +19,13 @@ from owl.rl import (
     ObsV1Config,
 )
 
-TRANSFORMER_V1: Literal["transformer_v1"] = "transformer_v1"
+STATELESS_TRANSFORMER_V1: Literal["stateless_transformer_v1"] = (
+    "stateless_transformer_v1"
+)
 
 
-class TransformerV1Config(BaseModel):
-    model_arch: Literal["transformer_v1"] = TRANSFORMER_V1
+class StatelessTransformerV1Config(BaseModel):
+    model_arch: Literal["stateless_transformer_v1"] = STATELESS_TRANSFORMER_V1
     obs_spec: ObsV1Config = Field(default_factory=ObsV1Config)
     action_spec: ActionPureConfig = Field(default_factory=ActionPureConfig)
     embed_dim: int = Field(default=128, ge=1)
@@ -46,7 +48,9 @@ class TransformerV1Config(BaseModel):
         return self
 
 
-type ModelConfig = Annotated[TransformerV1Config, Field(discriminator="model_arch")]
+type ModelConfig = Annotated[
+    StatelessTransformerV1Config, Field(discriminator="model_arch")
+]
 
 
 @dataclass
@@ -92,8 +96,8 @@ class PackedSequence:
     padded_seq_len: int
 
 
-class TransformerActorCritic(nn.Module):
-    def __init__(self, config: TransformerV1Config) -> None:
+class StatelessTransformerV1(nn.Module):
+    def __init__(self, config: StatelessTransformerV1Config) -> None:
         super().__init__()
         self.config = config
         if torch.cuda.is_available() and not flash_attn_available():
@@ -514,7 +518,7 @@ class TransformerActorCritic(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, config: TransformerV1Config) -> None:
+    def __init__(self, config: StatelessTransformerV1Config) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(config.embed_dim)
         self.attn = MultiHeadSelfAttention(config)
@@ -527,7 +531,7 @@ class TransformerBlock(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, config: TransformerV1Config) -> None:
+    def __init__(self, config: StatelessTransformerV1Config) -> None:
         super().__init__()
         self.activation = config.activation
         hidden_dim = int(config.embed_dim * config.mlp_ratio)
@@ -555,7 +559,7 @@ class FeedForward(nn.Module):
 
 
 class MultiHeadSelfAttention(nn.Module):
-    def __init__(self, config: TransformerV1Config) -> None:
+    def __init__(self, config: StatelessTransformerV1Config) -> None:
         super().__init__()
         self.n_heads = config.n_heads
         self.head_dim = config.embed_dim // config.n_heads
@@ -626,7 +630,7 @@ class MinGRUCell(nn.Module):
 
 
 class LaunchPolicyHeads(nn.Module):
-    def __init__(self, config: TransformerV1Config) -> None:
+    def __init__(self, config: StatelessTransformerV1Config) -> None:
         super().__init__()
         self.config = config
         mixtures = config.n_angle_mixtures

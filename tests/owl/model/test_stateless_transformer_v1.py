@@ -1,7 +1,7 @@
 import pytest
 import torch
-from owl.model import ModelConfig, TransformerActorCritic, TransformerV1Config
-from owl.model.transformer_v1 import (
+from owl.model import ModelConfig, StatelessTransformerV1, StatelessTransformerV1Config
+from owl.model.stateless_transformer_v1 import (
     FeedForward,
     MinGRUCell,
     MultiHeadSelfAttention,
@@ -79,19 +79,19 @@ def _obs_batch(
 
 def test_model_config_requires_heads_to_divide_embed_dim() -> None:
     with pytest.raises(ValueError, match="n_heads must evenly divide embed_dim"):
-        TransformerV1Config(embed_dim=30, n_heads=8)
+        StatelessTransformerV1Config(embed_dim=30, n_heads=8)
 
 
 def test_model_config_has_discriminator_tag() -> None:
     config = TypeAdapter(ModelConfig).validate_python(
         {
-            "model_arch": "transformer_v1",
+            "model_arch": "stateless_transformer_v1",
             "embed_dim": 32,
             "n_heads": 4,
         }
     )
 
-    assert config.model_arch == "transformer_v1"
+    assert config.model_arch == "stateless_transformer_v1"
 
 
 def test_min_gru_cell_matches_paper_equation_without_candidate_tanh() -> None:
@@ -144,7 +144,7 @@ def test_pack_sequence_rejects_fully_masked_rows() -> None:
 
 
 def test_attention_and_swiglu_use_separate_projection_matrices_for_muon() -> None:
-    config = TransformerV1Config(embed_dim=32, n_heads=4, activation="swiglu")
+    config = StatelessTransformerV1Config(embed_dim=32, n_heads=4, activation="swiglu")
 
     attn = MultiHeadSelfAttention(config)
     mlp = FeedForward(config)
@@ -156,13 +156,13 @@ def test_attention_and_swiglu_use_separate_projection_matrices_for_muon() -> Non
 
 def test_observation_encoder_returns_entity_tokens_plus_player_tokens() -> None:
     obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 3)
-    config = TransformerV1Config(
+    config = StatelessTransformerV1Config(
         obs_spec=obs_spec,
         embed_dim=32,
         depth=1,
         n_heads=4,
     )
-    model = TransformerActorCritic(config)
+    model = StatelessTransformerV1(config)
     obs = _obs_batch(
         batch_size=2,
         obs_spec=obs_spec,
@@ -186,7 +186,7 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     torch.manual_seed(0)
     obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     action_spec = ActionPureConfig(max_per_planet_launches=3)
-    config = TransformerV1Config(
+    config = StatelessTransformerV1Config(
         obs_spec=obs_spec,
         action_spec=action_spec,
         embed_dim=32,
@@ -194,7 +194,7 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
         n_heads=4,
         n_angle_mixtures=2,
     )
-    model = TransformerActorCritic(config)
+    model = StatelessTransformerV1(config)
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
     obs.still_playing = torch.tensor(
         [[True, True, False, False], [True, True, True, False]]
@@ -232,7 +232,7 @@ def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
     torch.manual_seed(1)
     obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     action_spec = ActionPureConfig(max_per_planet_launches=3)
-    config = TransformerV1Config(
+    config = StatelessTransformerV1Config(
         obs_spec=obs_spec,
         action_spec=action_spec,
         embed_dim=32,
@@ -240,7 +240,7 @@ def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
         n_heads=4,
         n_angle_mixtures=2,
     )
-    model = TransformerActorCritic(config)
+    model = StatelessTransformerV1(config)
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
     obs.still_playing = torch.tensor(
         [[True, True, False, False], [True, True, True, False]]
@@ -257,13 +257,13 @@ def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
 
 def test_log_prob_rejects_invalid_action_dtypes() -> None:
     obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
-    config = TransformerV1Config(
+    config = StatelessTransformerV1Config(
         obs_spec=obs_spec,
         embed_dim=32,
         depth=1,
         n_heads=4,
     )
-    model = TransformerActorCritic(config)
+    model = StatelessTransformerV1(config)
     obs = _obs_batch(
         batch_size=1,
         obs_spec=obs_spec,
@@ -280,13 +280,13 @@ def test_log_prob_rejects_invalid_action_dtypes() -> None:
 
 def test_critic_requires_still_playing_mask_with_live_player() -> None:
     obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
-    config = TransformerV1Config(
+    config = StatelessTransformerV1Config(
         obs_spec=obs_spec,
         embed_dim=32,
         depth=1,
         n_heads=4,
     )
-    model = TransformerActorCritic(config)
+    model = StatelessTransformerV1(config)
     obs = _obs_batch(
         batch_size=1,
         obs_spec=obs_spec,

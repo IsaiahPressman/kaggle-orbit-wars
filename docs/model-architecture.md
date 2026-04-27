@@ -5,10 +5,10 @@ Orbit Wars RL API.
 
 ## Tagged Config
 
-The current model config is `TransformerV1Config` with discriminator:
+The current model config is `StatelessTransformerV1Config` with discriminator:
 
 ```python
-{"model_arch": "transformer_v1"}
+{"model_arch": "stateless_transformer_v1"}
 ```
 
 The exported `ModelConfig` type is a pydantic discriminated union alias over the
@@ -17,11 +17,11 @@ without changing callers that validate config dictionaries through the union.
 
 ## Config Reference
 
-`TransformerV1Config` fields:
+`StatelessTransformerV1Config` fields:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `model_arch` | `"transformer_v1"` | Pydantic discriminator tag. |
+| `model_arch` | `"stateless_transformer_v1"` | Pydantic discriminator tag. |
 | `obs_spec` | `ObsV1Config()` | Observation schema and entity capacities. |
 | `action_spec` | `ActionPureConfig()` | Action schema and max launches per source. |
 | `embed_dim` | `128` | Hidden width for all projected tokens and transformer blocks. |
@@ -39,7 +39,7 @@ without changing callers that validate config dictionaries through the union.
 
 ## Input Encoding
 
-`TransformerActorCritic` consumes an `ObsBatch` containing on-device torch tensors
+`StatelessTransformerV1` consumes an `ObsBatch` containing on-device torch tensors
 from `docs/rl-api-specs.md`.
 
 Each observation tensor receives one feedforward projection to `embed_dim`:
