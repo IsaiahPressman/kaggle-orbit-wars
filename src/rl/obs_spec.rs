@@ -8,7 +8,6 @@ use numpy::{
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::rules_engine::env::player_alive_flags;
 use crate::rules_engine::state::{
     CometGroup, Fleet, Planet, Point, SimConfig, State, BOARD_SIZE, COMET_SPAWN_STEPS,
 };
@@ -101,10 +100,9 @@ pub(super) fn encode_state(
         let production = planet.production.clamp(1, PRODUCTION_CHANNELS as i32) as usize - 1;
         row[OWNER_CHANNELS_WITH_NEUTRAL + 2 + production] = 1.0;
 
-        row[12] = (planet.radius / 10.0) as f32;
+        row[12] = (planet.radius / 3.0) as f32;
         row[13] = normalize_ships(planet.ships);
         row[14] = normalize_log_ships(planet.ships);
-        row[15] = normalize_angular_velocity(state.angular_velocity);
     }
 
     for (fleet_index, fleet) in fleets.iter().take(max_fleets).enumerate() {
@@ -191,12 +189,6 @@ fn encode_global(state: &State, global_obs: &mut [f32]) {
     global_obs[0] = state.step as f32 / state.config.episode_steps as f32;
     global_obs[1] = steps_until_next_comet_spawn(state.step) as f32 / 100.0;
     global_obs[2] = normalize_angular_velocity(state.angular_velocity);
-    global_obs[3] = active_comet_count(state) as f32 / MAX_COMETS as f32;
-    global_obs[4] = player_alive_flags(state)
-        .into_iter()
-        .filter(|alive| *alive)
-        .count() as f32
-        / state.config.player_count as f32;
 }
 
 fn steps_until_next_comet_spawn(step: u32) -> u32 {
@@ -205,14 +197,6 @@ fn steps_until_next_comet_spawn(step: u32) -> u32 {
         .copied()
         .find(|spawn_step| *spawn_step > step)
         .map_or(0, |spawn_step| spawn_step - step)
-}
-
-fn active_comet_count(state: &State) -> usize {
-    state
-        .comets
-        .iter()
-        .map(|group| group.planet_ids.len())
-        .sum()
 }
 
 fn normalize_ships(ships: i32) -> f32 {

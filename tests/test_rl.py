@@ -133,7 +133,7 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     )
 
     assert planets.shape == (MAX_PLANETS, PLANET_CHANNELS)
-    assert fleets.shape == (MAX_PLANETS * 7 - MAX_COMETS, FLEET_CHANNELS)
+    assert fleets.shape == (ObsV1Config().max_fleets, FLEET_CHANNELS)
     assert comets.shape == (MAX_COMETS, COMET_CHANNELS)
     assert global_features.shape == (GLOBAL_CHANNELS,)
     assert can_act.shape == (4, ACTION_ENTITY_SLOTS)
@@ -147,7 +147,7 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     assert planets[0, 5] == pytest.approx(-0.5)
     assert planets[0, 6] == pytest.approx(0.5)
     assert planets[0, 9] == 1
-    assert planets[0, 15] == pytest.approx(1.0)
+    assert planets[0, 12] == pytest.approx(2 / 3)
     assert fleets[0, 0] == 1
     assert fleets[0, 4] == pytest.approx(-0.8)
     assert fleets[0, 5] == pytest.approx(-0.6)

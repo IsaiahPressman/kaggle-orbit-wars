@@ -8,14 +8,14 @@ use pyo3::prelude::*;
 use obs_spec::encode_obs_v1;
 use vec_env::PyRlVecEnv;
 
-pub const MAX_PLANETS: usize = 64;
+pub const MAX_PLANETS: usize = 40;
 pub const MAX_COMETS: usize = 4;
 pub const MAX_COMET_PATH_LENGTH: usize = 40;
 pub const DEFAULT_MAX_ENTITIES: usize = 512;
-pub const PLANET_CHANNELS: usize = 16;
+pub const PLANET_CHANNELS: usize = 15;
 pub const FLEET_CHANNELS: usize = 10;
 pub const COMET_CHANNELS: usize = OWNER_CHANNELS_WITH_NEUTRAL + 2 + MAX_COMET_PATH_LENGTH * 2;
-pub const GLOBAL_CHANNELS: usize = 5;
+pub const GLOBAL_CHANNELS: usize = 3;
 pub const OUTER_PLAYER_SLOTS: usize = 4;
 pub const ACTION_ENTITY_SLOTS: usize = MAX_PLANETS + MAX_COMETS;
 
