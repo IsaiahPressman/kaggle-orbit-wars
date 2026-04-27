@@ -46,7 +46,7 @@ Implemented:
 - Reset and procedural generation with injectable random sources.
 - Turn stepping in Python reference order.
 - Focused Rust unit tests for rules components.
-- Generation fixtures checked into Git.
+- Generation parity over ignored Python-reference fixtures.
 - Replay parity over ignored Kaggle JSONL fixtures.
 - Python RL observation/action wrappers and vectorized environment.
 
@@ -54,7 +54,7 @@ Not yet implemented:
 
 - Benchmarks and data-structure optimization for training throughput.
 - Mechanical doc freshness checks beyond `docs/pr-checklist.md`.
-- CI-owned replay fixture cache or a checked-in minimal replay fixture.
+- CI-owned parity fixture cache or checked-in minimal parity fixtures.
 
 ## Agentic Workflow
 
@@ -63,9 +63,9 @@ For rules changes, work in this order:
 1. Update or add parity/unit tests that state the expected behavior.
 2. Change the Rust simulator or fixture generator.
 3. Update this plan and `docs/rules-parity-coverage.md` in the same change.
-4. Run `just rs-prepare` with replay fixtures present. Use
-   `ORBIT_WARS_REQUIRE_PARITY_FIXTURES=0 just rs-test` only when intentionally
-   skipping replay parity.
+4. Run `just rs-prepare` with parity fixtures present. Use
+   `REQUIRE_PARITY_FIXTURES=0 just rs-test` only when intentionally skipping
+   fixture-backed parity.
 5. Use a reviewer pass to compare behavior against the Python reference and call
    out drift.
 
@@ -107,16 +107,15 @@ Replay parity tests:
 - `scripts/regenerate_test_fixtures.sh` removes outdated replay fixtures,
   regenerates the Python generation fixture, and downloads the selected replay
   fixture set.
-- Keep checked-in fixture files compact. If they become too large, keep them out
-  of Git too and make the test print the extraction command when the fixture is
-  missing.
+- Keep fixture files out of Git and make tests print the regeneration command
+  when required fixtures are missing.
 - Replay parity tests discover all `replay-*.jsonl` files in
   `ORBIT_WARS_PARITY_FIXTURE_DIR`, or
   `tests/fixtures/orbit_wars_replays` by default. If no fixtures are present,
-  the test fails by default. Set `ORBIT_WARS_REQUIRE_PARITY_FIXTURES=0` to skip
-  replay parity. When rules change, download new Kaggle episodes as JSONL
-  fixtures, update the episode id list below, and leave the test code unchanged
-  unless the fixture schema itself changes.
+  the test fails by default. Set `REQUIRE_PARITY_FIXTURES=0` to skip
+  fixture-backed parity. When rules change, download new Kaggle episodes as
+  JSONL fixtures, update the episode id list below, and leave the test code
+  unchanged unless the fixture schema itself changes.
 
 The current downloaded reference episodes are:
 

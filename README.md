@@ -63,8 +63,8 @@ Supported test environment variables:
 
 - `ORBIT_WARS_PARITY_FIXTURE_DIR`: directory containing extracted JSONL parity
   fixtures.
-- `ORBIT_WARS_REQUIRE_PARITY_FIXTURES=0`: skip replay parity when replay
-  fixtures are missing. Missing fixtures fail by default.
+- `REQUIRE_PARITY_FIXTURES=0`: skip replay and generation parity when fixtures
+  are missing. Missing fixtures fail by default.
 
 When the upstream rules change, keep the test code stable: download replacement
 episodes as JSONL fixtures, move them into the fixture directory if needed,
@@ -83,8 +83,8 @@ intentional upstream rule changes:
 uv run python scripts/generate_reference_fixtures.py
 ```
 
-The generated fixture is small and checked in at
-`tests/fixtures/generation/reference_generation.json`.
+The generated fixture is written to
+`tests/fixtures/generation/reference_generation.json` and ignored by Git.
 
 ## Updating tests after Python rule changes
 
@@ -121,6 +121,5 @@ just prepare
 5. Fix any failing Rust parity tests by matching the updated Python behavior,
    then rerun `just prepare`.
 
-The checked-in generation fixture should be committed when it changes. The
-replay JSONL fixtures remain ignored by Git; keep only the episode IDs and setup
-commands in source control.
+Generation and replay fixtures remain ignored by Git; keep only the episode IDs
+and setup commands in source control.

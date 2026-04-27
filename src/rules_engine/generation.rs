@@ -765,26 +765,38 @@ mod tests {
         }
     }
 
+    const GENERATION_FIXTURE_PATH: &str = "tests/fixtures/generation/reference_generation.json";
+
     #[test]
-    fn generate_planets_matches_python_reference_fixture() {
-        let fixture = reference_fixture();
+    fn generate_planets_matches_python_reference_fixture() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let Some(fixture) = reference_fixture()? else {
+            return Ok(());
+        };
         let mut rng = FixtureRandom::new(fixture.planet_generation.random_calls);
 
         let planets = generate_planets(&mut rng);
 
         rng.assert_finished();
         compare_planets(&planets, &fixture.planet_generation.planets);
+        Ok(())
     }
 
     #[test]
-    fn generate_comet_paths_matches_python_reference_fixture() {
-        let fixture = reference_fixture();
+    fn generate_comet_paths_matches_python_reference_fixture(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(fixture) = reference_fixture()? else {
+            return Ok(());
+        };
         check_comet_path_case(&fixture.comet_path_generation);
+        Ok(())
     }
 
     #[test]
-    fn reset_cases_match_python_reference_fixtures() {
-        let fixture = reference_fixture();
+    fn reset_cases_match_python_reference_fixtures() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(fixture) = reference_fixture()? else {
+            return Ok(());
+        };
 
         for case in fixture.reset_cases {
             let mut rng = FixtureRandom::new(case.random_calls);
@@ -802,20 +814,28 @@ mod tests {
             rng.assert_finished();
             compare_reset_state(&state, &case.state);
         }
+        Ok(())
     }
 
     #[test]
-    fn comet_path_cases_match_python_reference_fixtures() {
-        let fixture = reference_fixture();
+    fn comet_path_cases_match_python_reference_fixtures() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let Some(fixture) = reference_fixture()? else {
+            return Ok(());
+        };
 
         for case in &fixture.comet_path_cases {
             check_comet_path_case(case);
         }
+        Ok(())
     }
 
     #[test]
-    fn comet_ship_sampling_matches_python_reference_fixtures() {
-        let fixture = reference_fixture();
+    fn comet_ship_sampling_matches_python_reference_fixtures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(fixture) = reference_fixture()? else {
+            return Ok(());
+        };
 
         for case in fixture.comet_ship_cases {
             let mut rng = FixtureRandom::new(case.random_calls);
@@ -824,11 +844,15 @@ mod tests {
             rng.assert_finished();
             assert_eq!(ships, case.ships);
         }
+        Ok(())
     }
 
     #[test]
-    fn no_op_terminal_tie_matches_python_reference_fixture() {
-        let fixture = reference_fixture();
+    fn no_op_terminal_tie_matches_python_reference_fixture(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(fixture) = reference_fixture()? else {
+            return Ok(());
+        };
         let case = fixture.terminal_cases.no_op_tie;
         let mut state = State {
             config: SimConfig {
@@ -862,6 +886,7 @@ mod tests {
                 .map(player_result_from_reward)
                 .collect::<Vec<_>>()
         );
+        Ok(())
     }
 
     fn check_comet_path_case(case: &CometPathGenerationFixture) {
@@ -887,11 +912,42 @@ mod tests {
         compare_paths(&paths, &case.paths);
     }
 
-    fn reference_fixture() -> GenerationFixture {
-        serde_json::from_str(include_str!(
-            "../../tests/fixtures/generation/reference_generation.json"
-        ))
-        .expect("valid generation fixture")
+    fn reference_fixture() -> Result<Option<GenerationFixture>, Box<dyn std::error::Error>> {
+        let contents = match std::fs::read_to_string(GENERATION_FIXTURE_PATH) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                warn_or_fail_missing_generation_fixture()?;
+                return Ok(None);
+            },
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Some(serde_json::from_str(&contents)?))
+    }
+
+    fn warn_or_fail_missing_generation_fixture() -> Result<(), Box<dyn std::error::Error>> {
+        if require_parity_fixtures()? {
+            let message = format!(
+                "No generation parity fixture found at {GENERATION_FIXTURE_PATH}. \
+                Run scripts/regenerate_test_fixtures.sh to enable generation parity, \
+                or set REQUIRE_PARITY_FIXTURES=0 to skip generation parity."
+            );
+            Err(message.into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn require_parity_fixtures() -> Result<bool, Box<dyn std::error::Error>> {
+        let Ok(value) = std::env::var("REQUIRE_PARITY_FIXTURES") else {
+            return Ok(true);
+        };
+        match value.to_ascii_lowercase().as_str() {
+            "1" | "true" => Ok(true),
+            "0" | "false" => Ok(false),
+            _ => Err(
+                format!("REQUIRE_PARITY_FIXTURES must be 1/true or 0/false, got {value:?}").into(),
+            ),
+        }
     }
 
     fn planet_from_array(raw: &[f64; 7]) -> Planet {

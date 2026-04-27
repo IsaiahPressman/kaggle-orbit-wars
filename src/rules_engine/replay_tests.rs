@@ -130,7 +130,7 @@ fn warn_or_fail_missing_fixtures(fixture_dir: &Path) -> Result<(), Box<dyn Error
         let message = format!(
             "No replay parity fixtures found in {}. \
             Run scripts/regenerate_test_fixtures.sh to enable replay parity, \
-            or set ORBIT_WARS_REQUIRE_PARITY_FIXTURES=0 to skip replay parity.",
+            or set REQUIRE_PARITY_FIXTURES=0 to skip replay parity.",
             fixture_dir.display()
         );
         Err(message.into())
@@ -140,16 +140,15 @@ fn warn_or_fail_missing_fixtures(fixture_dir: &Path) -> Result<(), Box<dyn Error
 }
 
 fn require_parity_fixtures() -> Result<bool, Box<dyn Error>> {
-    let Ok(value) = std::env::var("ORBIT_WARS_REQUIRE_PARITY_FIXTURES") else {
+    let Ok(value) = std::env::var("REQUIRE_PARITY_FIXTURES") else {
         return Ok(true);
     };
     match value.to_ascii_lowercase().as_str() {
         "1" | "true" => Ok(true),
         "0" | "false" => Ok(false),
-        _ => Err(format!(
-            "ORBIT_WARS_REQUIRE_PARITY_FIXTURES must be 1/true or 0/false, got {value:?}"
-        )
-        .into()),
+        _ => {
+            Err(format!("REQUIRE_PARITY_FIXTURES must be 1/true or 0/false, got {value:?}").into())
+        },
     }
 }
 
