@@ -33,10 +33,10 @@ pub fn step(state: &mut State, actions: &[PlayerAction]) -> StepResult;
 `State` owns planets, fleets, comet metadata, the current step, the player
 count, generation constants, and ids needed for deterministic progression.
 
-`StepResult` should return one terminal result per player: not done, loss, or
-win. This matches the actual player count without making 2-player games carry
-ignored entries. The Python/RL adapter can widen this to a fixed tensor shape
-later if that is more convenient.
+`StepResult` returns one status per actual player: active, won, or lost. This
+matches the actual player count without making 2-player games carry ignored
+entries. The Python/RL adapter widens this to fixed outer player slots for
+tensor observations, rewards, and dones.
 
 ## Current Status
 
