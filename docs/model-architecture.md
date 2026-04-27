@@ -1,0 +1,142 @@
+# Model Architecture
+
+This document summarizes the first trainable actor-critic model scaffold for the
+Orbit Wars RL API.
+
+## Tagged Config
+
+The current model config is `TransformerV1Config` with discriminator:
+
+```python
+{"model_arch": "transformer_v1"}
+```
+
+The exported `ModelConfig` type is a pydantic discriminated union alias over the
+current config. It is intentionally shaped so future model configs can be added
+without changing callers that validate config dictionaries through the union.
+
+## Input Encoding
+
+`TransformerActorCritic` consumes an `ObsBatch` containing on-device torch tensors
+from `docs/rl-api-specs.md`.
+
+Each observation tensor receives one feedforward projection to `embed_dim`:
+
+- planets: `(batch, MAX_PLANETS, 16) -> (batch, MAX_PLANETS, embed_dim)`
+- fleets: `(batch, max_fleets, 10) -> (batch, max_fleets, embed_dim)`
+- comets: `(batch, MAX_COMETS, 88) -> (batch, MAX_COMETS, embed_dim)`
+- globals: `(batch, 3) -> (batch, 1, embed_dim)`
+
+Planet, comet, and fleet tokens are concatenated on the entity axis in that
+order. This keeps the action-origin hidden states contiguous as the first
+`ACTION_ENTITY_SLOTS` tokens. The global projection is added to every entity
+token. Four learned per-player embeddings are then appended for the critic,
+giving:
+
+```text
+(batch, max_entities + 4, embed_dim)
+```
+
+The planet, comet, fleet, and `still_playing` masks are concatenated into one
+token mask. Masked tokens are packed out before the transformer stack and
+reconstructed after the final transformer block.
+
+## Transformer Trunk
+
+The shared trunk is a stack of pre-norm transformer blocks configured by:
+
+- `depth`
+- `n_heads`
+- `mlp_ratio`
+- `embed_dim`
+
+`n_heads` must evenly divide `embed_dim`. The default activation is GELU. LayerNorm
+is used for normalization, and no dropout is applied.
+
+CPU execution uses torch scaled-dot-product attention. CUDA execution requires
+`flash-attn`; if CUDA is available and `flash-attn` is missing, construction
+raises `RuntimeError`. For CUDA, token packing metadata is built once before the
+transformer stack and reused by each attention block.
+
+## Critic
+
+The critic reads the final four player tokens. A linear head produces one logit
+per player, then applies a masked softmax using `obs.still_playing` with shape
+`(batch, 4)`.
+
+The resulting winner probabilities are mapped linearly into value targets:
+
+```text
+value = 2 * winner_probability - 1
+```
+
+This gives `0 -> -1`, `0.5 -> 0`, and `1 -> 1`.
+
+`still_playing` is explicit in `ObsBatch`. It should not be inferred from
+`can_act`, since a player can be alive without having a launchable entity on a
+specific turn.
+
+## Actor
+
+The actor uses hidden states for the action entity slots:
+
+```text
+0..39  -> planet tokens
+40..43 -> comet tokens
+```
+
+For each `(batch, player, action_entity)` position, the actor combines:
+
+- source entity hidden state
+- player hidden token
+- normalized `max_launch`
+
+The repeated launch slots are generated autoregressively with a 2-layer minGRU
+stack. Each slot also receives dynamic inputs for current activity, remaining
+ship budget, previous launch decision, the sine and cosine of the previous
+sampled launch angle, and the previous normalized ship count.
+
+The first recurrent slot receives only the static actor input. Dynamic recurrent
+features are added starting with the second launch slot.
+
+The minGRU cell follows the sequential equation from Feng et al., "Were RNNs
+All We Needed?":
+
+```text
+z_t = sigmoid(linear_z(x_t))
+h_tilde = linear_h(x_t)
+h_t = (1 - z_t) * h_{t-1} + z_t * h_tilde
+```
+
+The sequence length is at most `max_per_planet_launches <= 4`, so this
+implementation uses the straightforward sequential recurrence rather than the
+paper's parallel scan variant.
+
+For every slot, the policy emits:
+
+- Bernoulli launch/stop logits
+- mixture logits for angle/size components
+- von Mises angle parameters
+- shifted beta-binomial size parameters
+
+Sampling stops per `(batch, player, entity)` lane when the previous launch is
+false or when the remaining ship budget reaches zero. The accumulated sampled
+ships are capped by `max_launch`.
+
+The model returns decomposed action tensors:
+
+- `launch`: bool, `(batch, 4, 44, max_per_planet_launches)`
+- `angle`: float32, `(batch, 4, 44, max_per_planet_launches)`
+- `ships`: int64, `(batch, 4, 44, max_per_planet_launches)`
+
+It also returns decomposed log-prob tensors for launch gates and angle/size
+events, plus a total per batch row.
+
+## Log-Prob Replay
+
+The model exposes `log_prob(obs, actions)` to replay externally supplied action
+tensors through the same autoregressive state updates. This is the path PPO
+should use for new-policy log-probs of old rollout actions.
+
+Inactive and stopped slots are given finite dummy event inputs before masking so
+their zeroed log-prob contributions do not introduce NaN gradients.

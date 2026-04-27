@@ -86,6 +86,7 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     assert obs.fleets.shape == (2, env.obs_spec.max_fleets, FLEET_CHANNELS)
     assert obs.comets.shape == (2, MAX_COMETS, COMET_CHANNELS)
     assert obs.global_features.shape == (2, GLOBAL_CHANNELS)
+    assert obs.still_playing.shape == (2, 4)
     assert obs.can_act.shape == (2, 4, ACTION_ENTITY_SLOTS)
     assert obs.max_launch.shape == (2, 4, ACTION_ENTITY_SLOTS)
     assert rewards.shape == (2, 4)
@@ -111,6 +112,7 @@ def test_two_player_sample_marks_unused_player_slots_done() -> None:
     assert torch.equal(rewards, torch.zeros_like(rewards))
     assert torch.equal(dones[:, :2], torch.zeros_like(dones[:, :2]))
     assert torch.equal(dones[:, 2:], torch.ones_like(dones[:, 2:]))
+    assert torch.equal(env.observations.still_playing, ~dones)
 
 
 def test_vectorized_env_accepts_discriminated_config_dicts() -> None:

@@ -55,12 +55,18 @@ environment returns an `ObsBatch` with these tensors:
 | `planet_mask` | `bool` | `(n_envs, MAX_PLANETS)` |
 | `fleet_mask` | `bool` | `(n_envs, max_fleets)` |
 | `comet_mask` | `bool` | `(n_envs, MAX_COMETS)` |
+| `still_playing` | `bool` | `(n_envs, 4)` |
 | `global_features` | `float32` | `(n_envs, 3)` |
 | `can_act` | `bool` | `(n_envs, 4, ACTION_ENTITY_SLOTS)` |
 | `max_launch` | `int64` | `(n_envs, 4, ACTION_ENTITY_SLOTS)` |
 
 All reused buffers are fully overwritten on each observation write. Inactive
 rows are zero-filled and their masks are set to `False`.
+
+`still_playing` is true for player slots that are still active in the episode.
+The Python wrapper currently initializes it to `True` on reset and mirrors
+`~dones` after `step`; the Rust observation writer will own this tensor once it
+is wired into the low-level API.
 
 ### Normalization
 

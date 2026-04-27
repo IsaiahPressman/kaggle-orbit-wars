@@ -87,6 +87,7 @@ class ObsBatch(BaseModel):
     planet_mask: torch.Tensor
     fleet_mask: torch.Tensor
     comet_mask: torch.Tensor
+    still_playing: torch.Tensor
     global_features: torch.Tensor
     can_act: torch.Tensor
     max_launch: torch.Tensor
@@ -153,6 +154,8 @@ class VectorizedEnv:
             self._can_act_np,
             self._max_launch_np,
         )
+        # TODO
+        self.observations.still_playing.fill_(True)
         return self.observations
 
     def step(
@@ -190,6 +193,8 @@ class VectorizedEnv:
             self._rewards_np,
             self._dones_np,
         )
+        # TODO
+        self.observations.still_playing.copy_(~self.dones)
         return self.observations, self.rewards, self.dones
 
     def _allocate_observations(self, *, pin_memory: bool) -> ObsBatch:
@@ -233,6 +238,11 @@ class VectorizedEnv:
             ),
             comet_mask=torch.zeros(
                 (self.n_envs, self.obs_spec.max_comets),
+                dtype=torch.bool,
+                pin_memory=pin_memory,
+            ),
+            still_playing=torch.ones(
+                (self.n_envs, self.n_players),
                 dtype=torch.bool,
                 pin_memory=pin_memory,
             ),
@@ -299,8 +309,9 @@ def _require_action_shape(
 ) -> None:
     if action_array.shape == expected_shape:
         return
-    msg = f"{name} must have shape {expected_shape}, got {action_array.shape}"
-    raise ValueError(msg)
+    raise ValueError(
+        f"{name} must have shape {expected_shape}, got {action_array.shape}"
+    )
 
 
 def _rows_to_array(rows: object, *, name: str) -> np.ndarray:

@@ -1,0 +1,894 @@
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Annotated, Any, Literal, Self, assert_never
+
+import torch
+import torch.nn.functional as F
+from pydantic import BaseModel, Field, model_validator
+from torch import nn
+from torch.distributions import Bernoulli, Beta, Binomial, Categorical, VonMises
+
+from owl.rl import (
+    ACTION_ENTITY_SLOTS,
+    OUTER_PLAYER_SLOTS,
+    ActionPureConfig,
+    ObsBatch,
+    ObsV1Config,
+)
+
+TRANSFORMER_V1: Literal["transformer_v1"] = "transformer_v1"
+
+
+class TransformerV1Config(BaseModel):
+    model_arch: Literal["transformer_v1"] = TRANSFORMER_V1
+    obs_spec: ObsV1Config = Field(default_factory=ObsV1Config)
+    action_spec: ActionPureConfig = Field(default_factory=ActionPureConfig)
+    embed_dim: int = Field(default=128, ge=1)
+    depth: int = Field(default=4, ge=1)
+    n_heads: int = Field(default=8, ge=1)
+    mlp_ratio: float = Field(default=4.0, gt=0.0)
+    activation: Literal["gelu", "silu", "swiglu"] = "gelu"
+    n_angle_mixtures: int = Field(default=4, ge=1)
+    kappa_min: float = Field(default=1e-3, gt=0.0)
+    kappa_max: float | None = Field(default=200.0, gt=0.0)
+    tau_min: float = Field(default=1e-3, gt=0.0)
+    alpha_beta_eps: float = Field(default=1e-4, gt=0.0)
+    dir_eps: float = Field(default=1e-6, gt=0.0)
+    max_ship_normalizer: float = Field(default=250.0, gt=0.0)
+
+    @model_validator(mode="after")
+    def _validate_attention_shape(self) -> Self:
+        if self.embed_dim % self.n_heads != 0:
+            raise ValueError("n_heads must evenly divide embed_dim")
+        return self
+
+
+type ModelConfig = Annotated[TransformerV1Config, Field(discriminator="model_arch")]
+
+
+@dataclass
+class ModelActions:
+    launch: torch.Tensor
+    angle: torch.Tensor
+    ships: torch.Tensor
+
+
+@dataclass
+class ModelActionLogProbs:
+    launch: torch.Tensor
+    angle_and_size: torch.Tensor
+    total: torch.Tensor
+
+
+@dataclass
+class ModelOutput:
+    actions: ModelActions
+    log_probs: ModelActionLogProbs
+    values: torch.Tensor
+    winner_probabilities: torch.Tensor
+
+
+@dataclass(frozen=True)
+class PolicyParams:
+    continue_logits: torch.Tensor
+    mix_logits: torch.Tensor
+    log_w: torch.Tensor
+    loc: torch.Tensor
+    kappa: torch.Tensor
+    alpha: torch.Tensor
+    beta: torch.Tensor
+
+
+@dataclass(frozen=True)
+class PackedSequence:
+    indices: torch.Tensor
+    cu_seqlens: torch.Tensor
+    seqlens: torch.Tensor
+    max_seqlen: int
+    batch_size: int
+    padded_seq_len: int
+
+
+class TransformerActorCritic(nn.Module):
+    def __init__(self, config: TransformerV1Config) -> None:
+        super().__init__()
+        self.config = config
+        _require_flash_attn_if_cuda_available()
+
+        dim = self.config.embed_dim
+        self.planet_proj = nn.Linear(self.config.obs_spec.planet_channels, dim)
+        self.fleet_proj = nn.Linear(self.config.obs_spec.fleet_channels, dim)
+        self.comet_proj = nn.Linear(self.config.obs_spec.comet_channels, dim)
+        self.global_proj = nn.Linear(self.config.obs_spec.global_channels, dim)
+        self.player_tokens = nn.Embedding(OUTER_PLAYER_SLOTS, dim)
+
+        self.blocks = nn.ModuleList(
+            TransformerBlock(self.config) for _ in range(self.config.depth)
+        )
+        self.final_norm = nn.LayerNorm(dim)
+
+        self.critic_head = nn.Linear(dim, 1)
+        self.action_info_proj = nn.Linear(1, dim)
+        self.slot_dynamic_proj = nn.Linear(6, dim)
+        self.actor_input_proj = nn.Linear(dim * 3, dim)
+        self.actor_gru = MinGRUStack(dim, dim, n_layers=2)
+        self.actor_heads = LaunchPolicyHeads(self.config)
+
+    def encode_observations(self, obs: ObsBatch) -> tuple[torch.Tensor, torch.Tensor]:
+        global_token = self.global_proj(obs.global_features).unsqueeze(1)
+        planet_x = self.planet_proj(obs.planets) + global_token
+        fleet_x = self.fleet_proj(obs.fleets) + global_token
+        comet_x = self.comet_proj(obs.comets) + global_token
+        player_tokens = self.player_tokens.weight.unsqueeze(0).expand(
+            obs.planets.shape[0],
+            -1,
+            -1,
+        )
+
+        token_mask = torch.cat(
+            (
+                obs.planet_mask,
+                obs.comet_mask,
+                obs.fleet_mask,
+                obs.still_playing,
+            ),
+            dim=1,
+        )
+        x = torch.cat((planet_x, comet_x, fleet_x, player_tokens), dim=1)
+        packed_x, packed = pack_sequence(x, token_mask)
+
+        for block in self.blocks:
+            packed_x = block(packed_x, packed)
+        x = unpack_sequence(self.final_norm(packed_x), packed)
+        return x, token_mask
+
+    def forward(
+        self,
+        obs: ObsBatch,
+        *,
+        deterministic: bool = False,
+    ) -> ModelOutput:
+        hidden, _ = self.encode_observations(obs)
+        player_hidden = hidden[:, -OUTER_PLAYER_SLOTS:, :]
+        values, winner_probabilities = self._critic(player_hidden, obs.still_playing)
+        actions, log_probs = self._actor(
+            hidden,
+            obs.can_act,
+            obs.max_launch,
+            deterministic=deterministic,
+        )
+        return ModelOutput(
+            actions=actions,
+            log_probs=log_probs,
+            values=values,
+            winner_probabilities=winner_probabilities,
+        )
+
+    def log_prob(
+        self,
+        obs: ObsBatch,
+        actions: ModelActions,
+    ) -> ModelActionLogProbs:
+        hidden, _ = self.encode_observations(obs)
+        return self._actor_log_prob(hidden, obs.can_act, obs.max_launch, actions)
+
+    def _critic(
+        self,
+        player_hidden: torch.Tensor,
+        still_playing: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if still_playing.shape != player_hidden.shape[:2]:
+            raise ValueError(
+                "still_playing must have shape "
+                f"{tuple(player_hidden.shape[:2])}, got {tuple(still_playing.shape)}"
+            )
+        if not still_playing.any(dim=1).all():
+            raise ValueError(
+                "still_playing must include at least one player per batch row"
+            )
+
+        logits = self.critic_head(player_hidden).squeeze(-1)
+        probabilities = masked_softmax(logits, still_playing, dim=-1)
+        values = 2.0 * probabilities - 1.0
+        return values, probabilities
+
+    def _actor_inputs(
+        self,
+        hidden: torch.Tensor,
+        max_launch: torch.Tensor,
+    ) -> torch.Tensor:
+        action_entity_hidden = hidden[:, :ACTION_ENTITY_SLOTS, :]
+
+        player_hidden = hidden[:, -OUTER_PLAYER_SLOTS:, :]
+        entity_features = action_entity_hidden[:, None, :, :].expand(
+            -1,
+            OUTER_PLAYER_SLOTS,
+            -1,
+            -1,
+        )
+        player_features = player_hidden[:, :, None, :].expand(
+            -1,
+            -1,
+            ACTION_ENTITY_SLOTS,
+            -1,
+        )
+        max_launch_float = max_launch.to(dtype=action_entity_hidden.dtype)
+        action_info = (max_launch_float / self.config.max_ship_normalizer).unsqueeze(-1)
+        action_features = self.action_info_proj(action_info)
+        return self.actor_input_proj(
+            torch.cat((entity_features, player_features, action_features), dim=-1)
+        )
+
+    def _actor(
+        self,
+        hidden: torch.Tensor,
+        can_act: torch.Tensor,
+        max_launch: torch.Tensor,
+        *,
+        deterministic: bool,
+    ) -> tuple[ModelActions, ModelActionLogProbs]:
+        slot_input = self._actor_inputs(hidden, max_launch)
+        batch_size = slot_input.shape[0]
+        max_slots = self.config.action_spec.max_per_planet_launches
+        launch_slots: list[torch.Tensor] = []
+        angle_slots: list[torch.Tensor] = []
+        ship_slots: list[torch.Tensor] = []
+        launch_log_slots: list[torch.Tensor] = []
+        event_log_slots: list[torch.Tensor] = []
+
+        hidden_state = self.actor_gru.initial_state(
+            (*slot_input.shape[:-1],),
+            dtype=slot_input.dtype,
+            device=slot_input.device,
+        )
+        remaining = max_launch.clone()
+        active = can_act & (remaining > 0)
+        last_launch = torch.zeros_like(can_act)
+        last_angle_sin = torch.zeros_like(slot_input[..., 0])
+        last_angle_cos = torch.zeros_like(slot_input[..., 0])
+        last_ships = torch.zeros_like(max_launch)
+
+        for slot in range(max_slots):
+            slot_hidden, hidden_state = self.actor_gru(
+                self._slot_gru_input(
+                    slot_input,
+                    active,
+                    remaining,
+                    last_launch,
+                    last_angle_sin,
+                    last_angle_cos,
+                    last_ships,
+                    include_dynamic_features=slot > 0,
+                ),
+                hidden_state,
+            )
+            params = self.actor_heads(slot_hidden)
+            launch = self._sample_launch(
+                params.continue_logits,
+                active,
+                deterministic=deterministic,
+            )
+            angle, ships = self._sample_event(params, remaining, deterministic)
+            event_mask = active & launch
+            ships = torch.where(launch, ships.clamp_min(1), torch.zeros_like(ships))
+            ships = torch.minimum(ships, remaining)
+            angle = torch.where(launch, angle, torch.zeros_like(angle))
+
+            launch_log_prob = -F.binary_cross_entropy_with_logits(
+                params.continue_logits,
+                launch.to(dtype=params.continue_logits.dtype),
+                reduction="none",
+            )
+            launch_log_prob = torch.where(
+                active,
+                launch_log_prob,
+                torch.zeros_like(launch_log_prob),
+            )
+            event_log_prob = masked_event_log_prob_from_params(
+                params,
+                angle,
+                ships,
+                remaining,
+                event_mask,
+            )
+
+            launch_slots.append(launch)
+            angle_slots.append(angle)
+            ship_slots.append(ships)
+            launch_log_slots.append(launch_log_prob)
+            event_log_slots.append(event_log_prob)
+
+            remaining = (remaining - ships).clamp_min(0)
+            active = active & launch & (remaining > 0)
+            last_launch = launch
+            last_angle_sin = torch.where(
+                launch,
+                torch.sin(angle),
+                torch.zeros_like(angle),
+            )
+            last_angle_cos = torch.where(
+                launch,
+                torch.cos(angle),
+                torch.zeros_like(angle),
+            )
+            last_ships = ships
+
+        launch_tensor = torch.stack(launch_slots, dim=-1)
+        angle_tensor = torch.stack(angle_slots, dim=-1)
+        ship_tensor = torch.stack(ship_slots, dim=-1)
+        launch_log_tensor = torch.stack(launch_log_slots, dim=-1)
+        event_log_tensor = torch.stack(event_log_slots, dim=-1)
+
+        total_log_prob = (launch_log_tensor + event_log_tensor).sum(dim=(1, 2, 3))
+        if total_log_prob.shape != (batch_size,):
+            raise RuntimeError("internal error: total log-prob shape mismatch")
+
+        return (
+            ModelActions(
+                launch=launch_tensor,
+                angle=angle_tensor,
+                ships=ship_tensor,
+            ),
+            ModelActionLogProbs(
+                launch=launch_log_tensor,
+                angle_and_size=event_log_tensor,
+                total=total_log_prob,
+            ),
+        )
+
+    def _actor_log_prob(
+        self,
+        hidden: torch.Tensor,
+        can_act: torch.Tensor,
+        max_launch: torch.Tensor,
+        actions: ModelActions,
+    ) -> ModelActionLogProbs:
+        _require_actions_shape(
+            actions,
+            (
+                hidden.shape[0],
+                OUTER_PLAYER_SLOTS,
+                ACTION_ENTITY_SLOTS,
+                self.config.action_spec.max_per_planet_launches,
+            ),
+        )
+
+        slot_input = self._actor_inputs(hidden, max_launch)
+        launch_log_slots: list[torch.Tensor] = []
+        event_log_slots: list[torch.Tensor] = []
+
+        hidden_state = self.actor_gru.initial_state(
+            (*slot_input.shape[:-1],),
+            dtype=slot_input.dtype,
+            device=slot_input.device,
+        )
+        remaining = max_launch.clone()
+        active = can_act & (remaining > 0)
+        last_launch = torch.zeros_like(can_act)
+        last_angle_sin = torch.zeros_like(slot_input[..., 0])
+        last_angle_cos = torch.zeros_like(slot_input[..., 0])
+        last_ships = torch.zeros_like(max_launch)
+
+        for slot in range(self.config.action_spec.max_per_planet_launches):
+            slot_hidden, hidden_state = self.actor_gru(
+                self._slot_gru_input(
+                    slot_input,
+                    active,
+                    remaining,
+                    last_launch,
+                    last_angle_sin,
+                    last_angle_cos,
+                    last_ships,
+                    include_dynamic_features=slot > 0,
+                ),
+                hidden_state,
+            )
+            params = self.actor_heads(slot_hidden)
+            launch = actions.launch[..., slot]
+            angle = actions.angle[..., slot]
+            ships = actions.ships[..., slot]
+            event_mask = active & launch
+            _require_valid_action_slot(launch, ships, remaining, active)
+
+            launch_log_prob = -F.binary_cross_entropy_with_logits(
+                params.continue_logits,
+                launch.to(dtype=params.continue_logits.dtype),
+                reduction="none",
+            )
+            launch_log_prob = torch.where(
+                active,
+                launch_log_prob,
+                torch.zeros_like(launch_log_prob),
+            )
+            event_log_prob = masked_event_log_prob_from_params(
+                params,
+                angle,
+                ships,
+                remaining,
+                event_mask,
+            )
+
+            launch_log_slots.append(launch_log_prob)
+            event_log_slots.append(event_log_prob)
+
+            ships_used = torch.where(launch, ships, torch.zeros_like(ships))
+            remaining = (remaining - ships_used).clamp_min(0)
+            active = active & launch & (remaining > 0)
+            last_launch = launch
+            last_angle_sin = torch.where(
+                launch,
+                torch.sin(angle),
+                torch.zeros_like(angle),
+            )
+            last_angle_cos = torch.where(
+                launch,
+                torch.cos(angle),
+                torch.zeros_like(angle),
+            )
+            last_ships = ships_used
+
+        launch_log_tensor = torch.stack(launch_log_slots, dim=-1)
+        event_log_tensor = torch.stack(event_log_slots, dim=-1)
+        total_log_prob = (launch_log_tensor + event_log_tensor).sum(dim=(1, 2, 3))
+        return ModelActionLogProbs(
+            launch=launch_log_tensor,
+            angle_and_size=event_log_tensor,
+            total=total_log_prob,
+        )
+
+    @staticmethod
+    def _sample_launch(
+        logits: torch.Tensor,
+        active: torch.Tensor,
+        *,
+        deterministic: bool,
+    ) -> torch.Tensor:
+        if deterministic:
+            launch = logits.sigmoid() > 0.5
+        else:
+            launch = Bernoulli(logits=logits).sample().bool()
+
+        return launch & active
+
+    def _sample_event(
+        self,
+        params: PolicyParams,
+        remaining: torch.Tensor,
+        deterministic: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if deterministic:
+            mixture = params.mix_logits.argmax(dim=-1)
+        else:
+            mixture = Categorical(logits=params.mix_logits).sample()
+
+        gather_index = mixture.unsqueeze(-1)
+        loc = torch.gather(params.loc, -1, gather_index).squeeze(-1)
+        kappa = torch.gather(params.kappa, -1, gather_index).squeeze(-1)
+        alpha = torch.gather(params.alpha, -1, gather_index).squeeze(-1)
+        beta = torch.gather(params.beta, -1, gather_index).squeeze(-1)
+
+        if deterministic:
+            angle = loc.remainder(2.0 * math.pi)
+            ship_mean = (remaining - 1).clamp_min(0).to(dtype=alpha.dtype)
+            ship_mean = ship_mean * alpha / (alpha + beta)
+            ships = ship_mean.round().to(dtype=remaining.dtype) + 1
+        else:
+            angle = VonMises(loc, kappa).sample().remainder(2.0 * math.pi)
+            probs = Beta(alpha, beta).sample()
+            trials = (remaining - 1).clamp_min(0).to(dtype=probs.dtype)
+            ships = Binomial(total_count=trials, probs=probs).sample()
+            ships = ships.to(dtype=remaining.dtype) + 1
+
+        return angle, torch.minimum(ships, remaining.clamp_min(1))
+
+    def _slot_gru_input(
+        self,
+        slot_input: torch.Tensor,
+        active: torch.Tensor,
+        remaining: torch.Tensor,
+        last_launch: torch.Tensor,
+        last_angle_sin: torch.Tensor,
+        last_angle_cos: torch.Tensor,
+        last_ships: torch.Tensor,
+        *,
+        include_dynamic_features: bool,
+    ) -> torch.Tensor:
+        if not include_dynamic_features:
+            return slot_input
+        dynamic_features = torch.stack(
+            (
+                active.to(dtype=slot_input.dtype),
+                remaining.to(dtype=slot_input.dtype) / self.config.max_ship_normalizer,
+                last_launch.to(dtype=slot_input.dtype),
+                last_angle_sin.to(dtype=slot_input.dtype),
+                last_angle_cos.to(dtype=slot_input.dtype),
+                last_ships.to(dtype=slot_input.dtype) / self.config.max_ship_normalizer,
+            ),
+            dim=-1,
+        )
+        return slot_input + self.slot_dynamic_proj(dynamic_features)
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self, config: TransformerV1Config) -> None:
+        super().__init__()
+        self.norm1 = nn.LayerNorm(config.embed_dim)
+        self.attn = MultiHeadSelfAttention(config)
+        self.norm2 = nn.LayerNorm(config.embed_dim)
+        self.mlp = FeedForward(config)
+
+    def forward(self, x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x), packed)
+        return x + self.mlp(self.norm2(x))
+
+
+class FeedForward(nn.Module):
+    def __init__(self, config: TransformerV1Config) -> None:
+        super().__init__()
+        self.activation = config.activation
+        hidden_dim = int(config.embed_dim * config.mlp_ratio)
+        match config.activation:
+            case "gelu" | "silu":
+                self.up = nn.Linear(config.embed_dim, hidden_dim)
+                self.down = nn.Linear(hidden_dim, config.embed_dim)
+            case "swiglu":
+                self.up = nn.Linear(config.embed_dim, hidden_dim * 2)
+                self.down = nn.Linear(hidden_dim, config.embed_dim)
+            case _:
+                assert_never(config.activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        match self.activation:
+            case "gelu":
+                return self.down(F.gelu(self.up(x)))
+            case "silu":
+                return self.down(F.silu(self.up(x)))
+            case "swiglu":
+                gate, value = self.up(x).chunk(2, dim=-1)
+                return self.down(F.silu(gate) * value)
+            case _:
+                assert_never(self.activation)
+
+
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, config: TransformerV1Config) -> None:
+        super().__init__()
+        self.n_heads = config.n_heads
+        self.head_dim = config.embed_dim // config.n_heads
+        self.qkv = nn.Linear(config.embed_dim, config.embed_dim * 3)
+        self.out = nn.Linear(config.embed_dim, config.embed_dim)
+        self.flash_attn_varlen_qkvpacked_func = _load_flash_attn_varlen()
+
+    def forward(self, x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:
+        qkv = self.qkv(x).view(
+            x.shape[0],
+            3,
+            self.n_heads,
+            self.head_dim,
+        )
+        if self.flash_attn_varlen_qkvpacked_func is not None:
+            attn = self._flash_attention(qkv, packed)
+        else:
+            attn = self._sdpa_varlen(qkv, packed)
+        return self.out(attn.reshape(x.shape[0], self.n_heads * self.head_dim))
+
+    def _flash_attention(
+        self,
+        qkv: torch.Tensor,
+        packed: PackedSequence,
+    ) -> torch.Tensor:
+        assert self.flash_attn_varlen_qkvpacked_func is not None
+        if qkv.dtype not in (torch.float16, torch.bfloat16):
+            raise RuntimeError("flash-attn requires float16 or bfloat16 CUDA tensors")
+
+        return self.flash_attn_varlen_qkvpacked_func(
+            qkv=qkv,
+            cu_seqlens=packed.cu_seqlens,
+            max_seqlen=packed.max_seqlen,
+            dropout_p=0.0,
+            causal=False,
+        )
+
+    def _sdpa_varlen(
+        self,
+        qkv: torch.Tensor,
+        packed: PackedSequence,
+    ) -> torch.Tensor:
+        assert qkv.device.type == "cpu"
+        outputs = []
+        for start, end in zip(
+            packed.cu_seqlens[:-1].tolist(),
+            packed.cu_seqlens[1:].tolist(),
+            strict=True,
+        ):
+            q, k, v = qkv[start:end].unbind(dim=1)
+            attn = F.scaled_dot_product_attention(
+                q.transpose(0, 1).unsqueeze(0),
+                k.transpose(0, 1).unsqueeze(0),
+                v.transpose(0, 1).unsqueeze(0),
+                dropout_p=0.0,
+            )
+            outputs.append(attn.squeeze(0).transpose(0, 1))
+
+        return torch.cat(outputs, dim=0)
+
+
+class MinGRUStack(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, *, n_layers: int) -> None:
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.cells = nn.ModuleList(
+            MinGRUCell(input_dim if layer == 0 else hidden_dim, hidden_dim)
+            for layer in range(n_layers)
+        )
+
+    def initial_state(
+        self,
+        leading_shape: tuple[int, ...],
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> list[torch.Tensor]:
+        return [
+            torch.zeros((*leading_shape, self.hidden_dim), dtype=dtype, device=device)
+            for _ in self.cells
+        ]
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        state: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        next_state = []
+        layer_input = x
+        for cell, layer_state in zip(self.cells, state, strict=True):
+            layer_output = cell(layer_input, layer_state)
+            next_state.append(layer_output)
+            layer_input = layer_output
+        return layer_input, next_state
+
+
+class MinGRUCell(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.update = nn.Linear(input_dim, hidden_dim)
+        self.candidate = nn.Linear(input_dim, hidden_dim)
+
+    def forward(self, x: torch.Tensor, prev: torch.Tensor) -> torch.Tensor:
+        update = torch.sigmoid(self.update(x))
+        candidate = self.candidate(x)
+        return torch.lerp(prev, candidate, update)
+
+
+class LaunchPolicyHeads(nn.Module):
+    def __init__(self, config: TransformerV1Config) -> None:
+        super().__init__()
+        self.config = config
+        mixtures = config.n_angle_mixtures
+        self.continue_head = nn.Linear(config.embed_dim, 1)
+        self.mix_head = nn.Linear(config.embed_dim, mixtures)
+        self.dir_head = nn.Linear(config.embed_dim, mixtures * 2)
+        self.kappa_head = nn.Linear(config.embed_dim, mixtures)
+        self.size_frac_head = nn.Linear(config.embed_dim, mixtures)
+        self.size_conc_head = nn.Linear(config.embed_dim, mixtures)
+
+    def forward(self, x: torch.Tensor) -> PolicyParams:
+        mixtures = self.config.n_angle_mixtures
+        raw_dir = self.dir_head(x).view(*x.shape[:-1], mixtures, 2)
+        unit_dir = F.normalize(raw_dir, dim=-1, eps=self.config.dir_eps)
+        loc = torch.atan2(unit_dir[..., 1], unit_dir[..., 0])
+
+        kappa = self.config.kappa_min + F.softplus(self.kappa_head(x))
+        if self.config.kappa_max is not None:
+            kappa = kappa.clamp_max(self.config.kappa_max)
+
+        rho = torch.sigmoid(self.size_frac_head(x))
+        tau = self.config.tau_min + F.softplus(self.size_conc_head(x))
+        alpha = rho * tau + self.config.alpha_beta_eps
+        beta = (1.0 - rho) * tau + self.config.alpha_beta_eps
+
+        mix_logits = self.mix_head(x)
+        return PolicyParams(
+            continue_logits=self.continue_head(x).squeeze(-1),
+            mix_logits=mix_logits,
+            log_w=F.log_softmax(mix_logits, dim=-1),
+            loc=loc,
+            kappa=kappa,
+            alpha=alpha,
+            beta=beta,
+        )
+
+
+def pack_sequence(
+    x: torch.Tensor,
+    token_mask: torch.Tensor,
+) -> tuple[torch.Tensor, PackedSequence]:
+    batch_size, padded_seq_len, _ = x.shape
+    flat_mask = token_mask.reshape(-1)
+    indices = flat_mask.nonzero(as_tuple=False).flatten()
+    seqlens = token_mask.sum(dim=1, dtype=torch.int32)
+    if not seqlens.gt(0).all():
+        raise ValueError("each batch row must have at least one unmasked token")
+    packed = PackedSequence(
+        indices=indices,
+        cu_seqlens=F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)),
+        seqlens=seqlens,
+        max_seqlen=int(seqlens.max().item()),
+        batch_size=batch_size,
+        padded_seq_len=padded_seq_len,
+    )
+    return x.reshape(batch_size * padded_seq_len, -1)[indices], packed
+
+
+def unpack_sequence(x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:
+    out = torch.zeros(
+        (
+            packed.batch_size * packed.padded_seq_len,
+            x.shape[-1],
+        ),
+        dtype=x.dtype,
+        device=x.device,
+    )
+    out[packed.indices] = x
+    return out.view(packed.batch_size, packed.padded_seq_len, x.shape[-1])
+
+
+def masked_softmax(
+    logits: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    dim: int,
+) -> torch.Tensor:
+    masked_logits = logits.masked_fill(~mask, torch.finfo(logits.dtype).min)
+    return torch.softmax(masked_logits, dim=dim)
+
+
+def event_log_prob_from_params(
+    params: PolicyParams,
+    angle: torch.Tensor,
+    ships: torch.Tensor,
+    residual_budget: torch.Tensor,
+) -> torch.Tensor:
+    log_angle = von_mises_log_prob(angle, params.loc, params.kappa)
+    log_size = shifted_beta_binomial_log_prob(
+        ships,
+        residual_budget,
+        params.alpha,
+        params.beta,
+    )
+    return torch.logsumexp(params.log_w + log_angle + log_size, dim=-1)
+
+
+def masked_event_log_prob_from_params(
+    params: PolicyParams,
+    angle: torch.Tensor,
+    ships: torch.Tensor,
+    residual_budget: torch.Tensor,
+    event_mask: torch.Tensor,
+) -> torch.Tensor:
+    safe_angle = torch.where(event_mask, angle, torch.zeros_like(angle))
+    safe_ships = torch.where(event_mask, ships, torch.ones_like(ships))
+    safe_residual_budget = torch.where(
+        event_mask,
+        residual_budget.clamp_min(1),
+        torch.ones_like(residual_budget),
+    )
+    event_log_prob = event_log_prob_from_params(
+        params,
+        safe_angle,
+        safe_ships,
+        safe_residual_budget,
+    )
+    return torch.where(
+        event_mask,
+        event_log_prob,
+        torch.zeros_like(event_log_prob),
+    )
+
+
+def von_mises_log_prob(
+    theta: torch.Tensor,
+    loc: torch.Tensor,
+    kappa: torch.Tensor,
+) -> torch.Tensor:
+    if theta.ndim == loc.ndim - 1:
+        theta = theta.unsqueeze(-1)
+    log_i0 = torch.log(torch.special.i0e(kappa)) + kappa
+    return kappa * torch.cos(theta - loc) - math.log(2.0 * math.pi) - log_i0
+
+
+def shifted_beta_binomial_log_prob(
+    ships: torch.Tensor,
+    residual_budget: torch.Tensor,
+    alpha: torch.Tensor,
+    beta: torch.Tensor,
+) -> torch.Tensor:
+    dtype = alpha.dtype
+    residual = residual_budget.to(device=alpha.device)
+    n_ships = ships.to(device=alpha.device)
+
+    trials = (residual - 1).clamp_min(0).unsqueeze(-1).to(dtype=dtype)
+    successes_raw = (n_ships - 1).unsqueeze(-1).to(dtype=dtype)
+    valid = (
+        residual.unsqueeze(-1).ge(1)
+        & n_ships.unsqueeze(-1).ge(1)
+        & n_ships.unsqueeze(-1).le(residual.unsqueeze(-1))
+    )
+
+    successes = successes_raw.clamp_min(0.0)
+    successes = torch.minimum(successes, trials)
+    log_comb = (
+        torch.lgamma(trials + 1.0)
+        - torch.lgamma(successes + 1.0)
+        - torch.lgamma(trials - successes + 1.0)
+    )
+    log_prob = (
+        log_comb
+        + log_beta(successes + alpha, trials - successes + beta)
+        - log_beta(alpha, beta)
+    )
+    return torch.where(valid, log_prob, torch.full_like(log_prob, -torch.inf))
+
+
+def log_beta(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return torch.lgamma(a) + torch.lgamma(b) - torch.lgamma(a + b)
+
+
+def _require_actions_shape(
+    actions: ModelActions,
+    expected_shape: tuple[int, int, int, int],
+) -> None:
+    for name, tensor in (
+        ("launch", actions.launch),
+        ("angle", actions.angle),
+        ("ships", actions.ships),
+    ):
+        if tensor.shape != expected_shape:
+            raise ValueError(
+                f"actions.{name} must have shape {expected_shape}, got {tensor.shape}"
+            )
+    if actions.launch.dtype != torch.bool:
+        raise ValueError(
+            f"actions.launch must have dtype torch.bool, got {actions.launch.dtype}"
+        )
+    if actions.angle.dtype != torch.float32:
+        raise ValueError(
+            f"actions.angle must have dtype torch.float32, got {actions.angle.dtype}"
+        )
+    if actions.ships.dtype != torch.int64:
+        raise ValueError(
+            f"actions.ships must have dtype torch.int64, got {actions.ships.dtype}"
+        )
+
+
+def _require_valid_action_slot(
+    launch: torch.Tensor,
+    ships: torch.Tensor,
+    remaining: torch.Tensor,
+    active: torch.Tensor,
+) -> None:
+    if (launch & ~active).any().item():
+        raise ValueError(
+            "actions.launch cannot be true after a lane has stopped or is inactive"
+        )
+    invalid_ships = launch & (ships.lt(1) | ships.gt(remaining))
+    if invalid_ships.any().item():
+        raise ValueError("actions.ships must be in 1..remaining for launched slots")
+
+
+def _require_flash_attn_if_cuda_available() -> None:
+    if not torch.cuda.is_available():
+        return
+    if _load_flash_attn_varlen() is None:
+        raise RuntimeError("flash-attn must be installed when CUDA is available")
+
+
+def _load_flash_attn_varlen() -> Any | None:
+    try:
+        from flash_attn import flash_attn_varlen_qkvpacked_func
+    except ImportError:
+        return None
+
+    return flash_attn_varlen_qkvpacked_func
