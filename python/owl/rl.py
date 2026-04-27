@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import Annotated, Any, Literal, SupportsFloat, SupportsInt, cast
 
 import numpy as np
@@ -115,6 +116,13 @@ class VectorizedEnv:
             self.action_spec.action_spec,
             self.obs_spec.max_entities,
         )
+        if pin_memory and not torch.cuda.is_available():
+            warnings.warn(
+                "pin_memory=True requires CUDA; proceeding without pinned memory",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            pin_memory = False
         self.n_envs = n_envs
         self.n_players = OUTER_PLAYER_SLOTS
         self.observations = self._allocate_observations(pin_memory=pin_memory)

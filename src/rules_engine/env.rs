@@ -448,7 +448,7 @@ fn player_results(state: &State) -> Vec<PlayerResult> {
         .collect()
 }
 
-pub fn is_game_terminated(state: &State) -> bool {
+fn is_game_terminated(state: &State) -> bool {
     reached_step_limit(state) || remaining_alive_players(state) <= 1
 }
 

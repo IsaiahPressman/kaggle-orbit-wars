@@ -40,6 +40,18 @@ def test_vectorized_env_writes_into_preallocated_torch_buffers() -> None:
     assert torch.all(obs.max_launch[~obs.can_act] == 0)
 
 
+def test_vectorized_env_warns_and_disables_pin_memory_without_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    with pytest.warns(RuntimeWarning, match="proceeding without pinned memory"):
+        env = VectorizedEnv(n_envs=1)
+
+    assert not env.observations.planets.is_pinned()
+    assert not env.rewards.is_pinned()
+
+
 def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     env = VectorizedEnv(n_envs=2, two_player_weight=0.0, pin_memory=False)
     reward_ptr = env.rewards.data_ptr()

@@ -3,7 +3,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-use crate::rules_engine::env::{is_game_terminated, player_alive_flags, reset, step, PlayerAction};
+use crate::rules_engine::env::{player_alive_flags, reset, step, PlayerAction};
 use crate::rules_engine::state::{PlayerResult, ResetConfig, State};
 
 use super::action_spec::decode_pure_actions;
@@ -386,7 +386,7 @@ fn step_one_env(
     two_player_weight: f64,
 ) {
     let result = step(state, decoded);
-    let should_reset = is_game_terminated(state);
+    let should_reset = result_is_terminal(&result.player_results);
     let alive = player_alive_flags(state);
 
     reward_chunk.fill(0.0);
@@ -405,6 +405,12 @@ fn step_one_env(
         *state = reset(sample_reset_config(two_player_weight));
         player_finished.fill(false);
     }
+}
+
+fn result_is_terminal(results: &[PlayerResult]) -> bool {
+    results
+        .iter()
+        .all(|result| !matches!(result, PlayerResult::NotDone))
 }
 
 fn sample_reset_config(two_player_weight: f64) -> ResetConfig {
@@ -474,6 +480,83 @@ mod tests {
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
         }
+    }
+
+    fn state_with_all_players_alive() -> State {
+        let planets = vec![
+            Planet {
+                id: 0,
+                owner: 0,
+                x: 10.0,
+                y: 10.0,
+                radius: 2.0,
+                ships: 10,
+                production: 1,
+            },
+            Planet {
+                id: 1,
+                owner: 1,
+                x: 90.0,
+                y: 10.0,
+                radius: 2.0,
+                ships: 10,
+                production: 1,
+            },
+            Planet {
+                id: 2,
+                owner: 2,
+                x: 10.0,
+                y: 90.0,
+                radius: 2.0,
+                ships: 10,
+                production: 1,
+            },
+            Planet {
+                id: 3,
+                owner: 3,
+                x: 90.0,
+                y: 90.0,
+                radius: 2.0,
+                ships: 10,
+                production: 1,
+            },
+        ];
+        State {
+            config: SimConfig::new(4),
+            step: 0,
+            angular_velocity: 0.025,
+            initial_planets: planets.clone(),
+            planets,
+            fleets: Vec::new(),
+            next_fleet_id: 0,
+            comets: Vec::new(),
+            comet_planet_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn nonterminal_horizon_step_does_not_reset_before_returning_done() {
+        let actions = vec![Vec::new(); 4];
+        let mut state = state_with_all_players_alive();
+        state.step = state.config.episode_steps.saturating_sub(3);
+        let expected_step = state.step + 1;
+        let mut finished = vec![false; 4];
+        let mut rewards = vec![99.0; 4];
+        let mut dones = vec![true; 4];
+
+        step_one_env(
+            &mut state,
+            &mut finished,
+            &actions,
+            &mut rewards,
+            &mut dones,
+            0.0,
+        );
+
+        assert_eq!(state.step, expected_step);
+        assert_eq!(rewards, vec![0.0; 4]);
+        assert_eq!(dones, vec![false; 4]);
+        assert_eq!(finished, vec![false; 4]);
     }
 
     #[test]
