@@ -8,11 +8,14 @@ name = "rs"
 # "cdylib" is necessary to produce a shared library for Python to import from.
 crate-type = ["cdylib"]
 
+[features]
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
 numpy = "0.28.0"
-# "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
-# "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
-pyo3 = { version = "0.28.2", features = ["extension-module", "abi3-py39"] }
+# "abi3-py312" tells pyo3 (and maturin) to build using the stable ABI with
+# minimum Python version 3.12, matching pyproject.toml.
+pyo3 = { version = "0.28.2", features = ["abi3-py312"] }
 rand = "0.10.1"
 rayon = "1.12.0"
 

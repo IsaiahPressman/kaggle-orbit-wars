@@ -40,6 +40,7 @@ build-backend = "maturin"
 module-name = "owl.rs"
 python-packages = ["owl"]
 python-source = "python"
+features = ["extension-module"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]

@@ -32,9 +32,6 @@ rs-lint:
 rs-test:
 	cargo test
 [group: 'rust']
-rs-test-full:
-	cargo test -- --include-ignored
-[group: 'rust']
 rs-prepare: rs-format rs-lint rs-test
 
 [group: 'build']
@@ -45,7 +42,7 @@ build-release:
 	RUSTFLAGS="-C target-cpu=native" uv run maturin develop --release
 
 [group: 'build']
-prepare: build rs-format py-format rs-lint py-lint py-static rs-test-full py-test-full
+prepare: build rs-format py-format rs-lint py-lint py-static rs-test py-test-full
 [group: 'build']
 prepare-rl: prepare build-release
 

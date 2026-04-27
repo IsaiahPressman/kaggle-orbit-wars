@@ -2,10 +2,6 @@
 target/
 python/owl/rs*.so
 
-# Lockfiles
-Cargo.lock
-uv.lock
-
 # Python-generated files
 __pycache__/
 *.py[oc]

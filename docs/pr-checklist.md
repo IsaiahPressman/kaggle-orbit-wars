@@ -39,10 +39,15 @@ limited and a full prepare would not add signal.
    - Replay fixtures are present in `tests/fixtures/orbit_wars_replays`.
    - `tests/fixtures/generation/reference_generation.json` is current if
      generation behavior changed.
+   - `docs/rules-engine-plan.md` describes the current implementation state, not
+     only historical plans.
    - `docs/rules-parity-coverage.md` still describes the real coverage and
      residual gaps.
 
-6. Summarize residual risk in the final response or PR body. If no meaningful
+6. For RL API changes, confirm `docs/rl-api-specs.md` still matches the public
+   Python config shape, tensor shapes, channel order, and action semantics.
+
+7. Summarize residual risk in the final response or PR body. If no meaningful
    risk remains, say so directly.
 
 ## Agent Review Gate

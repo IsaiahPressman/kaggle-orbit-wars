@@ -15,6 +15,15 @@ rustup component add rustfmt --toolchain nightly
 
 3. `just prepare` should run without errors
 
+## Orbit Wars reference
+
+The Rust rules engine targets the installed `kaggle-environments` Orbit Wars
+implementation. Resolve the local module and gameplay prose paths with:
+
+```sh
+uv run python -c 'from importlib import import_module; from pathlib import Path; m = import_module("kaggle_environments.envs.orbit_wars.orbit_wars"); print(Path(m.__file__).resolve()); print(Path(m.__file__).with_name("README.md").resolve())'
+```
+
 ## Orbit Wars replay parity
 
 Replay parity tests use compact Kaggle episode transition fixtures. The
@@ -48,6 +57,8 @@ Supported test environment variables:
 
 - `ORBIT_WARS_PARITY_FIXTURE_DIR`: directory containing extracted JSONL parity
   fixtures.
+- `ORBIT_WARS_REQUIRE_PARITY_FIXTURES=0`: skip replay parity when replay
+  fixtures are missing. Missing fixtures fail by default.
 
 When the upstream rules change, keep the test code stable: download replacement
 episodes as JSONL fixtures, move them into the fixture directory if needed,

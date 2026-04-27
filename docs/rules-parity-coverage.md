@@ -9,6 +9,10 @@ changes.
 Replay fixtures are generated with `scripts/download_replays.py` and loaded from
 `tests/fixtures/orbit_wars_replays/replay-*.jsonl`.
 
+The replay parity test fails by default when no replay fixtures are present. Set
+`ORBIT_WARS_REQUIRE_PARITY_FIXTURES=0` to skip replay parity on machines that do
+not have local fixtures.
+
 The replay parity test checks each transition against the Python reference for:
 
 - step counter
@@ -73,5 +77,7 @@ Discrete ids, owners, ship counts, production, removals, and terminal results
 must match exactly.
 
 Replay fixtures are ignored by Git because full episodes can be large. A fresh
-checkout must run `scripts/regenerate_test_fixtures.sh` before `just prepare`,
-or restore replay fixtures from cache.
+checkout must run `scripts/regenerate_test_fixtures.sh` or restore replay
+fixtures from cache before running required replay parity. Use
+`ORBIT_WARS_REQUIRE_PARITY_FIXTURES=0 just rs-test` only when intentionally
+skipping replay parity.

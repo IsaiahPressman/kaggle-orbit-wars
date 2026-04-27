@@ -38,6 +38,7 @@ const SHIP_NORMALIZER: f32 = 250.0;
 const LOG_SHIP_NORMALIZER: f32 = 4.6051702;
 const MIN_ANGULAR_VELOCITY: f32 = 0.025;
 const ANGULAR_VELOCITY_SPAN: f32 = 0.025;
+const INTEGER_TOLERANCE: f64 = 1e-9;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_state(
@@ -332,28 +333,43 @@ fn finite_f64(value: f64, name: &str) -> PyResult<f64> {
 }
 
 fn finite_i32(value: f64, name: &str) -> PyResult<i32> {
-    finite_f64(value, name)?;
-    Ok(value as i32)
+    let rounded = finite_integer(value, name)?;
+    if rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
+        return Err(PyValueError::new_err(format!("{name} must fit in i32")));
+    }
+    Ok(rounded as i32)
 }
 
 fn finite_u32(value: f64, name: &str) -> PyResult<u32> {
-    finite_f64(value, name)?;
-    if value < 0.0 {
+    let rounded = finite_integer(value, name)?;
+    if rounded < 0.0 {
         return Err(PyValueError::new_err(format!(
             "{name} must be non-negative"
         )));
     }
-    Ok(value as u32)
+    if rounded > f64::from(u32::MAX) {
+        return Err(PyValueError::new_err(format!("{name} must fit in u32")));
+    }
+    Ok(rounded as u32)
 }
 
 fn finite_usize(value: f64, name: &str) -> PyResult<usize> {
-    finite_f64(value, name)?;
-    if value < 0.0 || value > MAX_COMET_PATH_LENGTH as f64 {
+    let rounded = finite_integer(value, name)?;
+    if rounded < 0.0 || rounded > MAX_COMET_PATH_LENGTH as f64 {
         return Err(PyValueError::new_err(format!(
             "{name} must be between 0 and {MAX_COMET_PATH_LENGTH}"
         )));
     }
-    Ok(value as usize)
+    Ok(rounded as usize)
+}
+
+fn finite_integer(value: f64, name: &str) -> PyResult<f64> {
+    finite_f64(value, name)?;
+    let rounded = value.round();
+    if (value - rounded).abs() <= INTEGER_TOLERANCE {
+        return Ok(rounded);
+    }
+    Err(PyValueError::new_err(format!("{name} must be an integer")))
 }
 
 fn require_shape_suffix(name: &str, actual: &[usize], expected_last_dim: usize) -> PyResult<()> {
@@ -498,5 +514,19 @@ mod tests {
     fn angular_velocity_normalization_maps_generated_range_to_zero_one() {
         assert_eq!(normalize_angular_velocity(0.025), 0.0);
         assert_eq!(normalize_angular_velocity(0.05), 1.0);
+    }
+
+    #[test]
+    fn integer_fields_round_values_within_tolerance() {
+        assert_eq!(finite_i32(4.0 + 5e-10, "value").unwrap(), 4);
+        assert_eq!(finite_u32(7.0 - 5e-10, "value").unwrap(), 7);
+        assert_eq!(finite_usize(3.0 + 5e-10, "value").unwrap(), 3);
+    }
+
+    #[test]
+    fn integer_fields_reject_fractional_values() {
+        assert!(finite_i32(4.1, "value").is_err());
+        assert!(finite_u32(7.9, "value").is_err());
+        assert!(finite_usize(3.5, "value").is_err());
     }
 }
