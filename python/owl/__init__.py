@@ -1,5 +1,5 @@
 from owl.rl import (
-    ActionV1Config,
+    ActionPureConfig,
     ObsBatch,
     ObsV1Config,
     VectorizedEnv,
@@ -8,7 +8,7 @@ from owl.rl import (
 from owl.rs import hello_from_rust
 
 __all__ = [
-    "ActionV1Config",
+    "ActionPureConfig",
     "ObsBatch",
     "ObsV1Config",
     "VectorizedEnv",

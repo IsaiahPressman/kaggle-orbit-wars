@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, SupportsFloat, SupportsInt, cast
+from typing import Any, Literal, SupportsFloat, SupportsInt, cast
 
 import numpy as np
 import torch
@@ -13,6 +13,7 @@ from owl.rs import encode_obs_v1, rl_obs_constants
     MAX_PLANETS,
     MAX_COMETS,
     MAX_COMET_PATH_LENGTH,
+    ACTION_ENTITY_SLOTS,
     DEFAULT_MAX_ENTITIES,
     PLANET_CHANNELS,
     FLEET_CHANNELS,
@@ -58,9 +59,15 @@ class ObsV1Config(BaseModel):
         return GLOBAL_CHANNELS
 
 
-class ActionV1Config(BaseModel):
-    action_spec: Literal["action_v1"] = "action_v1"
-    action_dim: int = 0
+class ActionPureConfig(BaseModel):
+    """Pure action spec.
+
+    Sharp edge: the action entity axis is ordered as all planet tokens first,
+    then comet tokens appended at the end, matching the intended
+    planet-plus-comet hidden-token concatenation order.
+    """
+
+    action_spec: Literal["pure"] = "pure"
 
 
 OUTER_PLAYER_SLOTS = 4
@@ -76,6 +83,8 @@ class ObsBatch(BaseModel):
     fleet_mask: torch.Tensor
     comet_mask: torch.Tensor
     global_features: torch.Tensor
+    can_act: torch.Tensor
+    max_launch: torch.Tensor
 
 
 class VectorizedEnv:
@@ -85,17 +94,17 @@ class VectorizedEnv:
         n_envs: int,
         two_player_weight: float = 0.5,
         obs_spec: ObsV1Config | None = None,
-        action_spec: ActionV1Config | None = None,
+        action_spec: ActionPureConfig | None = None,
         pin_memory: bool = True,
     ) -> None:
         self.obs_spec = obs_spec or ObsV1Config()
-        self.action_spec = action_spec or ActionV1Config()
+        self.action_spec = action_spec or ActionPureConfig()
         self._rust = _RustRlVecEnv(
             n_envs,
             two_player_weight,
             self.obs_spec.obs_spec,
+            self.action_spec.action_spec,
             self.obs_spec.max_entities,
-            self.action_spec.action_dim,
         )
         self.n_envs = n_envs
         self.n_players = OUTER_PLAYER_SLOTS
@@ -114,6 +123,8 @@ class VectorizedEnv:
         self._fleet_mask_np = self.observations.fleet_mask.numpy()
         self._comet_mask_np = self.observations.comet_mask.numpy()
         self._global_obs_np = self.observations.global_features.numpy()
+        self._can_act_np = self.observations.can_act.numpy()
+        self._max_launch_np = self.observations.max_launch.numpy()
         self._rewards_np = self.rewards.numpy()
         self._dones_np = self.dones.numpy()
 
@@ -126,24 +137,29 @@ class VectorizedEnv:
             self._fleet_mask_np,
             self._comet_mask_np,
             self._global_obs_np,
+            self._can_act_np,
+            self._max_launch_np,
         )
         return self.observations
 
     def step(
-        self, actions: np.ndarray | torch.Tensor
+        self,
+        launch: np.ndarray | torch.Tensor,
+        angle: np.ndarray | torch.Tensor,
+        ships: np.ndarray | torch.Tensor,
     ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor]:
-        action_array = _actions_to_numpy(actions)
-        expected_shape = (
-            self.n_envs,
-            self.n_players,
-            self.action_spec.action_dim,
-        )
-        if action_array.shape != expected_shape:
-            msg = f"actions must have shape {expected_shape}, got {action_array.shape}"
-            raise ValueError(msg)
+        launch_array = _actions_to_numpy(launch, dtype=np.bool_)
+        angle_array = _actions_to_numpy(angle, dtype=np.float32)
+        ship_array = _actions_to_numpy(ships, dtype=np.int64)
+        expected_shape = (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS)
+        _require_action_shape("launch", launch_array, expected_shape)
+        _require_action_shape("angle", angle_array, expected_shape)
+        _require_action_shape("ships", ship_array, expected_shape)
 
         self._rust.step(
-            action_array,
+            launch_array,
+            angle_array,
+            ship_array,
             self._planet_obs_np,
             self._fleet_obs_np,
             self._comet_obs_np,
@@ -151,6 +167,8 @@ class VectorizedEnv:
             self._fleet_mask_np,
             self._comet_mask_np,
             self._global_obs_np,
+            self._can_act_np,
+            self._max_launch_np,
             self._rewards_np,
             self._dones_np,
         )
@@ -205,6 +223,16 @@ class VectorizedEnv:
                 dtype=torch.float32,
                 pin_memory=pin_memory,
             ),
+            can_act=torch.zeros(
+                (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS),
+                dtype=torch.bool,
+                pin_memory=pin_memory,
+            ),
+            max_launch=torch.zeros(
+                (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS),
+                dtype=torch.int64,
+                pin_memory=pin_memory,
+            ),
         )
 
 
@@ -212,6 +240,8 @@ def encode_python_observation(
     obs: dict[str, object],
     obs_spec: ObsV1Config | None = None,
 ) -> tuple[
+    np.ndarray,
+    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -238,12 +268,21 @@ def encode_python_observation(
     )
 
 
-def _actions_to_numpy(actions: np.ndarray | torch.Tensor) -> np.ndarray:
+def _actions_to_numpy(actions: np.ndarray | torch.Tensor, *, dtype: Any) -> np.ndarray:
     if isinstance(actions, torch.Tensor):
         if actions.device.type != "cpu":
             raise ValueError("actions must be on CPU before stepping the Rust env")
         actions = actions.detach().numpy()
-    return np.ascontiguousarray(actions, dtype=np.float32)
+    return np.ascontiguousarray(actions, dtype=dtype)
+
+
+def _require_action_shape(
+    name: str, action_array: np.ndarray, expected_shape: tuple[int, int, int]
+) -> None:
+    if action_array.shape == expected_shape:
+        return
+    msg = f"{name} must have shape {expected_shape}, got {action_array.shape}"
+    raise ValueError(msg)
 
 
 def _rows_to_array(rows: object, *, name: str) -> np.ndarray:
