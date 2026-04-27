@@ -67,9 +67,9 @@ rows are zero-filled and their masks are set to `False`.
 - Positions use `x_norm = (x / BOARD_SIZE) * 2 - 1`, with `BOARD_SIZE = 100`.
   The four map corners are `(-1, -1)`, `(1, -1)`, `(-1, 1)`, and `(1, 1)`.
 - Radius uses `radius / 3`.
-- Ships use `ships / 200`.
-- Log ships use `ln(max(ships, 0) + 1) / 10`. Planets can reach zero ships
-  after combat, so this avoids `ln(0)`.
+- Ships use `ships / 250`.
+- Log ships use `ln(max(ships, 0) + 1) / ln(250)`. Planets can reach zero
+  ships after combat, so this avoids `ln(0)`.
 - Angular velocity uses `(angular_velocity - 0.025) / 0.025`. Generated games
   currently map the expected range `[0.025, 0.05]` to `[0, 1]`. The value is
   not clamped.

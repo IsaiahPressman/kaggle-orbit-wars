@@ -34,8 +34,8 @@ type EncodedObsV1<'py> = (
 const OWNER_CHANNELS_WITH_NEUTRAL: usize = 5;
 const OWNER_CHANNELS: usize = 4;
 const PRODUCTION_CHANNELS: usize = 5;
-const SHIP_NORMALIZER: f32 = 200.0;
-const LOG_SHIP_NORMALIZER: f32 = 10.0;
+const SHIP_NORMALIZER: f32 = 250.0;
+const LOG_SHIP_NORMALIZER: f32 = 5.521461;
 const MIN_ANGULAR_VELOCITY: f32 = 0.025;
 const ANGULAR_VELOCITY_SPAN: f32 = 0.025;
 

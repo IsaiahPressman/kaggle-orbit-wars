@@ -178,7 +178,7 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
 
     assert fleet_mask.tolist() == [True]
     assert fleets[0, 1] == 1
-    assert fleets[0, 8] == pytest.approx(0.1)
+    assert fleets[0, 8] == pytest.approx(20 / 250)
     assert "max_entities exceeded: 1 fleets ignored" in capfd.readouterr().err
 
 
@@ -204,7 +204,7 @@ def test_python_observation_encoder_writes_comet_future_paths() -> None:
     assert comet_mask.tolist() == [True, False, False, False]
     assert planets[0].tolist() == [0.0] * PLANET_CHANNELS
     assert comets[0, 2] == 1.0
-    assert comets[0, 5] == pytest.approx(25 / 200)
+    assert comets[0, 5] == pytest.approx(25 / 250)
     assert comets[0, 7] == pytest.approx(0.0)
     assert comets[0, 8] == pytest.approx(0.0)
     assert comets[0, 9] == pytest.approx(1.0)
