@@ -3,7 +3,7 @@
 Use this checklist before creating, recommending, or merging a PR. It is meant
 to make the final agent review repeatable and repository-owned, following the
 agent workflow guidance in OpenAI's harness-engineering writeup:
-https://openai.com/index/harness-engineering/.
+<https://openai.com/index/harness-engineering/>.
 
 ## Final Review
 

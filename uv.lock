@@ -1257,7 +1257,7 @@ wheels = [
 [[package]]
 name = "kaggle-environments"
 version = "1.28.1"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/Kaggle/kaggle-environments#613f4d75f172f8b02638236df38e352175228d98" }
 dependencies = [
     { name = "flask" },
     { name = "google-auth" },
@@ -1278,10 +1278,6 @@ dependencies = [
     { name = "tenacity" },
     { name = "termcolor" },
     { name = "transformers" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/84/0c/bece183a052394a3488d11d16197e695bb6d58bb72ba352b51df29435272/kaggle_environments-1.28.1.tar.gz", hash = "sha256:13034128ac944e2d45a0054b886a541cedba23f324817f6c4138926ac41b9335", size = 13225106, upload-time = "2026-04-20T23:40:11.048Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/80/1f/27dce3e63d819a71c424c1b8f2723c9c9e3f4e9a265e650ac1071cb4460a/kaggle_environments-1.28.1-py3-none-any.whl", hash = "sha256:6605259ce8b2ab971be6fd01fc7174716074858f38756d5a1b39a5e3b70a447d", size = 13329780, upload-time = "2026-04-20T23:40:08.142Z" },
 ]
 
 [[package]]
@@ -2261,7 +2257,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "flash-attn", marker = "extra == 'flash-attn'", specifier = ">=2.8.3" },
-    { name = "kaggle-environments", specifier = ">=1.28.0" },
+    { name = "kaggle-environments", git = "https://github.com/Kaggle/kaggle-environments" },
     { name = "numpy", specifier = ">=2.4.4" },
     { name = "pydantic", specifier = ">=2.13.2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
