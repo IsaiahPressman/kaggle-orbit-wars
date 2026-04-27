@@ -136,6 +136,7 @@ class VectorizedEnv:
         self._planet_mask_np = self.observations.planet_mask.numpy()
         self._fleet_mask_np = self.observations.fleet_mask.numpy()
         self._comet_mask_np = self.observations.comet_mask.numpy()
+        self._still_playing_np = self.observations.still_playing.numpy()
         self._global_obs_np = self.observations.global_features.numpy()
         self._can_act_np = self.observations.can_act.numpy()
         self._max_launch_np = self.observations.max_launch.numpy()
@@ -150,12 +151,11 @@ class VectorizedEnv:
             self._planet_mask_np,
             self._fleet_mask_np,
             self._comet_mask_np,
+            self._still_playing_np,
             self._global_obs_np,
             self._can_act_np,
             self._max_launch_np,
         )
-        # TODO
-        self.observations.still_playing.fill_(True)
         return self.observations
 
     def step(
@@ -187,14 +187,13 @@ class VectorizedEnv:
             self._planet_mask_np,
             self._fleet_mask_np,
             self._comet_mask_np,
+            self._still_playing_np,
             self._global_obs_np,
             self._can_act_np,
             self._max_launch_np,
             self._rewards_np,
             self._dones_np,
         )
-        # TODO
-        self.observations.still_playing.copy_(~self.dones)
         return self.observations, self.rewards, self.dones
 
     def _allocate_observations(self, *, pin_memory: bool) -> ObsBatch:
@@ -241,7 +240,7 @@ class VectorizedEnv:
                 dtype=torch.bool,
                 pin_memory=pin_memory,
             ),
-            still_playing=torch.ones(
+            still_playing=torch.zeros(
                 (self.n_envs, self.n_players),
                 dtype=torch.bool,
                 pin_memory=pin_memory,

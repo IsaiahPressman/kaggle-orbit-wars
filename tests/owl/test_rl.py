@@ -95,6 +95,27 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     assert torch.equal(dones, torch.zeros_like(dones))
 
 
+def test_reset_writes_still_playing_from_rust_env_state() -> None:
+    env = VectorizedEnv(
+        n_envs=2,
+        obs_spec=ObsV1Config(),
+        action_spec=ActionPureConfig(),
+        two_player_weight=1.0,
+        pin_memory=False,
+    )
+    still_playing_ptr = env.observations.still_playing.data_ptr()
+
+    env.observations.still_playing.fill_(True)
+    obs = env.reset()
+
+    assert obs.still_playing.data_ptr() == still_playing_ptr
+    assert np.shares_memory(obs.still_playing.numpy(), env._still_playing_np)
+    assert torch.equal(
+        obs.still_playing,
+        torch.tensor([[True, True, False, False], [True, True, False, False]]),
+    )
+
+
 def test_two_player_sample_marks_unused_player_slots_done() -> None:
     env = VectorizedEnv(
         n_envs=2,

@@ -135,9 +135,9 @@ pub struct StepResult {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerResult {
-    NotDone,
-    Loss,
-    Win,
+    Active,
+    Won,
+    Lost,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

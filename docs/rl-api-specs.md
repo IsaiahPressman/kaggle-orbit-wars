@@ -63,10 +63,12 @@ environment returns an `ObsBatch` with these tensors:
 All reused buffers are fully overwritten on each observation write. Inactive
 rows are zero-filled and their masks are set to `False`.
 
-`still_playing` is true for player slots that are still active in the episode.
-The Python wrapper currently initializes it to `True` on reset and mirrors
-`~dones` after `step`; the Rust observation writer will own this tensor once it
-is wired into the low-level API.
+`still_playing` is true for player slots that are active in the current
+observation's episode and have not finished. The Rust vectorized environment
+writes this tensor on every `reset` and `step`; inactive outer player slots are
+`False`. After a terminal auto-reset, `still_playing` describes the returned
+reset observation, while `dones` still describes the transition that just
+finished.
 
 ### Normalization
 
@@ -217,6 +219,14 @@ Call:
 ```python
 obs, rewards, dones = env.step(launch, angle, ships)
 ```
+
+`rewards` and `dones` have shape `(n_envs, 4)`. Inactive player slots are
+always `done=True` with reward `0`. Active players receive reward `0` with
+`done=False`. A player that newly loses receives reward `-1` with `done=True`;
+later steps for that already-finished player stay `done=True` with reward `0`.
+A sole winner receives reward `1` with `done=True`. If multiple players tie as
+winners, each tied winner receives the average of one winner reward and the
+remaining tied loser rewards: `(1 - (winner_count - 1)) / winner_count`.
 
 | Tensor | dtype | Shape | Meaning |
 | --- | --- | --- | --- |

@@ -437,9 +437,19 @@ fn compare_state(state: &State, result: &StepResult, row: &FixtureRow) -> Result
 fn expected_player_results(row: &FixtureRow) -> Vec<PlayerResult> {
     let reached_step_limit =
         row.expected.step.saturating_sub(1) >= row.configuration.episode_steps.saturating_sub(2);
-    let terminated = reached_step_limit || alive_players(&row.expected) <= 1;
+    let alive_flags = player_alive_flags(&row.expected, row.players);
+    let terminated = reached_step_limit || alive_flags.iter().filter(|alive| **alive).count() <= 1;
     if !terminated {
-        return vec![PlayerResult::NotDone; row.players];
+        return alive_flags
+            .into_iter()
+            .map(|alive| {
+                if alive {
+                    PlayerResult::Active
+                } else {
+                    PlayerResult::Lost
+                }
+            })
+            .collect();
     }
 
     let scores = player_scores(row);
@@ -448,25 +458,25 @@ fn expected_player_results(row: &FixtureRow) -> Vec<PlayerResult> {
         .into_iter()
         .map(|score| {
             if score == max_score && max_score > 0 {
-                PlayerResult::Win
+                PlayerResult::Won
             } else {
-                PlayerResult::Loss
+                PlayerResult::Lost
             }
         })
         .collect()
 }
 
-fn alive_players(observation: &ObservationFixture) -> usize {
-    let mut alive_players = std::collections::HashSet::new();
+fn player_alive_flags(observation: &ObservationFixture, player_count: usize) -> Vec<bool> {
+    let mut alive_players = vec![false; player_count];
     for planet in &observation.planets {
         if planet[1] != -1.0 {
-            alive_players.insert(planet[1] as i32);
+            alive_players[planet[1] as usize] = true;
         }
     }
     for fleet in &observation.fleets {
-        alive_players.insert(fleet[1] as i32);
+        alive_players[fleet[1] as usize] = true;
     }
-    alive_players.len()
+    alive_players
 }
 
 fn player_scores(row: &FixtureRow) -> Vec<i32> {
