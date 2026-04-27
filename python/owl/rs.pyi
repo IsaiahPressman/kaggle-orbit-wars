@@ -6,7 +6,6 @@ class RlVecEnv:
     max_planets: int
     max_entities: int
     max_fleets: int
-    action_dim: int
 
     def __init__(
         self,

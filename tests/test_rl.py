@@ -79,6 +79,26 @@ def test_two_player_sample_marks_unused_player_slots_done() -> None:
     assert torch.equal(dones[:, 2:], torch.ones_like(dones[:, 2:]))
 
 
+def test_vectorized_env_accepts_discriminated_config_dicts() -> None:
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec={"obs_spec": "obs_v1", "max_entities": MAX_PLANETS + MAX_COMETS + 1},
+        action_spec={"action_spec": "pure"},
+        pin_memory=False,
+    )
+
+    assert env.obs_spec.max_fleets == 1
+    assert env.action_spec.action_spec == "pure"
+
+
+def test_vectorized_env_rejects_empty_config_dicts() -> None:
+    with pytest.raises(ValueError, match="obs_spec"):
+        VectorizedEnv(n_envs=1, obs_spec={}, pin_memory=False)
+
+    with pytest.raises(ValueError, match="action_spec"):
+        VectorizedEnv(n_envs=1, action_spec={}, pin_memory=False)
+
+
 def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     (
         planets,

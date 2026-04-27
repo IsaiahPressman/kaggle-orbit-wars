@@ -108,11 +108,6 @@ impl PyRlVecEnv {
         self.max_fleets
     }
 
-    #[getter]
-    fn action_dim(&self) -> usize {
-        ACTION_ENTITY_SLOTS
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn reset(
         &mut self,

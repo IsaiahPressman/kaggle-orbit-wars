@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Literal, SupportsFloat, SupportsInt, cast
+from typing import Annotated, Any, Literal, SupportsFloat, SupportsInt, cast
 
 import numpy as np
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 from owl.rs import RlVecEnv as _RustRlVecEnv
 from owl.rs import encode_obs_v1, rl_obs_constants
@@ -70,6 +70,11 @@ class ActionPureConfig(BaseModel):
     action_spec: Literal["pure"] = "pure"
 
 
+type ObsConfig = Annotated[ObsV1Config, Field(discriminator="obs_spec")]
+type ActionConfig = Annotated[ActionPureConfig, Field(discriminator="action_spec")]
+_OBS_CONFIG_ADAPTER: TypeAdapter[ObsV1Config] = TypeAdapter(ObsConfig)
+_ACTION_CONFIG_ADAPTER: TypeAdapter[ActionPureConfig] = TypeAdapter(ActionConfig)
+
 OUTER_PLAYER_SLOTS = 4
 
 
@@ -93,12 +98,16 @@ class VectorizedEnv:
         *,
         n_envs: int,
         two_player_weight: float = 0.5,
-        obs_spec: ObsV1Config | None = None,
-        action_spec: ActionPureConfig | None = None,
+        obs_spec: ObsConfig | dict[str, object] | None = None,
+        action_spec: ActionConfig | dict[str, object] | None = None,
         pin_memory: bool = True,
     ) -> None:
-        self.obs_spec = obs_spec or ObsV1Config()
-        self.action_spec = action_spec or ActionPureConfig()
+        self.obs_spec = _OBS_CONFIG_ADAPTER.validate_python(
+            ObsV1Config() if obs_spec is None else obs_spec
+        )
+        self.action_spec = _ACTION_CONFIG_ADAPTER.validate_python(
+            ActionPureConfig() if action_spec is None else action_spec
+        )
         self._rust = _RustRlVecEnv(
             n_envs,
             two_player_weight,
