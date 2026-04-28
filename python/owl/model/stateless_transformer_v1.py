@@ -6,10 +6,11 @@ from typing import Annotated, Literal, Self, assert_never
 
 import torch
 import torch.nn.functional as F
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 from torch import nn
 from torch.distributions import Bernoulli, Beta, Binomial, Categorical, VonMises
 
+from owl.config import BaseConfig
 from owl.model.attn import flash_attn_available, varlen_attention
 from owl.model.base import (
     BaseModelAPI,
@@ -32,7 +33,7 @@ STATELESS_TRANSFORMER_V1: Literal["stateless_transformer_v1"] = (
 )
 
 
-class StatelessTransformerV1Config(BaseModel):
+class StatelessTransformerV1Config(BaseConfig):
     model_arch: Literal["stateless_transformer_v1"] = STATELESS_TRANSFORMER_V1
     obs_spec: ObsV1Config = Field(default_factory=ObsV1Config)
     action_spec: ActionPureConfig = Field(default_factory=ActionPureConfig)

@@ -5,8 +5,9 @@ from time import perf_counter
 from typing import Literal, Protocol
 
 import torch
-from pydantic import BaseModel, Field
+from pydantic import Field
 
+from owl.config import BaseConfig
 from owl.model import BaseModelAPI, ModelActions, ModelEvaluation, ModelOutput
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
@@ -25,10 +26,9 @@ from owl.train.metrics import (
     masked_sum_by_segment,
     weighted_mean,
 )
-from owl.train.optimizer import CompositeOptimizer, OptimizerName, create_optimizer
+from owl.train.optimizer import CompositeOptimizer, OptimizerConfig, create_optimizer
 from owl.train.sampling import (
     SegmentSample,
-    SegmentSampling,
     SegmentSamplingConfig,
     SegmentSamplingMetrics,
     sample_segments,
@@ -53,18 +53,14 @@ _OBS_FIELDS = tuple(ObsBatch.model_fields)
 _ACTION_FIELDS = tuple(ModelActions.__dataclass_fields__)
 
 
-class PPOConfig(BaseModel):
-    model_config = {"frozen": True}
-
+class PPOConfig(BaseConfig):
     horizon: int = Field(default=64, ge=1)
     n_envs: int = Field(default=1, ge=1)
     update_epochs: int = Field(default=4, ge=1)
-    segments_per_minibatch: int = Field(default=1, ge=1)
     replay_ratio: float = Field(default=1.0, gt=0.0)
-    segment_sampling: SegmentSampling = "uniform"
-    prio_alpha: float = Field(default=0.0, ge=0.0)
-    prio_beta: float = Field(default=0.2, ge=0.0)
-    prio_eps: float = Field(default=1e-6, gt=0.0)
+    segment_sampling: SegmentSamplingConfig = Field(
+        default_factory=SegmentSamplingConfig
+    )
     gamma: float = Field(default=0.99, ge=0.0, le=1.0)
     gae_lambda: float = Field(default=0.95, ge=0.0, le=1.0)
     clip_coef: float = Field(default=0.2, ge=0.0)
@@ -81,13 +77,6 @@ class PPOConfig(BaseModel):
     recompute_advantages_each_epoch: bool = False
     compile_mode: CompileMode | None = None
     dtype: TrainingDType = "float32"
-    optimizer: OptimizerName = "adamw"
-    learning_rate: float = Field(default=3e-4, gt=0.0)
-    adamw_eps: float = Field(default=1e-5, gt=0.0)
-    weight_decay: float = Field(default=0.0, ge=0.0)
-    muon_lr: float | None = Field(default=None, gt=0.0)
-    muon_weight_decay: float = Field(default=0.1, ge=0.0)
-    muon_momentum: float = Field(default=0.95, ge=0.0, lt=1.0)
 
 
 class ModelForwardFn(Protocol):
@@ -286,6 +275,7 @@ class PPOTrainer:
         env: VectorizedEnv,
         model: BaseModelAPI,
         optimizer: torch.optim.Optimizer | CompositeOptimizer | None = None,
+        optimizer_config: OptimizerConfig | None = None,
         config: PPOConfig,
         device: torch.device,
     ) -> None:
@@ -302,7 +292,12 @@ class PPOTrainer:
             config.compile_mode,
         )
         self._ppo_loss = _compile_ppo_loss(config.compile_mode)
-        self.optimizer = optimizer or create_optimizer(self.model, config)
+        if optimizer is not None:
+            self.optimizer = optimizer
+        elif optimizer_config is not None:
+            self.optimizer = create_optimizer(self.model, optimizer_config)
+        else:
+            raise ValueError("optimizer or optimizer_config is required")
         self.config = config
         self.device = device
         self._obs = _obs_to_device(env.reset(), device)
@@ -396,7 +391,7 @@ class PPOTrainer:
             int(
                 self.config.replay_ratio
                 * self.config.n_envs
-                / self.config.segments_per_minibatch
+                / self.config.segment_sampling.segments_per_minibatch
             ),
         )
         should_stop = False
@@ -428,13 +423,7 @@ class PPOTrainer:
                 )
                 sample = sample_segments(
                     sampling_advantages,
-                    SegmentSamplingConfig(
-                        sampling=self.config.segment_sampling,
-                        segments_per_minibatch=self.config.segments_per_minibatch,
-                        prio_alpha=self.config.prio_alpha,
-                        prio_beta=self.config.prio_beta,
-                        prio_eps=self.config.prio_eps,
-                    ),
+                    self.config.segment_sampling,
                 )
                 sampling_metrics.append(
                     segment_sampling_metrics(sampling_advantages, sample)

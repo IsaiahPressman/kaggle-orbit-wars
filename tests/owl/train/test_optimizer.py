@@ -2,7 +2,7 @@ import pytest
 import torch
 from owl.model import BaseModelAPI, ModelActions, ModelEvaluation, ModelOutput
 from owl.rl import ObsBatch
-from owl.train import CompositeOptimizer, PPOConfig, ppo
+from owl.train import AdamWConfig, CompositeOptimizer, MuonConfig, ppo
 from torch import nn
 
 
@@ -42,11 +42,11 @@ def test_create_optimizer_supports_adamw_and_muon() -> None:
 
     adamw = ppo.create_optimizer(
         adamw_model,
-        PPOConfig(optimizer="adamw", learning_rate=3e-4, weight_decay=0.01),
+        AdamWConfig(learning_rate=3e-4, weight_decay=0.01),
     )
     muon = ppo.create_optimizer(
         muon_model,
-        PPOConfig(optimizer="muon", learning_rate=3e-4, muon_lr=0.02),
+        MuonConfig(learning_rate=3e-4, muon_lr=0.02),
     )
 
     assert isinstance(adamw, torch.optim.AdamW)
@@ -72,7 +72,7 @@ def test_composite_optimizer_round_trips_nested_state_dict() -> None:
     model = OptimizerTestModel()
     optimizer = ppo.create_optimizer(
         model,
-        PPOConfig(optimizer="muon", learning_rate=3e-4, muon_lr=0.02),
+        MuonConfig(learning_rate=3e-4, muon_lr=0.02),
     )
     assert isinstance(optimizer, CompositeOptimizer)
 
@@ -83,7 +83,7 @@ def test_composite_optimizer_round_trips_nested_state_dict() -> None:
 
     replacement = ppo.create_optimizer(
         model,
-        PPOConfig(optimizer="muon", learning_rate=3e-4, muon_lr=0.02),
+        MuonConfig(learning_rate=3e-4, muon_lr=0.02),
     )
     assert isinstance(replacement, CompositeOptimizer)
     replacement.load_state_dict(state)
@@ -93,7 +93,7 @@ def test_composite_optimizer_round_trips_nested_state_dict() -> None:
 
 def test_create_optimizer_rejects_unknown_optimizer_contract() -> None:
     model = OptimizerTestModel()
-    config = PPOConfig.model_construct(optimizer="sgd")
+    config = AdamWConfig.model_construct(optimizer="sgd")
 
     with pytest.raises(AssertionError, match="Expected code to be unreachable"):
         ppo.create_optimizer(model, config)

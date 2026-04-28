@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from pydantic import BaseModel, Field
 
+from owl.config import BaseConfig
 from owl.rs import RlVecEnv as _RustRlVecEnv
 from owl.rs import encode_obs_v1, rl_obs_constants
 
@@ -23,7 +24,7 @@ from owl.rs import encode_obs_v1, rl_obs_constants
 ) = rl_obs_constants()
 
 
-class ObsV1Config(BaseModel):
+class ObsV1Config(BaseConfig):
     obs_spec: Literal["obs_v1"] = "obs_v1"
     max_entities: int = Field(default=DEFAULT_MAX_ENTITIES, gt=MAX_PLANETS + MAX_COMETS)
 
@@ -60,7 +61,7 @@ class ObsV1Config(BaseModel):
         return GLOBAL_CHANNELS
 
 
-class ActionPureConfig(BaseModel):
+class ActionPureConfig(BaseConfig):
     """Pure action spec.
 
     Sharp edge: the action entity axis is ordered as all planet tokens first,
@@ -76,6 +77,14 @@ type ObsConfig = Annotated[ObsV1Config, Field(discriminator="obs_spec")]
 type ActionConfig = Annotated[ActionPureConfig, Field(discriminator="action_spec")]
 
 OUTER_PLAYER_SLOTS = 4
+
+
+class EnvConfig(BaseConfig):
+    n_envs: int = Field(default=1, ge=1)
+    obs_spec: ObsConfig = Field(default_factory=ObsV1Config)
+    action_spec: ActionConfig = Field(default_factory=ActionPureConfig)
+    two_player_weight: float = Field(default=0.5, ge=0.0, le=1.0)
+    pin_memory: bool = True
 
 
 class ObsBatch(BaseModel):

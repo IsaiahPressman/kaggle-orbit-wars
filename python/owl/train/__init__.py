@@ -1,7 +1,15 @@
-from owl.train.advantages import AdvantageMode, compute_advantages, compute_gae
-from owl.train.metrics import explained_variance
-from owl.train.optimizer import CompositeOptimizer, OptimizerName, create_optimizer
-from owl.train.ppo import (
+from .advantages import AdvantageMode, compute_advantages, compute_gae
+from .config import FullConfig
+from .metrics import explained_variance
+from .optimizer import (
+    AdamWConfig,
+    CompositeOptimizer,
+    MuonConfig,
+    OptimizerConfig,
+    OptimizerName,
+    create_optimizer,
+)
+from .ppo import (
     CompileMode,
     PPOConfig,
     PPOLossMetrics,
@@ -11,7 +19,7 @@ from owl.train.ppo import (
     ppo_loss,
     validate_ppo_loss_inputs,
 )
-from owl.train.sampling import (
+from .sampling import (
     SegmentSample,
     SegmentSampling,
     SegmentSamplingConfig,
@@ -21,12 +29,16 @@ from owl.train.sampling import (
     sample_segments_uniform,
     segment_sampling_metrics,
 )
-from owl.train.utils import TrainingDType, assert_finite, autocast_context
+from .utils import TrainingDType, assert_finite, autocast_context
 
 __all__ = [
+    "AdamWConfig",
     "AdvantageMode",
     "CompileMode",
     "CompositeOptimizer",
+    "FullConfig",
+    "MuonConfig",
+    "OptimizerConfig",
     "OptimizerName",
     "PPOConfig",
     "PPOLossMetrics",

@@ -263,7 +263,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         config=ppo.PPOConfig(
             horizon=5,
             n_envs=4,
-            segments_per_minibatch=2,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=2),
             update_epochs=2,
             gamma=0.9,
             gae_lambda=0.95,
@@ -305,7 +305,11 @@ def test_trainer_masks_inactive_player_slots() -> None:
         env=env,
         model=model,
         optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
-        config=ppo.PPOConfig(horizon=3, n_envs=3, segments_per_minibatch=1),
+        config=ppo.PPOConfig(
+            horizon=3,
+            n_envs=3,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+        ),
         device=torch.device("cpu"),
     )
 
@@ -336,7 +340,7 @@ def test_trainer_compiles_model_when_configured(
         config=ppo.PPOConfig(
             horizon=2,
             n_envs=2,
-            segments_per_minibatch=1,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
             compile_mode="default",
         ),
         device=torch.device("cpu"),
@@ -416,7 +420,7 @@ def test_trainer_recomputes_advantages_each_epoch(
             horizon=2,
             n_envs=1,
             update_epochs=2,
-            segments_per_minibatch=1,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
             recompute_advantages_each_epoch=True,
         ),
         device=torch.device("cpu"),
@@ -493,7 +497,7 @@ def test_trainer_vtrace_recomputes_current_policy_ratios(
             horizon=2,
             n_envs=1,
             update_epochs=2,
-            segments_per_minibatch=1,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
             advantage_mode="gae_vtrace",
         ),
         device=torch.device("cpu"),
@@ -514,7 +518,11 @@ def test_trainer_overwrites_dones_when_envs_terminate_inside_rollout() -> None:
         env=env,
         model=model,
         optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
-        config=ppo.PPOConfig(horizon=4, n_envs=3, segments_per_minibatch=1),
+        config=ppo.PPOConfig(
+            horizon=4,
+            n_envs=3,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+        ),
         device=torch.device("cpu"),
     )
 

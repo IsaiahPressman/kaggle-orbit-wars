@@ -4,19 +4,20 @@ from dataclasses import dataclass
 from typing import Literal, assert_never
 
 import torch
+from pydantic import Field
 
+from owl.config import BaseConfig
 from owl.train.utils import assert_finite, require_2d
 
 SegmentSampling = Literal["uniform", "advantage_priority"]
 
 
-@dataclass(frozen=True)
-class SegmentSamplingConfig:
+class SegmentSamplingConfig(BaseConfig):
     sampling: SegmentSampling = "uniform"
-    segments_per_minibatch: int = 8
-    prio_alpha: float = 0.0
-    prio_beta: float = 0.2
-    prio_eps: float = 1e-6
+    segments_per_minibatch: int = Field(default=1, ge=1)
+    prio_alpha: float = Field(default=0.0, ge=0.0)
+    prio_beta: float = Field(default=0.2, ge=0.0)
+    prio_eps: float = Field(default=1e-6, gt=0.0)
 
 
 @dataclass(frozen=True)

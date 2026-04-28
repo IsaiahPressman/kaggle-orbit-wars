@@ -1,37 +1,38 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from typing import Literal, Protocol, assert_never, overload
+from typing import Annotated, Literal, assert_never, overload
 
 import torch
+from pydantic import Field
 from torch import nn
 
+from owl.config import BaseConfig
 from owl.model import BaseModelAPI
 
 OptimizerName = Literal["adamw", "muon"]
 
 
-class OptimizerConfig(Protocol):
-    @property
-    def optimizer(self) -> OptimizerName: ...
+class AdamWConfig(BaseConfig):
+    optimizer: Literal["adamw"] = "adamw"
+    learning_rate: float = Field(default=3e-4, gt=0.0)
+    adamw_eps: float = Field(default=1e-5, gt=0.0)
+    weight_decay: float = Field(default=0.0, ge=0.0)
 
-    @property
-    def learning_rate(self) -> float: ...
 
-    @property
-    def adamw_eps(self) -> float: ...
+class MuonConfig(BaseConfig):
+    optimizer: Literal["muon"] = "muon"
+    learning_rate: float = Field(default=3e-4, gt=0.0)
+    adamw_eps: float = Field(default=1e-5, gt=0.0)
+    weight_decay: float = Field(default=0.0, ge=0.0)
+    muon_lr: float | None = Field(default=None, gt=0.0)
+    muon_weight_decay: float = Field(default=0.1, ge=0.0)
+    muon_momentum: float = Field(default=0.95, ge=0.0, lt=1.0)
 
-    @property
-    def weight_decay(self) -> float: ...
 
-    @property
-    def muon_lr(self) -> float | None: ...
-
-    @property
-    def muon_weight_decay(self) -> float: ...
-
-    @property
-    def muon_momentum(self) -> float: ...
+type OptimizerConfig = Annotated[
+    AdamWConfig | MuonConfig, Field(discriminator="optimizer")
+]
 
 
 class CompositeOptimizer(torch.optim.Optimizer):
