@@ -320,6 +320,66 @@ def test_obs_to_device_clones_cpu_observation_buffers() -> None:
         assert getattr(copied, field).data_ptr() != getattr(obs, field).data_ptr()
 
 
+def test_obs_to_device_uses_non_blocking_for_pinned_cuda_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 1)
+    obs = _obs_batch(n_envs=2, obs_spec=obs_spec)
+    non_blocking_args: list[bool] = []
+
+    def fake_to(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        del args
+        non_blocking_args.append(kwargs["non_blocking"])
+        return self
+
+    monkeypatch.setattr(torch.Tensor, "is_pinned", lambda _self: True)
+    monkeypatch.setattr(torch.Tensor, "to", fake_to)
+
+    ppo._obs_to_device(obs, torch.device("cuda"))
+
+    assert non_blocking_args == [True] * len(ppo._OBS_FIELDS)
+
+
+def test_obs_to_device_blocks_for_unpinned_cuda_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 1)
+    obs = _obs_batch(n_envs=2, obs_spec=obs_spec)
+    non_blocking_args: list[bool] = []
+
+    def fake_to(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        del args
+        non_blocking_args.append(kwargs["non_blocking"])
+        return self
+
+    monkeypatch.setattr(torch.Tensor, "to", fake_to)
+
+    ppo._obs_to_device(obs, torch.device("cuda"))
+
+    assert non_blocking_args == [False] * len(ppo._OBS_FIELDS)
+
+
+def test_actions_to_cpu_transfer_policy_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actions = _actions(n_envs=2)
+    non_blocking_args: list[bool] = []
+
+    def fake_to(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        del args
+        non_blocking_args.append(kwargs["non_blocking"])
+        return self
+
+    monkeypatch.setattr(torch.Tensor, "to", fake_to)
+
+    ppo._actions_to_cpu(actions)
+    ppo._actions_to_cpu(actions, non_blocking=True)
+
+    assert non_blocking_args == [False] * len(ppo._ACTION_FIELDS) + [True] * len(
+        ppo._ACTION_FIELDS
+    )
+
+
 def test_collect_rollout_keeps_pre_step_obs_with_reused_cpu_buffers() -> None:
     torch.manual_seed(4)
     env = ReusingObservationEnv(n_envs=2)

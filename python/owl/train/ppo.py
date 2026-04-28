@@ -132,6 +132,8 @@ class PPOUpdateResult:
 
 @dataclass(frozen=True)
 class PPORolloutSegments:
+    """Rollout tensors converted from collection layout [T, N, ...] to [N, T, ...]."""
+
     obs: ObsBatch
     actions: ModelActions
     logp: torch.Tensor
@@ -141,6 +143,8 @@ class PPORolloutSegments:
 
 
 class PPORolloutBuffer:
+    """Collect rollouts in time-major layout [T, N, ...]."""
+
     def __init__(
         self,
         *,
@@ -262,6 +266,7 @@ class PPORolloutBuffer:
         self.dones[step].copy_(dones)
 
     def segment_major(self) -> PPORolloutSegments:
+        """Return contiguous segment-major/time-second rollout tensors [N, T, ...]."""
         return PPORolloutSegments(
             obs=_obs_segment_major(self.obs),
             actions=_actions_segment_major(self.actions),
@@ -363,8 +368,18 @@ class PPOTrainer:
                     output = self._model_forward(self._obs)
                 actions = _output_actions(output)
                 next_obs, rewards, dones = _step_env(self.env, actions)
-                rewards = rewards.to(self.device)
-                dones = dones.to(self.device)
+                non_blocking_step_transfer = _can_non_blocking_copy_to_device(
+                    (rewards, dones),
+                    self.device,
+                )
+                rewards = rewards.to(
+                    self.device,
+                    non_blocking=non_blocking_step_transfer,
+                )
+                dones = dones.to(
+                    self.device,
+                    non_blocking=non_blocking_step_transfer,
+                )
                 self.rollout.write_step(
                     step,
                     obs=self._obs,
@@ -967,20 +982,54 @@ def _actions_index(actions: ModelActions, idx: torch.Tensor) -> ModelActions:
     )
 
 
-def _obs_to_device(obs: ObsBatch, device: torch.device) -> ObsBatch:
-    if device.type == "cpu":
-        return ObsBatch(
-            **{field: (getattr(obs, field).to(device).clone()) for field in _OBS_FIELDS}
-        )
-
-    return ObsBatch(
-        **{field: (getattr(obs, field).to(device)) for field in _OBS_FIELDS}
+def _can_non_blocking_copy_to_device(
+    tensors: tuple[torch.Tensor, ...],
+    device: torch.device,
+) -> bool:
+    return device.type == "cuda" and all(
+        tensor.device.type == "cpu" and tensor.is_pinned() for tensor in tensors
     )
 
 
-def _actions_to_cpu(actions: ModelActions) -> ModelActions:
+def _obs_to_device(
+    obs: ObsBatch,
+    device: torch.device,
+    *,
+    non_blocking: bool | None = None,
+) -> ObsBatch:
+    if non_blocking is None:
+        non_blocking = _can_non_blocking_copy_to_device(
+            tuple(getattr(obs, field) for field in _OBS_FIELDS),
+            device,
+        )
+    if device.type == "cpu":
+        return ObsBatch(
+            **{
+                field: (
+                    getattr(obs, field).to(device, non_blocking=non_blocking).clone()
+                )
+                for field in _OBS_FIELDS
+            }
+        )
+
+    return ObsBatch(
+        **{
+            field: getattr(obs, field).to(device, non_blocking=non_blocking)
+            for field in _OBS_FIELDS
+        }
+    )
+
+
+def _actions_to_cpu(
+    actions: ModelActions,
+    *,
+    non_blocking: bool = False,
+) -> ModelActions:
     return ModelActions(
-        **{field: getattr(actions, field).cpu() for field in _ACTION_FIELDS}
+        **{
+            field: getattr(actions, field).to("cpu", non_blocking=non_blocking)
+            for field in _ACTION_FIELDS
+        }
     )
 
 
