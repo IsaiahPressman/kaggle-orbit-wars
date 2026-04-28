@@ -29,14 +29,13 @@ without changing callers that validate config dictionaries through the union.
 | `n_heads` | `8` | Attention heads; must evenly divide `embed_dim`. |
 | `mlp_ratio` | `4.0` | FFN hidden width multiplier. |
 | `activation` | `"gelu"` | FFN activation: `"gelu"`, `"silu"`, or `"swiglu"`. |
-| `n_action_mixtures` | `4` | Mixture components for launch angle and fleet-size event heads. Deprecated config alias: `n_angle_mixtures`. |
+| `n_action_mixtures` | `4` | Mixture components for launch angle and fleet-size event heads. |
 | `kappa_min` | `1e-3` | Lower bound added to von Mises concentration. |
 | `kappa_max` | `200.0` | Optional cap for von Mises concentration. |
 | `tau_min` | `1e-3` | Lower bound added to beta-binomial concentration. |
 | `alpha_beta_eps` | `1e-4` | Epsilon added to beta-binomial alpha and beta. |
 | `dir_eps` | `1e-6` | Epsilon for normalizing raw angle direction vectors. |
 | `max_ship_normalizer` | `250.0` | Normalizer for ship-budget actor features. |
-| `entropy_ship_support_cap` | `250` | Maximum ship-count support enumerated for truncated entropy estimates. |
 
 ## Input Encoding
 
@@ -61,8 +60,8 @@ giving:
 ```
 
 The planet, comet, fleet, and `still_playing` masks are concatenated into one
-token mask. Masked tokens are packed out before the transformer stack and
-reconstructed after the final transformer block.
+token mask. Masked tokens are excluded from attention keys and are zeroed in
+the returned hidden states.
 
 ## Transformer Trunk
 
@@ -76,11 +75,11 @@ The shared trunk is a stack of pre-norm transformer blocks configured by:
 `n_heads` must evenly divide `embed_dim`. The default activation is GELU. LayerNorm
 is used for normalization, and no dropout is applied.
 
-CPU execution uses torch scaled-dot-product attention. CUDA execution uses
-`flash-attn` when it is installed and the attention tensors are fp16/bf16;
-otherwise it falls back to the same per-sequence scaled-dot-product attention
-path. Token packing metadata is built once before the transformer stack and
-reused by each attention block.
+CPU execution uses torch scaled-dot-product attention over regular
+`(batch, seq, dim)` tensors with the token mask passed as the attention key
+mask. CUDA execution uses packed varlen `flash-attn` when it is installed and
+the attention tensors are fp16/bf16; otherwise it uses the same regular-shaped
+scaled-dot-product attention path without packing and unpacking activations.
 
 Attention uses separate `q`, `k`, and `v` linear layers instead of one packed
 QKV projection. SwiGLU also uses separate gate and value projections. This keeps
@@ -93,13 +92,8 @@ Linear layers use orthogonal initialization with zero biases. Input projections
 use unit gain, hidden projections use ReLU-style gain, and transformer residual
 output projections are scaled by `1 / sqrt(2 * depth)`.
 
-Actor output heads use small `0.01` gain so initial policy logits and
-distribution parameters stay near their priors. The launch/continue gate starts
-with logit `-2`, biasing each active lane toward stopping while preserving
-nonzero exploration probability. Direction mixture biases are spread evenly
-around the circle. The critic head uses unit gain. The angle concentration
-starts at `kappa ~= 1`, while size fraction and concentration start at an
-approximately uniform beta-binomial prior with `alpha ~= beta ~= 1`.
+Actor output heads use small `0.01` gain with zero biases, matching the normal
+RL policy-layer initialization. The critic head uses unit gain.
 
 ## Critic
 
@@ -182,15 +176,10 @@ The model returns decomposed action tensors:
 - `angle`: float32, `(batch, 4, 44, max_per_planet_launches)`
 - `ships`: int64, `(batch, 4, 44, max_per_planet_launches)`
 
-It also returns decomposed log-prob and entropy tensors for launch gates and
-angle/size events, plus per-player action-entity totals with shape
-`(batch, 4, 44)`.
-
-The angle/size entropy is an augmented latent-mixture entropy estimate: mixture
-label entropy plus expected component entropy. It is not the exact marginal
-entropy of the emitted action when mixture components overlap. Ship-count
-entropy enumerates support only up to `entropy_ship_support_cap`; residual ship
-budgets above that cap use truncated support.
+It also returns decomposed log-prob tensors and sampled entropy estimates for
+launch gates and angle/size events, plus per-player action-entity totals with
+shape `(batch, 4, 44)`. Entropy is estimated from the replayed action as
+`-log_prob(action)`.
 
 ## Log-Prob Replay
 

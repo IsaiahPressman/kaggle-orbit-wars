@@ -6,12 +6,12 @@ from typing import Annotated, Literal, Self, assert_never, cast
 
 import torch
 import torch.nn.functional as F
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import Field, model_validator
 from torch import nn
 from torch.distributions import Bernoulli, Beta, Binomial, Categorical, VonMises
 
 from owl.config import BaseConfig
-from owl.model.attn import varlen_attention
+from owl.model.attn import use_flash_attn, varlen_attention
 from owl.model.base import (
     BaseModelAPI,
     ModelActionEntropies,
@@ -35,9 +35,6 @@ _HIDDEN_INIT_GAIN = math.sqrt(2.0)
 _INPUT_INIT_GAIN = 1.0
 _ACTOR_HEAD_INIT_GAIN = 0.01
 _CRITIC_HEAD_INIT_GAIN = 1.0
-_INITIAL_CONTINUE_LOGIT = -2.0
-_INITIAL_KAPPA = 1.0
-_INITIAL_SIZE_CONCENTRATION = 2.0
 
 
 class StatelessTransformerV1Config(BaseConfig):
@@ -49,28 +46,19 @@ class StatelessTransformerV1Config(BaseConfig):
     n_heads: int = Field(default=8, ge=1)
     mlp_ratio: float = Field(default=4.0, gt=0.0)
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
-    n_action_mixtures: int = Field(
-        default=4,
-        ge=1,
-        validation_alias=AliasChoices("n_action_mixtures", "n_angle_mixtures"),
-    )
+    n_action_mixtures: int = Field(default=4, ge=1)
     kappa_min: float = Field(default=1e-3, gt=0.0)
     kappa_max: float | None = Field(default=200.0, gt=0.0)
     tau_min: float = Field(default=1e-3, gt=0.0)
     alpha_beta_eps: float = Field(default=1e-4, gt=0.0)
     dir_eps: float = Field(default=1e-6, gt=0.0)
     max_ship_normalizer: float = Field(default=250.0, gt=0.0)
-    entropy_ship_support_cap: int = Field(default=250, ge=1)
 
     @model_validator(mode="after")
     def _validate_attention_shape(self) -> Self:
         if self.embed_dim % self.n_heads != 0:
             raise ValueError("n_heads must evenly divide embed_dim")
         return self
-
-    @property
-    def n_angle_mixtures(self) -> int:
-        return self.n_action_mixtures
 
 
 type ModelConfig = Annotated[
@@ -157,21 +145,6 @@ class StatelessTransformerV1(BaseModelAPI):
                 else _ACTOR_HEAD_INIT_GAIN
             )
             _init_linear(layer, gain=gain)
-        _init_direction_bias(
-            self.actor_heads.dir_head,
-            mixtures=self.config.n_action_mixtures,
-        )
-        _init_bias(self.actor_heads.continue_head, _INITIAL_CONTINUE_LOGIT)
-        _init_bias(
-            self.actor_heads.kappa_head,
-            _softplus_inverse_for_minimum_target(_INITIAL_KAPPA, self.config.kappa_min),
-        )
-        _init_bias(
-            self.actor_heads.size_conc_head,
-            _softplus_inverse_for_minimum_target(
-                _INITIAL_SIZE_CONCENTRATION, self.config.tau_min
-            ),
-        )
 
     def get_input_layers(self) -> tuple[nn.Module, ...]:
         return (
@@ -218,11 +191,11 @@ class StatelessTransformerV1(BaseModelAPI):
             dim=1,
         )
         x = torch.cat((planet_x, comet_x, fleet_x, player_tokens), dim=1)
-        packed_x, packed = pack_sequence(x, token_mask)
-
+        packed = build_packed_sequence(token_mask)
         for block in self.blocks:
-            packed_x = block(packed_x, packed)
-        x = unpack_sequence(self.final_norm(packed_x), packed)
+            x = block(x, token_mask, packed)
+        x = self.final_norm(x)
+        x = x.masked_fill(~token_mask.unsqueeze(-1), 0.0)
         return x, token_mask
 
     def forward(
@@ -393,12 +366,8 @@ class StatelessTransformerV1(BaseModelAPI):
                 remaining,
                 event_mask,
             )
-            launch_entropy, event_entropy = masked_action_entropy_from_params(
-                params,
-                remaining,
-                active,
-                max_ship_support=self.config.entropy_ship_support_cap,
-            )
+            launch_entropy = -launch_log_prob
+            event_entropy = -event_log_prob
 
             launch_slots.append(launch)
             angle_slots.append(angle)
@@ -535,12 +504,8 @@ class StatelessTransformerV1(BaseModelAPI):
                 remaining,
                 event_mask,
             )
-            launch_entropy, event_entropy = masked_action_entropy_from_params(
-                params,
-                remaining,
-                active,
-                max_ship_support=self.config.entropy_ship_support_cap,
-            )
+            launch_entropy = -launch_log_prob
+            event_entropy = -event_log_prob
 
             launch_log_slots.append(launch_log_prob)
             event_log_slots.append(event_log_prob)
@@ -710,9 +675,15 @@ class TransformerBlock(nn.Module):
         self.norm2 = nn.LayerNorm(config.embed_dim)
         self.mlp = FeedForward(config)
 
-    def forward(self, x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x), packed)
-        return x + self.mlp(self.norm2(x))
+    def forward(
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor,
+        packed: PackedSequence,
+    ) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x), token_mask, packed)
+        x = x + self.mlp(self.norm2(x))
+        return x.masked_fill(~token_mask.unsqueeze(-1), 0.0)
 
 
 class FeedForward(nn.Module):
@@ -753,18 +724,40 @@ class MultiHeadSelfAttention(nn.Module):
         self.v = nn.Linear(config.embed_dim, config.embed_dim)
         self.out = nn.Linear(config.embed_dim, config.embed_dim)
 
-    def forward(self, x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:
-        q = self.q(x).view(x.shape[0], self.n_heads, self.head_dim)
-        k = self.k(x).view(x.shape[0], self.n_heads, self.head_dim)
-        v = self.v(x).view(x.shape[0], self.n_heads, self.head_dim)
+    def forward(
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor,
+        packed: PackedSequence,
+    ) -> torch.Tensor:
+        batch_size, seq_len, _ = x.shape
+        q = self.q(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
+        k = self.k(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
+        v = self.v(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
+
+        if not use_flash_attn(q):
+            attn = F.scaled_dot_product_attention(
+                q.transpose(1, 2),
+                k.transpose(1, 2),
+                v.transpose(1, 2),
+                attn_mask=token_mask[:, None, None, :],
+                dropout_p=0.0,
+            )
+            attn = attn.transpose(1, 2)
+            return self.out(attn.reshape(batch_size, seq_len, -1))
+
+        q_packed = pack_tensor(q, packed)
+        k_packed = pack_tensor(k, packed)
+        v_packed = pack_tensor(v, packed)
         attn = varlen_attention(
-            q,
-            k,
-            v,
+            q_packed,
+            k_packed,
+            v_packed,
             cu_seqlens=packed.cu_seqlens,
             max_seqlen=packed.max_seqlen,
         )
-        return self.out(attn.reshape(x.shape[0], self.n_heads * self.head_dim))
+        attn = unpack_sequence(attn, packed)
+        return self.out(attn.reshape(batch_size, seq_len, -1))
 
 
 class MinGRUStack(nn.Module):
@@ -876,41 +869,14 @@ def _init_linear(module: nn.Linear, *, gain: float) -> None:
         nn.init.zeros_(module.bias)
 
 
-def _init_bias(module: nn.Linear, value: float) -> None:
-    if module.bias is None:
-        raise ValueError("expected linear layer to have a bias")
-    nn.init.constant_(module.bias, value)
-
-
-def _init_direction_bias(module: nn.Linear, *, mixtures: int) -> None:
-    if module.bias is None:
-        raise ValueError("expected direction head to have a bias")
-    angles = torch.arange(
-        mixtures,
-        dtype=module.bias.dtype,
-        device=module.bias.device,
-    )
-    angles = angles * (2.0 * math.pi / mixtures)
-    directions = torch.stack((torch.cos(angles), torch.sin(angles)), dim=-1)
-    with torch.no_grad():
-        module.bias.copy_(directions.reshape(-1))
-
-
-def _softplus_inverse_for_minimum_target(target: float, minimum: float) -> float:
-    return math.log(math.expm1(max(target - minimum, 1e-6)))
-
-
-def pack_sequence(
-    x: torch.Tensor,
-    token_mask: torch.Tensor,
-) -> tuple[torch.Tensor, PackedSequence]:
-    batch_size, padded_seq_len, _ = x.shape
+def build_packed_sequence(token_mask: torch.Tensor) -> PackedSequence:
+    batch_size, padded_seq_len = token_mask.shape
     flat_mask = token_mask.reshape(-1)
     indices = flat_mask.nonzero(as_tuple=False).flatten()
     seqlens = token_mask.sum(dim=1, dtype=torch.int32)
     if not seqlens.gt(0).all():
         raise ValueError("each batch row must have at least one unmasked token")
-    packed = PackedSequence(
+    return PackedSequence(
         indices=indices,
         cu_seqlens=F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)),
         seqlens=seqlens,
@@ -918,20 +884,33 @@ def pack_sequence(
         batch_size=batch_size,
         padded_seq_len=padded_seq_len,
     )
-    return x.reshape(batch_size * padded_seq_len, -1)[indices], packed
+
+
+def pack_tensor(x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:
+    return x.reshape(packed.batch_size * packed.padded_seq_len, *x.shape[2:])[
+        packed.indices
+    ]
+
+
+def pack_sequence(
+    x: torch.Tensor,
+    token_mask: torch.Tensor,
+) -> tuple[torch.Tensor, PackedSequence]:
+    packed = build_packed_sequence(token_mask)
+    return pack_tensor(x, packed), packed
 
 
 def unpack_sequence(x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:
     out = torch.zeros(
         (
             packed.batch_size * packed.padded_seq_len,
-            x.shape[-1],
+            *x.shape[1:],
         ),
         dtype=x.dtype,
         device=x.device,
     )
     out[packed.indices] = x
-    return out.view(packed.batch_size, packed.padded_seq_len, x.shape[-1])
+    return out.view(packed.batch_size, packed.padded_seq_len, *x.shape[1:])
 
 
 def masked_softmax(
@@ -986,107 +965,6 @@ def masked_event_log_prob_from_params(
         event_log_prob,
         torch.zeros_like(event_log_prob),
     )
-
-
-def masked_action_entropy_from_params(
-    params: PolicyParams,
-    residual_budget: torch.Tensor,
-    active: torch.Tensor,
-    *,
-    max_ship_support: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    params = params.to_distribution_dtype()
-    launch_entropy = binary_entropy_from_logits(params.continue_logits)
-    event_entropy = event_entropy_from_params(
-        params,
-        residual_budget.clamp_min(1),
-        max_ship_support=max_ship_support,
-    )
-    launch_probability = torch.sigmoid(params.continue_logits)
-    return (
-        torch.where(active, launch_entropy, torch.zeros_like(launch_entropy)),
-        torch.where(
-            active,
-            launch_probability * event_entropy,
-            torch.zeros_like(event_entropy),
-        ),
-    )
-
-
-def binary_entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
-    probability = torch.sigmoid(logits)
-    return F.binary_cross_entropy_with_logits(logits, probability, reduction="none")
-
-
-def event_entropy_from_params(
-    params: PolicyParams,
-    residual_budget: torch.Tensor,
-    *,
-    max_ship_support: int,
-) -> torch.Tensor:
-    """Approximate entropy of the augmented latent mixture event.
-
-    This is H(component) plus expected component entropy, not the exact
-    marginal entropy of the emitted angle/ship event when components overlap.
-    """
-    mix_probabilities = torch.softmax(params.mix_logits, dim=-1)
-    mixture_entropy = -(mix_probabilities * params.log_w).sum(dim=-1)
-    component_entropy = von_mises_entropy(params.kappa) + beta_binomial_entropy(
-        residual_budget,
-        params.alpha,
-        params.beta,
-        max_ship_support=max_ship_support,
-    )
-    return mixture_entropy + (mix_probabilities * component_entropy).sum(dim=-1)
-
-
-def von_mises_entropy(kappa: torch.Tensor) -> torch.Tensor:
-    log_i0 = torch.log(torch.special.i0e(kappa)) + kappa
-    i1_over_i0 = torch.special.i1e(kappa) / torch.special.i0e(kappa)
-    return math.log(2.0 * math.pi) + log_i0 - kappa * i1_over_i0
-
-
-def beta_binomial_entropy(
-    residual_budget: torch.Tensor,
-    alpha: torch.Tensor,
-    beta: torch.Tensor,
-    *,
-    max_ship_support: int,
-) -> torch.Tensor:
-    """Entropy contribution over a capped prefix of ship-count support.
-
-    For residual budgets larger than ``max_ship_support`` the tail is
-    intentionally unenumerated, making this a truncated-support entropy.
-    """
-    support = torch.arange(
-        1,
-        max_ship_support + 1,
-        dtype=alpha.dtype,
-        device=alpha.device,
-    )
-    successes = support - 1.0
-    trials = (residual_budget - 1).clamp_min(0).unsqueeze(-1).unsqueeze(-1)
-    successes = successes.view(*((1,) * residual_budget.ndim), max_ship_support, 1)
-    alpha = alpha.unsqueeze(-2)
-    beta = beta.unsqueeze(-2)
-    valid = successes <= trials
-    successes_safe = torch.minimum(successes, trials)
-    log_comb = (
-        torch.lgamma(trials + 1.0)
-        - torch.lgamma(successes_safe + 1.0)
-        - torch.lgamma(trials - successes_safe + 1.0)
-    )
-    log_prob = (
-        log_comb
-        + log_beta(successes_safe + alpha, trials - successes_safe + beta)
-        - log_beta(alpha, beta)
-    )
-    log_prob = torch.where(valid, log_prob, torch.full_like(log_prob, -torch.inf))
-    probabilities = torch.where(valid, log_prob.exp(), torch.zeros_like(log_prob))
-    entropy = -(
-        probabilities * torch.where(valid, log_prob, torch.zeros_like(log_prob))
-    )
-    return entropy.sum(dim=-2)
 
 
 def _per_player_action_entity_log_prob(
