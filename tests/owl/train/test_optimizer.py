@@ -2,7 +2,15 @@ import pytest
 import torch
 from owl.model import BaseModelAPI, ModelActions, ModelEvaluation, ModelOutput
 from owl.rl import ObsBatch
-from owl.train import AdamWConfig, CompositeOptimizer, MuonConfig, ppo
+from owl.train import (
+    AdamWConfig,
+    CompositeOptimizer,
+    LRScheduleConfig,
+    MuonConfig,
+    create_lr_scheduler,
+    create_optimizer,
+    lr_multiplier,
+)
 from torch import nn
 
 
@@ -40,11 +48,11 @@ def test_create_optimizer_supports_adamw_and_muon() -> None:
     adamw_model = OptimizerTestModel()
     muon_model = OptimizerTestModel()
 
-    adamw = ppo.create_optimizer(
+    adamw = create_optimizer(
         adamw_model,
         AdamWConfig(learning_rate=3e-4, weight_decay=0.01),
     )
-    muon = ppo.create_optimizer(
+    muon = create_optimizer(
         muon_model,
         MuonConfig(learning_rate=3e-4, muon_lr=0.02),
     )
@@ -53,7 +61,6 @@ def test_create_optimizer_supports_adamw_and_muon() -> None:
     assert adamw.defaults["lr"] == pytest.approx(3e-4)
     assert adamw.defaults["weight_decay"] == pytest.approx(0.01)
     assert isinstance(muon, CompositeOptimizer)
-    assert isinstance(muon, torch.optim.Optimizer)
     assert any(isinstance(inner, torch.optim.Muon) for inner in muon.optimizers)
     assert any(isinstance(inner, torch.optim.AdamW) for inner in muon.optimizers)
     muon_param_ids = {
@@ -70,7 +77,7 @@ def test_create_optimizer_supports_adamw_and_muon() -> None:
 
 def test_composite_optimizer_round_trips_nested_state_dict() -> None:
     model = OptimizerTestModel()
-    optimizer = ppo.create_optimizer(
+    optimizer = create_optimizer(
         model,
         MuonConfig(learning_rate=3e-4, muon_lr=0.02),
     )
@@ -81,7 +88,7 @@ def test_composite_optimizer_round_trips_nested_state_dict() -> None:
     optimizer.step()
     state = optimizer.state_dict()
 
-    replacement = ppo.create_optimizer(
+    replacement = create_optimizer(
         model,
         MuonConfig(learning_rate=3e-4, muon_lr=0.02),
     )
@@ -96,4 +103,65 @@ def test_create_optimizer_rejects_unknown_optimizer_contract() -> None:
     config = AdamWConfig.model_construct(optimizer="sgd")
 
     with pytest.raises(AssertionError, match="Expected code to be unreachable"):
-        ppo.create_optimizer(model, config)
+        create_optimizer(model, config)
+
+
+def test_lr_multiplier_linear_warmup_then_cosine_decay() -> None:
+    config = LRScheduleConfig(warmup_steps=2, decay_steps=4, lr_min_ratio=0.1)
+
+    assert lr_multiplier(config, 0) == pytest.approx(0.0)
+    assert lr_multiplier(config, 1) == pytest.approx(0.5)
+    assert lr_multiplier(config, 2) == pytest.approx(1.0)
+    assert lr_multiplier(config, 6) == pytest.approx(0.1)
+    assert lr_multiplier(config, 20) == pytest.approx(0.1)
+
+
+def test_lr_scheduler_scales_optimizer_param_groups() -> None:
+    model = OptimizerTestModel()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+    scheduler = create_lr_scheduler(
+        optimizer,
+        LRScheduleConfig(warmup_steps=2, decay_steps=2, lr_min_ratio=0.25),
+    )
+    assert scheduler is not None
+    assert isinstance(scheduler, torch.optim.lr_scheduler.LambdaLR)
+    assert scheduler.get_last_lr() == pytest.approx([0.0])
+
+    optimizer.step()
+    scheduler.step()
+    assert scheduler.get_last_lr() == pytest.approx([0.005])
+    optimizer.step()
+    scheduler.step()
+    assert scheduler.get_last_lr() == pytest.approx([0.01])
+    optimizer.step()
+    scheduler.step()
+    assert scheduler.get_last_lr() == pytest.approx([0.00625])
+
+
+def test_composite_lr_scheduler_round_trips_nested_state_dict() -> None:
+    model = OptimizerTestModel()
+    optimizer = create_optimizer(
+        model,
+        MuonConfig(
+            learning_rate=0.01,
+            muon_lr=0.02,
+            lr_schedule=LRScheduleConfig(warmup_steps=1, decay_steps=2),
+        ),
+    )
+    scheduler = create_lr_scheduler(
+        optimizer,
+        LRScheduleConfig(warmup_steps=1, decay_steps=2),
+    )
+    assert scheduler is not None
+
+    optimizer.step()
+    scheduler.step()
+    state = scheduler.state_dict()
+    replacement = create_lr_scheduler(
+        optimizer,
+        LRScheduleConfig(warmup_steps=1, decay_steps=2),
+    )
+    assert replacement is not None
+    replacement.load_state_dict(state)
+
+    assert replacement.state_dict()["schedulers"]

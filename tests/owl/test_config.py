@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -25,7 +26,7 @@ class RootConfigWithSubconfigRef(BaseConfig):
         return {"inner"}
 
 
-def _write_yaml(path: Path, data: dict[str, object]) -> None:
+def _write_yaml(path: Path, data: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(data, f)
 
@@ -109,7 +110,7 @@ def test_base_config_from_file_does_not_mutate_input_overrides(tmp_path: Path) -
             "seed": 42,
         },
     )
-    overrides: dict[str, object] = {
+    overrides: dict[str, Any] = {
         "inner": {"name": "override", "size": 3},
         "inner.size": 4,
     }

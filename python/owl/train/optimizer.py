@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from typing import Annotated, Literal, assert_never, overload
+from collections.abc import Iterable
+from math import cos, pi
+from typing import Annotated, Any, Literal, Protocol, assert_never
 
 import torch
 from pydantic import Field
@@ -11,6 +12,35 @@ from owl.config import BaseConfig
 from owl.model import BaseModelAPI
 
 OptimizerName = Literal["adamw", "muon"]
+LRScheduleName = Literal["linear_warmup_cosine_decay"]
+type StateDict = dict[str, Any]
+
+
+class LRScheduleConfig(BaseConfig):
+    schedule: LRScheduleName = "linear_warmup_cosine_decay"
+    warmup_steps: int = Field(default=0, ge=0)
+    decay_steps: int = Field(default=1, ge=1)
+    lr_min_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class Optimizer(Protocol):
+    def zero_grad(self, set_to_none: bool = True) -> None: ...
+
+    def step(self) -> None: ...
+
+    def state_dict(self) -> StateDict: ...
+
+    def load_state_dict(self, state_dict: StateDict) -> None: ...
+
+
+class LRScheduler(Protocol):
+    def step(self) -> None: ...
+
+    def get_last_lr(self) -> list[float]: ...
+
+    def state_dict(self) -> StateDict: ...
+
+    def load_state_dict(self, state_dict: StateDict) -> None: ...
 
 
 class AdamWConfig(BaseConfig):
@@ -18,6 +48,7 @@ class AdamWConfig(BaseConfig):
     learning_rate: float = Field(default=3e-4, gt=0.0)
     adamw_eps: float = Field(default=1e-5, gt=0.0)
     weight_decay: float = Field(default=0.0, ge=0.0)
+    lr_schedule: LRScheduleConfig | None = None
 
 
 class MuonConfig(BaseConfig):
@@ -28,6 +59,7 @@ class MuonConfig(BaseConfig):
     muon_lr: float | None = Field(default=None, gt=0.0)
     muon_weight_decay: float = Field(default=0.1, ge=0.0)
     muon_momentum: float = Field(default=0.95, ge=0.0, lt=1.0)
+    lr_schedule: LRScheduleConfig | None = None
 
 
 type OptimizerConfig = Annotated[
@@ -35,42 +67,26 @@ type OptimizerConfig = Annotated[
 ]
 
 
-class CompositeOptimizer(torch.optim.Optimizer):
+class CompositeOptimizer:
     def __init__(self, optimizers: Iterable[torch.optim.Optimizer]) -> None:
         self.optimizers = list(optimizers)
         if not self.optimizers:
             raise ValueError("CompositeOptimizer requires at least one optimizer")
-        params = [
-            param
-            for optimizer in self.optimizers
-            for group in optimizer.param_groups
-            for param in group["params"]
-        ]
-        super().__init__(params, defaults={})
 
     def zero_grad(self, set_to_none: bool = True) -> None:
         for optimizer in self.optimizers:
             optimizer.zero_grad(set_to_none=set_to_none)
 
-    @overload
-    def step(self, closure: None = None) -> None: ...
-
-    @overload
-    def step(self, closure: Callable[[], float]) -> float: ...
-
-    def step(self, closure: Callable[[], float] | None = None) -> float | None:
-        if closure is not None:
-            raise ValueError("CompositeOptimizer does not support closures")
+    def step(self) -> None:
         for optimizer in self.optimizers:
             optimizer.step()
-        return None
 
-    def state_dict(self) -> dict[str, object]:
+    def state_dict(self) -> StateDict:
         return {
             "optimizers": [optimizer.state_dict() for optimizer in self.optimizers],
         }
 
-    def load_state_dict(self, state_dict: dict[str, object]) -> None:
+    def load_state_dict(self, state_dict: StateDict) -> None:
         optimizer_states = state_dict["optimizers"]
         if not isinstance(optimizer_states, list):
             raise ValueError("CompositeOptimizer state must contain optimizer states")
@@ -87,9 +103,84 @@ class CompositeOptimizer(torch.optim.Optimizer):
             optimizer.load_state_dict(optimizer_state)
 
 
-def create_optimizer(
-    model: BaseModelAPI, config: OptimizerConfig
-) -> torch.optim.Optimizer | CompositeOptimizer:
+class CompositeLRScheduler:
+    def __init__(self, schedulers: Iterable[torch.optim.lr_scheduler.LambdaLR]) -> None:
+        self.schedulers = list(schedulers)
+        if not self.schedulers:
+            raise ValueError("CompositeLRScheduler requires at least one scheduler")
+
+    def step(self) -> None:
+        for scheduler in self.schedulers:
+            scheduler.step()
+
+    def get_last_lr(self) -> list[float]:
+        return [lr for scheduler in self.schedulers for lr in scheduler.get_last_lr()]
+
+    def state_dict(self) -> StateDict:
+        return {
+            "schedulers": [scheduler.state_dict() for scheduler in self.schedulers],
+        }
+
+    def load_state_dict(self, state_dict: StateDict) -> None:
+        scheduler_states = state_dict["schedulers"]
+        if not isinstance(scheduler_states, list):
+            raise ValueError("CompositeLRScheduler state must contain scheduler states")
+        if len(scheduler_states) != len(self.schedulers):
+            raise ValueError(
+                "CompositeLRScheduler state scheduler count must match current "
+                f"scheduler count {len(self.schedulers)}, got {len(scheduler_states)}"
+            )
+        for scheduler, scheduler_state in zip(
+            self.schedulers,
+            scheduler_states,
+            strict=True,
+        ):
+            scheduler.load_state_dict(scheduler_state)
+
+
+def create_lr_scheduler(
+    optimizer: Optimizer,
+    config: LRScheduleConfig | None,
+) -> LRScheduler | None:
+    if config is None:
+        return None
+    if isinstance(optimizer, CompositeOptimizer):
+        return CompositeLRScheduler(
+            torch.optim.lr_scheduler.LambdaLR(
+                inner_optimizer,
+                lr_lambda=lambda step: lr_multiplier(config, step),
+            )
+            for inner_optimizer in optimizer.optimizers
+        )
+    if not isinstance(optimizer, torch.optim.Optimizer):
+        raise TypeError("optimizer must be a torch optimizer or CompositeOptimizer")
+    return torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda step: lr_multiplier(config, step),
+    )
+
+
+def lr_multiplier(config: LRScheduleConfig, step: int) -> float:
+    if step < 0:
+        raise ValueError("step must be non-negative")
+
+    match config.schedule:
+        case "linear_warmup_cosine_decay":
+            if config.warmup_steps > 0 and step < config.warmup_steps:
+                return step / config.warmup_steps
+
+            decay_step = min(
+                max(step - config.warmup_steps, 0),
+                config.decay_steps,
+            )
+            progress = decay_step / config.decay_steps
+            cosine = 0.5 * (1.0 + cos(pi * progress))
+            return config.lr_min_ratio + (1.0 - config.lr_min_ratio) * cosine
+        case _:
+            assert_never(config.schedule)
+
+
+def create_optimizer(model: BaseModelAPI, config: OptimizerConfig) -> Optimizer:
     if config.optimizer == "adamw":
         return torch.optim.AdamW(
             model.parameters(),

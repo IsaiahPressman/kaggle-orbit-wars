@@ -45,6 +45,10 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
             },
             "model": {
                 "model_arch": "stateless_transformer_v1",
+                "action_spec": {
+                    "action_spec": "pure",
+                    "max_per_planet_launches": 2,
+                },
                 "embed_dim": 32,
                 "depth": 1,
                 "n_heads": 4,
@@ -52,6 +56,11 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
             "optimizer": {
                 "optimizer": "adamw",
                 "learning_rate": 0.001,
+                "lr_schedule": {
+                    "warmup_steps": 2,
+                    "decay_steps": 10,
+                    "lr_min_ratio": 0.1,
+                },
             },
             "rl": {
                 "horizon": 4,
@@ -67,7 +76,42 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
 
     assert config.env.n_envs == 2
     assert config.optimizer.learning_rate == pytest.approx(0.001)
+    assert config.optimizer.lr_schedule is not None
+    assert config.optimizer.lr_schedule.warmup_steps == 2
     assert config.rl.segment_sampling.sampling == "advantage_priority"
+
+
+def test_full_config_rejects_mismatched_model_and_env_action_specs() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"model\.action_spec\.max_per_planet_launches must match "
+        r"env\.action_spec\.max_per_planet_launches",
+    ):
+        FullConfig.model_validate(
+            {
+                "env": {
+                    "n_envs": 2,
+                    "action_spec": {
+                        "action_spec": "pure",
+                        "max_per_planet_launches": 2,
+                    },
+                },
+                "model": {
+                    "model_arch": "stateless_transformer_v1",
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                },
+                "optimizer": {
+                    "optimizer": "adamw",
+                    "learning_rate": 0.001,
+                },
+                "rl": {
+                    "horizon": 4,
+                    "n_envs": 2,
+                },
+            }
+        )
 
 
 def test_autocast_context_respects_dtype_config() -> None:

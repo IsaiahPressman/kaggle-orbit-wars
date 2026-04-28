@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 import torch
 from owl.model import (
@@ -325,7 +327,7 @@ def test_trainer_compiles_model_when_configured(
 ) -> None:
     calls: list[tuple[str, str]] = []
 
-    def fake_compile(target: object, *, mode: str) -> object:
+    def fake_compile(target: Any, *, mode: str) -> Any:
         name = getattr(target, "__name__", target.__class__.__name__)
         calls.append((name, mode))
         return target

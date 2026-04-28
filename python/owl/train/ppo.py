@@ -26,7 +26,7 @@ from owl.train.metrics import (
     masked_sum_by_segment,
     weighted_mean,
 )
-from owl.train.optimizer import CompositeOptimizer, OptimizerConfig, create_optimizer
+from owl.train.optimizer import LRScheduler, Optimizer
 from owl.train.sampling import (
     SegmentSample,
     SegmentSamplingConfig,
@@ -272,12 +272,12 @@ class PPOTrainer:
     def __init__(
         self,
         *,
+        config: PPOConfig,
         env: VectorizedEnv,
         model: BaseModelAPI,
-        optimizer: torch.optim.Optimizer | CompositeOptimizer | None = None,
-        optimizer_config: OptimizerConfig | None = None,
-        config: PPOConfig,
+        optimizer: Optimizer,
         device: torch.device,
+        lr_scheduler: LRScheduler | None = None,
     ) -> None:
         if env.n_envs != config.n_envs:
             raise ValueError(
@@ -292,12 +292,8 @@ class PPOTrainer:
             config.compile_mode,
         )
         self._ppo_loss = _compile_ppo_loss(config.compile_mode)
-        if optimizer is not None:
-            self.optimizer = optimizer
-        elif optimizer_config is not None:
-            self.optimizer = create_optimizer(self.model, optimizer_config)
-        else:
-            raise ValueError("optimizer or optimizer_config is required")
+        self.optimizer = optimizer
+        self.lr_scheduler = lr_scheduler
         self.config = config
         self.device = device
         self._obs = _obs_to_device(env.reset(), device)
@@ -451,6 +447,8 @@ class PPOTrainer:
         metrics = _mean_loss_metrics(loss_metrics)
         metrics["grad_norm"] = float(torch.stack(grad_norms).mean().item())
         metrics["num_minibatches"] = float(len(loss_metrics))
+        if self.lr_scheduler is not None:
+            metrics["learning_rate"] = float(self.lr_scheduler.get_last_lr()[0])
         if sampling_metrics:
             metrics.update(_mean_sampling_metrics(sampling_metrics))
         return metrics
@@ -528,6 +526,8 @@ class PPOTrainer:
             self.model.parameters(), self.config.max_grad_norm
         )
         self.optimizer.step()
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
         return PPOUpdateResult(
             metrics=metrics,
             indices=idx,

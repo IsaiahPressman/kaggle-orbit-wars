@@ -273,7 +273,7 @@ class VectorizedEnv:
 
 
 def encode_python_observation(
-    obs: dict[str, object],
+    obs: dict[str, Any],
     obs_spec: ObsV1Config | None = None,
 ) -> tuple[
     np.ndarray,
@@ -322,7 +322,7 @@ def _require_action_shape(
     )
 
 
-def _rows_to_array(rows: object, *, name: str) -> np.ndarray:
+def _rows_to_array(rows: Any, *, name: str) -> np.ndarray:
     if not isinstance(rows, list):
         raise TypeError(f"obs['{name}'] must be a list")
     if not rows:
@@ -334,7 +334,7 @@ def _rows_to_array(rows: object, *, name: str) -> np.ndarray:
 
 
 def _comets_to_arrays(
-    comets: object,
+    comets: Any,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if not isinstance(comets, list):
         raise TypeError("obs['comets'] must be a list")
