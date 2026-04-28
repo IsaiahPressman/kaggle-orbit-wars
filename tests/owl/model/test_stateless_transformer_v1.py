@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 from owl.model import ModelConfig, StatelessTransformerV1, StatelessTransformerV1Config
@@ -18,6 +20,7 @@ from owl.rl import (
     ObsV1Config,
 )
 from pydantic import TypeAdapter
+from torch import nn
 
 
 def _obs_batch(
@@ -153,6 +156,80 @@ def test_attention_and_swiglu_use_separate_projection_matrices_for_muon() -> Non
     assert attn.q is not attn.k
     assert attn.k is not attn.v
     assert mlp.gate is not mlp.value
+
+
+def test_model_initialization_sets_stable_rl_priors() -> None:
+    torch.manual_seed(0)
+    config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=2,
+        n_heads=4,
+        n_angle_mixtures=2,
+    )
+    model = StatelessTransformerV1(config)
+
+    for module in model.modules():
+        if isinstance(module, nn.LayerNorm):
+            assert torch.allclose(module.weight, torch.ones_like(module.weight))
+            assert torch.allclose(module.bias, torch.zeros_like(module.bias))
+
+    for module in model.get_input_layers():
+        if isinstance(module, nn.Linear):
+            assert module.bias is not None
+            assert torch.allclose(module.bias, torch.zeros_like(module.bias))
+
+    residual_gain = 1.0 / math.sqrt(2.0 * config.depth)
+    for block in model.blocks:
+        assert torch.allclose(
+            block.attn.out.weight.norm(dim=1),
+            torch.full((config.embed_dim,), residual_gain),
+            atol=1e-6,
+        )
+        assert torch.allclose(
+            block.mlp.down.weight.norm(dim=1),
+            torch.full((config.embed_dim,), residual_gain),
+            atol=1e-6,
+        )
+
+    assert torch.allclose(
+        model.critic_head.weight.norm(dim=1),
+        torch.tensor([1.0]),
+        atol=1e-6,
+    )
+    for head in (
+        model.actor_heads.continue_head,
+        model.actor_heads.mix_head,
+        model.actor_heads.dir_head,
+        model.actor_heads.kappa_head,
+        model.actor_heads.size_frac_head,
+        model.actor_heads.size_conc_head,
+    ):
+        assert torch.allclose(
+            head.weight.norm(dim=1),
+            torch.full((head.out_features,), 0.01),
+            atol=1e-6,
+        )
+
+    params = model.actor_heads(torch.zeros((1, 1, 1, config.embed_dim)))
+    assert torch.allclose(
+        params.continue_logits, torch.zeros_like(params.continue_logits)
+    )
+    assert torch.allclose(params.mix_logits, torch.zeros_like(params.mix_logits))
+    assert torch.allclose(torch.cos(params.loc), torch.tensor([[[[1.0, -1.0]]]]))
+    assert torch.allclose(
+        torch.sin(params.loc),
+        torch.zeros_like(params.loc),
+        atol=1e-6,
+    )
+    assert torch.allclose(params.kappa, torch.full_like(params.kappa, 1.0))
+    assert torch.allclose(
+        params.alpha,
+        torch.full_like(params.alpha, 1.0 + config.alpha_beta_eps),
+    )
+    assert torch.allclose(
+        params.beta,
+        torch.full_like(params.beta, 1.0 + config.alpha_beta_eps),
+    )
 
 
 def test_observation_encoder_returns_entity_tokens_plus_player_tokens() -> None:

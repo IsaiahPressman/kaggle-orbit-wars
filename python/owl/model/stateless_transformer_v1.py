@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Annotated, Literal, Self, assert_never
+from typing import Annotated, Literal, Self, assert_never, cast
 
 import torch
 import torch.nn.functional as F
@@ -31,6 +31,12 @@ from owl.rl import (
 STATELESS_TRANSFORMER_V1: Literal["stateless_transformer_v1"] = (
     "stateless_transformer_v1"
 )
+_HIDDEN_INIT_GAIN = math.sqrt(2.0)
+_INPUT_INIT_GAIN = 1.0
+_ACTOR_HEAD_INIT_GAIN = 0.01
+_CRITIC_HEAD_INIT_GAIN = 1.0
+_INITIAL_KAPPA = 1.0
+_INITIAL_SIZE_CONCENTRATION = 2.0
 
 
 class StatelessTransformerV1Config(BaseConfig):
@@ -109,6 +115,39 @@ class StatelessTransformerV1(BaseModelAPI):
         self.actor_gru = MinGRUStack(dim, dim, n_layers=2)
         self.actor_heads = LaunchPolicyHeads(self.config)
 
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        self.apply(_init_module)
+        for layer in self.get_input_layers():
+            _init_input_layer(layer)
+        residual_gain = 1.0 / math.sqrt(2.0 * self.config.depth)
+        for module in self.blocks:
+            block = cast(TransformerBlock, module)
+            _init_linear(block.attn.out, gain=residual_gain)
+            _init_linear(block.mlp.down, gain=residual_gain)
+        for layer in self.get_output_layers():
+            gain = (
+                _CRITIC_HEAD_INIT_GAIN
+                if layer is self.critic_head
+                else _ACTOR_HEAD_INIT_GAIN
+            )
+            _init_linear(layer, gain=gain)
+        _init_direction_bias(
+            self.actor_heads.dir_head,
+            mixtures=self.config.n_angle_mixtures,
+        )
+        _init_bias(
+            self.actor_heads.kappa_head,
+            _softplus_inverse_for_minimum_target(_INITIAL_KAPPA, self.config.kappa_min),
+        )
+        _init_bias(
+            self.actor_heads.size_conc_head,
+            _softplus_inverse_for_minimum_target(
+                _INITIAL_SIZE_CONCENTRATION, self.config.tau_min
+            ),
+        )
+
     def get_input_layers(self) -> tuple[nn.Module, ...]:
         return (
             self.planet_proj,
@@ -121,7 +160,7 @@ class StatelessTransformerV1(BaseModelAPI):
             self.actor_input_proj,
         )
 
-    def get_output_layers(self) -> tuple[nn.Module, ...]:
+    def get_output_layers(self) -> tuple[nn.Linear, ...]:
         return (
             self.critic_head,
             self.actor_heads.continue_head,
@@ -737,6 +776,53 @@ class LaunchPolicyHeads(nn.Module):
             alpha=alpha,
             beta=beta,
         )
+
+
+def _init_module(module: nn.Module) -> None:
+    if isinstance(module, nn.Linear):
+        _init_linear(module, gain=_HIDDEN_INIT_GAIN)
+    elif isinstance(module, nn.Embedding):
+        nn.init.normal_(module.weight, mean=0.0, std=module.embedding_dim**-0.5)
+    elif isinstance(module, nn.LayerNorm):
+        nn.init.ones_(module.weight)
+        nn.init.zeros_(module.bias)
+
+
+def _init_input_layer(module: nn.Module) -> None:
+    if isinstance(module, nn.Linear):
+        _init_linear(module, gain=_INPUT_INIT_GAIN)
+    elif isinstance(module, nn.Embedding):
+        nn.init.normal_(module.weight, mean=0.0, std=module.embedding_dim**-0.5)
+
+
+def _init_linear(module: nn.Linear, *, gain: float) -> None:
+    nn.init.orthogonal_(module.weight, gain=gain)
+    if module.bias is not None:
+        nn.init.zeros_(module.bias)
+
+
+def _init_bias(module: nn.Linear, value: float) -> None:
+    if module.bias is None:
+        raise ValueError("expected linear layer to have a bias")
+    nn.init.constant_(module.bias, value)
+
+
+def _init_direction_bias(module: nn.Linear, *, mixtures: int) -> None:
+    if module.bias is None:
+        raise ValueError("expected direction head to have a bias")
+    angles = torch.arange(
+        mixtures,
+        dtype=module.bias.dtype,
+        device=module.bias.device,
+    )
+    angles = angles * (2.0 * math.pi / mixtures)
+    directions = torch.stack((torch.cos(angles), torch.sin(angles)), dim=-1)
+    with torch.no_grad():
+        module.bias.copy_(directions.reshape(-1))
+
+
+def _softplus_inverse_for_minimum_target(target: float, minimum: float) -> float:
+    return math.log(math.expm1(max(target - minimum, 1e-6)))
 
 
 def pack_sequence(

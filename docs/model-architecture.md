@@ -85,6 +85,18 @@ QKV projection. SwiGLU also uses separate gate and value projections. This keeps
 each weight matrix tied to one projection role, which is a better fit for Muon
 optimizer assumptions than packing multiple operations into one parameter.
 
+## Initialization
+
+Linear layers use orthogonal initialization with zero biases. Input projections
+use unit gain, hidden projections use ReLU-style gain, and transformer residual
+output projections are scaled by `1 / sqrt(2 * depth)`.
+
+Actor output heads use small `0.01` gain so initial policy logits and
+distribution parameters stay near neutral. Direction mixture biases are spread
+evenly around the circle. The critic head uses unit gain. The angle
+concentration starts at `kappa ~= 1`, while size fraction and concentration
+start at an approximately uniform beta-binomial prior with `alpha ~= beta ~= 1`.
+
 ## Critic
 
 The critic reads the final four player tokens. A linear head produces one logit
