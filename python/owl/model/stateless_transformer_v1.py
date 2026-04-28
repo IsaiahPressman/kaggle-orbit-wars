@@ -35,6 +35,7 @@ _HIDDEN_INIT_GAIN = math.sqrt(2.0)
 _INPUT_INIT_GAIN = 1.0
 _ACTOR_HEAD_INIT_GAIN = 0.01
 _CRITIC_HEAD_INIT_GAIN = 1.0
+_INITIAL_CONTINUE_LOGIT = -2.0
 _INITIAL_KAPPA = 1.0
 _INITIAL_SIZE_CONCENTRATION = 2.0
 
@@ -152,6 +153,7 @@ class StatelessTransformerV1(BaseModelAPI):
             self.actor_heads.dir_head,
             mixtures=self.config.n_angle_mixtures,
         )
+        _init_bias(self.actor_heads.continue_head, _INITIAL_CONTINUE_LOGIT)
         _init_bias(
             self.actor_heads.kappa_head,
             _softplus_inverse_for_minimum_target(_INITIAL_KAPPA, self.config.kappa_min),

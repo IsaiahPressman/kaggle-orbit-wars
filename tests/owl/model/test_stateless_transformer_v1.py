@@ -225,7 +225,12 @@ def test_model_initialization_sets_stable_rl_priors() -> None:
 
     params = model.actor_heads(torch.zeros((1, 1, 1, config.embed_dim)))
     assert torch.allclose(
-        params.continue_logits, torch.zeros_like(params.continue_logits)
+        params.continue_logits,
+        torch.full_like(params.continue_logits, -2.0),
+    )
+    assert torch.allclose(
+        params.continue_logits.sigmoid(),
+        torch.full_like(params.continue_logits, 0.11920292),
     )
     assert torch.allclose(params.mix_logits, torch.zeros_like(params.mix_logits))
     assert torch.allclose(torch.cos(params.loc), torch.tensor([[[[1.0, -1.0]]]]))

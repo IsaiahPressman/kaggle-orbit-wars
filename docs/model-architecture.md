@@ -94,10 +94,12 @@ use unit gain, hidden projections use ReLU-style gain, and transformer residual
 output projections are scaled by `1 / sqrt(2 * depth)`.
 
 Actor output heads use small `0.01` gain so initial policy logits and
-distribution parameters stay near neutral. Direction mixture biases are spread
-evenly around the circle. The critic head uses unit gain. The angle
-concentration starts at `kappa ~= 1`, while size fraction and concentration
-start at an approximately uniform beta-binomial prior with `alpha ~= beta ~= 1`.
+distribution parameters stay near their priors. The launch/continue gate starts
+with logit `-2`, biasing each active lane toward stopping while preserving
+nonzero exploration probability. Direction mixture biases are spread evenly
+around the circle. The critic head uses unit gain. The angle concentration
+starts at `kappa ~= 1`, while size fraction and concentration start at an
+approximately uniform beta-binomial prior with `alpha ~= beta ~= 1`.
 
 ## Critic
 
