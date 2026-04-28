@@ -75,6 +75,7 @@ class PPOConfig(BaseConfig):
     vtrace_rho_clip: float = Field(default=1.0, gt=0.0)
     vtrace_c_clip: float = Field(default=1.0, gt=0.0)
     recompute_advantages_each_epoch: bool = False
+    debug_validate_ppo_loss_inputs: bool = False
     compile_mode: CompileMode | None = None
     dtype: TrainingDType = "float32"
 
@@ -649,6 +650,18 @@ def _compile_ppo_loss(compile_mode: CompileMode | None) -> PPOLossFn:
         value_weight: torch.Tensor,
         config: PPOConfig,
     ) -> PPOLossMetrics:
+        _validate_ppo_loss_inputs_if_debug(
+            new_logp=new_logp,
+            entropy=entropy,
+            new_values=new_values,
+            old_logp=old_logp,
+            old_values=old_values,
+            returns=returns,
+            advantages=advantages,
+            policy_weight=policy_weight,
+            value_weight=value_weight,
+            config=config,
+        )
         return _ppo_loss_metrics_from_tuple(
             compiled_tensor_loss(
                 new_logp,
@@ -685,6 +698,18 @@ def ppo_loss(
     value_weight: torch.Tensor,
     config: PPOConfig,
 ) -> PPOLossMetrics:
+    _validate_ppo_loss_inputs_if_debug(
+        new_logp=new_logp,
+        entropy=entropy,
+        new_values=new_values,
+        old_logp=old_logp,
+        old_values=old_values,
+        returns=returns,
+        advantages=advantages,
+        policy_weight=policy_weight,
+        value_weight=value_weight,
+        config=config,
+    )
     return _ppo_loss_metrics_from_tuple(
         _ppo_loss_tensors(
             new_logp,
@@ -703,6 +728,34 @@ def ppo_loss(
             config.vf_coef,
             config.ent_coef,
         )
+    )
+
+
+def _validate_ppo_loss_inputs_if_debug(
+    *,
+    new_logp: torch.Tensor,
+    entropy: torch.Tensor,
+    new_values: torch.Tensor,
+    old_logp: torch.Tensor,
+    old_values: torch.Tensor,
+    returns: torch.Tensor,
+    advantages: torch.Tensor,
+    policy_weight: torch.Tensor,
+    value_weight: torch.Tensor,
+    config: PPOConfig,
+) -> None:
+    if not config.debug_validate_ppo_loss_inputs:
+        return
+    validate_ppo_loss_inputs(
+        new_logp=new_logp,
+        entropy=entropy,
+        new_values=new_values,
+        old_logp=old_logp,
+        old_values=old_values,
+        returns=returns,
+        advantages=advantages,
+        policy_weight=policy_weight,
+        value_weight=value_weight,
     )
 
 

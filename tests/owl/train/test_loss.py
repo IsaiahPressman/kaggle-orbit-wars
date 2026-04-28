@@ -1,3 +1,6 @@
+from typing import Any
+
+import owl.train.ppo as ppo_module
 import pytest
 import torch
 from owl.train import PPOConfig, ppo_loss, validate_ppo_loss_inputs
@@ -160,6 +163,69 @@ def test_ppo_loss_handles_all_policy_invalid_minibatch() -> None:
     assert torch.allclose(metrics.policy_loss, torch.tensor(0.0))
     assert torch.allclose(metrics.value_loss, torch.tensor(0.5))
     assert torch.allclose(metrics.ratio_max, torch.tensor(0.0))
+
+
+def _call_loss_with_broadcast_policy_weight(
+    loss_fn: ppo_module.PPOLossFn,
+    config: PPOConfig,
+) -> ppo_module.PPOLossMetrics:
+    shape = (2, 2)
+    return loss_fn(
+        new_logp=torch.zeros(shape),
+        entropy=torch.ones(shape),
+        new_values=torch.zeros(shape),
+        old_logp=torch.zeros(shape),
+        old_values=torch.zeros(shape),
+        returns=torch.zeros(shape),
+        advantages=torch.ones(shape),
+        policy_weight=torch.ones((1, 2)),
+        value_weight=torch.ones(shape),
+        config=config,
+    )
+
+
+def test_ppo_loss_validates_inputs_only_when_debug_enabled() -> None:
+    metrics = _call_loss_with_broadcast_policy_weight(
+        ppo_loss,
+        PPOConfig(normalize_advantages=False),
+    )
+    assert torch.isfinite(metrics.loss)
+
+    with pytest.raises(ValueError, match="policy_weight must match new_logp shape"):
+        _call_loss_with_broadcast_policy_weight(
+            ppo_loss,
+            PPOConfig(
+                debug_validate_ppo_loss_inputs=True,
+                normalize_advantages=False,
+            ),
+        )
+
+
+def test_compiled_ppo_loss_validates_inputs_only_when_debug_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_compile(target: Any, *, mode: str) -> Any:
+        assert target is ppo_module._ppo_loss_tensors
+        assert mode == "default"
+        return target
+
+    monkeypatch.setattr(ppo_module.torch, "compile", fake_compile)
+    loss_fn = ppo_module._compile_ppo_loss("default")
+
+    metrics = _call_loss_with_broadcast_policy_weight(
+        loss_fn,
+        PPOConfig(normalize_advantages=False),
+    )
+    assert torch.isfinite(metrics.loss)
+
+    with pytest.raises(ValueError, match="policy_weight must match new_logp shape"):
+        _call_loss_with_broadcast_policy_weight(
+            loss_fn,
+            PPOConfig(
+                debug_validate_ppo_loss_inputs=True,
+                normalize_advantages=False,
+            ),
+        )
 
 
 def test_validate_ppo_loss_inputs_checks_cold_path_invariants() -> None:
