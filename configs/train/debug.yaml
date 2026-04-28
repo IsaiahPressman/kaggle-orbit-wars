@@ -1,0 +1,24 @@
+env:
+  n_envs: 1
+  pin_memory: false
+
+model:
+  model_arch: stateless_transformer_v1
+  embed_dim: 32
+  depth: 1
+  n_heads: 4
+
+optimizer:
+  optimizer: adamw
+  learning_rate: 0.0003
+
+rl:
+  n_envs: 1
+  horizon: 16
+  update_epochs: 1
+  replay_ratio: 1.0
+  compile_mode: null
+  dtype: float32
+  segment_sampling:
+    sampling: uniform
+    segments_per_minibatch: 1

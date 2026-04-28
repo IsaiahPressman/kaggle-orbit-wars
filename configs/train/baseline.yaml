@@ -1,0 +1,29 @@
+env:
+  n_envs: 512
+
+model:
+  model_arch: stateless_transformer_v1
+
+optimizer:
+  optimizer: adamw
+  learning_rate: 0.0003
+
+rl:
+  n_envs: 512
+  horizon: 64
+  gamma: 0.995
+  gae_lambda: 0.95
+  update_epochs: 2
+  replay_ratio: 1.0
+  clip_coef: 0.2
+  vf_clip_coef: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.003
+  max_grad_norm: 1.0
+  target_kl: 0.03
+  advantage_mode: gae
+  normalize_advantages: true
+  recompute_advantages_each_epoch: false
+  segment_sampling:
+    sampling: uniform
+    segments_per_minibatch: 64

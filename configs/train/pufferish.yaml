@@ -1,0 +1,27 @@
+env:
+  n_envs: 1024
+
+model:
+  model_arch: stateless_transformer_v1
+
+optimizer:
+  optimizer: adamw
+  learning_rate: 0.0003
+
+rl:
+  n_envs: 1024
+  horizon: 64
+  gamma: 0.995
+  gae_lambda: 0.9
+  update_epochs: 1
+  replay_ratio: 1.0
+  target_kl: 0.03
+  advantage_mode: gae_vtrace
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  recompute_advantages_each_epoch: true
+  segment_sampling:
+    sampling: advantage_priority
+    segments_per_minibatch: 64
+    prio_alpha: 0.5
+    prio_beta: 0.2
