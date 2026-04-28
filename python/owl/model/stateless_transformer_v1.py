@@ -6,7 +6,7 @@ from typing import Annotated, Literal, Self, assert_never, cast
 
 import torch
 import torch.nn.functional as F
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from torch import nn
 from torch.distributions import Bernoulli, Beta, Binomial, Categorical, VonMises
 
@@ -49,7 +49,11 @@ class StatelessTransformerV1Config(BaseConfig):
     n_heads: int = Field(default=8, ge=1)
     mlp_ratio: float = Field(default=4.0, gt=0.0)
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
-    n_angle_mixtures: int = Field(default=4, ge=1)
+    n_action_mixtures: int = Field(
+        default=4,
+        ge=1,
+        validation_alias=AliasChoices("n_action_mixtures", "n_angle_mixtures"),
+    )
     kappa_min: float = Field(default=1e-3, gt=0.0)
     kappa_max: float | None = Field(default=200.0, gt=0.0)
     tau_min: float = Field(default=1e-3, gt=0.0)
@@ -63,6 +67,10 @@ class StatelessTransformerV1Config(BaseConfig):
         if self.embed_dim % self.n_heads != 0:
             raise ValueError("n_heads must evenly divide embed_dim")
         return self
+
+    @property
+    def n_angle_mixtures(self) -> int:
+        return self.n_action_mixtures
 
 
 type ModelConfig = Annotated[
@@ -151,7 +159,7 @@ class StatelessTransformerV1(BaseModelAPI):
             _init_linear(layer, gain=gain)
         _init_direction_bias(
             self.actor_heads.dir_head,
-            mixtures=self.config.n_angle_mixtures,
+            mixtures=self.config.n_action_mixtures,
         )
         _init_bias(self.actor_heads.continue_head, _INITIAL_CONTINUE_LOGIT)
         _init_bias(
@@ -810,7 +818,7 @@ class LaunchPolicyHeads(nn.Module):
     def __init__(self, config: StatelessTransformerV1Config) -> None:
         super().__init__()
         self.config = config
-        mixtures = config.n_angle_mixtures
+        mixtures = config.n_action_mixtures
         self.continue_head = nn.Linear(config.embed_dim, 1)
         self.mix_head = nn.Linear(config.embed_dim, mixtures)
         self.dir_head = nn.Linear(config.embed_dim, mixtures * 2)
@@ -819,7 +827,7 @@ class LaunchPolicyHeads(nn.Module):
         self.size_conc_head = nn.Linear(config.embed_dim, mixtures)
 
     def forward(self, x: torch.Tensor) -> PolicyParams:
-        mixtures = self.config.n_angle_mixtures
+        mixtures = self.config.n_action_mixtures
         raw_dir = self.dir_head(x).view(*x.shape[:-1], mixtures, 2)
         unit_dir = F.normalize(raw_dir, dim=-1, eps=self.config.dir_eps)
         loc = torch.atan2(unit_dir[..., 1], unit_dir[..., 0])

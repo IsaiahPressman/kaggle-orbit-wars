@@ -29,7 +29,7 @@ without changing callers that validate config dictionaries through the union.
 | `n_heads` | `8` | Attention heads; must evenly divide `embed_dim`. |
 | `mlp_ratio` | `4.0` | FFN hidden width multiplier. |
 | `activation` | `"gelu"` | FFN activation: `"gelu"`, `"silu"`, or `"swiglu"`. |
-| `n_angle_mixtures` | `4` | Mixture components for angle and fleet-size event heads. |
+| `n_action_mixtures` | `4` | Mixture components for launch angle and fleet-size event heads. Deprecated config alias: `n_angle_mixtures`. |
 | `kappa_min` | `1e-3` | Lower bound added to von Mises concentration. |
 | `kappa_max` | `200.0` | Optional cap for von Mises concentration. |
 | `tau_min` | `1e-3` | Lower bound added to beta-binomial concentration. |

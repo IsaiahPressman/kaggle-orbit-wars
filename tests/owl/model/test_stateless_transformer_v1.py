@@ -101,6 +101,18 @@ def test_model_config_has_discriminator_tag() -> None:
     assert config.model_arch == "stateless_transformer_v1"
 
 
+def test_model_config_accepts_deprecated_angle_mixture_alias() -> None:
+    config = TypeAdapter(ModelConfig).validate_python(
+        {
+            "model_arch": "stateless_transformer_v1",
+            "n_angle_mixtures": 2,
+        }
+    )
+
+    assert config.n_action_mixtures == 2
+    assert config.n_angle_mixtures == 2
+
+
 def test_model_constructor_does_not_require_flash_attn_on_cuda_hosts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -177,7 +189,7 @@ def test_model_initialization_sets_stable_rl_priors() -> None:
         embed_dim=32,
         depth=2,
         n_heads=4,
-        n_angle_mixtures=2,
+        n_action_mixtures=2,
     )
     model = StatelessTransformerV1(config)
 
@@ -288,7 +300,7 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
         embed_dim=32,
         depth=1,
         n_heads=4,
-        n_angle_mixtures=2,
+        n_action_mixtures=2,
     )
     model = StatelessTransformerV1(config)
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
@@ -471,7 +483,7 @@ def test_actor_distribution_outputs_remain_fp32_under_cpu_bf16_autocast() -> Non
         embed_dim=32,
         depth=1,
         n_heads=4,
-        n_angle_mixtures=2,
+        n_action_mixtures=2,
     )
     model = StatelessTransformerV1(config)
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
@@ -585,7 +597,7 @@ def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
         embed_dim=32,
         depth=1,
         n_heads=4,
-        n_angle_mixtures=2,
+        n_action_mixtures=2,
     )
     model = StatelessTransformerV1(config)
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
@@ -627,7 +639,7 @@ def test_k_max_is_hard_truncation_and_replays_without_final_stop_probability() -
         embed_dim=32,
         depth=1,
         n_heads=4,
-        n_angle_mixtures=2,
+        n_action_mixtures=2,
     )
     model = StatelessTransformerV1(config)
     obs = _obs_batch(batch_size=1, obs_spec=obs_spec, action_spec=action_spec)
