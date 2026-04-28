@@ -78,6 +78,18 @@ class PolicyParams:
     alpha: torch.Tensor
     beta: torch.Tensor
 
+    def to_distribution_dtype(self) -> PolicyParams:
+        mix_logits = self.mix_logits.float()
+        return PolicyParams(
+            continue_logits=self.continue_logits.float(),
+            mix_logits=mix_logits,
+            log_w=F.log_softmax(mix_logits, dim=-1),
+            loc=self.loc.float(),
+            kappa=self.kappa.float(),
+            alpha=self.alpha.float(),
+            beta=self.beta.float(),
+        )
+
 
 @dataclass(frozen=True)
 class PackedSequence:
@@ -332,7 +344,7 @@ class StatelessTransformerV1(BaseModelAPI):
                 ),
                 hidden_state,
             )
-            params = self.actor_heads(slot_hidden)
+            params = self.actor_heads(slot_hidden).to_distribution_dtype()
             launch = self._sample_launch(
                 params.continue_logits,
                 active,
@@ -383,12 +395,12 @@ class StatelessTransformerV1(BaseModelAPI):
                 launch,
                 torch.sin(angle),
                 torch.zeros_like(angle),
-            )
+            ).to(dtype=slot_input.dtype)
             last_angle_cos = torch.where(
                 launch,
                 torch.cos(angle),
                 torch.zeros_like(angle),
-            )
+            ).to(dtype=slot_input.dtype)
             last_ships = ships
 
         launch_tensor = torch.stack(launch_slots, dim=-1)
@@ -475,7 +487,7 @@ class StatelessTransformerV1(BaseModelAPI):
                 ),
                 hidden_state,
             )
-            params = self.actor_heads(slot_hidden)
+            params = self.actor_heads(slot_hidden).to_distribution_dtype()
             launch = actions.launch[..., slot]
             angle = actions.angle[..., slot]
             ships = actions.ships[..., slot]
@@ -519,12 +531,12 @@ class StatelessTransformerV1(BaseModelAPI):
                 launch,
                 torch.sin(angle),
                 torch.zeros_like(angle),
-            )
+            ).to(dtype=slot_input.dtype)
             last_angle_cos = torch.where(
                 launch,
                 torch.cos(angle),
                 torch.zeros_like(angle),
-            )
+            ).to(dtype=slot_input.dtype)
             last_ships = ships_used
 
         launch_log_tensor = torch.stack(launch_log_slots, dim=-1)
@@ -559,6 +571,7 @@ class StatelessTransformerV1(BaseModelAPI):
         *,
         deterministic: bool,
     ) -> torch.Tensor:
+        logits = logits.float()
         if deterministic:
             launch = logits.sigmoid() > 0.5
         else:
@@ -572,6 +585,7 @@ class StatelessTransformerV1(BaseModelAPI):
         remaining: torch.Tensor,
         deterministic: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        params = params.to_distribution_dtype()
         if deterministic:
             mixture = params.mix_logits.argmax(dim=-1)
         else:
@@ -873,6 +887,7 @@ def event_log_prob_from_params(
     ships: torch.Tensor,
     residual_budget: torch.Tensor,
 ) -> torch.Tensor:
+    params = params.to_distribution_dtype()
     log_angle = von_mises_log_prob(angle, params.loc, params.kappa)
     log_size = shifted_beta_binomial_log_prob(
         ships,
@@ -917,6 +932,7 @@ def masked_action_entropy_from_params(
     *,
     max_ship_support: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    params = params.to_distribution_dtype()
     launch_entropy = binary_entropy_from_logits(params.continue_logits)
     event_entropy = event_entropy_from_params(
         params,
