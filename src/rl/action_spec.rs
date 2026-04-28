@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::rules_engine::env::PlayerAction;
 use crate::rules_engine::state::{LaunchAction, Planet, State};
 
-use super::{ACTION_ENTITY_SLOTS, MAX_COMETS, MAX_PLANETS};
+use super::{ACTION_ENTITY_SLOTS, MAX_COMETS, MAX_PLANETS, OUTER_PLAYER_SLOTS};
 
 pub(super) fn decode_pure_actions(
     state: &State,
@@ -11,37 +11,71 @@ pub(super) fn decode_pure_actions(
     angle: &[f32],
     ships: &[i64],
     max_per_planet_launches: usize,
-) -> Vec<PlayerAction> {
+) -> Result<Vec<PlayerAction>, String> {
     let entities = action_entity_slots(state);
     let mut actions = vec![Vec::new(); state.config.player_count];
     for (player, player_actions) in actions.iter_mut().enumerate() {
         let player_offset = player * ACTION_ENTITY_SLOTS * max_per_planet_launches;
         for (entity_index, planet) in entities.iter().enumerate() {
-            let Some(planet) = planet else {
-                continue;
-            };
             let entity_offset = player_offset + entity_index * max_per_planet_launches;
+            let mut spent_ships = 0_i64;
             for launch_index in 0..max_per_planet_launches {
                 let action_index = entity_offset + launch_index;
                 if !launch[action_index] {
                     break;
                 }
+                let Some(planet) = planet else {
+                    return Err(format!(
+                        "player {player} cannot launch from empty action entity slot {entity_index}"
+                    ));
+                };
                 let ship_count = ships[action_index];
-                assert!(
-                    ship_count >= 1,
-                    "pure action ships must be >= 1 when launch is true"
-                );
+                if ship_count < 1 {
+                    return Err(format!(
+                        "player {player} entity slot {entity_index} launch {launch_index} ships must be >= 1"
+                    ));
+                }
+                if ship_count > i64::from(i32::MAX) {
+                    return Err(format!(
+                        "player {player} entity slot {entity_index} launch {launch_index} ships must fit in i32"
+                    ));
+                }
+                let launch_angle = angle[action_index];
+                if !launch_angle.is_finite() {
+                    return Err(format!(
+                        "player {player} entity slot {entity_index} launch {launch_index} angle must be finite"
+                    ));
+                }
+                if planet.owner != player as i32 {
+                    return Err(format!(
+                        "player {player} cannot launch from planet {} owned by {}",
+                        planet.id, planet.owner
+                    ));
+                }
+                spent_ships += ship_count;
+                if spent_ships > i64::from(planet.ships) {
+                    return Err(format!(
+                        "planet {} has {} ships, cannot launch {spent_ships}",
+                        planet.id, planet.ships
+                    ));
+                }
                 player_actions.push(LaunchAction {
                     from_planet_id: planet.id,
-                    angle: f64::from(angle[action_index]),
-                    ships: ship_count
-                        .try_into()
-                        .expect("pure action ships must fit in i32"),
+                    angle: f64::from(launch_angle),
+                    ships: ship_count as i32,
                 });
             }
         }
     }
-    actions
+    for player in state.config.player_count..OUTER_PLAYER_SLOTS {
+        let player_offset = player * ACTION_ENTITY_SLOTS * max_per_planet_launches;
+        let player_launches =
+            &launch[player_offset..player_offset + ACTION_ENTITY_SLOTS * max_per_planet_launches];
+        if player_launches.iter().any(|launched| *launched) {
+            return Err(format!("player slot {player} is inactive"));
+        }
+    }
+    Ok(actions)
 }
 
 pub(super) fn encode_action_spec(state: &State, can_act: &mut [bool], max_launch: &mut [i64]) {
@@ -128,14 +162,82 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "pure action ships must be >= 1 when launch is true")]
-    fn pure_launch_panics_when_ship_count_is_zero() {
+    fn pure_launch_errors_when_ship_count_is_zero() {
         let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
         let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS];
         let ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
         launch[0] = true;
 
-        decode_pure_actions(&one_planet_state(), &launch, &angle, &ships, 1);
+        let err = decode_pure_actions(&one_planet_state(), &launch, &angle, &ships, 1)
+            .expect_err("zero ships should fail");
+
+        assert!(err.contains("ships must be >= 1"));
+    }
+
+    #[test]
+    fn pure_launch_errors_when_ship_count_exceeds_i32() {
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+        let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        ships[0] = i64::from(i32::MAX) + 1;
+
+        let err = decode_pure_actions(&one_planet_state(), &launch, &angle, &ships, 1)
+            .expect_err("oversized ships should fail");
+
+        assert!(err.contains("ships must fit in i32"));
+    }
+
+    #[test]
+    fn pure_launch_errors_when_angle_is_not_finite() {
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+        let mut angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        angle[0] = f32::INFINITY;
+        ships[0] = 1;
+
+        let err = decode_pure_actions(&one_planet_state(), &launch, &angle, &ships, 1)
+            .expect_err("non-finite angle should fail");
+
+        assert!(err.contains("angle must be finite"));
+    }
+
+    #[test]
+    fn pure_launch_errors_when_player_does_not_own_source() {
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+        let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        launch[ACTION_ENTITY_SLOTS] = true;
+        ships[ACTION_ENTITY_SLOTS] = 1;
+
+        let err = decode_pure_actions(&one_planet_state(), &launch, &angle, &ships, 1)
+            .expect_err("wrong owner should fail");
+
+        assert!(err.contains("player 1 cannot launch from planet 7 owned by 0"));
+    }
+
+    #[test]
+    fn pure_launch_errors_when_total_launches_exceed_source_ships() {
+        let max_per_planet_launches = 2;
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS * max_per_planet_launches];
+        let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS * max_per_planet_launches];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS * max_per_planet_launches];
+        launch[0] = true;
+        ships[0] = 6;
+        launch[1] = true;
+        ships[1] = 5;
+
+        let err = decode_pure_actions(
+            &one_planet_state(),
+            &launch,
+            &angle,
+            &ships,
+            max_per_planet_launches,
+        )
+        .expect_err("overspending should fail");
+
+        assert!(err.contains("planet 7 has 10 ships, cannot launch 11"));
     }
 
     #[test]
@@ -157,7 +259,8 @@ mod tests {
             &angle,
             &ships,
             max_per_planet_launches,
-        );
+        )
+        .expect("valid actions should decode");
 
         assert_eq!(actions[0].len(), 2);
         assert_eq!(actions[0][0].ships, 2);

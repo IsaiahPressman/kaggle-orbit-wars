@@ -234,12 +234,11 @@ remaining tied loser rewards: `(1 - (winner_count - 1)) / winner_count`.
 | `angle` | `float32` | `(n_envs, 4, 44, max_per_planet_launches)` | launch angle in radians |
 | `ships` | `int64` | `(n_envs, 4, 44, max_per_planet_launches)` | requested ship count |
 
+Python requires exact submitted action dtypes at the boundary; wrong dtypes are
+rejected instead of cast.
 If `launch` is `False`, that slot is a no-op and `angle` / `ships` are ignored.
-If `launch` is `True`, `ships >= 1` is required and the Rust API panics if the
-invariant is violated.
+If `launch` is `True`, `ships >= 1`, `ships <= i32::MAX`, a finite `angle`, a
+valid source entity, source ownership by the acting player, and enough remaining
+ships on that source are required. Invalid submitted actions raise `ValueError`.
 For each player and source entity, decoding stops at the first `False` launch
 slot, so later slots for that source are ignored.
-
-The pure action decoder currently performs only the explicit `ships >= 1`
-validation itself. Ownership, source validity, and overspending are still
-checked by the rules engine's normal fail-fast launch validation.

@@ -173,9 +173,15 @@ class VectorizedEnv:
         angle: np.ndarray | torch.Tensor,
         ships: np.ndarray | torch.Tensor,
     ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor]:
-        launch_array = _actions_to_numpy(launch, dtype=np.bool_)
-        angle_array = _actions_to_numpy(angle, dtype=np.float32)
-        ship_array = _actions_to_numpy(ships, dtype=np.int64)
+        launch_array = _actions_to_numpy(
+            "launch", launch, dtype=np.bool_, torch_dtype=torch.bool
+        )
+        angle_array = _actions_to_numpy(
+            "angle", angle, dtype=np.float32, torch_dtype=torch.float32
+        )
+        ship_array = _actions_to_numpy(
+            "ships", ships, dtype=np.int64, torch_dtype=torch.int64
+        )
         expected_shape = (
             self.n_envs,
             self.n_players,
@@ -304,12 +310,29 @@ def encode_python_observation(
     )
 
 
-def _actions_to_numpy(actions: np.ndarray | torch.Tensor, *, dtype: Any) -> np.ndarray:
+def _actions_to_numpy(
+    name: str,
+    actions: np.ndarray | torch.Tensor,
+    *,
+    dtype: Any,
+    torch_dtype: torch.dtype,
+) -> np.ndarray:
     if isinstance(actions, torch.Tensor):
         if actions.device.type != "cpu":
             raise ValueError("actions must be on CPU before stepping the Rust env")
+        if actions.dtype != torch_dtype:
+            raise ValueError(
+                f"{name} must have dtype {torch_dtype}, got {actions.dtype}"
+            )
         actions = actions.detach().numpy()
-    return np.ascontiguousarray(actions, dtype=dtype)
+    elif isinstance(actions, np.ndarray):
+        if actions.dtype != np.dtype(dtype):
+            raise ValueError(
+                f"{name} must have dtype {np.dtype(dtype).name}, got {actions.dtype}"
+            )
+    else:
+        raise TypeError(f"{name} must be a NumPy array or Torch tensor")
+    return np.ascontiguousarray(actions)
 
 
 def _require_action_shape(
