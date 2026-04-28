@@ -55,6 +55,7 @@ class StatelessTransformerV1Config(BaseConfig):
     alpha_beta_eps: float = Field(default=1e-4, gt=0.0)
     dir_eps: float = Field(default=1e-6, gt=0.0)
     max_ship_normalizer: float = Field(default=250.0, gt=0.0)
+    entropy_ship_support_cap: int = Field(default=250, ge=1)
 
     @model_validator(mode="after")
     def _validate_attention_shape(self) -> Self:
@@ -330,6 +331,8 @@ class StatelessTransformerV1(BaseModelAPI):
         last_angle_cos = torch.zeros_like(slot_input[..., 0])
         last_ships = torch.zeros_like(max_launch)
 
+        # The configured slot count is a hard truncation: there is no extra
+        # terminal stop probability after the final slot.
         for slot in range(max_slots):
             slot_hidden, hidden_state = self.actor_gru(
                 self._slot_gru_input(
@@ -377,7 +380,7 @@ class StatelessTransformerV1(BaseModelAPI):
                 params,
                 remaining,
                 active,
-                max_ship_support=int(self.config.max_ship_normalizer),
+                max_ship_support=self.config.entropy_ship_support_cap,
             )
 
             launch_slots.append(launch)
@@ -473,6 +476,8 @@ class StatelessTransformerV1(BaseModelAPI):
         last_angle_cos = torch.zeros_like(slot_input[..., 0])
         last_ships = torch.zeros_like(max_launch)
 
+        # The configured slot count is a hard truncation: there is no extra
+        # terminal stop probability after the final slot.
         for slot in range(self.config.action_spec.max_per_planet_launches):
             slot_hidden, hidden_state = self.actor_gru(
                 self._slot_gru_input(
@@ -515,7 +520,7 @@ class StatelessTransformerV1(BaseModelAPI):
                 params,
                 remaining,
                 active,
-                max_ship_support=int(self.config.max_ship_normalizer),
+                max_ship_support=self.config.entropy_ship_support_cap,
             )
 
             launch_log_slots.append(launch_log_prob)
@@ -961,6 +966,11 @@ def event_entropy_from_params(
     *,
     max_ship_support: int,
 ) -> torch.Tensor:
+    """Approximate entropy of the augmented latent mixture event.
+
+    This is H(component) plus expected component entropy, not the exact
+    marginal entropy of the emitted angle/ship event when components overlap.
+    """
     mix_probabilities = torch.softmax(params.mix_logits, dim=-1)
     mixture_entropy = -(mix_probabilities * params.log_w).sum(dim=-1)
     component_entropy = von_mises_entropy(params.kappa) + beta_binomial_entropy(
@@ -985,6 +995,11 @@ def beta_binomial_entropy(
     *,
     max_ship_support: int,
 ) -> torch.Tensor:
+    """Entropy contribution over a capped prefix of ship-count support.
+
+    For residual budgets larger than ``max_ship_support`` the tail is
+    intentionally unenumerated, making this a truncated-support entropy.
+    """
     support = torch.arange(
         1,
         max_ship_support + 1,

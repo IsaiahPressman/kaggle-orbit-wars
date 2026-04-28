@@ -427,6 +427,39 @@ def test_distribution_helpers_promote_lower_precision_params_to_fp32() -> None:
         assert torch.isfinite(tensor).all()
 
 
+def test_action_entropy_is_finite_above_ship_support_cap() -> None:
+    mixtures = 1
+    shape = (1, 1, 1, mixtures)
+    params = PolicyParams(
+        continue_logits=torch.zeros(shape[:-1]),
+        mix_logits=torch.zeros(shape),
+        log_w=torch.zeros(shape),
+        loc=torch.zeros(shape),
+        kappa=torch.ones(shape),
+        alpha=torch.ones(shape),
+        beta=torch.ones(shape),
+    )
+    residual_budget = torch.tensor([[[11]]])
+    active = torch.ones(shape[:-1], dtype=torch.bool)
+
+    launch_entropy, event_entropy = masked_action_entropy_from_params(
+        params,
+        residual_budget,
+        active,
+        max_ship_support=3,
+    )
+    _, wider_event_entropy = masked_action_entropy_from_params(
+        params,
+        residual_budget,
+        active,
+        max_ship_support=11,
+    )
+
+    assert torch.isfinite(launch_entropy).all()
+    assert torch.isfinite(event_entropy).all()
+    assert torch.all(event_entropy < wider_event_entropy)
+
+
 def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
     torch.manual_seed(1)
     obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
@@ -467,6 +500,42 @@ def test_beta_binomial_entropy_uses_static_capped_support() -> None:
 
     expected = (250.0 / 300.0) * torch.log(torch.tensor(300.0, dtype=torch.float64))
     assert torch.allclose(entropy, expected.view(1, 1), atol=1e-3)
+
+
+def test_k_max_is_hard_truncation_and_replays_without_final_stop_probability() -> None:
+    torch.manual_seed(2)
+    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=3)
+    config = StatelessTransformerV1Config(
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        n_angle_mixtures=2,
+    )
+    model = StatelessTransformerV1(config)
+    obs = _obs_batch(batch_size=1, obs_spec=obs_spec, action_spec=action_spec)
+    obs.max_launch[0, 0, 0] = 100
+    with torch.no_grad():
+        model.actor_heads.continue_head.bias.fill_(100.0)
+
+    output = model(obs, deterministic=True)
+
+    assert output.actions.launch[0, 0, 0].all()
+    assert output.actions.ships[0, 0, 0].sum() < obs.max_launch[0, 0, 0]
+
+    evaluation = model.evaluate_actions(obs, output.actions)
+
+    assert torch.allclose(evaluation.log_probs.launch, output.log_probs.launch)
+    assert torch.allclose(
+        evaluation.log_probs.angle_and_size,
+        output.log_probs.angle_and_size,
+    )
+    assert torch.allclose(
+        evaluation.log_probs.per_player_entity,
+        output.log_probs.per_player_entity,
+    )
 
 
 def test_evaluate_actions_rejects_invalid_action_dtypes() -> None:

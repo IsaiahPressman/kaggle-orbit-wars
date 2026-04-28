@@ -35,7 +35,8 @@ without changing callers that validate config dictionaries through the union.
 | `tau_min` | `1e-3` | Lower bound added to beta-binomial concentration. |
 | `alpha_beta_eps` | `1e-4` | Epsilon added to beta-binomial alpha and beta. |
 | `dir_eps` | `1e-6` | Epsilon for normalizing raw angle direction vectors. |
-| `max_ship_normalizer` | `250.0` | Normalizer for ship-budget actor features and fixed entropy support cap. |
+| `max_ship_normalizer` | `250.0` | Normalizer for ship-budget actor features. |
+| `entropy_ship_support_cap` | `250` | Maximum ship-count support enumerated for truncated entropy estimates. |
 
 ## Input Encoding
 
@@ -75,10 +76,11 @@ The shared trunk is a stack of pre-norm transformer blocks configured by:
 `n_heads` must evenly divide `embed_dim`. The default activation is GELU. LayerNorm
 is used for normalization, and no dropout is applied.
 
-CPU execution uses torch scaled-dot-product attention. CUDA execution requires
-`flash-attn`; if CUDA is available and `flash-attn` is missing, construction
-raises `RuntimeError`. For CUDA, token packing metadata is built once before the
-transformer stack and reused by each attention block.
+CPU execution uses torch scaled-dot-product attention. CUDA execution uses
+`flash-attn` when it is installed and the attention tensors are fp16/bf16;
+otherwise it falls back to the same per-sequence scaled-dot-product attention
+path. Token packing metadata is built once before the transformer stack and
+reused by each attention block.
 
 Attention uses separate `q`, `k`, and `v` linear layers instead of one packed
 QKV projection. SwiGLU also uses separate gate and value projections. This keeps
@@ -171,6 +173,12 @@ The model returns decomposed action tensors:
 It also returns decomposed log-prob and entropy tensors for launch gates and
 angle/size events, plus per-player action-entity totals with shape
 `(batch, 4, 44)`.
+
+The angle/size entropy is an augmented latent-mixture entropy estimate: mixture
+label entropy plus expected component entropy. It is not the exact marginal
+entropy of the emitted action when mixture components overlap. Ship-count
+entropy enumerates support only up to `entropy_ship_support_cap`; residual ship
+budgets above that cap use truncated support.
 
 ## Log-Prob Replay
 
