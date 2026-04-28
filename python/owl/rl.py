@@ -70,7 +70,7 @@ class ActionPureConfig(BaseConfig):
     """
 
     action_spec: Literal["pure"] = "pure"
-    max_per_planet_launches: int = Field(default=1, ge=1, le=4)
+    max_per_planet_launches: int = Field(default=3, ge=1, le=4)
 
 
 type ObsConfig = Annotated[ObsV1Config, Field(discriminator="obs_spec")]

@@ -81,6 +81,69 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
     assert config.rl.segment_sampling.sampling == "advantage_priority"
 
 
+def test_full_config_defaults_to_multi_launch_actions() -> None:
+    config = FullConfig.model_validate(
+        {
+            "env": {
+                "n_envs": 2,
+            },
+            "model": {
+                "model_arch": "stateless_transformer_v1",
+                "embed_dim": 32,
+                "depth": 1,
+                "n_heads": 4,
+            },
+            "optimizer": {
+                "optimizer": "adamw",
+                "learning_rate": 0.001,
+            },
+            "rl": {
+                "horizon": 4,
+                "n_envs": 2,
+            },
+        }
+    )
+
+    assert config.env.action_spec.max_per_planet_launches == 3
+    assert config.model.action_spec.max_per_planet_launches == 3
+
+
+def test_full_config_rejects_single_launch_training_actions() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"training requires env\.action_spec\.max_per_planet_launches > 1",
+    ):
+        FullConfig.model_validate(
+            {
+                "env": {
+                    "n_envs": 2,
+                    "action_spec": {
+                        "action_spec": "pure",
+                        "max_per_planet_launches": 1,
+                    },
+                },
+                "model": {
+                    "model_arch": "stateless_transformer_v1",
+                    "action_spec": {
+                        "action_spec": "pure",
+                        "max_per_planet_launches": 1,
+                    },
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                },
+                "optimizer": {
+                    "optimizer": "adamw",
+                    "learning_rate": 0.001,
+                },
+                "rl": {
+                    "horizon": 4,
+                    "n_envs": 2,
+                },
+            }
+        )
+
+
 def test_full_config_rejects_mismatched_model_and_env_action_specs() -> None:
     with pytest.raises(
         ValueError,

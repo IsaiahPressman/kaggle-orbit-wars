@@ -23,7 +23,7 @@ without changing callers that validate config dictionaries through the union.
 | --- | --- | --- |
 | `model_arch` | `"stateless_transformer_v1"` | Pydantic discriminator tag. |
 | `obs_spec` | `ObsV1Config()` | Observation schema and entity capacities. |
-| `action_spec` | `ActionPureConfig()` | Action schema and max launches per source. |
+| `action_spec` | `ActionPureConfig()` | Action schema and max launches per source; defaults to 3 launch slots. |
 | `embed_dim` | `128` | Hidden width for all projected tokens and transformer blocks. |
 | `depth` | `4` | Number of transformer blocks. |
 | `n_heads` | `8` | Attention heads; must evenly divide `embed_dim`. |
@@ -152,6 +152,11 @@ h_t = (1 - z_t) * h_{t-1} + z_t * h_tilde
 The sequence length is at most `max_per_planet_launches <= 4`, so this
 implementation uses the straightforward sequential recurrence rather than the
 paper's parallel scan variant.
+
+`ActionPureConfig()` defaults to `max_per_planet_launches=3`. Training configs
+reject `max_per_planet_launches=1` so PPO runs cannot silently use the older
+single-launch action formulation while the model is configured for
+autoregressive repeated launch slots.
 
 For every slot, the policy emits:
 

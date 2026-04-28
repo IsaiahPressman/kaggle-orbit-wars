@@ -72,9 +72,15 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     )
     reward_ptr = env.rewards.data_ptr()
     done_ptr = env.dones.data_ptr()
-    launch = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.bool_)
-    angle = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.float32)
-    ships = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.int64)
+    action_shape = (
+        2,
+        4,
+        ACTION_ENTITY_SLOTS,
+        env.action_spec.max_per_planet_launches,
+    )
+    launch = np.zeros(action_shape, dtype=np.bool_)
+    angle = np.zeros(action_shape, dtype=np.float32)
+    ships = np.zeros(action_shape, dtype=np.int64)
 
     env.rewards.fill_(123)
     env.dones.fill_(True)
@@ -115,7 +121,7 @@ def test_step_rejects_wrong_numpy_action_dtypes(
         action_spec=ActionPureConfig(),
         pin_memory=False,
     )
-    shape = (1, 4, ACTION_ENTITY_SLOTS, 1)
+    shape = (1, 4, ACTION_ENTITY_SLOTS, env.action_spec.max_per_planet_launches)
     launch = np.zeros(shape, dtype=launch_dtype)
     angle = np.zeros(shape, dtype=angle_dtype)
     ships = np.zeros(shape, dtype=ships_dtype)
@@ -149,7 +155,7 @@ def test_step_rejects_wrong_torch_action_dtypes(
         action_spec=ActionPureConfig(),
         pin_memory=False,
     )
-    shape = (1, 4, ACTION_ENTITY_SLOTS, 1)
+    shape = (1, 4, ACTION_ENTITY_SLOTS, env.action_spec.max_per_planet_launches)
     launch = torch.zeros(shape, dtype=launch_dtype)
     angle = torch.zeros(shape, dtype=angle_dtype)
     ships = torch.zeros(shape, dtype=ships_dtype)
@@ -176,7 +182,7 @@ def test_step_rejects_invalid_launched_action_values(
     )
     obs = env.reset()
     env_index, player, entity = torch.nonzero(obs.can_act, as_tuple=False)[0].tolist()
-    shape = (1, 4, ACTION_ENTITY_SLOTS, 1)
+    shape = (1, 4, ACTION_ENTITY_SLOTS, env.action_spec.max_per_planet_launches)
     launch = np.zeros(shape, dtype=np.bool_)
     angle = np.zeros(shape, dtype=np.float32)
     ships = np.zeros(shape, dtype=np.int64)
@@ -217,9 +223,15 @@ def test_two_player_sample_marks_unused_player_slots_done() -> None:
         two_player_weight=1.0,
         pin_memory=False,
     )
-    launch = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.bool_)
-    angle = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.float32)
-    ships = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.int64)
+    action_shape = (
+        2,
+        4,
+        ACTION_ENTITY_SLOTS,
+        env.action_spec.max_per_planet_launches,
+    )
+    launch = np.zeros(action_shape, dtype=np.bool_)
+    angle = np.zeros(action_shape, dtype=np.float32)
+    ships = np.zeros(action_shape, dtype=np.int64)
 
     _, rewards, dones = env.step(launch, angle, ships)
 
@@ -243,6 +255,7 @@ def test_vectorized_env_accepts_discriminated_config_dicts() -> None:
 
 
 def test_action_config_validates_max_per_planet_launches() -> None:
+    assert ActionPureConfig().max_per_planet_launches == 3
     assert ActionPureConfig(max_per_planet_launches=4).max_per_planet_launches == 4
 
     with pytest.raises(ValueError, match="less than or equal to 4"):

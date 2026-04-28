@@ -40,7 +40,7 @@ pub struct PyRlVecEnv {
 #[pymethods]
 impl PyRlVecEnv {
     #[new]
-    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="obs_v1", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=1))]
+    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="obs_v1", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=3))]
     fn new(
         n_envs: usize,
         two_player_weight: f64,

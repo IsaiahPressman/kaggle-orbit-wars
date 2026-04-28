@@ -49,7 +49,10 @@ def _obs_batch(*, n_envs: int, obs_spec: ObsV1Config) -> ObsBatch:
     )
 
 
-def _actions(n_envs: int, max_launches: int = 1) -> ModelActions:
+def _actions(
+    n_envs: int,
+    max_launches: int = ActionPureConfig().max_per_planet_launches,
+) -> ModelActions:
     shape = (n_envs, 4, ACTION_ENTITY_SLOTS, max_launches)
     return ModelActions(
         launch=torch.zeros(shape, dtype=torch.bool),
@@ -143,6 +146,7 @@ class ReusingObservationEnv(TinyOrbitEnv):
 class TinyOrbitModel(BaseModelAPI):
     def __init__(self) -> None:
         super().__init__()
+        self.action_spec = ActionPureConfig()
         self.input_proj = nn.Linear(3, 8)
         self.hidden = nn.Linear(8, 8)
         self.policy = nn.Linear(8, 4)
@@ -160,7 +164,10 @@ class TinyOrbitModel(BaseModelAPI):
         logits = self.policy(hidden)
         dist = torch.distributions.Bernoulli(logits=logits)
         launch = logits.gt(0) if deterministic else dist.sample().bool()
-        actions = _actions(obs.global_features.shape[0])
+        actions = _actions(
+            obs.global_features.shape[0],
+            self.action_spec.max_per_planet_launches,
+        )
         actions.launch[:, :, 0, 0] = launch & obs.still_playing
         actions.ships[:, :, 0, 0] = actions.launch[:, :, 0, 0].to(torch.int64)
         log_probs = self._log_probs(dist.log_prob(actions.launch[:, :, 0, 0].float()))
@@ -283,7 +290,13 @@ def test_rollout_buffer_collects_time_major_and_returns_contiguous_segments() ->
         obs_spec.max_planets,
         obs_spec.planet_channels,
     )
-    assert segments.actions.launch.shape == (2, 3, 4, ACTION_ENTITY_SLOTS, 1)
+    assert segments.actions.launch.shape == (
+        2,
+        3,
+        4,
+        ACTION_ENTITY_SLOTS,
+        action_spec.max_per_planet_launches,
+    )
     assert segments.logp.shape == (2, 3, 4)
     assert segments.values.shape == (2, 3, 4)
     assert segments.rewards.shape == (2, 3, 4)
