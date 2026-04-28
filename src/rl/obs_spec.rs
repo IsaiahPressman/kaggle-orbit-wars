@@ -233,6 +233,11 @@ fn state_from_arrays(
     let comet_path_length_rows = comet_path_lengths.as_array();
     let comet_path_rows = comet_paths.as_array();
 
+    finite_f64(angular_velocity, "angular_velocity")?;
+    if episode_steps == 0 {
+        return Err(PyValueError::new_err("episode_steps must be > 0"));
+    }
+
     let planets = planet_rows
         .rows()
         .into_iter()

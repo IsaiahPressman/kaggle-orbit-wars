@@ -166,6 +166,9 @@ Shape per env: `(3,)`.
 | `1` | `steps_until_next_comet_spawn / 100` |
 | `2` | normalized angular velocity |
 
+Standalone observation encoding rejects non-finite `angular_velocity` and
+requires `episode_steps > 0` before computing these values.
+
 Comet spawn steps currently come from the rules engine constant:
 
 ```text

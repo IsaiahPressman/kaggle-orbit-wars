@@ -299,6 +299,28 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     assert not max_launch.any()
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("angular_velocity", np.nan, "angular_velocity must be finite"),
+        ("angular_velocity", np.inf, "angular_velocity must be finite"),
+        ("episode_steps", 0, "episode_steps must be > 0"),
+    ],
+)
+def test_python_observation_encoder_rejects_invalid_globals(
+    field: str, value: float | int, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        encode_python_observation(
+            {
+                field: value,
+                "planets": [],
+                "fleets": [],
+                "comets": [],
+            }
+        )
+
+
 def test_python_observation_encoder_keeps_largest_fleets_first(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
