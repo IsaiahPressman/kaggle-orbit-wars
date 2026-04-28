@@ -253,6 +253,19 @@ def test_rollout_buffer_collects_time_major_and_returns_contiguous_segments() ->
     )
 
 
+def test_obs_to_device_clones_cpu_observation_buffers() -> None:
+    obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 1)
+    obs = _obs_batch(n_envs=2, obs_spec=obs_spec)
+    obs.global_features.fill_(1.0)
+
+    copied = ppo._obs_to_device(obs, torch.device("cpu"))
+    obs.global_features.fill_(2.0)
+
+    assert torch.equal(copied.global_features, torch.ones_like(copied.global_features))
+    for field in ppo._OBS_FIELDS:
+        assert getattr(copied, field).data_ptr() != getattr(obs, field).data_ptr()
+
+
 def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
     torch.manual_seed(0)
     env = TinyOrbitEnv(n_envs=4, episode_length=3)

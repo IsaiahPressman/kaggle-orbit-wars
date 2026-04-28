@@ -820,7 +820,14 @@ def _actions_index(actions: ModelActions, idx: torch.Tensor) -> ModelActions:
 
 
 def _obs_to_device(obs: ObsBatch, device: torch.device) -> ObsBatch:
-    return ObsBatch(**{field: getattr(obs, field).to(device) for field in _OBS_FIELDS})
+    if device.type == "cpu":
+        return ObsBatch(
+            **{field: (getattr(obs, field).to(device).clone()) for field in _OBS_FIELDS}
+        )
+
+    return ObsBatch(
+        **{field: (getattr(obs, field).to(device)) for field in _OBS_FIELDS}
+    )
 
 
 def _actions_to_cpu(actions: ModelActions) -> ModelActions:
