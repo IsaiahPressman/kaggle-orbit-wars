@@ -2,18 +2,27 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import random
+import sys
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, assert_never
 
+import numpy as np
 import torch
 import yaml
 from owl.model import ModelConfig, StatelessTransformerV1
 from owl.rl import VectorizedEnv
 from owl.train import FullConfig, PPOTrainer
 from owl.train.logging import LogMode, create_logger
-from owl.train.optimizer import create_lr_scheduler, create_optimizer
+from owl.train.optimizer import (
+    LRScheduler,
+    Optimizer,
+    create_lr_scheduler,
+    create_optimizer,
+)
 from tqdm import tqdm
 
 
@@ -46,8 +55,12 @@ def main() -> None:
     )
 
     logger = create_logger(args.log_mode, run_dir, cfg)
-    env_steps_per_iteration = cfg.rl.horizon * cfg.rl.n_envs
+    env_steps_per_iteration = cfg.rl.horizon * env.n_envs
     env_steps = 0
+    started_at = time.monotonic()
+    next_checkpoint_env_steps = _next_periodic_checkpoint_step(
+        checkpoint_every_env_steps=args.checkpoint_every_env_steps,
+    )
 
     try:
         with tqdm(unit="env steps", dynamic_ncols=True) as progress:
@@ -56,8 +69,62 @@ def main() -> None:
                 env_steps += env_steps_per_iteration
                 progress.update(env_steps_per_iteration)
                 logger.log({**metrics, "env_steps": float(env_steps)}, step=env_steps)
+                if (
+                    next_checkpoint_env_steps is not None
+                    and env_steps >= next_checkpoint_env_steps
+                ):
+                    _write_checkpoint(
+                        run_dir / f"checkpoint-{env_steps}.pt",
+                        model=model,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        cfg=cfg,
+                        config_path=args.config,
+                        env_steps=env_steps,
+                    )
+                    next_checkpoint_env_steps = _next_periodic_checkpoint_step(
+                        checkpoint_every_env_steps=args.checkpoint_every_env_steps,
+                        env_steps=env_steps,
+                    )
+                if _should_stop_training(
+                    env_steps=env_steps,
+                    started_at=started_at,
+                    max_env_steps=args.max_env_steps,
+                    max_runtime_seconds=args.max_runtime_seconds,
+                ):
+                    break
     finally:
-        logger.close()
+        active_exception = sys.exception()
+        cleanup_error: Exception | None = None
+        if (
+            "model" in locals()
+            and "optimizer" in locals()
+            and "lr_scheduler" in locals()
+        ):
+            try:
+                _write_checkpoint(
+                    run_dir / "checkpoint-final.pt",
+                    model=model,
+                    optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
+                    cfg=cfg,
+                    config_path=args.config,
+                    env_steps=env_steps,
+                )
+            except Exception as exc:
+                if active_exception is None:
+                    cleanup_error = exc
+                else:
+                    traceback.print_exc()
+        try:
+            logger.close()
+        except Exception as exc:
+            if active_exception is None and cleanup_error is None:
+                cleanup_error = exc
+            else:
+                traceback.print_exc()
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 def _parse_args() -> argparse.Namespace:
@@ -80,7 +147,36 @@ def _parse_args() -> argparse.Namespace:
         metavar="field.path=value",
         help="Optional overrides in the format field.path=value",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--checkpoint-every-env-steps",
+        type=int,
+        default=0,
+        help="Write periodic checkpoints every N environment steps; 0 disables them",
+    )
+    parser.add_argument(
+        "--max-env-steps",
+        type=int,
+        default=None,
+        help="Stop after at least this many environment steps",
+    )
+    parser.add_argument(
+        "--max-runtime-seconds",
+        type=float,
+        default=None,
+        help="Stop after at least this many wall-clock seconds",
+    )
+    args = parser.parse_args()
+    _validate_args(args)
+    return args
+
+
+def _validate_args(args: argparse.Namespace) -> None:
+    if args.checkpoint_every_env_steps < 0:
+        raise ValueError("--checkpoint-every-env-steps must be non-negative")
+    if args.max_env_steps is not None and args.max_env_steps <= 0:
+        raise ValueError("--max-env-steps must be positive")
+    if args.max_runtime_seconds is not None and args.max_runtime_seconds <= 0.0:
+        raise ValueError("--max-runtime-seconds must be positive")
 
 
 def _parse_cli_overrides(raw_overrides: list[list[str]] | None) -> dict[str, Any]:
@@ -137,6 +233,65 @@ def _create_model(config: ModelConfig) -> StatelessTransformerV1:
             return StatelessTransformerV1(config)
         case _:
             assert_never(config)
+
+
+def _next_periodic_checkpoint_step(
+    *, checkpoint_every_env_steps: int, env_steps: int = 0
+) -> int | None:
+    if checkpoint_every_env_steps <= 0:
+        return None
+    return (env_steps // checkpoint_every_env_steps + 1) * checkpoint_every_env_steps
+
+
+def _should_stop_training(
+    *,
+    env_steps: int,
+    started_at: float,
+    max_env_steps: int | None,
+    max_runtime_seconds: float | None,
+) -> bool:
+    if max_env_steps is not None and env_steps >= max_env_steps:
+        return True
+    return (
+        max_runtime_seconds is not None
+        and time.monotonic() - started_at >= max_runtime_seconds
+    )
+
+
+def _write_checkpoint(
+    path: Path,
+    *,
+    model: torch.nn.Module,
+    optimizer: Optimizer,
+    lr_scheduler: LRScheduler | None,
+    cfg: FullConfig,
+    config_path: Path,
+    env_steps: int,
+) -> None:
+    checkpoint = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "lr_scheduler": (None if lr_scheduler is None else lr_scheduler.state_dict()),
+        "config": cfg.model_dump(mode="json", round_trip=True),
+        "config_path": str(config_path),
+        "rng_state": _rng_state(),
+        "env_steps": env_steps,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    torch.save(checkpoint, tmp_path)
+    tmp_path.replace(path)
+
+
+def _rng_state() -> dict[str, Any]:
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all()
+        if torch.cuda.is_available()
+        else None,
+    }
 
 
 if __name__ == "__main__":

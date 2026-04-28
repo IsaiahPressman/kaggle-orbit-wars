@@ -114,6 +114,34 @@ def test_full_config_rejects_mismatched_model_and_env_action_specs() -> None:
         )
 
 
+def test_full_config_rejects_mismatched_rl_and_env_counts() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"rl\.n_envs must match env\.n_envs \(2\), got 3",
+    ):
+        FullConfig.model_validate(
+            {
+                "env": {
+                    "n_envs": 2,
+                },
+                "model": {
+                    "model_arch": "stateless_transformer_v1",
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                },
+                "optimizer": {
+                    "optimizer": "adamw",
+                    "learning_rate": 0.001,
+                },
+                "rl": {
+                    "horizon": 4,
+                    "n_envs": 3,
+                },
+            }
+        )
+
+
 def test_autocast_context_respects_dtype_config() -> None:
     with ppo.autocast_context(PPOConfig(dtype="float32"), torch.device("cpu")):
         assert not torch.is_autocast_enabled("cpu")

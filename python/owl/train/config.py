@@ -31,3 +31,12 @@ class FullConfig(BaseConfig):
                 f"({model_max_launches} != {env_max_launches})"
             )
         return self
+
+    @model_validator(mode="after")
+    def _validate_rl_env_count_matches_env(self) -> Self:
+        if self.rl.n_envs != self.env.n_envs:
+            raise ValueError(
+                f"rl.n_envs must match env.n_envs ({self.env.n_envs}), "
+                f"got {self.rl.n_envs}"
+            )
+        return self
