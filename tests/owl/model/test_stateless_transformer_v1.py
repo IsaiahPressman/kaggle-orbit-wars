@@ -98,6 +98,16 @@ def test_model_config_has_discriminator_tag() -> None:
     assert config.model_arch == "stateless_transformer_v1"
 
 
+def test_model_constructor_does_not_require_flash_attn_on_cuda_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=32, depth=1, n_heads=4)
+    )
+
+
 def test_min_gru_cell_matches_paper_equation_without_candidate_tanh() -> None:
     cell = MinGRUCell(input_dim=2, hidden_dim=2)
     with torch.no_grad():

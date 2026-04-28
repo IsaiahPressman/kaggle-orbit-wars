@@ -11,7 +11,7 @@ from torch import nn
 from torch.distributions import Bernoulli, Beta, Binomial, Categorical, VonMises
 
 from owl.config import BaseConfig
-from owl.model.attn import flash_attn_available, varlen_attention
+from owl.model.attn import varlen_attention
 from owl.model.base import (
     BaseModelAPI,
     ModelActionEntropies,
@@ -93,8 +93,6 @@ class StatelessTransformerV1(BaseModelAPI):
     def __init__(self, config: StatelessTransformerV1Config) -> None:
         super().__init__()
         self.config = config
-        if torch.cuda.is_available() and not flash_attn_available():
-            raise RuntimeError("flash-attn must be installed when CUDA is available")
 
         dim = self.config.embed_dim
         self.planet_proj = nn.Linear(self.config.obs_spec.planet_channels, dim)

@@ -22,6 +22,27 @@ def flash_attn_available() -> bool:
     return _FLASH_ATTN_VARLEN_FUNC is not None
 
 
+def _should_use_flash_attn(
+    *,
+    device_type: str,
+    dtype: torch.dtype,
+    has_flash_attn: bool,
+) -> bool:
+    return (
+        device_type == "cuda"
+        and dtype in (torch.float16, torch.bfloat16)
+        and has_flash_attn
+    )
+
+
+def use_flash_attn(q: torch.Tensor) -> bool:
+    return _should_use_flash_attn(
+        device_type=q.device.type,
+        dtype=q.dtype,
+        has_flash_attn=_FLASH_ATTN_VARLEN_FUNC is not None,
+    )
+
+
 def varlen_attention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -30,11 +51,9 @@ def varlen_attention(
     cu_seqlens: torch.Tensor,
     max_seqlen: int,
 ) -> torch.Tensor:
-    if q.device.type == "cuda":
+    if use_flash_attn(q):
         if _FLASH_ATTN_VARLEN_FUNC is None:
-            raise RuntimeError("flash-attn is required for CUDA varlen attention")
-        if q.dtype not in (torch.float16, torch.bfloat16):
-            raise RuntimeError("flash-attn requires float16 or bfloat16 CUDA tensors")
+            raise RuntimeError("internal error: flash-attn backend is unavailable")
         return _FLASH_ATTN_VARLEN_FUNC(
             q=q,
             k=k,
@@ -47,6 +66,16 @@ def varlen_attention(
             causal=False,
         )
 
+    return _varlen_attention_sdpa(q, k, v, cu_seqlens=cu_seqlens)
+
+
+def _varlen_attention_sdpa(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    cu_seqlens: torch.Tensor,
+) -> torch.Tensor:
     outputs = []
     for start, end in zip(
         cu_seqlens[:-1].tolist(),
