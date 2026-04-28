@@ -387,10 +387,11 @@ class PPOTrainer:
         loss_metrics: list[PPOLossMetrics] = []
         grad_norms: list[torch.Tensor] = []
         sampling_metrics: list[SegmentSamplingMetrics] = []
-        train_values = segments.values.clone()
+        current_logp = segments.logp.clone()
+        current_values = segments.values.clone()
         current_advantages = advantages
         current_returns = returns
-        current_bootstrap_values = bootstrap_values
+        current_bootstrap_values = bootstrap_values.clone()
         n_minibatches = max(
             1,
             int(
@@ -402,26 +403,17 @@ class PPOTrainer:
         should_stop = False
         for epoch in range(self.config.update_epochs):
             if self._should_recompute_advantages(epoch):
-                train_logp, train_values = self._current_segment_logp_values(segments)
+                current_logp, current_values = self._current_segment_logp_values(
+                    segments
+                )
                 current_bootstrap_values = self._current_bootstrap_values()
-                ratios = (
-                    _policy_ratios(train_logp, segments.logp)
-                    if self.config.advantage_mode == "gae_vtrace"
-                    else None
+                current_advantages, current_returns = self._compute_current_gae(
+                    segments=segments,
+                    current_logp=current_logp,
+                    current_values=current_values,
+                    current_bootstrap_values=current_bootstrap_values,
                 )
-                current_advantages, current_returns = compute_gae(
-                    rewards=segments.rewards,
-                    values=train_values,
-                    dones=segments.dones,
-                    last_values=current_bootstrap_values,
-                    gamma=self.config.gamma,
-                    gae_lambda=self.config.gae_lambda,
-                    ratios=ratios,
-                    mode=self.config.advantage_mode,
-                    vtrace_rho_clip=self.config.vtrace_rho_clip,
-                    vtrace_c_clip=self.config.vtrace_c_clip,
-                )
-            for _minibatch in range(n_minibatches):
+            for minibatch_index in range(n_minibatches):
                 sampling_advantages = _segment_sampling_advantages(
                     current_advantages,
                     policy_mask,
@@ -443,12 +435,26 @@ class PPOTrainer:
                 )
                 loss_metrics.append(update.metrics)
                 grad_norms.append(update.grad_norm.detach())
+                current_logp[update.indices] = update.new_logp
+                current_values[update.indices] = update.new_values
                 if (
                     self.config.target_kl is not None
                     and update.metrics.approx_kl.item() > self.config.target_kl
                 ):
                     should_stop = True
                     break
+                has_next_minibatch = minibatch_index + 1 < n_minibatches
+                if (
+                    has_next_minibatch
+                    and self._should_refresh_advantages_between_minibatches()
+                ):
+                    current_bootstrap_values = self._current_bootstrap_values()
+                    current_advantages, current_returns = self._compute_current_gae(
+                        segments=segments,
+                        current_logp=current_logp,
+                        current_values=current_values,
+                        current_bootstrap_values=current_bootstrap_values,
+                    )
             if should_stop:
                 break
 
@@ -469,6 +475,38 @@ class PPOTrainer:
         return (
             self.config.recompute_advantages_each_epoch
             or self.config.advantage_mode == "gae_vtrace"
+        )
+
+    def _should_refresh_advantages_between_minibatches(self) -> bool:
+        return (
+            self.config.recompute_advantages_each_epoch
+            or self.config.advantage_mode == "gae_vtrace"
+        )
+
+    def _compute_current_gae(
+        self,
+        *,
+        segments: PPORolloutSegments,
+        current_logp: torch.Tensor,
+        current_values: torch.Tensor,
+        current_bootstrap_values: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        ratios = (
+            _policy_ratios(current_logp, segments.logp)
+            if self.config.advantage_mode == "gae_vtrace"
+            else None
+        )
+        return compute_gae(
+            rewards=segments.rewards,
+            values=current_values,
+            dones=segments.dones,
+            last_values=current_bootstrap_values,
+            gamma=self.config.gamma,
+            gae_lambda=self.config.gae_lambda,
+            ratios=ratios,
+            mode=self.config.advantage_mode,
+            vtrace_rho_clip=self.config.vtrace_rho_clip,
+            vtrace_c_clip=self.config.vtrace_c_clip,
         )
 
     def _current_segment_logp_values(

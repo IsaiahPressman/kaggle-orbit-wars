@@ -605,6 +605,128 @@ def test_trainer_vtrace_recomputes_current_policy_ratios(
     assert not torch.allclose(ratios_seen[1], torch.ones_like(ratios_seen[1]))
 
 
+def test_trainer_vtrace_refreshes_same_epoch_replay_tensors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(5)
+    seen: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+
+    def fake_compute_gae(
+        *,
+        rewards: torch.Tensor,
+        values: torch.Tensor,
+        dones: torch.Tensor,
+        last_values: torch.Tensor,
+        gamma: float,
+        gae_lambda: float,
+        ratios: torch.Tensor | None = None,
+        mode: ppo.AdvantageMode = "gae",
+        vtrace_rho_clip: float = 1.0,
+        vtrace_c_clip: float = 1.0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del dones, gamma, gae_lambda, vtrace_rho_clip, vtrace_c_clip
+        assert mode == "gae_vtrace"
+        assert ratios is not None
+        seen.append(
+            (
+                ratios.detach().clone(),
+                values.detach().clone(),
+                last_values.detach().clone(),
+            )
+        )
+        advantages = torch.ones_like(rewards)
+        return advantages, advantages + values
+
+    def fake_sample_segments(
+        advantages: torch.Tensor,
+        config: ppo.SegmentSamplingConfig,
+    ) -> ppo.SegmentSample:
+        del config
+        return ppo.SegmentSample(
+            indices=torch.zeros((1,), dtype=torch.int64),
+            importance=torch.ones((1, 1), dtype=advantages.dtype),
+            probabilities=torch.ones((advantages.shape[0],), dtype=advantages.dtype),
+        )
+
+    monkeypatch.setattr(ppo, "compute_gae", fake_compute_gae)
+    monkeypatch.setattr(ppo, "sample_segments", fake_sample_segments)
+
+    env = TinyOrbitEnv(n_envs=1)
+    model = TinyOrbitModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            n_envs=1,
+            update_epochs=1,
+            replay_ratio=2.0,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+            advantage_mode="gae_vtrace",
+        ),
+        device=torch.device("cpu"),
+    )
+    bootstrap_values = trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+    policy_mask = ppo._policy_mask(segments.obs)
+    value_mask = segments.obs.still_playing
+    advantages = torch.ones_like(segments.rewards)
+    returns = advantages + segments.values
+    replacement_logp = torch.full_like(segments.logp[:1], 0.5)
+    replacement_values = torch.full_like(segments.values[:1], 2.0)
+    replacement_bootstrap = torch.full_like(bootstrap_values, 3.0)
+
+    def fake_update_minibatch(
+        segments: ppo.PPORolloutSegments,
+        advantages: torch.Tensor,
+        returns: torch.Tensor,
+        policy_mask: torch.Tensor,
+        value_mask: torch.Tensor,
+        sample: ppo.SegmentSample,
+    ) -> ppo.PPOUpdateResult:
+        del segments, advantages, returns, policy_mask, value_mask
+        zero = replacement_logp.new_zeros(())
+        metrics = ppo.PPOLossMetrics(
+            loss=zero,
+            policy_loss=zero,
+            value_loss=zero,
+            entropy=zero,
+            approx_kl=zero,
+            clipfrac=zero,
+            ratio_mean=zero,
+            ratio_max=zero,
+        )
+        return ppo.PPOUpdateResult(
+            metrics=metrics,
+            indices=sample.indices,
+            new_logp=replacement_logp,
+            new_values=replacement_values,
+            grad_norm=zero,
+        )
+
+    monkeypatch.setattr(trainer, "_update_minibatch", fake_update_minibatch)
+    monkeypatch.setattr(
+        trainer,
+        "_current_bootstrap_values",
+        lambda: replacement_bootstrap,
+    )
+
+    trainer._update(
+        segments,
+        advantages,
+        returns,
+        bootstrap_values,
+        policy_mask,
+        value_mask,
+    )
+
+    assert len(seen) == 1
+    assert torch.allclose(seen[0][0], torch.exp(replacement_logp - segments.logp[:1]))
+    assert torch.allclose(seen[0][1], replacement_values)
+    assert torch.allclose(seen[0][2], replacement_bootstrap)
+
+
 def test_trainer_overwrites_dones_when_envs_terminate_inside_rollout() -> None:
     torch.manual_seed(3)
     env = TinyOrbitEnv(n_envs=3, episode_length=1)
