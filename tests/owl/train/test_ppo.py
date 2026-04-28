@@ -114,6 +114,32 @@ class TinyOrbitEnv:
         return still_playing
 
 
+class ReusingObservationEnv(TinyOrbitEnv):
+    def __init__(self, *, n_envs: int, episode_length: int = 10) -> None:
+        super().__init__(n_envs=n_envs, episode_length=episode_length)
+        self._obs_storage = _obs_batch(n_envs=n_envs, obs_spec=self.obs_spec)
+
+    def _obs(self) -> ObsBatch:
+        obs = self._obs_storage
+        obs.planets.zero_()
+        obs.fleets.zero_()
+        obs.comets.zero_()
+        obs.planet_mask.zero_()
+        obs.fleet_mask.zero_()
+        obs.comet_mask.zero_()
+        obs.still_playing.zero_()
+        obs.global_features.zero_()
+        obs.can_act.zero_()
+        obs.max_launch.zero_()
+        obs.global_features[:, 0] = self._targets
+        obs.global_features[:, 1] = self._steps.to(torch.float32)
+        obs.still_playing.copy_(self._still_playing())
+        obs.planet_mask[:, :2] = True
+        obs.can_act[:, :, 0] = obs.still_playing
+        obs.max_launch[:, :, 0] = obs.still_playing.to(torch.int64)
+        return obs
+
+
 class TinyOrbitModel(BaseModelAPI):
     def __init__(self) -> None:
         super().__init__()
@@ -264,6 +290,35 @@ def test_obs_to_device_clones_cpu_observation_buffers() -> None:
     assert torch.equal(copied.global_features, torch.ones_like(copied.global_features))
     for field in ppo._OBS_FIELDS:
         assert getattr(copied, field).data_ptr() != getattr(obs, field).data_ptr()
+
+
+def test_collect_rollout_keeps_pre_step_obs_with_reused_cpu_buffers() -> None:
+    torch.manual_seed(4)
+    env = ReusingObservationEnv(n_envs=2)
+    model = TinyOrbitModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=3,
+            n_envs=2,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+        ),
+        device=torch.device("cpu"),
+    )
+
+    trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+
+    expected_steps = torch.tensor([0.0, 1.0, 2.0])
+    assert torch.equal(
+        segments.obs.global_features[:, :, 1], expected_steps.expand(2, -1)
+    )
+    assert torch.equal(
+        trainer._obs.global_features[:, 1],
+        torch.full((2,), 3.0),
+    )
 
 
 def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
