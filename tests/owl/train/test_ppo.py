@@ -234,6 +234,21 @@ class TinyOrbitModel(BaseModelAPI):
         )
 
 
+def _zero_loss_metrics(zero: torch.Tensor) -> ppo.PPOLossMetrics:
+    return ppo.PPOLossMetrics(
+        loss=zero,
+        policy_loss=zero,
+        value_loss=zero,
+        entropy=zero,
+        approx_kl=zero,
+        clipfrac=zero,
+        ratio_mean=zero,
+        ratio_max=zero,
+        logratio_mean=zero,
+        logratio_abs_max=zero,
+    )
+
+
 def test_rollout_buffer_collects_time_major_and_returns_contiguous_segments() -> None:
     obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 1)
     action_spec = ActionPureConfig()
@@ -353,7 +368,13 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "clipfrac",
         "ratio_mean",
         "ratio_max",
+        "logratio_mean",
+        "logratio_abs_max",
         "grad_norm",
+        "num_minibatches_per_epoch",
+        "num_total_minibatches",
+        "effective_replay_exposure",
+        "policy_active_ratio",
         "advantage_mean",
         "advantage_std",
         "priority_mean",
@@ -410,6 +431,110 @@ def test_segment_sampling_advantages_use_policy_mask() -> None:
         sampling_advantages,
         torch.tensor([[1.0, 2.0], [0.0, 4.0]]),
     )
+
+
+def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(7)
+    env = TinyOrbitEnv(n_envs=5)
+    model = TinyOrbitModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            n_envs=5,
+            update_epochs=1,
+            replay_ratio=1.0,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=2),
+        ),
+        device=torch.device("cpu"),
+    )
+    bootstrap_values = trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+    policy_mask = ppo._policy_mask(segments.obs)
+    value_mask = segments.obs.still_playing
+    advantages = torch.ones_like(segments.rewards)
+    returns = advantages + segments.values
+    seen: list[torch.Tensor] = []
+
+    def fake_update_minibatch(
+        segments: ppo.PPORolloutSegments,
+        advantages: torch.Tensor,
+        returns: torch.Tensor,
+        policy_mask: torch.Tensor,
+        value_mask: torch.Tensor,
+        sample: ppo.SegmentSample,
+    ) -> ppo.PPOUpdateResult:
+        del advantages, returns, policy_mask, value_mask
+        seen.append(sample.indices.detach().clone())
+        zero = segments.logp.new_zeros(())
+        return ppo.PPOUpdateResult(
+            metrics=_zero_loss_metrics(zero),
+            indices=sample.indices,
+            new_logp=segments.logp[sample.indices],
+            new_values=segments.values[sample.indices],
+            grad_norm=zero,
+        )
+
+    monkeypatch.setattr(trainer, "_update_minibatch", fake_update_minibatch)
+
+    metrics = trainer._update(
+        segments,
+        advantages,
+        returns,
+        bootstrap_values,
+        policy_mask,
+        value_mask,
+    )
+
+    assert [indices.shape for indices in seen] == [(2,), (2,), (1,)]
+    all_indices = torch.cat(seen)
+    assert torch.equal(all_indices.sort().values, torch.arange(5))
+    assert metrics["num_minibatches"] == pytest.approx(3.0)
+    assert metrics["num_minibatches_per_epoch"] == pytest.approx(3.0)
+    assert metrics["num_total_minibatches"] == pytest.approx(3.0)
+    assert metrics["effective_replay_exposure"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        ppo.PPOConfig(
+            n_envs=4,
+            replay_ratio=2.0,
+            segment_sampling=ppo.SegmentSamplingConfig(
+                sampling="uniform",
+                segments_per_minibatch=2,
+            ),
+        ),
+        ppo.PPOConfig(
+            n_envs=4,
+            replay_ratio=1.0,
+            segment_sampling=ppo.SegmentSamplingConfig(
+                sampling="advantage_priority",
+                segments_per_minibatch=2,
+            ),
+        ),
+    ],
+)
+def test_epoch_samples_keeps_replacement_sampling_paths(config: ppo.PPOConfig) -> None:
+    advantages = torch.ones((4, 2))
+
+    n_minibatches = ppo._num_minibatches_per_epoch(config)
+    samples = ppo._epoch_samples(
+        advantages,
+        config,
+        n_minibatches,
+    )
+
+    assert samples == [None for _ in range(n_minibatches)]
+
+
+def test_ppo_config_defaults_target_kl() -> None:
+    assert ppo.PPOConfig().target_kl == pytest.approx(0.03)
 
 
 def test_trainer_compiles_model_when_configured(
@@ -499,6 +624,8 @@ def test_trainer_recomputes_advantages_each_epoch(
             clipfrac=zero,
             ratio_mean=zero,
             ratio_max=zero,
+            logratio_mean=zero,
+            logratio_abs_max=zero,
         )
 
     monkeypatch.setattr(ppo, "compute_gae", fake_compute_gae)
@@ -578,6 +705,8 @@ def test_trainer_vtrace_recomputes_current_policy_ratios(
             clipfrac=zero,
             ratio_mean=zero,
             ratio_max=zero,
+            logratio_mean=zero,
+            logratio_abs_max=zero,
         )
 
     monkeypatch.setattr(ppo, "compute_gae", fake_compute_gae)
@@ -696,6 +825,8 @@ def test_trainer_vtrace_refreshes_same_epoch_replay_tensors(
             clipfrac=zero,
             ratio_mean=zero,
             ratio_max=zero,
+            logratio_mean=zero,
+            logratio_abs_max=zero,
         )
         return ppo.PPOUpdateResult(
             metrics=metrics,

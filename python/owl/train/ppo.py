@@ -31,6 +31,7 @@ from owl.train.sampling import (
     SegmentSamplingConfig,
     SegmentSamplingMetrics,
     sample_segments,
+    sample_segments_uniform_epoch,
     segment_sampling_metrics,
 )
 from owl.train.utils import (
@@ -67,7 +68,7 @@ class PPOConfig(BaseConfig):
     vf_coef: float = Field(default=0.5, ge=0.0)
     ent_coef: float = Field(default=0.01, ge=0.0)
     max_grad_norm: float = Field(default=0.5, gt=0.0)
-    target_kl: float | None = Field(default=None, gt=0.0)
+    target_kl: float | None = Field(default=0.03, gt=0.0)
     normalize_advantages: bool = True
     advantage_eps: float = Field(default=1e-8, gt=0.0)
     advantage_mode: AdvantageMode = "gae"
@@ -115,6 +116,8 @@ class PPOLossMetrics:
     clipfrac: torch.Tensor
     ratio_mean: torch.Tensor
     ratio_max: torch.Tensor
+    logratio_mean: torch.Tensor
+    logratio_abs_max: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -392,14 +395,8 @@ class PPOTrainer:
         current_advantages = advantages
         current_returns = returns
         current_bootstrap_values = bootstrap_values.clone()
-        n_minibatches = max(
-            1,
-            int(
-                self.config.replay_ratio
-                * self.config.n_envs
-                / self.config.segment_sampling.segments_per_minibatch
-            ),
-        )
+        n_minibatches = _num_minibatches_per_epoch(self.config)
+        sampled_segments = 0
         should_stop = False
         for epoch in range(self.config.update_epochs):
             if self._should_recompute_advantages(epoch):
@@ -413,18 +410,32 @@ class PPOTrainer:
                     current_values=current_values,
                     current_bootstrap_values=current_bootstrap_values,
                 )
-            for minibatch_index in range(n_minibatches):
+            sampling_advantages = _segment_sampling_advantages(
+                current_advantages,
+                policy_mask,
+            )
+            epoch_samples = _epoch_samples(
+                sampling_advantages,
+                self.config,
+                n_minibatches,
+            )
+            for minibatch_index, epoch_sample in enumerate(epoch_samples):
                 sampling_advantages = _segment_sampling_advantages(
                     current_advantages,
                     policy_mask,
                 )
-                sample = sample_segments(
-                    sampling_advantages,
-                    self.config.segment_sampling,
+                sample = (
+                    epoch_sample
+                    if epoch_sample is not None
+                    else sample_segments(
+                        sampling_advantages,
+                        self.config.segment_sampling,
+                    )
                 )
                 sampling_metrics.append(
                     segment_sampling_metrics(sampling_advantages, sample)
                 )
+                sampled_segments += int(sample.indices.numel())
                 update = self._update_minibatch(
                     segments,
                     current_advantages,
@@ -463,6 +474,14 @@ class PPOTrainer:
         metrics = _mean_loss_metrics(loss_metrics)
         metrics["grad_norm"] = float(torch.stack(grad_norms).mean().item())
         metrics["num_minibatches"] = float(len(loss_metrics))
+        metrics["num_minibatches_per_epoch"] = float(n_minibatches)
+        metrics["num_total_minibatches"] = float(
+            n_minibatches * self.config.update_epochs
+        )
+        metrics["effective_replay_exposure"] = float(
+            sampled_segments / self.config.n_envs
+        )
+        metrics["policy_active_ratio"] = float(policy_mask.float().mean().item())
         if self.lr_scheduler is not None:
             metrics["learning_rate"] = float(self.lr_scheduler.get_last_lr()[0])
         if sampling_metrics:
@@ -697,6 +716,8 @@ def _ppo_loss_metrics_from_tuple(
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
     ],
 ) -> PPOLossMetrics:
     (
@@ -708,6 +729,8 @@ def _ppo_loss_metrics_from_tuple(
         clipfrac,
         ratio_mean,
         ratio_max,
+        logratio_mean,
+        logratio_abs_max,
     ) = tensors
     return PPOLossMetrics(
         loss=loss,
@@ -718,6 +741,8 @@ def _ppo_loss_metrics_from_tuple(
         clipfrac=clipfrac,
         ratio_mean=ratio_mean,
         ratio_max=ratio_max,
+        logratio_mean=logratio_mean,
+        logratio_abs_max=logratio_abs_max,
     )
 
 
@@ -738,6 +763,8 @@ def _ppo_loss_tensors(
     vf_coef: float,
     ent_coef: float,
 ) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
@@ -783,6 +810,8 @@ def _ppo_loss_tensors(
     )
     ratio_mean = weighted_mean(ratio, policy_weight)
     ratio_max = _masked_max_or_zero(ratio, policy_weight > 0)
+    logratio_mean = weighted_mean(logratio, policy_weight)
+    logratio_abs_max = _masked_max_or_zero(logratio.abs(), policy_weight > 0)
 
     return (
         loss,
@@ -793,6 +822,8 @@ def _ppo_loss_tensors(
         clipfrac,
         ratio_mean,
         ratio_max,
+        logratio_mean,
+        logratio_abs_max,
     )
 
 
@@ -954,6 +985,35 @@ def _policy_ratios(new_logp: torch.Tensor, old_logp: torch.Tensor) -> torch.Tens
     return (new_logp - old_logp).exp()
 
 
+def _uses_uniform_single_pass_sampling(config: PPOConfig) -> bool:
+    return config.segment_sampling.sampling == "uniform" and config.replay_ratio == 1.0
+
+
+def _num_minibatches_per_epoch(config: PPOConfig) -> int:
+    segments_per_minibatch = config.segment_sampling.segments_per_minibatch
+    if _uses_uniform_single_pass_sampling(config):
+        return (config.n_envs + segments_per_minibatch - 1) // segments_per_minibatch
+    return max(1, int(config.replay_ratio * config.n_envs / segments_per_minibatch))
+
+
+def _epoch_samples(
+    sampling_advantages: torch.Tensor,
+    config: PPOConfig,
+    n_minibatches: int,
+) -> list[SegmentSample | None]:
+    if _uses_uniform_single_pass_sampling(config):
+        samples: list[SegmentSample | None] = []
+        samples.extend(
+            sample_segments_uniform_epoch(
+                n_segments=sampling_advantages.shape[0],
+                segments_per_minibatch=config.segment_sampling.segments_per_minibatch,
+                device=sampling_advantages.device,
+            )
+        )
+        return samples
+    return [None for _ in range(n_minibatches)]
+
+
 def _masked_max_or_zero(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     masked = torch.where(mask, values, torch.full_like(values, -torch.inf))
     return torch.where(
@@ -986,6 +1046,8 @@ def _mean_loss_metrics(metrics: list[PPOLossMetrics]) -> dict[str, float]:
         "clipfrac",
         "ratio_mean",
         "ratio_max",
+        "logratio_mean",
+        "logratio_abs_max",
     )
     return {
         name: float(
