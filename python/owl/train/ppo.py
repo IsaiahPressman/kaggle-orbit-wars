@@ -389,7 +389,7 @@ class PPOTrainer:
                     rewards=rewards,
                     dones=dones,
                 )
-                self._obs = _obs_to_device(next_obs, self.device)
+                _copy_obs_to_device_(self._obs, next_obs, self.device)
             with autocast_context(self.config, self.device):
                 bootstrap = self._model_forward(self._obs)
             return _output_values(bootstrap).detach()
@@ -1018,6 +1018,22 @@ def _obs_to_device(
             for field in _OBS_FIELDS
         }
     )
+
+
+def _copy_obs_to_device_(
+    dst: ObsBatch,
+    src: ObsBatch,
+    device: torch.device,
+    *,
+    non_blocking: bool | None = None,
+) -> None:
+    if non_blocking is None:
+        non_blocking = _can_non_blocking_copy_to_device(
+            tuple(getattr(src, field) for field in _OBS_FIELDS),
+            device,
+        )
+    for field in _OBS_FIELDS:
+        getattr(dst, field).copy_(getattr(src, field), non_blocking=non_blocking)
 
 
 def _actions_to_cpu(

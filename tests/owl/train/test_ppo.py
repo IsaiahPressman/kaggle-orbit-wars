@@ -395,10 +395,16 @@ def test_collect_rollout_keeps_pre_step_obs_with_reused_cpu_buffers() -> None:
         ),
         device=torch.device("cpu"),
     )
+    obs_ptrs = {
+        field: getattr(trainer._obs, field).data_ptr() for field in ppo._OBS_FIELDS
+    }
 
     trainer._collect_rollout()
     segments = trainer.rollout.segment_major()
 
+    assert obs_ptrs == {
+        field: getattr(trainer._obs, field).data_ptr() for field in ppo._OBS_FIELDS
+    }
     expected_steps = torch.tensor([0.0, 1.0, 2.0])
     assert torch.equal(
         segments.obs.global_features[:, :, 1], expected_steps.expand(2, -1)
