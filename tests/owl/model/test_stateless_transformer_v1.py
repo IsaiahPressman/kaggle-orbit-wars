@@ -321,6 +321,7 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert torch.all(output.winner_probabilities[~obs.still_playing] == 0)
     assert torch.all(output.actions.ships[~output.actions.launch] == 0)
     assert torch.all(output.actions.ships.sum(dim=-1) <= obs.max_launch)
+    assert model.launch_slot_tokens.weight.shape == (3, config.embed_dim)
     assert model.slot_dynamic_proj.in_features == 6
 
     evaluation = model.evaluate_actions(obs, output.actions)
@@ -344,6 +345,51 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     )
     assert torch.allclose(evaluation.values, output.values)
     assert torch.allclose(evaluation.winner_probabilities, output.winner_probabilities)
+
+
+def test_launch_slot_embedding_is_added_to_each_slot_input() -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=4)
+    config = StatelessTransformerV1Config(
+        action_spec=action_spec,
+        embed_dim=16,
+        depth=1,
+        n_heads=4,
+    )
+    model = StatelessTransformerV1(config)
+    slot_input = torch.zeros((2, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    active = torch.zeros(slot_input.shape[:-1], dtype=torch.bool)
+    remaining = torch.zeros(slot_input.shape[:-1], dtype=torch.int64)
+    last_launch = torch.zeros(slot_input.shape[:-1], dtype=torch.bool)
+    last_angle_sin = torch.zeros(slot_input.shape[:-1])
+    last_angle_cos = torch.zeros(slot_input.shape[:-1])
+    last_ships = torch.zeros(slot_input.shape[:-1], dtype=torch.int64)
+
+    first_slot = model._slot_gru_input(
+        slot_input,
+        0,
+        active,
+        remaining,
+        last_launch,
+        last_angle_sin,
+        last_angle_cos,
+        last_ships,
+        include_dynamic_features=False,
+    )
+    second_slot = model._slot_gru_input(
+        slot_input,
+        1,
+        active,
+        remaining,
+        last_launch,
+        last_angle_sin,
+        last_angle_cos,
+        last_ships,
+        include_dynamic_features=False,
+    )
+
+    expected_first_slot = model.launch_slot_tokens.weight[0].view(1, 1, 1, -1)
+    assert torch.allclose(first_slot, expected_first_slot.expand_as(first_slot))
+    assert not torch.allclose(first_slot, second_slot)
 
 
 def test_actor_distribution_outputs_remain_fp32_under_cpu_bf16_autocast() -> None:

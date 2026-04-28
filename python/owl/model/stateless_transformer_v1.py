@@ -121,6 +121,10 @@ class StatelessTransformerV1(BaseModelAPI):
 
         self.critic_head = nn.Linear(dim, 1)
         self.action_info_proj = nn.Linear(1, dim)
+        self.launch_slot_tokens = nn.Embedding(
+            self.config.action_spec.max_per_planet_launches,
+            dim,
+        )
         self.slot_dynamic_proj = nn.Linear(6, dim)
         self.actor_input_proj = nn.Linear(dim * 3, dim)
         self.actor_gru = MinGRUStack(dim, dim, n_layers=2)
@@ -167,6 +171,7 @@ class StatelessTransformerV1(BaseModelAPI):
             self.global_proj,
             self.player_tokens,
             self.action_info_proj,
+            self.launch_slot_tokens,
             self.slot_dynamic_proj,
             self.actor_input_proj,
         )
@@ -337,6 +342,7 @@ class StatelessTransformerV1(BaseModelAPI):
             slot_hidden, hidden_state = self.actor_gru(
                 self._slot_gru_input(
                     slot_input,
+                    slot,
                     active,
                     remaining,
                     last_launch,
@@ -482,6 +488,7 @@ class StatelessTransformerV1(BaseModelAPI):
             slot_hidden, hidden_state = self.actor_gru(
                 self._slot_gru_input(
                     slot_input,
+                    slot,
                     active,
                     remaining,
                     last_launch,
@@ -619,6 +626,7 @@ class StatelessTransformerV1(BaseModelAPI):
     def _slot_gru_input(
         self,
         slot_input: torch.Tensor,
+        slot: int,
         active: torch.Tensor,
         remaining: torch.Tensor,
         last_launch: torch.Tensor,
@@ -628,8 +636,10 @@ class StatelessTransformerV1(BaseModelAPI):
         *,
         include_dynamic_features: bool,
     ) -> torch.Tensor:
+        slot_token = self.launch_slot_tokens.weight[slot].to(dtype=slot_input.dtype)
+        slot_context = slot_input + slot_token
         if not include_dynamic_features:
-            return slot_input
+            return slot_context
         dynamic_features = torch.stack(
             (
                 active.to(dtype=slot_input.dtype),
@@ -641,7 +651,7 @@ class StatelessTransformerV1(BaseModelAPI):
             ),
             dim=-1,
         )
-        return slot_input + self.slot_dynamic_proj(dynamic_features)
+        return slot_context + self.slot_dynamic_proj(dynamic_features)
 
 
 class TransformerBlock(nn.Module):

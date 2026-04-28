@@ -133,12 +133,15 @@ For each `(batch, player, action_entity)` position, the actor combines:
 - normalized `max_launch`
 
 The repeated launch slots are generated autoregressively with a 2-layer minGRU
-stack. Each slot also receives dynamic inputs for current activity, remaining
-ship budget, previous launch decision, the sine and cosine of the previous
-sampled launch angle, and the previous normalized ship count.
+stack. Each recurrent step adds a learned launch-slot embedding so the actor has
+an explicit first/second/third/etc. slot identity. Each slot also receives
+dynamic inputs for current activity, remaining ship budget, previous launch
+decision, the sine and cosine of the previous sampled launch angle, and the
+previous normalized ship count.
 
-The first recurrent slot receives only the static actor input. Dynamic recurrent
-features are added starting with the second launch slot.
+The first recurrent slot receives the static actor input plus its slot
+embedding. Dynamic recurrent features are added starting with the second launch
+slot.
 
 The minGRU cell follows the sequential equation from Feng et al., "Were RNNs
 All We Needed?":
