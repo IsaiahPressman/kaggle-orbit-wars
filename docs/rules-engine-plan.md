@@ -147,6 +147,9 @@ The current downloaded reference episodes are:
   reference RNG stream after planet generation.
 - Combat is queued during fleet movement and sweep, then resolved after all
   movement.
+- Fleet movement queues planet collisions before checking out-of-bounds or sun
+  removal, matching the reference behavior for fast fleets that cross multiple
+  collision/removal zones in one step.
 - Termination happens at `episodeSteps - 2`, which is earlier than the prose
   rule's 500-turn wording suggests.
 - Player 0 observations are the canonical replay observations. Later player

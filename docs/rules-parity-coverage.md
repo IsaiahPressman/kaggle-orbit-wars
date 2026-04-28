@@ -58,7 +58,8 @@ replays:
 - launch validation and side effects
 - production order
 - fleet movement and removal
-- sun, planet, and sweep collisions
+- fleet collision priority: planet collisions before out-of-bounds or sun removal
+- sun, planet, out-of-bounds, and sweep collisions
 - combat resolution, ties, and reinforcement
 - comet spawning before same-step movement
 - comet movement and expiry
