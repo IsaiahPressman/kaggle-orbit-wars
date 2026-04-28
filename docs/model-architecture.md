@@ -35,7 +35,7 @@ without changing callers that validate config dictionaries through the union.
 | `tau_min` | `1e-3` | Lower bound added to beta-binomial concentration. |
 | `alpha_beta_eps` | `1e-4` | Epsilon added to beta-binomial alpha and beta. |
 | `dir_eps` | `1e-6` | Epsilon for normalizing raw angle direction vectors. |
-| `max_ship_normalizer` | `250.0` | Normalizer for ship-budget actor features. |
+| `max_ship_normalizer` | `250.0` | Normalizer for ship-budget actor features and fixed entropy support cap. |
 
 ## Input Encoding
 
@@ -156,14 +156,15 @@ The model returns decomposed action tensors:
 - `angle`: float32, `(batch, 4, 44, max_per_planet_launches)`
 - `ships`: int64, `(batch, 4, 44, max_per_planet_launches)`
 
-It also returns decomposed log-prob tensors for launch gates and angle/size
-events, plus a total per batch row.
+It also returns decomposed log-prob and entropy tensors for launch gates and
+angle/size events, plus per-player action-entity totals with shape
+`(batch, 4, 44)`.
 
 ## Log-Prob Replay
 
-The model exposes `log_prob(obs, actions)` to replay externally supplied action
-tensors through the same autoregressive state updates. This is the path PPO
-should use for new-policy log-probs of old rollout actions.
+The model exposes `evaluate_actions(obs, actions)` to replay externally supplied
+action tensors through the same autoregressive state updates and return both
+new-policy log-probs, entropies, and critic values from one encode.
 
 Inactive and stopped slots are given finite dummy event inputs before masking so
 their zeroed log-prob contributions do not introduce NaN gradients.

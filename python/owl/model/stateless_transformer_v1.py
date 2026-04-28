@@ -11,6 +11,14 @@ from torch import nn
 from torch.distributions import Bernoulli, Beta, Binomial, Categorical, VonMises
 
 from owl.model.attn import flash_attn_available, varlen_attention
+from owl.model.base import (
+    BaseModelAPI,
+    ModelActionEntropies,
+    ModelActionLogProbs,
+    ModelActions,
+    ModelEvaluation,
+    ModelOutput,
+)
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     OUTER_PLAYER_SLOTS,
@@ -53,28 +61,6 @@ type ModelConfig = Annotated[
 ]
 
 
-@dataclass
-class ModelActions:
-    launch: torch.Tensor
-    angle: torch.Tensor
-    ships: torch.Tensor
-
-
-@dataclass
-class ModelActionLogProbs:
-    launch: torch.Tensor
-    angle_and_size: torch.Tensor
-    total: torch.Tensor
-
-
-@dataclass
-class ModelOutput:
-    actions: ModelActions
-    log_probs: ModelActionLogProbs
-    values: torch.Tensor
-    winner_probabilities: torch.Tensor
-
-
 @dataclass(frozen=True)
 class PolicyParams:
     continue_logits: torch.Tensor
@@ -96,7 +82,7 @@ class PackedSequence:
     padded_seq_len: int
 
 
-class StatelessTransformerV1(nn.Module):
+class StatelessTransformerV1(BaseModelAPI):
     def __init__(self, config: StatelessTransformerV1Config) -> None:
         super().__init__()
         self.config = config
@@ -121,6 +107,29 @@ class StatelessTransformerV1(nn.Module):
         self.actor_input_proj = nn.Linear(dim * 3, dim)
         self.actor_gru = MinGRUStack(dim, dim, n_layers=2)
         self.actor_heads = LaunchPolicyHeads(self.config)
+
+    def get_input_layers(self) -> tuple[nn.Module, ...]:
+        return (
+            self.planet_proj,
+            self.fleet_proj,
+            self.comet_proj,
+            self.global_proj,
+            self.player_tokens,
+            self.action_info_proj,
+            self.slot_dynamic_proj,
+            self.actor_input_proj,
+        )
+
+    def get_output_layers(self) -> tuple[nn.Module, ...]:
+        return (
+            self.critic_head,
+            self.actor_heads.continue_head,
+            self.actor_heads.mix_head,
+            self.actor_heads.dir_head,
+            self.actor_heads.kappa_head,
+            self.actor_heads.size_frac_head,
+            self.actor_heads.size_conc_head,
+        )
 
     def encode_observations(self, obs: ObsBatch) -> tuple[torch.Tensor, torch.Tensor]:
         global_token = self.global_proj(obs.global_features).unsqueeze(1)
@@ -159,7 +168,7 @@ class StatelessTransformerV1(nn.Module):
         hidden, _ = self.encode_observations(obs)
         player_hidden = hidden[:, -OUTER_PLAYER_SLOTS:, :]
         values, winner_probabilities = self._critic(player_hidden, obs.still_playing)
-        actions, log_probs = self._actor(
+        actions, log_probs, entropies = self._actor(
             hidden,
             obs.can_act,
             obs.max_launch,
@@ -168,17 +177,31 @@ class StatelessTransformerV1(nn.Module):
         return ModelOutput(
             actions=actions,
             log_probs=log_probs,
+            entropies=entropies,
             values=values,
             winner_probabilities=winner_probabilities,
         )
 
-    def log_prob(
+    def evaluate_actions(
         self,
         obs: ObsBatch,
         actions: ModelActions,
-    ) -> ModelActionLogProbs:
+    ) -> ModelEvaluation:
         hidden, _ = self.encode_observations(obs)
-        return self._actor_log_prob(hidden, obs.can_act, obs.max_launch, actions)
+        player_hidden = hidden[:, -OUTER_PLAYER_SLOTS:, :]
+        values, winner_probabilities = self._critic(player_hidden, obs.still_playing)
+        log_probs, entropies = self._actor_log_prob(
+            hidden,
+            obs.can_act,
+            obs.max_launch,
+            actions,
+        )
+        return ModelEvaluation(
+            log_probs=log_probs,
+            entropies=entropies,
+            values=values,
+            winner_probabilities=winner_probabilities,
+        )
 
     def _critic(
         self,
@@ -234,15 +257,16 @@ class StatelessTransformerV1(nn.Module):
         max_launch: torch.Tensor,
         *,
         deterministic: bool,
-    ) -> tuple[ModelActions, ModelActionLogProbs]:
+    ) -> tuple[ModelActions, ModelActionLogProbs, ModelActionEntropies]:
         slot_input = self._actor_inputs(hidden, max_launch)
-        batch_size = slot_input.shape[0]
         max_slots = self.config.action_spec.max_per_planet_launches
         launch_slots: list[torch.Tensor] = []
         angle_slots: list[torch.Tensor] = []
         ship_slots: list[torch.Tensor] = []
         launch_log_slots: list[torch.Tensor] = []
         event_log_slots: list[torch.Tensor] = []
+        launch_entropy_slots: list[torch.Tensor] = []
+        event_entropy_slots: list[torch.Tensor] = []
 
         hidden_state = self.actor_gru.initial_state(
             (*slot_input.shape[:-1],),
@@ -299,12 +323,20 @@ class StatelessTransformerV1(nn.Module):
                 remaining,
                 event_mask,
             )
+            launch_entropy, event_entropy = masked_action_entropy_from_params(
+                params,
+                remaining,
+                active,
+                max_ship_support=int(self.config.max_ship_normalizer),
+            )
 
             launch_slots.append(launch)
             angle_slots.append(angle)
             ship_slots.append(ships)
             launch_log_slots.append(launch_log_prob)
             event_log_slots.append(event_log_prob)
+            launch_entropy_slots.append(launch_entropy)
+            event_entropy_slots.append(event_entropy)
 
             remaining = (remaining - ships).clamp_min(0)
             active = active & launch & (remaining > 0)
@@ -326,10 +358,17 @@ class StatelessTransformerV1(nn.Module):
         ship_tensor = torch.stack(ship_slots, dim=-1)
         launch_log_tensor = torch.stack(launch_log_slots, dim=-1)
         event_log_tensor = torch.stack(event_log_slots, dim=-1)
+        launch_entropy_tensor = torch.stack(launch_entropy_slots, dim=-1)
+        event_entropy_tensor = torch.stack(event_entropy_slots, dim=-1)
 
-        total_log_prob = (launch_log_tensor + event_log_tensor).sum(dim=(1, 2, 3))
-        if total_log_prob.shape != (batch_size,):
-            raise RuntimeError("internal error: total log-prob shape mismatch")
+        per_player_action_entity_log_prob = _per_player_action_entity_log_prob(
+            launch_log_tensor,
+            event_log_tensor,
+        )
+        per_player_action_entity_entropy = _per_player_action_entity_log_prob(
+            launch_entropy_tensor,
+            event_entropy_tensor,
+        )
 
         return (
             ModelActions(
@@ -340,7 +379,12 @@ class StatelessTransformerV1(nn.Module):
             ModelActionLogProbs(
                 launch=launch_log_tensor,
                 angle_and_size=event_log_tensor,
-                total=total_log_prob,
+                per_player_entity=per_player_action_entity_log_prob,
+            ),
+            ModelActionEntropies(
+                launch=launch_entropy_tensor,
+                angle_and_size=event_entropy_tensor,
+                per_player_entity=per_player_action_entity_entropy,
             ),
         )
 
@@ -350,7 +394,7 @@ class StatelessTransformerV1(nn.Module):
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
         actions: ModelActions,
-    ) -> ModelActionLogProbs:
+    ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
         _require_actions_shape(
             actions,
             (
@@ -364,6 +408,8 @@ class StatelessTransformerV1(nn.Module):
         slot_input = self._actor_inputs(hidden, max_launch)
         launch_log_slots: list[torch.Tensor] = []
         event_log_slots: list[torch.Tensor] = []
+        launch_entropy_slots: list[torch.Tensor] = []
+        event_entropy_slots: list[torch.Tensor] = []
 
         hidden_state = self.actor_gru.initial_state(
             (*slot_input.shape[:-1],),
@@ -415,9 +461,17 @@ class StatelessTransformerV1(nn.Module):
                 remaining,
                 event_mask,
             )
+            launch_entropy, event_entropy = masked_action_entropy_from_params(
+                params,
+                remaining,
+                active,
+                max_ship_support=int(self.config.max_ship_normalizer),
+            )
 
             launch_log_slots.append(launch_log_prob)
             event_log_slots.append(event_log_prob)
+            launch_entropy_slots.append(launch_entropy)
+            event_entropy_slots.append(event_entropy)
 
             ships_used = torch.where(launch, ships, torch.zeros_like(ships))
             remaining = (remaining - ships_used).clamp_min(0)
@@ -437,11 +491,27 @@ class StatelessTransformerV1(nn.Module):
 
         launch_log_tensor = torch.stack(launch_log_slots, dim=-1)
         event_log_tensor = torch.stack(event_log_slots, dim=-1)
-        total_log_prob = (launch_log_tensor + event_log_tensor).sum(dim=(1, 2, 3))
-        return ModelActionLogProbs(
-            launch=launch_log_tensor,
-            angle_and_size=event_log_tensor,
-            total=total_log_prob,
+        launch_entropy_tensor = torch.stack(launch_entropy_slots, dim=-1)
+        event_entropy_tensor = torch.stack(event_entropy_slots, dim=-1)
+        per_player_action_entity_log_prob = _per_player_action_entity_log_prob(
+            launch_log_tensor,
+            event_log_tensor,
+        )
+        per_player_action_entity_entropy = _per_player_action_entity_log_prob(
+            launch_entropy_tensor,
+            event_entropy_tensor,
+        )
+        return (
+            ModelActionLogProbs(
+                launch=launch_log_tensor,
+                angle_and_size=event_log_tensor,
+                per_player_entity=per_player_action_entity_log_prob,
+            ),
+            ModelActionEntropies(
+                launch=launch_entropy_tensor,
+                angle_and_size=event_entropy_tensor,
+                per_player_entity=per_player_action_entity_entropy,
+            ),
         )
 
     @staticmethod
@@ -753,6 +823,103 @@ def masked_event_log_prob_from_params(
         event_log_prob,
         torch.zeros_like(event_log_prob),
     )
+
+
+def masked_action_entropy_from_params(
+    params: PolicyParams,
+    residual_budget: torch.Tensor,
+    active: torch.Tensor,
+    *,
+    max_ship_support: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    launch_entropy = binary_entropy_from_logits(params.continue_logits)
+    event_entropy = event_entropy_from_params(
+        params,
+        residual_budget.clamp_min(1),
+        max_ship_support=max_ship_support,
+    )
+    launch_probability = torch.sigmoid(params.continue_logits)
+    return (
+        torch.where(active, launch_entropy, torch.zeros_like(launch_entropy)),
+        torch.where(
+            active,
+            launch_probability * event_entropy,
+            torch.zeros_like(event_entropy),
+        ),
+    )
+
+
+def binary_entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
+    probability = torch.sigmoid(logits)
+    return F.binary_cross_entropy_with_logits(logits, probability, reduction="none")
+
+
+def event_entropy_from_params(
+    params: PolicyParams,
+    residual_budget: torch.Tensor,
+    *,
+    max_ship_support: int,
+) -> torch.Tensor:
+    mix_probabilities = torch.softmax(params.mix_logits, dim=-1)
+    mixture_entropy = -(mix_probabilities * params.log_w).sum(dim=-1)
+    component_entropy = von_mises_entropy(params.kappa) + beta_binomial_entropy(
+        residual_budget,
+        params.alpha,
+        params.beta,
+        max_ship_support=max_ship_support,
+    )
+    return mixture_entropy + (mix_probabilities * component_entropy).sum(dim=-1)
+
+
+def von_mises_entropy(kappa: torch.Tensor) -> torch.Tensor:
+    log_i0 = torch.log(torch.special.i0e(kappa)) + kappa
+    i1_over_i0 = torch.special.i1e(kappa) / torch.special.i0e(kappa)
+    return math.log(2.0 * math.pi) + log_i0 - kappa * i1_over_i0
+
+
+def beta_binomial_entropy(
+    residual_budget: torch.Tensor,
+    alpha: torch.Tensor,
+    beta: torch.Tensor,
+    *,
+    max_ship_support: int,
+) -> torch.Tensor:
+    support = torch.arange(
+        1,
+        max_ship_support + 1,
+        dtype=alpha.dtype,
+        device=alpha.device,
+    )
+    successes = support - 1.0
+    trials = (residual_budget - 1).clamp_min(0).unsqueeze(-1).unsqueeze(-1)
+    successes = successes.view(*((1,) * residual_budget.ndim), max_ship_support, 1)
+    alpha = alpha.unsqueeze(-2)
+    beta = beta.unsqueeze(-2)
+    valid = successes <= trials
+    successes_safe = torch.minimum(successes, trials)
+    log_comb = (
+        torch.lgamma(trials + 1.0)
+        - torch.lgamma(successes_safe + 1.0)
+        - torch.lgamma(trials - successes_safe + 1.0)
+    )
+    log_prob = (
+        log_comb
+        + log_beta(successes_safe + alpha, trials - successes_safe + beta)
+        - log_beta(alpha, beta)
+    )
+    log_prob = torch.where(valid, log_prob, torch.full_like(log_prob, -torch.inf))
+    probabilities = torch.where(valid, log_prob.exp(), torch.zeros_like(log_prob))
+    entropy = -(
+        probabilities * torch.where(valid, log_prob, torch.zeros_like(log_prob))
+    )
+    return entropy.sum(dim=-2)
+
+
+def _per_player_action_entity_log_prob(
+    launch_log_prob: torch.Tensor,
+    event_log_prob: torch.Tensor,
+) -> torch.Tensor:
+    return (launch_log_prob + event_log_prob).sum(dim=-1)
 
 
 def von_mises_log_prob(

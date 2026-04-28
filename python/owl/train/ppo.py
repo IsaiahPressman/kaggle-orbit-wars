@@ -1,0 +1,942 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from time import perf_counter
+from typing import Literal, Protocol
+
+import torch
+from pydantic import BaseModel, Field
+
+from owl.model import BaseModelAPI, ModelActions, ModelEvaluation, ModelOutput
+from owl.rl import (
+    ACTION_ENTITY_SLOTS,
+    OUTER_PLAYER_SLOTS,
+    ActionPureConfig,
+    ObsBatch,
+    ObsV1Config,
+    VectorizedEnv,
+)
+from owl.train.advantages import AdvantageMode, compute_gae
+from owl.train.metrics import (
+    explained_variance,
+    masked_max,
+    masked_mean,
+    masked_std,
+    masked_sum_by_segment,
+    weighted_mean,
+)
+from owl.train.optimizer import CompositeOptimizer, OptimizerName, create_optimizer
+from owl.train.sampling import (
+    SegmentSample,
+    SegmentSampling,
+    SegmentSamplingConfig,
+    SegmentSamplingMetrics,
+    sample_segments,
+    segment_sampling_metrics,
+)
+from owl.train.utils import (
+    TrainingDType,
+    assert_finite,
+    autocast_context,
+    require_same_shape,
+)
+
+CompileMode = Literal[
+    "default",
+    "reduce-overhead",
+    "max-autotune",
+    "max-autotune-no-cudagraphs",
+]
+
+
+_OBS_FIELDS = tuple(ObsBatch.model_fields)
+_ACTION_FIELDS = tuple(ModelActions.__dataclass_fields__)
+
+
+class PPOConfig(BaseModel):
+    model_config = {"frozen": True}
+
+    horizon: int = Field(default=64, ge=1)
+    n_envs: int = Field(default=1, ge=1)
+    update_epochs: int = Field(default=4, ge=1)
+    segments_per_minibatch: int = Field(default=1, ge=1)
+    replay_ratio: float = Field(default=1.0, gt=0.0)
+    segment_sampling: SegmentSampling = "uniform"
+    prio_alpha: float = Field(default=0.0, ge=0.0)
+    prio_beta: float = Field(default=0.2, ge=0.0)
+    prio_eps: float = Field(default=1e-6, gt=0.0)
+    gamma: float = Field(default=0.99, ge=0.0, le=1.0)
+    gae_lambda: float = Field(default=0.95, ge=0.0, le=1.0)
+    clip_coef: float = Field(default=0.2, ge=0.0)
+    vf_clip_coef: float = Field(default=0.2, ge=0.0)
+    vf_coef: float = Field(default=0.5, ge=0.0)
+    ent_coef: float = Field(default=0.01, ge=0.0)
+    max_grad_norm: float = Field(default=0.5, gt=0.0)
+    target_kl: float | None = Field(default=None, gt=0.0)
+    normalize_advantages: bool = True
+    advantage_eps: float = Field(default=1e-8, gt=0.0)
+    advantage_mode: AdvantageMode = "gae"
+    vtrace_rho_clip: float = Field(default=1.0, gt=0.0)
+    vtrace_c_clip: float = Field(default=1.0, gt=0.0)
+    recompute_advantages_each_epoch: bool = False
+    compile_mode: CompileMode | None = None
+    dtype: TrainingDType = "float32"
+    optimizer: OptimizerName = "adamw"
+    learning_rate: float = Field(default=3e-4, gt=0.0)
+    adamw_eps: float = Field(default=1e-5, gt=0.0)
+    weight_decay: float = Field(default=0.0, ge=0.0)
+    muon_lr: float | None = Field(default=None, gt=0.0)
+    muon_weight_decay: float = Field(default=0.1, ge=0.0)
+    muon_momentum: float = Field(default=0.95, ge=0.0, lt=1.0)
+
+
+class ModelForwardFn(Protocol):
+    def __call__(
+        self, obs: ObsBatch, *, deterministic: bool = False
+    ) -> ModelOutput: ...
+
+
+class ModelEvaluateActionsFn(Protocol):
+    def __call__(self, obs: ObsBatch, actions: ModelActions) -> ModelEvaluation: ...
+
+
+class PPOLossFn(Protocol):
+    def __call__(
+        self,
+        *,
+        new_logp: torch.Tensor,
+        entropy: torch.Tensor,
+        new_values: torch.Tensor,
+        old_logp: torch.Tensor,
+        old_values: torch.Tensor,
+        returns: torch.Tensor,
+        advantages: torch.Tensor,
+        loss_weight: torch.Tensor,
+        config: PPOConfig,
+    ) -> PPOLossMetrics: ...
+
+
+@dataclass(frozen=True)
+class PPOLossMetrics:
+    loss: torch.Tensor
+    policy_loss: torch.Tensor
+    value_loss: torch.Tensor
+    entropy: torch.Tensor
+    approx_kl: torch.Tensor
+    clipfrac: torch.Tensor
+    ratio_mean: torch.Tensor
+    ratio_max: torch.Tensor
+
+
+@dataclass(frozen=True)
+class PPOUpdateResult:
+    metrics: PPOLossMetrics
+    indices: torch.Tensor
+    new_logp: torch.Tensor
+    new_values: torch.Tensor
+    grad_norm: torch.Tensor
+
+
+@dataclass(frozen=True)
+class PPORolloutSegments:
+    obs: ObsBatch
+    actions: ModelActions
+    logp: torch.Tensor
+    values: torch.Tensor
+    rewards: torch.Tensor
+    dones: torch.Tensor
+
+
+class PPORolloutBuffer:
+    def __init__(
+        self,
+        *,
+        horizon: int,
+        n_envs: int,
+        obs_spec: ObsV1Config,
+        action_spec: ActionPureConfig,
+        device: torch.device,
+    ) -> None:
+        if horizon <= 0:
+            raise ValueError("horizon must be positive")
+        if n_envs <= 0:
+            raise ValueError("n_envs must be positive")
+        self.horizon = horizon
+        self.n_envs = n_envs
+        self.obs = ObsBatch(
+            planets=torch.zeros(
+                (horizon, n_envs, obs_spec.max_planets, obs_spec.planet_channels),
+                dtype=torch.float32,
+                device=device,
+            ),
+            fleets=torch.zeros(
+                (horizon, n_envs, obs_spec.max_fleets, obs_spec.fleet_channels),
+                dtype=torch.float32,
+                device=device,
+            ),
+            comets=torch.zeros(
+                (horizon, n_envs, obs_spec.max_comets, obs_spec.comet_channels),
+                dtype=torch.float32,
+                device=device,
+            ),
+            planet_mask=torch.zeros(
+                (horizon, n_envs, obs_spec.max_planets),
+                dtype=torch.bool,
+                device=device,
+            ),
+            fleet_mask=torch.zeros(
+                (horizon, n_envs, obs_spec.max_fleets),
+                dtype=torch.bool,
+                device=device,
+            ),
+            comet_mask=torch.zeros(
+                (horizon, n_envs, obs_spec.max_comets),
+                dtype=torch.bool,
+                device=device,
+            ),
+            still_playing=torch.zeros(
+                (horizon, n_envs, OUTER_PLAYER_SLOTS),
+                dtype=torch.bool,
+                device=device,
+            ),
+            global_features=torch.zeros(
+                (horizon, n_envs, obs_spec.global_channels),
+                dtype=torch.float32,
+                device=device,
+            ),
+            can_act=torch.zeros(
+                (horizon, n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
+                dtype=torch.bool,
+                device=device,
+            ),
+            max_launch=torch.zeros(
+                (horizon, n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
+                dtype=torch.int64,
+                device=device,
+            ),
+        )
+        action_shape = (
+            horizon,
+            n_envs,
+            OUTER_PLAYER_SLOTS,
+            ACTION_ENTITY_SLOTS,
+            action_spec.max_per_planet_launches,
+        )
+        self.actions = ModelActions(
+            launch=torch.zeros(action_shape, dtype=torch.bool, device=device),
+            angle=torch.zeros(action_shape, dtype=torch.float32, device=device),
+            ships=torch.zeros(action_shape, dtype=torch.int64, device=device),
+        )
+        self.logp = torch.zeros(
+            (horizon, n_envs, OUTER_PLAYER_SLOTS),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.values = torch.zeros(
+            (horizon, n_envs, OUTER_PLAYER_SLOTS),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.rewards = torch.zeros(
+            (horizon, n_envs, OUTER_PLAYER_SLOTS),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.dones = torch.zeros(
+            (horizon, n_envs, OUTER_PLAYER_SLOTS),
+            dtype=torch.bool,
+            device=device,
+        )
+
+    def write_step(
+        self,
+        step: int,
+        *,
+        obs: ObsBatch,
+        actions: ModelActions,
+        logp: torch.Tensor,
+        values: torch.Tensor,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+    ) -> None:
+        if not 0 <= step < self.horizon:
+            raise ValueError(f"step must be in 0..{self.horizon - 1}, got {step}")
+        _copy_obs_time_step(self.obs, step, obs)
+        _copy_actions_time_step(self.actions, step, actions)
+        self.logp[step].copy_(logp)
+        self.values[step].copy_(values)
+        self.rewards[step].copy_(rewards)
+        self.dones[step].copy_(dones)
+
+    def segment_major(self) -> PPORolloutSegments:
+        return PPORolloutSegments(
+            obs=_obs_segment_major(self.obs),
+            actions=_actions_segment_major(self.actions),
+            logp=self.logp.transpose(0, 1).contiguous(),
+            values=self.values.transpose(0, 1).contiguous(),
+            rewards=self.rewards.transpose(0, 1).contiguous(),
+            dones=self.dones.transpose(0, 1).contiguous(),
+        )
+
+
+class PPOTrainer:
+    def __init__(
+        self,
+        *,
+        env: VectorizedEnv,
+        model: BaseModelAPI,
+        optimizer: torch.optim.Optimizer | CompositeOptimizer | None = None,
+        config: PPOConfig,
+        device: torch.device,
+    ) -> None:
+        if env.n_envs != config.n_envs:
+            raise ValueError(
+                f"config.n_envs must match env.n_envs ({env.n_envs}), "
+                f"got {config.n_envs}"
+            )
+        self.env = env
+        self.model = model
+        self._model_forward = _compile_model_forward(self.model, config.compile_mode)
+        self._model_evaluate_actions = _compile_model_evaluate_actions(
+            self.model,
+            config.compile_mode,
+        )
+        self._ppo_loss = _compile_ppo_loss(config.compile_mode)
+        self.optimizer = optimizer or create_optimizer(self.model, config)
+        self.config = config
+        self.device = device
+        self._obs = _obs_to_device(env.reset(), device)
+        self.rollout = PPORolloutBuffer(
+            horizon=config.horizon,
+            n_envs=config.n_envs,
+            obs_spec=env.obs_spec,
+            action_spec=env.action_spec,
+            device=device,
+        )
+
+    def train_iteration(self) -> dict[str, float]:
+        start = perf_counter()
+        last_values = self._collect_rollout()
+        segments = self.rollout.segment_major()
+        valid_mask = segments.obs.still_playing
+        ratios = (
+            torch.ones_like(segments.logp)
+            if self.config.advantage_mode == "gae_vtrace"
+            else None
+        )
+        advantages, returns = compute_gae(
+            rewards=segments.rewards,
+            values=segments.values,
+            dones=segments.dones,
+            last_values=last_values,
+            gamma=self.config.gamma,
+            gae_lambda=self.config.gae_lambda,
+            ratios=ratios,
+            mode=self.config.advantage_mode,
+            vtrace_rho_clip=self.config.vtrace_rho_clip,
+            vtrace_c_clip=self.config.vtrace_c_clip,
+        )
+        metrics = self._update(segments, advantages, returns, last_values, valid_mask)
+        episode_returns = masked_sum_by_segment(segments.rewards, valid_mask)
+        metrics["return_mean"] = float(episode_returns.mean().item())
+        metrics["return_max"] = float(episode_returns.max().item())
+        metrics["explained_variance"] = float(
+            explained_variance(segments.values, returns, valid_mask=valid_mask).item()
+        )
+        metrics["advantage_mean"] = float(masked_mean(advantages, valid_mask).item())
+        metrics["advantage_std"] = float(masked_std(advantages, valid_mask).item())
+        elapsed = max(perf_counter() - start, 1e-12)
+        metrics["steps_per_second"] = float(
+            self.config.horizon * self.config.n_envs / elapsed
+        )
+        return metrics
+
+    def _collect_rollout(self) -> torch.Tensor:
+        self.rollout.rewards.zero_()
+        self.rollout.dones.zero_()
+        with torch.no_grad():
+            for step in range(self.config.horizon):
+                with autocast_context(self.config, self.device):
+                    output = self._model_forward(self._obs)
+                actions = _output_actions(output)
+                next_obs, rewards, dones = _step_env(self.env, actions)
+                rewards = rewards.to(self.device)
+                dones = dones.to(self.device)
+                self.rollout.write_step(
+                    step,
+                    obs=self._obs,
+                    actions=actions,
+                    logp=_output_logp(output),
+                    values=_output_values(output),
+                    rewards=rewards,
+                    dones=dones,
+                )
+                self._obs = _obs_to_device(next_obs, self.device)
+            with autocast_context(self.config, self.device):
+                bootstrap = self._model_forward(self._obs)
+            return _output_values(bootstrap).detach()
+
+    def _update(
+        self,
+        segments: PPORolloutSegments,
+        advantages: torch.Tensor,
+        returns: torch.Tensor,
+        bootstrap_values: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> dict[str, float]:
+        loss_metrics: list[PPOLossMetrics] = []
+        grad_norms: list[torch.Tensor] = []
+        sampling_metrics: list[SegmentSamplingMetrics] = []
+        train_values = segments.values.clone()
+        current_advantages = advantages
+        current_returns = returns
+        current_bootstrap_values = bootstrap_values
+        n_minibatches = max(
+            1,
+            int(
+                self.config.replay_ratio
+                * self.config.n_envs
+                / self.config.segments_per_minibatch
+            ),
+        )
+        should_stop = False
+        for epoch in range(self.config.update_epochs):
+            if self._should_recompute_advantages(epoch):
+                train_logp, train_values = self._current_segment_logp_values(segments)
+                current_bootstrap_values = self._current_bootstrap_values()
+                ratios = (
+                    _policy_ratios(train_logp, segments.logp)
+                    if self.config.advantage_mode == "gae_vtrace"
+                    else None
+                )
+                current_advantages, current_returns = compute_gae(
+                    rewards=segments.rewards,
+                    values=train_values,
+                    dones=segments.dones,
+                    last_values=current_bootstrap_values,
+                    gamma=self.config.gamma,
+                    gae_lambda=self.config.gae_lambda,
+                    ratios=ratios,
+                    mode=self.config.advantage_mode,
+                    vtrace_rho_clip=self.config.vtrace_rho_clip,
+                    vtrace_c_clip=self.config.vtrace_c_clip,
+                )
+            for _minibatch in range(n_minibatches):
+                sampling_advantages = _segment_sampling_advantages(
+                    current_advantages,
+                    valid_mask,
+                )
+                sample = sample_segments(
+                    sampling_advantages,
+                    SegmentSamplingConfig(
+                        sampling=self.config.segment_sampling,
+                        segments_per_minibatch=self.config.segments_per_minibatch,
+                        prio_alpha=self.config.prio_alpha,
+                        prio_beta=self.config.prio_beta,
+                        prio_eps=self.config.prio_eps,
+                    ),
+                )
+                sampling_metrics.append(
+                    segment_sampling_metrics(sampling_advantages, sample)
+                )
+                update = self._update_minibatch(
+                    segments,
+                    current_advantages,
+                    current_returns,
+                    valid_mask,
+                    sample,
+                )
+                loss_metrics.append(update.metrics)
+                grad_norms.append(update.grad_norm.detach())
+                if (
+                    self.config.target_kl is not None
+                    and update.metrics.approx_kl.item() > self.config.target_kl
+                ):
+                    should_stop = True
+                    break
+            if should_stop:
+                break
+
+        if not loss_metrics:
+            raise RuntimeError("internal error: PPO update produced no minibatches")
+        metrics = _mean_loss_metrics(loss_metrics)
+        metrics["grad_norm"] = float(torch.stack(grad_norms).mean().item())
+        metrics["num_minibatches"] = float(len(loss_metrics))
+        if sampling_metrics:
+            metrics.update(_mean_sampling_metrics(sampling_metrics))
+        return metrics
+
+    def _should_recompute_advantages(self, epoch: int) -> bool:
+        if epoch == 0:
+            return False
+        return (
+            self.config.recompute_advantages_each_epoch
+            or self.config.advantage_mode == "gae_vtrace"
+        )
+
+    def _current_segment_logp_values(
+        self,
+        segments: PPORolloutSegments,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        with torch.no_grad(), autocast_context(self.config, self.device):
+            output = self._model_evaluate_actions(
+                _flatten_obs_time(segments.obs),
+                _flatten_actions_time(segments.actions),
+            )
+        return (
+            _output_logp(output).detach().view_as(segments.logp),
+            _output_values(output).detach().view_as(segments.values),
+        )
+
+    def _current_bootstrap_values(self) -> torch.Tensor:
+        with torch.no_grad(), autocast_context(self.config, self.device):
+            output = self._model_forward(self._obs)
+        return _output_values(output).detach()
+
+    def _update_minibatch(
+        self,
+        segments: PPORolloutSegments,
+        advantages: torch.Tensor,
+        returns: torch.Tensor,
+        valid_mask: torch.Tensor,
+        sample: SegmentSample,
+    ) -> PPOUpdateResult:
+        idx = sample.indices
+        batch_actions = _flatten_actions_time(_actions_index(segments.actions, idx))
+        batch_obs = _flatten_obs_time(_obs_index(segments.obs, idx))
+        batch_old_logp = segments.logp[idx]
+        batch_old_values = segments.values[idx]
+        batch_returns = returns[idx]
+        batch_valid_mask = valid_mask[idx]
+        importance = sample.importance
+        while importance.ndim < advantages[idx].ndim:
+            importance = importance.unsqueeze(-1)
+        batch_advantages = advantages[idx]
+        batch_loss_weight = (
+            batch_valid_mask.to(dtype=batch_advantages.dtype) * importance
+        )
+
+        with autocast_context(self.config, self.device):
+            output = self._model_evaluate_actions(batch_obs, batch_actions)
+        new_logp = _output_logp(output).view_as(batch_old_logp)
+        entropy = _output_entropy(output, batch_old_logp)
+        new_values = _output_values(output).view_as(batch_old_values)
+
+        metrics = self._ppo_loss(
+            new_logp=new_logp,
+            entropy=entropy,
+            new_values=new_values,
+            old_logp=batch_old_logp,
+            old_values=batch_old_values,
+            returns=batch_returns,
+            advantages=batch_advantages,
+            loss_weight=batch_loss_weight,
+            config=self.config,
+        )
+        self.optimizer.zero_grad(set_to_none=True)
+        metrics.loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            self.model.parameters(), self.config.max_grad_norm
+        )
+        self.optimizer.step()
+        return PPOUpdateResult(
+            metrics=metrics,
+            indices=idx,
+            new_logp=new_logp.detach(),
+            new_values=new_values.detach(),
+            grad_norm=grad_norm.detach(),
+        )
+
+
+def _compile_model_forward(
+    model: BaseModelAPI, compile_mode: CompileMode | None
+) -> ModelForwardFn:
+    if compile_mode is None:
+        return model
+    compiled: ModelForwardFn = torch.compile(model, mode=compile_mode)
+    return compiled
+
+
+def _compile_model_evaluate_actions(
+    model: BaseModelAPI, compile_mode: CompileMode | None
+) -> ModelEvaluateActionsFn:
+    if compile_mode is None:
+        return model.evaluate_actions
+    compiled: ModelEvaluateActionsFn = torch.compile(
+        model.evaluate_actions,
+        mode=compile_mode,
+    )
+    return compiled
+
+
+def _compile_ppo_loss(compile_mode: CompileMode | None) -> PPOLossFn:
+    if compile_mode is None:
+        return ppo_loss
+    compiled_tensor_loss = torch.compile(_ppo_loss_tensors, mode=compile_mode)
+
+    def compiled_ppo_loss(
+        *,
+        new_logp: torch.Tensor,
+        entropy: torch.Tensor,
+        new_values: torch.Tensor,
+        old_logp: torch.Tensor,
+        old_values: torch.Tensor,
+        returns: torch.Tensor,
+        advantages: torch.Tensor,
+        loss_weight: torch.Tensor,
+        config: PPOConfig,
+    ) -> PPOLossMetrics:
+        return _ppo_loss_metrics_from_tuple(
+            compiled_tensor_loss(
+                new_logp,
+                entropy,
+                new_values,
+                old_logp,
+                old_values,
+                returns,
+                advantages,
+                loss_weight,
+                config.normalize_advantages,
+                config.advantage_eps,
+                config.clip_coef,
+                config.vf_clip_coef,
+                config.vf_coef,
+                config.ent_coef,
+            )
+        )
+
+    return compiled_ppo_loss
+
+
+def ppo_loss(
+    *,
+    new_logp: torch.Tensor,
+    entropy: torch.Tensor,
+    new_values: torch.Tensor,
+    old_logp: torch.Tensor,
+    old_values: torch.Tensor,
+    returns: torch.Tensor,
+    advantages: torch.Tensor,
+    loss_weight: torch.Tensor,
+    config: PPOConfig,
+) -> PPOLossMetrics:
+    return _ppo_loss_metrics_from_tuple(
+        _ppo_loss_tensors(
+            new_logp,
+            entropy,
+            new_values,
+            old_logp,
+            old_values,
+            returns,
+            advantages,
+            loss_weight,
+            config.normalize_advantages,
+            config.advantage_eps,
+            config.clip_coef,
+            config.vf_clip_coef,
+            config.vf_coef,
+            config.ent_coef,
+        )
+    )
+
+
+def _ppo_loss_metrics_from_tuple(
+    tensors: tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ],
+) -> PPOLossMetrics:
+    (
+        loss,
+        policy_loss,
+        value_loss,
+        entropy,
+        approx_kl,
+        clipfrac,
+        ratio_mean,
+        ratio_max,
+    ) = tensors
+    return PPOLossMetrics(
+        loss=loss,
+        policy_loss=policy_loss,
+        value_loss=value_loss,
+        entropy=entropy,
+        approx_kl=approx_kl,
+        clipfrac=clipfrac,
+        ratio_mean=ratio_mean,
+        ratio_max=ratio_max,
+    )
+
+
+def _ppo_loss_tensors(
+    new_logp: torch.Tensor,
+    entropy: torch.Tensor,
+    new_values: torch.Tensor,
+    old_logp: torch.Tensor,
+    old_values: torch.Tensor,
+    returns: torch.Tensor,
+    advantages: torch.Tensor,
+    loss_weight: torch.Tensor,
+    normalize_advantages: bool,
+    advantage_eps: float,
+    clip_coef: float,
+    vf_clip_coef: float,
+    vf_coef: float,
+    ent_coef: float,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    normalized_advantages = advantages
+    if normalize_advantages:
+        valid = loss_weight > 0
+        normalized_advantages = (advantages - masked_mean(advantages, valid)) / (
+            masked_std(advantages, valid) + advantage_eps
+        )
+
+    logratio = new_logp - old_logp
+    ratio = logratio.exp()
+    pg_loss1 = -normalized_advantages * ratio
+    pg_loss2 = -normalized_advantages * torch.clamp(
+        ratio, 1.0 - clip_coef, 1.0 + clip_coef
+    )
+    policy_loss = weighted_mean(torch.max(pg_loss1, pg_loss2), loss_weight)
+
+    value_clipped = old_values + torch.clamp(
+        new_values - old_values,
+        -vf_clip_coef,
+        vf_clip_coef,
+    )
+    value_loss_unclipped = (new_values - returns).pow(2)
+    value_loss_clipped = (value_clipped - returns).pow(2)
+    value_loss = 0.5 * weighted_mean(
+        torch.max(value_loss_unclipped, value_loss_clipped),
+        loss_weight,
+    )
+
+    entropy_mean = weighted_mean(entropy, loss_weight)
+    loss = policy_loss + vf_coef * value_loss - ent_coef * entropy_mean
+    approx_kl = weighted_mean((ratio - 1.0) - logratio, loss_weight)
+    clipfrac = weighted_mean(
+        ((ratio - 1.0).abs() > clip_coef).float(),
+        loss_weight,
+    )
+    ratio_mean = weighted_mean(ratio, loss_weight)
+    ratio_max = masked_max(ratio, loss_weight > 0)
+
+    return (
+        loss,
+        policy_loss,
+        value_loss,
+        entropy_mean,
+        approx_kl,
+        clipfrac,
+        ratio_mean,
+        ratio_max,
+    )
+
+
+def validate_ppo_loss_inputs(
+    *,
+    new_logp: torch.Tensor,
+    entropy: torch.Tensor,
+    new_values: torch.Tensor,
+    old_logp: torch.Tensor,
+    old_values: torch.Tensor,
+    returns: torch.Tensor,
+    advantages: torch.Tensor,
+    loss_weight: torch.Tensor,
+) -> None:
+    require_same_shape(new_logp, old_logp, left_name="new_logp", right_name="old_logp")
+    require_same_shape(new_logp, entropy, left_name="new_logp", right_name="entropy")
+    require_same_shape(
+        new_logp, old_values, left_name="new_logp", right_name="old_values"
+    )
+    require_same_shape(new_logp, returns, left_name="new_logp", right_name="returns")
+    require_same_shape(
+        new_logp, advantages, left_name="new_logp", right_name="advantages"
+    )
+    require_same_shape(
+        new_logp, loss_weight, left_name="new_logp", right_name="loss_weight"
+    )
+    if new_values.numel() != returns.numel():
+        raise ValueError(
+            f"new_values must have {returns.numel()} elements, got {new_values.numel()}"
+        )
+    for name, tensor in (
+        ("new_logp", new_logp),
+        ("entropy", entropy),
+        ("new_values", new_values),
+        ("old_logp", old_logp),
+        ("old_values", old_values),
+        ("returns", returns),
+        ("advantages", advantages),
+        ("loss_weight", loss_weight),
+    ):
+        assert_finite(tensor, name)
+
+
+def _copy_obs_time_step(dst: ObsBatch, step: int, src: ObsBatch) -> None:
+    for field in _OBS_FIELDS:
+        getattr(dst, field)[step].copy_(getattr(src, field))
+
+
+def _copy_actions_time_step(
+    dst: ModelActions,
+    step: int,
+    src: ModelActions,
+) -> None:
+    for field in _ACTION_FIELDS:
+        getattr(dst, field)[step].copy_(getattr(src, field))
+
+
+def _obs_segment_major(obs: ObsBatch) -> ObsBatch:
+    return ObsBatch(
+        **{
+            field: getattr(obs, field).transpose(0, 1).contiguous()
+            for field in _OBS_FIELDS
+        }
+    )
+
+
+def _actions_segment_major(actions: ModelActions) -> ModelActions:
+    return ModelActions(
+        **{
+            field: getattr(actions, field).transpose(0, 1).contiguous()
+            for field in _ACTION_FIELDS
+        }
+    )
+
+
+def _obs_index(obs: ObsBatch, idx: torch.Tensor) -> ObsBatch:
+    return ObsBatch(**{field: getattr(obs, field)[idx] for field in _OBS_FIELDS})
+
+
+def _actions_index(actions: ModelActions, idx: torch.Tensor) -> ModelActions:
+    return ModelActions(
+        **{field: getattr(actions, field)[idx] for field in _ACTION_FIELDS}
+    )
+
+
+def _obs_to_device(obs: ObsBatch, device: torch.device) -> ObsBatch:
+    return ObsBatch(**{field: getattr(obs, field).to(device) for field in _OBS_FIELDS})
+
+
+def _actions_to_cpu(actions: ModelActions) -> ModelActions:
+    return ModelActions(
+        **{field: getattr(actions, field).cpu() for field in _ACTION_FIELDS}
+    )
+
+
+def _flatten_tensor_time(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.reshape(tensor.shape[0] * tensor.shape[1], *tensor.shape[2:])
+
+
+def _flatten_obs_time(obs: ObsBatch) -> ObsBatch:
+    return ObsBatch(
+        **{field: _flatten_tensor_time(getattr(obs, field)) for field in _OBS_FIELDS}
+    )
+
+
+def _flatten_actions_time(actions: ModelActions) -> ModelActions:
+    return ModelActions(
+        **{
+            field: _flatten_tensor_time(getattr(actions, field))
+            for field in _ACTION_FIELDS
+        }
+    )
+
+
+def _step_env(
+    env: VectorizedEnv,
+    actions: ModelActions,
+) -> tuple[ObsBatch, torch.Tensor, torch.Tensor]:
+    cpu_actions = _actions_to_cpu(actions)
+    return env.step(cpu_actions.launch, cpu_actions.angle, cpu_actions.ships)
+
+
+def _output_actions(output: ModelOutput) -> ModelActions:
+    return output.actions
+
+
+def _output_logp(output: ModelOutput | ModelEvaluation) -> torch.Tensor:
+    return output.log_probs.per_player_entity.sum(dim=-1)
+
+
+def _output_entropy(
+    output: ModelOutput | ModelEvaluation, like: torch.Tensor
+) -> torch.Tensor:
+    return output.entropies.per_player_entity.sum(dim=-1).view_as(like)
+
+
+def _output_values(output: ModelOutput | ModelEvaluation) -> torch.Tensor:
+    return output.values
+
+
+def _policy_ratios(new_logp: torch.Tensor, old_logp: torch.Tensor) -> torch.Tensor:
+    require_same_shape(new_logp, old_logp, left_name="new_logp", right_name="old_logp")
+    return (new_logp - old_logp).exp()
+
+
+def _segment_sampling_advantages(
+    advantages: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> torch.Tensor:
+    masked_advantages = advantages * valid_mask.to(dtype=advantages.dtype)
+    if masked_advantages.ndim == 2:
+        return masked_advantages
+    if masked_advantages.ndim == 3:
+        return masked_advantages.detach().abs().sum(dim=-1)
+    raise ValueError(
+        f"advantages must have shape [N, T] or [N, T, P], got {advantages.shape}"
+    )
+
+
+def _mean_loss_metrics(metrics: list[PPOLossMetrics]) -> dict[str, float]:
+    names = (
+        "policy_loss",
+        "value_loss",
+        "entropy",
+        "approx_kl",
+        "clipfrac",
+        "ratio_mean",
+        "ratio_max",
+    )
+    return {
+        name: float(
+            torch.stack([getattr(metric, name) for metric in metrics]).mean().item()
+        )
+        for name in names
+    }
+
+
+def _mean_sampling_metrics(metrics: list[SegmentSamplingMetrics]) -> dict[str, float]:
+    metric_names = (
+        ("priority_min", "priority_min"),
+        ("priority_mean", "priority_mean"),
+        ("priority_max", "priority_max"),
+        ("priority_entropy", "probability_entropy"),
+        ("sample_duplicate_frac", "duplicate_fraction"),
+        ("importance_mean", "importance_mean"),
+        ("importance_max", "importance_max"),
+    )
+    return {
+        output_name: float(
+            torch.stack([getattr(metric, attr_name) for metric in metrics])
+            .mean()
+            .item()
+        )
+        for output_name, attr_name in metric_names
+    }

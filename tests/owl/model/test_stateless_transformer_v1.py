@@ -5,6 +5,7 @@ from owl.model.stateless_transformer_v1 import (
     FeedForward,
     MinGRUCell,
     MultiHeadSelfAttention,
+    beta_binomial_entropy,
     pack_sequence,
     unpack_sequence,
 )
@@ -211,7 +212,19 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert output.actions.ships.dtype == torch.int64
     assert output.log_probs.launch.shape == expected_action_shape
     assert output.log_probs.angle_and_size.shape == expected_action_shape
-    assert output.log_probs.total.shape == (2,)
+    assert output.log_probs.per_player_entity.shape == (2, 4, ACTION_ENTITY_SLOTS)
+    assert output.entropies.launch.shape == expected_action_shape
+    assert output.entropies.angle_and_size.shape == expected_action_shape
+    assert output.entropies.per_player_entity.shape == (2, 4, ACTION_ENTITY_SLOTS)
+    assert torch.allclose(
+        output.log_probs.per_player_entity,
+        (output.log_probs.launch + output.log_probs.angle_and_size).sum(dim=-1),
+    )
+    assert torch.allclose(
+        output.entropies.per_player_entity,
+        (output.entropies.launch + output.entropies.angle_and_size).sum(dim=-1),
+    )
+    assert torch.isfinite(output.entropies.per_player_entity).all()
     assert output.values.shape == (2, 4)
     assert output.winner_probabilities.shape == (2, 4)
     assert torch.allclose(output.winner_probabilities.sum(dim=1), torch.ones(2))
@@ -220,12 +233,27 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert torch.all(output.actions.ships.sum(dim=-1) <= obs.max_launch)
     assert model.slot_dynamic_proj.in_features == 6
 
-    replay_log_probs = model.log_prob(obs, output.actions)
-    assert torch.allclose(replay_log_probs.launch, output.log_probs.launch)
+    evaluation = model.evaluate_actions(obs, output.actions)
+    assert torch.allclose(evaluation.log_probs.launch, output.log_probs.launch)
     assert torch.allclose(
-        replay_log_probs.angle_and_size, output.log_probs.angle_and_size
+        evaluation.log_probs.angle_and_size,
+        output.log_probs.angle_and_size,
     )
-    assert torch.allclose(replay_log_probs.total, output.log_probs.total)
+    assert torch.allclose(
+        evaluation.log_probs.per_player_entity,
+        output.log_probs.per_player_entity,
+    )
+    assert torch.allclose(evaluation.entropies.launch, output.entropies.launch)
+    assert torch.allclose(
+        evaluation.entropies.angle_and_size,
+        output.entropies.angle_and_size,
+    )
+    assert torch.allclose(
+        evaluation.entropies.per_player_entity,
+        output.entropies.per_player_entity,
+    )
+    assert torch.allclose(evaluation.values, output.values)
+    assert torch.allclose(evaluation.winner_probabilities, output.winner_probabilities)
 
 
 def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
@@ -248,14 +276,29 @@ def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
     output = model(obs)
 
     model.zero_grad()
-    model.log_prob(obs, output.actions).total.sum().backward()
+    model.evaluate_actions(
+        obs,
+        output.actions,
+    ).log_probs.per_player_entity.sum().backward()
 
     grads = [param.grad for param in model.parameters() if param.grad is not None]
     assert grads
     assert all(torch.isfinite(grad).all() for grad in grads)
 
 
-def test_log_prob_rejects_invalid_action_dtypes() -> None:
+def test_beta_binomial_entropy_uses_static_capped_support() -> None:
+    entropy = beta_binomial_entropy(
+        torch.tensor([300]),
+        torch.tensor([[1.0]], dtype=torch.float64),
+        torch.tensor([[1.0]], dtype=torch.float64),
+        max_ship_support=250,
+    )
+
+    expected = (250.0 / 300.0) * torch.log(torch.tensor(300.0, dtype=torch.float64))
+    assert torch.allclose(entropy, expected.view(1, 1), atol=1e-3)
+
+
+def test_evaluate_actions_rejects_invalid_action_dtypes() -> None:
     obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
     config = StatelessTransformerV1Config(
         obs_spec=obs_spec,
@@ -275,7 +318,7 @@ def test_log_prob_rejects_invalid_action_dtypes() -> None:
     with pytest.raises(
         ValueError, match=r"actions\.ships must have dtype torch\.int64"
     ):
-        model.log_prob(obs, output.actions)
+        model.evaluate_actions(obs, output.actions)
 
 
 def test_critic_requires_still_playing_mask_with_live_player() -> None:
