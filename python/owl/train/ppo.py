@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
+from pathlib import Path
 from time import perf_counter
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
+import numpy as np
 import torch
 from pydantic import Field
 
@@ -31,7 +34,7 @@ from owl.train.sampling import (
     SegmentSamplingConfig,
     SegmentSamplingMetrics,
     sample_segments,
-    sample_segments_uniform_epoch,
+    sample_segments_uniform_single_pass,
     segment_sampling_metrics,
 )
 from owl.train.utils import (
@@ -55,8 +58,7 @@ _ACTION_FIELDS = tuple(ModelActions.__dataclass_fields__)
 
 class PPOConfig(BaseConfig):
     horizon: int = Field(default=64, ge=1)
-    n_envs: int = Field(default=1, ge=1)
-    update_epochs: int = Field(default=4, ge=1)
+    checkpoint_freq: int = Field(default=0, ge=0)
     replay_ratio: float = Field(default=1.0, gt=0.0)
     segment_sampling: SegmentSamplingConfig = Field(
         default_factory=SegmentSamplingConfig
@@ -74,7 +76,7 @@ class PPOConfig(BaseConfig):
     advantage_mode: AdvantageMode = "gae"
     vtrace_rho_clip: float = Field(default=1.0, gt=0.0)
     vtrace_c_clip: float = Field(default=1.0, gt=0.0)
-    recompute_advantages_each_epoch: bool = False
+    recompute_advantages_each_minibatch: bool = True
     debug_validate_ppo_loss_inputs: bool = False
     compile_mode: CompileMode | None = None
     dtype: TrainingDType = "float32"
@@ -288,11 +290,6 @@ class PPOTrainer:
         device: torch.device,
         lr_scheduler: LRScheduler | None = None,
     ) -> None:
-        if env.n_envs != config.n_envs:
-            raise ValueError(
-                f"config.n_envs must match env.n_envs ({env.n_envs}), "
-                f"got {config.n_envs}"
-            )
         self.env = env
         self.model = model
         self._model_forward = _compile_model_forward(self.model, config.compile_mode)
@@ -305,10 +302,18 @@ class PPOTrainer:
         self.lr_scheduler = lr_scheduler
         self.config = config
         self.device = device
-        self._obs = _obs_to_device(env.reset(), device)
+        self.n_envs = env.n_envs
+        self._non_blocking_env_to_device = device.type == "cuda" and getattr(
+            env, "pin_memory_enabled", False
+        )
+        self._obs = _obs_to_device(
+            env.reset(),
+            device,
+            non_blocking=self._non_blocking_env_to_device,
+        )
         self.rollout = PPORolloutBuffer(
             horizon=config.horizon,
-            n_envs=config.n_envs,
+            n_envs=env.n_envs,
             obs_spec=env.obs_spec,
             action_spec=env.action_spec,
             device=device,
@@ -354,10 +359,32 @@ class PPOTrainer:
         metrics["advantage_mean"] = float(masked_mean(advantages, policy_mask).item())
         metrics["advantage_std"] = float(masked_std(advantages, policy_mask).item())
         elapsed = max(perf_counter() - start, 1e-12)
-        metrics["steps_per_second"] = float(
-            self.config.horizon * self.config.n_envs / elapsed
-        )
+        metrics["steps_per_second"] = float(self.config.horizon * self.n_envs / elapsed)
         return metrics
+
+    def write_checkpoint(
+        self,
+        path: Path,
+        *,
+        config: Any,
+        config_path: Path,
+        env_steps: int,
+    ) -> None:
+        checkpoint = {
+            "model": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "lr_scheduler": (
+                None if self.lr_scheduler is None else self.lr_scheduler.state_dict()
+            ),
+            "config": config.model_dump(mode="json", round_trip=True),
+            "config_path": str(config_path),
+            "rng_state": _rng_state(),
+            "env_steps": env_steps,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f".{path.name}.tmp")
+        torch.save(checkpoint, tmp_path)
+        tmp_path.replace(path)
 
     def _collect_rollout(self) -> torch.Tensor:
         self.rollout.rewards.zero_()
@@ -368,17 +395,13 @@ class PPOTrainer:
                     output = self._model_forward(self._obs)
                 actions = _output_actions(output)
                 next_obs, rewards, dones = _step_env(self.env, actions)
-                non_blocking_step_transfer = _can_non_blocking_copy_to_device(
-                    (rewards, dones),
-                    self.device,
-                )
                 rewards = rewards.to(
                     self.device,
-                    non_blocking=non_blocking_step_transfer,
+                    non_blocking=self._non_blocking_env_to_device,
                 )
                 dones = dones.to(
                     self.device,
-                    non_blocking=non_blocking_step_transfer,
+                    non_blocking=self._non_blocking_env_to_device,
                 )
                 self.rollout.write_step(
                     step,
@@ -389,7 +412,11 @@ class PPOTrainer:
                     rewards=rewards,
                     dones=dones,
                 )
-                _copy_obs_to_device_(self._obs, next_obs, self.device)
+                _copy_obs_to_device_(
+                    self._obs,
+                    next_obs,
+                    non_blocking=self._non_blocking_env_to_device,
+                )
             with autocast_context(self.config, self.device):
                 bootstrap = self._model_forward(self._obs)
             return _output_values(bootstrap).detach()
@@ -411,11 +438,18 @@ class PPOTrainer:
         current_advantages = advantages
         current_returns = returns
         current_bootstrap_values = bootstrap_values.clone()
-        n_minibatches = _num_minibatches_per_epoch(self.config)
+        n_minibatches = _num_minibatches_per_update(self.config, self.n_envs)
         sampled_segments = 0
-        should_stop = False
-        for epoch in range(self.config.update_epochs):
-            if self._should_recompute_advantages(epoch):
+        update_samples = _update_samples(
+            sampling_advantages=_segment_sampling_advantages(
+                current_advantages,
+                policy_mask,
+            ),
+            config=self.config,
+            n_minibatches=n_minibatches,
+        )
+        for minibatch_index, update_sample in enumerate(update_samples):
+            if self._should_recompute_advantages(minibatch_index):
                 current_logp, current_values = self._current_segment_logp_values(
                     segments
                 )
@@ -430,59 +464,34 @@ class PPOTrainer:
                 current_advantages,
                 policy_mask,
             )
-            epoch_samples = _epoch_samples(
-                sampling_advantages,
-                self.config,
-                n_minibatches,
+            sample = (
+                update_sample
+                if update_sample is not None
+                else sample_segments(
+                    sampling_advantages,
+                    self.config.segment_sampling,
+                )
             )
-            for minibatch_index, epoch_sample in enumerate(epoch_samples):
-                sampling_advantages = _segment_sampling_advantages(
-                    current_advantages,
-                    policy_mask,
-                )
-                sample = (
-                    epoch_sample
-                    if epoch_sample is not None
-                    else sample_segments(
-                        sampling_advantages,
-                        self.config.segment_sampling,
-                    )
-                )
-                sampling_metrics.append(
-                    segment_sampling_metrics(sampling_advantages, sample)
-                )
-                sampled_segments += int(sample.indices.numel())
-                update = self._update_minibatch(
-                    segments,
-                    current_advantages,
-                    current_returns,
-                    policy_mask,
-                    value_mask,
-                    sample,
-                )
-                loss_metrics.append(update.metrics)
-                grad_norms.append(update.grad_norm.detach())
-                current_logp[update.indices] = update.new_logp
-                current_values[update.indices] = update.new_values
-                if (
-                    self.config.target_kl is not None
-                    and update.metrics.approx_kl.item() > self.config.target_kl
-                ):
-                    should_stop = True
-                    break
-                has_next_minibatch = minibatch_index + 1 < n_minibatches
-                if (
-                    has_next_minibatch
-                    and self._should_refresh_advantages_between_minibatches()
-                ):
-                    current_bootstrap_values = self._current_bootstrap_values()
-                    current_advantages, current_returns = self._compute_current_gae(
-                        segments=segments,
-                        current_logp=current_logp,
-                        current_values=current_values,
-                        current_bootstrap_values=current_bootstrap_values,
-                    )
-            if should_stop:
+            sampling_metrics.append(
+                segment_sampling_metrics(sampling_advantages, sample)
+            )
+            sampled_segments += int(sample.indices.numel())
+            update = self._update_minibatch(
+                segments,
+                current_advantages,
+                current_returns,
+                policy_mask,
+                value_mask,
+                sample,
+            )
+            loss_metrics.append(update.metrics)
+            grad_norms.append(update.grad_norm.detach())
+            current_logp[update.indices] = update.new_logp
+            current_values[update.indices] = update.new_values
+            if (
+                self.config.target_kl is not None
+                and update.metrics.approx_kl.item() > self.config.target_kl
+            ):
                 break
 
         if not loss_metrics:
@@ -490,13 +499,9 @@ class PPOTrainer:
         metrics = _mean_loss_metrics(loss_metrics)
         metrics["grad_norm"] = float(torch.stack(grad_norms).mean().item())
         metrics["num_minibatches"] = float(len(loss_metrics))
-        metrics["num_minibatches_per_epoch"] = float(n_minibatches)
-        metrics["num_total_minibatches"] = float(
-            n_minibatches * self.config.update_epochs
-        )
-        metrics["effective_replay_exposure"] = float(
-            sampled_segments / self.config.n_envs
-        )
+        metrics["num_minibatches_per_update"] = float(n_minibatches)
+        metrics["num_total_minibatches"] = float(n_minibatches)
+        metrics["effective_replay_exposure"] = float(sampled_segments / self.n_envs)
         metrics["policy_active_ratio"] = float(policy_mask.float().mean().item())
         if self.lr_scheduler is not None:
             metrics["learning_rate"] = float(self.lr_scheduler.get_last_lr()[0])
@@ -504,17 +509,11 @@ class PPOTrainer:
             metrics.update(_mean_sampling_metrics(sampling_metrics))
         return metrics
 
-    def _should_recompute_advantages(self, epoch: int) -> bool:
-        if epoch == 0:
+    def _should_recompute_advantages(self, minibatch_index: int) -> bool:
+        if minibatch_index == 0:
             return False
         return (
-            self.config.recompute_advantages_each_epoch
-            or self.config.advantage_mode == "gae_vtrace"
-        )
-
-    def _should_refresh_advantages_between_minibatches(self) -> bool:
-        return (
-            self.config.recompute_advantages_each_epoch
+            self.config.recompute_advantages_each_minibatch
             or self.config.advantage_mode == "gae_vtrace"
         )
 
@@ -544,6 +543,11 @@ class PPOTrainer:
             vtrace_c_clip=self.config.vtrace_c_clip,
         )
 
+    def _current_bootstrap_values(self) -> torch.Tensor:
+        with torch.no_grad(), autocast_context(self.config, self.device):
+            output = self._model_forward(self._obs)
+        return _output_values(output).detach()
+
     def _current_segment_logp_values(
         self,
         segments: PPORolloutSegments,
@@ -557,11 +561,6 @@ class PPOTrainer:
             _output_logp(output).detach().view_as(segments.logp),
             _output_values(output).detach().view_as(segments.values),
         )
-
-    def _current_bootstrap_values(self) -> torch.Tensor:
-        with torch.no_grad(), autocast_context(self.config, self.device):
-            output = self._model_forward(self._obs)
-        return _output_values(output).detach()
 
     def _update_minibatch(
         self,
@@ -982,26 +981,12 @@ def _actions_index(actions: ModelActions, idx: torch.Tensor) -> ModelActions:
     )
 
 
-def _can_non_blocking_copy_to_device(
-    tensors: tuple[torch.Tensor, ...],
-    device: torch.device,
-) -> bool:
-    return device.type == "cuda" and all(
-        tensor.device.type == "cpu" and tensor.is_pinned() for tensor in tensors
-    )
-
-
 def _obs_to_device(
     obs: ObsBatch,
     device: torch.device,
     *,
-    non_blocking: bool | None = None,
+    non_blocking: bool = False,
 ) -> ObsBatch:
-    if non_blocking is None:
-        non_blocking = _can_non_blocking_copy_to_device(
-            tuple(getattr(obs, field) for field in _OBS_FIELDS),
-            device,
-        )
     if device.type == "cpu":
         return ObsBatch(
             **{
@@ -1023,15 +1008,9 @@ def _obs_to_device(
 def _copy_obs_to_device_(
     dst: ObsBatch,
     src: ObsBatch,
-    device: torch.device,
     *,
-    non_blocking: bool | None = None,
+    non_blocking: bool = False,
 ) -> None:
-    if non_blocking is None:
-        non_blocking = _can_non_blocking_copy_to_device(
-            tuple(getattr(src, field) for field in _OBS_FIELDS),
-            device,
-        )
     for field in _OBS_FIELDS:
         getattr(dst, field).copy_(getattr(src, field), non_blocking=non_blocking)
 
@@ -1107,14 +1086,26 @@ def _uses_uniform_single_pass_sampling(config: PPOConfig) -> bool:
     return config.segment_sampling.sampling == "uniform" and config.replay_ratio == 1.0
 
 
-def _num_minibatches_per_epoch(config: PPOConfig) -> int:
+def _rng_state() -> dict[str, Any]:
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all()
+        if torch.cuda.is_available()
+        else None,
+    }
+
+
+def _num_minibatches_per_update(config: PPOConfig, n_envs: int) -> int:
     segments_per_minibatch = config.segment_sampling.segments_per_minibatch
     if _uses_uniform_single_pass_sampling(config):
-        return (config.n_envs + segments_per_minibatch - 1) // segments_per_minibatch
-    return max(1, int(config.replay_ratio * config.n_envs / segments_per_minibatch))
+        return (n_envs + segments_per_minibatch - 1) // segments_per_minibatch
+    return max(1, int(config.replay_ratio * n_envs / segments_per_minibatch))
 
 
-def _epoch_samples(
+def _update_samples(
+    *,
     sampling_advantages: torch.Tensor,
     config: PPOConfig,
     n_minibatches: int,
@@ -1122,7 +1113,7 @@ def _epoch_samples(
     if _uses_uniform_single_pass_sampling(config):
         samples: list[SegmentSample | None] = []
         samples.extend(
-            sample_segments_uniform_epoch(
+            sample_segments_uniform_single_pass(
                 n_segments=sampling_advantages.shape[0],
                 segments_per_minibatch=config.segment_sampling.segments_per_minibatch,
                 device=sampling_advantages.device,

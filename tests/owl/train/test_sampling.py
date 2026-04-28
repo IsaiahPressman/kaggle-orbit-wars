@@ -3,7 +3,7 @@ import torch
 from owl.train import (
     sample_segments_by_advantage,
     sample_segments_uniform,
-    sample_segments_uniform_epoch,
+    sample_segments_uniform_single_pass,
 )
 
 
@@ -19,9 +19,12 @@ def test_sample_segments_uniform_shapes() -> None:
     assert torch.allclose(sample.importance, torch.ones((3, 1)))
 
 
-def test_sample_segments_uniform_epoch_shuffles_without_replacement() -> None:
+def test_sample_segments_uniform_single_pass_shuffles_without_replacement() -> None:
     torch.manual_seed(0)
-    samples = sample_segments_uniform_epoch(n_segments=5, segments_per_minibatch=2)
+    samples = sample_segments_uniform_single_pass(
+        n_segments=5,
+        segments_per_minibatch=2,
+    )
 
     assert [sample.indices.shape for sample in samples] == [(2,), (2,), (1,)]
     indices = torch.cat([sample.indices for sample in samples])

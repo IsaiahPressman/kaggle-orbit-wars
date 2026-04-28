@@ -70,6 +70,7 @@ class TinyOrbitEnv:
         two_player: bool = False,
     ) -> None:
         self.n_envs = n_envs
+        self.pin_memory_enabled = False
         self.obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 2)
         self.action_spec = ActionPureConfig()
         self.episode_length = episode_length
@@ -320,7 +321,7 @@ def test_obs_to_device_clones_cpu_observation_buffers() -> None:
         assert getattr(copied, field).data_ptr() != getattr(obs, field).data_ptr()
 
 
-def test_obs_to_device_uses_non_blocking_for_pinned_cuda_sources(
+def test_obs_to_device_uses_explicit_non_blocking_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 1)
@@ -332,15 +333,14 @@ def test_obs_to_device_uses_non_blocking_for_pinned_cuda_sources(
         non_blocking_args.append(kwargs["non_blocking"])
         return self
 
-    monkeypatch.setattr(torch.Tensor, "is_pinned", lambda _self: True)
     monkeypatch.setattr(torch.Tensor, "to", fake_to)
 
-    ppo._obs_to_device(obs, torch.device("cuda"))
+    ppo._obs_to_device(obs, torch.device("cuda"), non_blocking=True)
 
     assert non_blocking_args == [True] * len(ppo._OBS_FIELDS)
 
 
-def test_obs_to_device_blocks_for_unpinned_cuda_sources(
+def test_obs_to_device_defaults_to_blocking_transfer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 1)
@@ -380,6 +380,43 @@ def test_actions_to_cpu_transfer_policy_is_explicit(
     )
 
 
+def test_trainer_sets_static_env_transfer_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = TinyOrbitEnv(n_envs=2)
+    env.pin_memory_enabled = True
+    model = TinyOrbitModel()
+    non_blocking_args: list[bool] = []
+
+    def fake_obs_to_device(
+        obs: ObsBatch,
+        device: torch.device,
+        *,
+        non_blocking: bool = False,
+    ) -> ObsBatch:
+        del device
+        non_blocking_args.append(non_blocking)
+        return obs
+
+    class FakeRolloutBuffer:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+    monkeypatch.setattr(ppo, "_obs_to_device", fake_obs_to_device)
+    monkeypatch.setattr(ppo, "PPORolloutBuffer", FakeRolloutBuffer)
+
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(horizon=2),
+        device=torch.device("cuda"),
+    )
+
+    assert trainer._non_blocking_env_to_device is True
+    assert non_blocking_args == [True]
+
+
 def test_collect_rollout_keeps_pre_step_obs_with_reused_cpu_buffers() -> None:
     torch.manual_seed(4)
     env = ReusingObservationEnv(n_envs=2)
@@ -390,7 +427,6 @@ def test_collect_rollout_keeps_pre_step_obs_with_reused_cpu_buffers() -> None:
         optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
         config=ppo.PPOConfig(
             horizon=3,
-            n_envs=2,
             segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
         ),
         device=torch.device("cpu"),
@@ -426,9 +462,8 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         optimizer=optimizer,
         config=ppo.PPOConfig(
             horizon=5,
-            n_envs=4,
             segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=2),
-            update_epochs=2,
+            replay_ratio=1.0,
             gamma=0.9,
             gae_lambda=0.95,
         ),
@@ -450,7 +485,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "logratio_mean",
         "logratio_abs_max",
         "grad_norm",
-        "num_minibatches_per_epoch",
+        "num_minibatches_per_update",
         "num_total_minibatches",
         "effective_replay_exposure",
         "policy_active_ratio",
@@ -477,7 +512,6 @@ def test_trainer_masks_inactive_player_slots() -> None:
         optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
         config=ppo.PPOConfig(
             horizon=3,
-            n_envs=3,
             segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
         ),
         device=torch.device("cpu"),
@@ -524,8 +558,6 @@ def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
         optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
         config=ppo.PPOConfig(
             horizon=2,
-            n_envs=5,
-            update_epochs=1,
             replay_ratio=1.0,
             segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=2),
         ),
@@ -573,7 +605,7 @@ def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
     all_indices = torch.cat(seen)
     assert torch.equal(all_indices.sort().values, torch.arange(5))
     assert metrics["num_minibatches"] == pytest.approx(3.0)
-    assert metrics["num_minibatches_per_epoch"] == pytest.approx(3.0)
+    assert metrics["num_minibatches_per_update"] == pytest.approx(3.0)
     assert metrics["num_total_minibatches"] == pytest.approx(3.0)
     assert metrics["effective_replay_exposure"] == pytest.approx(1.0)
 
@@ -582,7 +614,6 @@ def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
     "config",
     [
         ppo.PPOConfig(
-            n_envs=4,
             replay_ratio=2.0,
             segment_sampling=ppo.SegmentSamplingConfig(
                 sampling="uniform",
@@ -590,7 +621,6 @@ def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
             ),
         ),
         ppo.PPOConfig(
-            n_envs=4,
             replay_ratio=1.0,
             segment_sampling=ppo.SegmentSamplingConfig(
                 sampling="advantage_priority",
@@ -599,14 +629,14 @@ def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
         ),
     ],
 )
-def test_epoch_samples_keeps_replacement_sampling_paths(config: ppo.PPOConfig) -> None:
+def test_update_samples_keeps_replacement_sampling_paths(config: ppo.PPOConfig) -> None:
     advantages = torch.ones((4, 2))
 
-    n_minibatches = ppo._num_minibatches_per_epoch(config)
-    samples = ppo._epoch_samples(
-        advantages,
-        config,
-        n_minibatches,
+    n_minibatches = ppo._num_minibatches_per_update(config, n_envs=4)
+    samples = ppo._update_samples(
+        sampling_advantages=advantages,
+        config=config,
+        n_minibatches=n_minibatches,
     )
 
     assert samples == [None for _ in range(n_minibatches)]
@@ -635,7 +665,6 @@ def test_trainer_compiles_model_when_configured(
         optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
         config=ppo.PPOConfig(
             horizon=2,
-            n_envs=2,
             segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
             compile_mode="default",
         ),
@@ -650,7 +679,7 @@ def test_trainer_compiles_model_when_configured(
     ]
 
 
-def test_trainer_recomputes_advantages_each_epoch(
+def test_trainer_recomputes_advantages_each_minibatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     torch.manual_seed(2)
@@ -717,10 +746,9 @@ def test_trainer_recomputes_advantages_each_epoch(
         optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
         config=ppo.PPOConfig(
             horizon=2,
-            n_envs=1,
-            update_epochs=2,
+            replay_ratio=2.0,
             segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
-            recompute_advantages_each_epoch=True,
+            recompute_advantages_each_minibatch=True,
         ),
         device=torch.device("cpu"),
     )
@@ -732,7 +760,7 @@ def test_trainer_recomputes_advantages_each_epoch(
     assert means_seen[0] != means_seen[1]
 
 
-def test_trainer_vtrace_recomputes_current_policy_ratios(
+def test_trainer_vtrace_recomputes_ratios_each_minibatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     torch.manual_seed(4)
@@ -798,8 +826,7 @@ def test_trainer_vtrace_recomputes_current_policy_ratios(
         optimizer=torch.optim.AdamW(model.parameters(), lr=0.1, eps=1e-5),
         config=ppo.PPOConfig(
             horizon=2,
-            n_envs=1,
-            update_epochs=2,
+            replay_ratio=2.0,
             segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
             advantage_mode="gae_vtrace",
         ),
@@ -813,7 +840,7 @@ def test_trainer_vtrace_recomputes_current_policy_ratios(
     assert not torch.allclose(ratios_seen[1], torch.ones_like(ratios_seen[1]))
 
 
-def test_trainer_vtrace_refreshes_same_epoch_replay_tensors(
+def test_trainer_vtrace_refreshes_same_update_replay_tensors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     torch.manual_seed(5)
@@ -867,8 +894,6 @@ def test_trainer_vtrace_refreshes_same_epoch_replay_tensors(
         optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
         config=ppo.PPOConfig(
             horizon=2,
-            n_envs=1,
-            update_epochs=1,
             replay_ratio=2.0,
             segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
             advantage_mode="gae_vtrace",
@@ -910,12 +935,17 @@ def test_trainer_vtrace_refreshes_same_epoch_replay_tensors(
         return ppo.PPOUpdateResult(
             metrics=metrics,
             indices=sample.indices,
-            new_logp=replacement_logp,
-            new_values=replacement_values,
+            new_logp=replacement_logp.clone(),
+            new_values=replacement_values.clone(),
             grad_norm=zero,
         )
 
     monkeypatch.setattr(trainer, "_update_minibatch", fake_update_minibatch)
+    monkeypatch.setattr(
+        trainer,
+        "_current_segment_logp_values",
+        lambda _segments: (replacement_logp, replacement_values),
+    )
     monkeypatch.setattr(
         trainer,
         "_current_bootstrap_values",
@@ -947,7 +977,6 @@ def test_trainer_overwrites_dones_when_envs_terminate_inside_rollout() -> None:
         optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
         config=ppo.PPOConfig(
             horizon=4,
-            n_envs=3,
             segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
         ),
         device=torch.device("cpu"),

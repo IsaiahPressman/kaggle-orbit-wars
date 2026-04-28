@@ -88,7 +88,7 @@ def sample_segments_uniform(
     )
 
 
-def sample_segments_uniform_epoch(
+def sample_segments_uniform_single_pass(
     *,
     n_segments: int,
     segments_per_minibatch: int,

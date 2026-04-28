@@ -13,9 +13,8 @@ optimizer:
   learning_rate: 0.0003
 
 rl:
-  n_envs: 1
   horizon: 16
-  update_epochs: 1
+  checkpoint_freq: 0
   replay_ratio: 1.0
   compile_mode: null
   dtype: float32

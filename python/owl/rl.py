@@ -131,6 +131,7 @@ class VectorizedEnv:
             pin_memory = False
         self.n_envs = n_envs
         self.n_players = OUTER_PLAYER_SLOTS
+        self.pin_memory_enabled = pin_memory
         self.observations = self._allocate_observations(pin_memory=pin_memory)
         self.rewards = torch.zeros(
             (n_envs, self.n_players), dtype=torch.float32, pin_memory=pin_memory

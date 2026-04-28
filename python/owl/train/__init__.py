@@ -32,7 +32,7 @@ from .sampling import (
     sample_segments,
     sample_segments_by_advantage,
     sample_segments_uniform,
-    sample_segments_uniform_epoch,
+    sample_segments_uniform_single_pass,
     segment_sampling_metrics,
 )
 from .utils import TrainingDType, assert_finite, autocast_context
@@ -71,7 +71,7 @@ __all__ = [
     "sample_segments",
     "sample_segments_by_advantage",
     "sample_segments_uniform",
-    "sample_segments_uniform_epoch",
+    "sample_segments_uniform_single_pass",
     "segment_sampling_metrics",
     "validate_ppo_loss_inputs",
 ]
