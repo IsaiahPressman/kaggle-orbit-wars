@@ -322,7 +322,7 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert torch.all(output.actions.ships[~output.actions.launch] == 0)
     assert torch.all(output.actions.ships.sum(dim=-1) <= obs.max_launch)
     assert model.launch_slot_tokens.weight.shape == (3, config.embed_dim)
-    assert model.slot_dynamic_proj.in_features == 6
+    assert model.slot_dynamic_proj.in_features == 9
 
     evaluation = model.evaluate_actions(obs, output.actions)
     assert torch.allclose(evaluation.log_probs.launch, output.log_probs.launch)
@@ -359,6 +359,7 @@ def test_launch_slot_embedding_is_added_to_each_slot_input() -> None:
     slot_input = torch.zeros((2, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
     active = torch.zeros(slot_input.shape[:-1], dtype=torch.bool)
     remaining = torch.zeros(slot_input.shape[:-1], dtype=torch.int64)
+    initial_max_launch = torch.zeros(slot_input.shape[:-1], dtype=torch.int64)
     last_launch = torch.zeros(slot_input.shape[:-1], dtype=torch.bool)
     last_angle_sin = torch.zeros(slot_input.shape[:-1])
     last_angle_cos = torch.zeros(slot_input.shape[:-1])
@@ -369,6 +370,7 @@ def test_launch_slot_embedding_is_added_to_each_slot_input() -> None:
         0,
         active,
         remaining,
+        initial_max_launch,
         last_launch,
         last_angle_sin,
         last_angle_cos,
@@ -380,6 +382,7 @@ def test_launch_slot_embedding_is_added_to_each_slot_input() -> None:
         1,
         active,
         remaining,
+        initial_max_launch,
         last_launch,
         last_angle_sin,
         last_angle_cos,
@@ -390,6 +393,67 @@ def test_launch_slot_embedding_is_added_to_each_slot_input() -> None:
     expected_first_slot = model.launch_slot_tokens.weight[0].view(1, 1, 1, -1)
     assert torch.allclose(first_slot, expected_first_slot.expand_as(first_slot))
     assert not torch.allclose(first_slot, second_slot)
+
+
+def test_slot_dynamic_features_include_relative_budget_and_slot_fraction() -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=4)
+    config = StatelessTransformerV1Config(
+        action_spec=action_spec,
+        embed_dim=16,
+        depth=1,
+        n_heads=4,
+        max_ship_normalizer=100.0,
+    )
+    model = StatelessTransformerV1(config)
+    active = torch.tensor([[[True, False]]])
+    remaining = torch.tensor([[[6, 0]]])
+    initial_max_launch = torch.tensor([[[10, 0]]])
+    last_launch = torch.tensor([[[True, False]]])
+    last_angle_sin = torch.tensor([[[0.25, -0.5]]])
+    last_angle_cos = torch.tensor([[[0.75, 0.5]]])
+    last_ships = torch.tensor([[[2, 3]]])
+
+    features = model._slot_dynamic_features(
+        2,
+        active,
+        remaining,
+        initial_max_launch,
+        last_launch,
+        last_angle_sin,
+        last_angle_cos,
+        last_ships,
+        dtype=torch.float32,
+    )
+
+    expected = torch.tensor(
+        [
+            [
+                [
+                    1.0,
+                    0.06,
+                    1.0,
+                    0.25,
+                    0.75,
+                    0.02,
+                    0.6,
+                    0.2,
+                    2.0 / 3.0,
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    -0.5,
+                    0.5,
+                    0.03,
+                    0.0,
+                    3.0,
+                    2.0 / 3.0,
+                ],
+            ]
+        ]
+    )
+    assert torch.allclose(features, expected)
 
 
 def test_actor_distribution_outputs_remain_fp32_under_cpu_bf16_autocast() -> None:

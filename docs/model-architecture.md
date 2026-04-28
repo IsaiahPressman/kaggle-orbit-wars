@@ -135,9 +135,11 @@ For each `(batch, player, action_entity)` position, the actor combines:
 The repeated launch slots are generated autoregressively with a 2-layer minGRU
 stack. Each recurrent step adds a learned launch-slot embedding so the actor has
 an explicit first/second/third/etc. slot identity. Each slot also receives
-dynamic inputs for current activity, remaining ship budget, previous launch
-decision, the sine and cosine of the previous sampled launch angle, and the
-previous normalized ship count.
+dynamic inputs for current activity, absolute-normalized remaining ship budget,
+previous launch decision, the sine and cosine of the previous sampled launch
+angle, previous absolute-normalized ship count, remaining fraction of the
+initial launch budget, previous ship-count fraction of the initial launch
+budget, and normalized slot index.
 
 The first recurrent slot receives the static actor input plus its slot
 embedding. Dynamic recurrent features are added starting with the second launch

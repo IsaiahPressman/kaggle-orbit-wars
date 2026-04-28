@@ -125,7 +125,7 @@ class StatelessTransformerV1(BaseModelAPI):
             self.config.action_spec.max_per_planet_launches,
             dim,
         )
-        self.slot_dynamic_proj = nn.Linear(6, dim)
+        self.slot_dynamic_proj = nn.Linear(9, dim)
         self.actor_input_proj = nn.Linear(dim * 3, dim)
         self.actor_gru = MinGRUStack(dim, dim, n_layers=2)
         self.actor_heads = LaunchPolicyHeads(self.config)
@@ -345,6 +345,7 @@ class StatelessTransformerV1(BaseModelAPI):
                     slot,
                     active,
                     remaining,
+                    max_launch,
                     last_launch,
                     last_angle_sin,
                     last_angle_cos,
@@ -491,6 +492,7 @@ class StatelessTransformerV1(BaseModelAPI):
                     slot,
                     active,
                     remaining,
+                    max_launch,
                     last_launch,
                     last_angle_sin,
                     last_angle_cos,
@@ -629,6 +631,7 @@ class StatelessTransformerV1(BaseModelAPI):
         slot: int,
         active: torch.Tensor,
         remaining: torch.Tensor,
+        initial_max_launch: torch.Tensor,
         last_launch: torch.Tensor,
         last_angle_sin: torch.Tensor,
         last_angle_cos: torch.Tensor,
@@ -640,18 +643,53 @@ class StatelessTransformerV1(BaseModelAPI):
         slot_context = slot_input + slot_token
         if not include_dynamic_features:
             return slot_context
-        dynamic_features = torch.stack(
+        dynamic_features = self._slot_dynamic_features(
+            slot,
+            active,
+            remaining,
+            initial_max_launch,
+            last_launch,
+            last_angle_sin,
+            last_angle_cos,
+            last_ships,
+            dtype=slot_input.dtype,
+        )
+        return slot_context + self.slot_dynamic_proj(dynamic_features)
+
+    def _slot_dynamic_features(
+        self,
+        slot: int,
+        active: torch.Tensor,
+        remaining: torch.Tensor,
+        initial_max_launch: torch.Tensor,
+        last_launch: torch.Tensor,
+        last_angle_sin: torch.Tensor,
+        last_angle_cos: torch.Tensor,
+        last_ships: torch.Tensor,
+        *,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        initial_available_ships = initial_max_launch.clamp_min(1).to(dtype=dtype)
+        slot_denominator = max(self.config.action_spec.max_per_planet_launches - 1, 1)
+        slot_fraction = torch.full_like(
+            remaining,
+            fill_value=slot / slot_denominator,
+            dtype=dtype,
+        )
+        return torch.stack(
             (
-                active.to(dtype=slot_input.dtype),
-                remaining.to(dtype=slot_input.dtype) / self.config.max_ship_normalizer,
-                last_launch.to(dtype=slot_input.dtype),
-                last_angle_sin.to(dtype=slot_input.dtype),
-                last_angle_cos.to(dtype=slot_input.dtype),
-                last_ships.to(dtype=slot_input.dtype) / self.config.max_ship_normalizer,
+                active.to(dtype=dtype),
+                remaining.to(dtype=dtype) / self.config.max_ship_normalizer,
+                last_launch.to(dtype=dtype),
+                last_angle_sin.to(dtype=dtype),
+                last_angle_cos.to(dtype=dtype),
+                last_ships.to(dtype=dtype) / self.config.max_ship_normalizer,
+                remaining.to(dtype=dtype) / initial_available_ships,
+                last_ships.to(dtype=dtype) / initial_available_ships,
+                slot_fraction,
             ),
             dim=-1,
         )
-        return slot_context + self.slot_dynamic_proj(dynamic_features)
 
 
 class TransformerBlock(nn.Module):
