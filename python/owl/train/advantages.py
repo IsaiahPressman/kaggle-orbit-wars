@@ -8,7 +8,7 @@ from owl.train.utils import (
     assert_finite,
     require_probability_range,
     require_same_shape,
-    require_time_major,
+    require_segment_time_major,
 )
 
 AdvantageMode = Literal["gae", "gae_vtrace"]
@@ -55,7 +55,8 @@ def compute_advantages(
     vtrace_rho_clip: float = 1.0,
     vtrace_c_clip: float = 1.0,
 ) -> torch.Tensor:
-    require_time_major(values, "values")
+    """Compute advantages for segment-major/time-second tensors [N, T, ...]."""
+    require_segment_time_major(values, "values")
     require_same_shape(values, rewards, left_name="values", right_name="rewards")
     require_same_shape(values, dones, left_name="values", right_name="dones")
     require_probability_range(gamma, "gamma")
