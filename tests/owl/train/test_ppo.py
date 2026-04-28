@@ -390,6 +390,28 @@ def test_trainer_masks_inactive_player_slots() -> None:
     assert segments.dones[:, :, 2:].all()
 
 
+def test_segment_sampling_advantages_use_policy_mask() -> None:
+    advantages = torch.tensor(
+        [
+            [[1.0, 100.0], [2.0, 200.0]],
+            [[3.0, 300.0], [4.0, 400.0]],
+        ]
+    )
+    policy_mask = torch.tensor(
+        [
+            [[True, False], [True, False]],
+            [[False, False], [True, False]],
+        ]
+    )
+
+    sampling_advantages = ppo._segment_sampling_advantages(advantages, policy_mask)
+
+    assert torch.equal(
+        sampling_advantages,
+        torch.tensor([[1.0, 2.0], [0.0, 4.0]]),
+    )
+
+
 def test_trainer_compiles_model_when_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -460,11 +482,12 @@ def test_trainer_recomputes_advantages_each_epoch(
         old_values: torch.Tensor,
         returns: torch.Tensor,
         advantages: torch.Tensor,
-        loss_weight: torch.Tensor,
+        policy_weight: torch.Tensor,
+        value_weight: torch.Tensor,
         config: ppo.PPOConfig,
     ) -> ppo.PPOLossMetrics:
-        del entropy, old_logp, old_values, returns, config
-        means_seen.append(float((advantages * loss_weight).mean().item()))
+        del entropy, old_logp, old_values, returns, value_weight, config
+        means_seen.append(float((advantages * policy_weight).mean().item()))
         loss = new_values.mean() + 0.0 * new_logp.mean()
         zero = loss.detach().new_zeros(())
         return ppo.PPOLossMetrics(
@@ -538,10 +561,12 @@ def test_trainer_vtrace_recomputes_current_policy_ratios(
         old_values: torch.Tensor,
         returns: torch.Tensor,
         advantages: torch.Tensor,
-        loss_weight: torch.Tensor,
+        policy_weight: torch.Tensor,
+        value_weight: torch.Tensor,
         config: ppo.PPOConfig,
     ) -> ppo.PPOLossMetrics:
-        del entropy, old_logp, old_values, returns, advantages, loss_weight, config
+        del entropy, old_logp, old_values, returns, advantages, policy_weight
+        del value_weight, config
         loss = -new_logp.mean() + 0.0 * new_values.mean()
         zero = loss.detach().new_zeros(())
         return ppo.PPOLossMetrics(

@@ -20,7 +20,6 @@ from owl.rl import (
 from owl.train.advantages import AdvantageMode, compute_gae
 from owl.train.metrics import (
     explained_variance,
-    masked_max,
     masked_mean,
     masked_std,
     masked_sum_by_segment,
@@ -100,7 +99,8 @@ class PPOLossFn(Protocol):
         old_values: torch.Tensor,
         returns: torch.Tensor,
         advantages: torch.Tensor,
-        loss_weight: torch.Tensor,
+        policy_weight: torch.Tensor,
+        value_weight: torch.Tensor,
         config: PPOConfig,
     ) -> PPOLossMetrics: ...
 
@@ -309,7 +309,8 @@ class PPOTrainer:
         start = perf_counter()
         last_values = self._collect_rollout()
         segments = self.rollout.segment_major()
-        valid_mask = segments.obs.still_playing
+        value_mask = segments.obs.still_playing
+        policy_mask = _policy_mask(segments.obs)
         ratios = (
             torch.ones_like(segments.logp)
             if self.config.advantage_mode == "gae_vtrace"
@@ -327,15 +328,22 @@ class PPOTrainer:
             vtrace_rho_clip=self.config.vtrace_rho_clip,
             vtrace_c_clip=self.config.vtrace_c_clip,
         )
-        metrics = self._update(segments, advantages, returns, last_values, valid_mask)
-        episode_returns = masked_sum_by_segment(segments.rewards, valid_mask)
+        metrics = self._update(
+            segments,
+            advantages,
+            returns,
+            last_values,
+            policy_mask,
+            value_mask,
+        )
+        episode_returns = masked_sum_by_segment(segments.rewards, value_mask)
         metrics["return_mean"] = float(episode_returns.mean().item())
         metrics["return_max"] = float(episode_returns.max().item())
         metrics["explained_variance"] = float(
-            explained_variance(segments.values, returns, valid_mask=valid_mask).item()
+            explained_variance(segments.values, returns, valid_mask=value_mask).item()
         )
-        metrics["advantage_mean"] = float(masked_mean(advantages, valid_mask).item())
-        metrics["advantage_std"] = float(masked_std(advantages, valid_mask).item())
+        metrics["advantage_mean"] = float(masked_mean(advantages, policy_mask).item())
+        metrics["advantage_std"] = float(masked_std(advantages, policy_mask).item())
         elapsed = max(perf_counter() - start, 1e-12)
         metrics["steps_per_second"] = float(
             self.config.horizon * self.config.n_envs / elapsed
@@ -373,7 +381,8 @@ class PPOTrainer:
         advantages: torch.Tensor,
         returns: torch.Tensor,
         bootstrap_values: torch.Tensor,
-        valid_mask: torch.Tensor,
+        policy_mask: torch.Tensor,
+        value_mask: torch.Tensor,
     ) -> dict[str, float]:
         loss_metrics: list[PPOLossMetrics] = []
         grad_norms: list[torch.Tensor] = []
@@ -415,7 +424,7 @@ class PPOTrainer:
             for _minibatch in range(n_minibatches):
                 sampling_advantages = _segment_sampling_advantages(
                     current_advantages,
-                    valid_mask,
+                    policy_mask,
                 )
                 sample = sample_segments(
                     sampling_advantages,
@@ -428,7 +437,8 @@ class PPOTrainer:
                     segments,
                     current_advantages,
                     current_returns,
-                    valid_mask,
+                    policy_mask,
+                    value_mask,
                     sample,
                 )
                 loss_metrics.append(update.metrics)
@@ -485,7 +495,8 @@ class PPOTrainer:
         segments: PPORolloutSegments,
         advantages: torch.Tensor,
         returns: torch.Tensor,
-        valid_mask: torch.Tensor,
+        policy_mask: torch.Tensor,
+        value_mask: torch.Tensor,
         sample: SegmentSample,
     ) -> PPOUpdateResult:
         idx = sample.indices
@@ -494,13 +505,17 @@ class PPOTrainer:
         batch_old_logp = segments.logp[idx]
         batch_old_values = segments.values[idx]
         batch_returns = returns[idx]
-        batch_valid_mask = valid_mask[idx]
+        batch_policy_mask = policy_mask[idx]
+        batch_value_mask = value_mask[idx]
         importance = sample.importance
         while importance.ndim < advantages[idx].ndim:
             importance = importance.unsqueeze(-1)
         batch_advantages = advantages[idx]
-        batch_loss_weight = (
-            batch_valid_mask.to(dtype=batch_advantages.dtype) * importance
+        batch_policy_weight = (
+            batch_policy_mask.to(dtype=batch_advantages.dtype) * importance
+        )
+        batch_value_weight = (
+            batch_value_mask.to(dtype=batch_advantages.dtype) * importance
         )
 
         with autocast_context(self.config, self.device):
@@ -517,7 +532,8 @@ class PPOTrainer:
             old_values=batch_old_values,
             returns=batch_returns,
             advantages=batch_advantages,
-            loss_weight=batch_loss_weight,
+            policy_weight=batch_policy_weight,
+            value_weight=batch_value_weight,
             config=self.config,
         )
         self.optimizer.zero_grad(set_to_none=True)
@@ -572,7 +588,8 @@ def _compile_ppo_loss(compile_mode: CompileMode | None) -> PPOLossFn:
         old_values: torch.Tensor,
         returns: torch.Tensor,
         advantages: torch.Tensor,
-        loss_weight: torch.Tensor,
+        policy_weight: torch.Tensor,
+        value_weight: torch.Tensor,
         config: PPOConfig,
     ) -> PPOLossMetrics:
         return _ppo_loss_metrics_from_tuple(
@@ -584,7 +601,8 @@ def _compile_ppo_loss(compile_mode: CompileMode | None) -> PPOLossFn:
                 old_values,
                 returns,
                 advantages,
-                loss_weight,
+                policy_weight,
+                value_weight,
                 config.normalize_advantages,
                 config.advantage_eps,
                 config.clip_coef,
@@ -606,7 +624,8 @@ def ppo_loss(
     old_values: torch.Tensor,
     returns: torch.Tensor,
     advantages: torch.Tensor,
-    loss_weight: torch.Tensor,
+    policy_weight: torch.Tensor,
+    value_weight: torch.Tensor,
     config: PPOConfig,
 ) -> PPOLossMetrics:
     return _ppo_loss_metrics_from_tuple(
@@ -618,7 +637,8 @@ def ppo_loss(
             old_values,
             returns,
             advantages,
-            loss_weight,
+            policy_weight,
+            value_weight,
             config.normalize_advantages,
             config.advantage_eps,
             config.clip_coef,
@@ -671,7 +691,8 @@ def _ppo_loss_tensors(
     old_values: torch.Tensor,
     returns: torch.Tensor,
     advantages: torch.Tensor,
-    loss_weight: torch.Tensor,
+    policy_weight: torch.Tensor,
+    value_weight: torch.Tensor,
     normalize_advantages: bool,
     advantage_eps: float,
     clip_coef: float,
@@ -690,7 +711,7 @@ def _ppo_loss_tensors(
 ]:
     normalized_advantages = advantages
     if normalize_advantages:
-        valid = loss_weight > 0
+        valid = policy_weight > 0
         normalized_advantages = (advantages - masked_mean(advantages, valid)) / (
             masked_std(advantages, valid) + advantage_eps
         )
@@ -701,7 +722,7 @@ def _ppo_loss_tensors(
     pg_loss2 = -normalized_advantages * torch.clamp(
         ratio, 1.0 - clip_coef, 1.0 + clip_coef
     )
-    policy_loss = weighted_mean(torch.max(pg_loss1, pg_loss2), loss_weight)
+    policy_loss = weighted_mean(torch.max(pg_loss1, pg_loss2), policy_weight)
 
     value_clipped = old_values + torch.clamp(
         new_values - old_values,
@@ -712,18 +733,18 @@ def _ppo_loss_tensors(
     value_loss_clipped = (value_clipped - returns).pow(2)
     value_loss = 0.5 * weighted_mean(
         torch.max(value_loss_unclipped, value_loss_clipped),
-        loss_weight,
+        value_weight,
     )
 
-    entropy_mean = weighted_mean(entropy, loss_weight)
+    entropy_mean = weighted_mean(entropy, policy_weight)
     loss = policy_loss + vf_coef * value_loss - ent_coef * entropy_mean
-    approx_kl = weighted_mean((ratio - 1.0) - logratio, loss_weight)
+    approx_kl = weighted_mean((ratio - 1.0) - logratio, policy_weight)
     clipfrac = weighted_mean(
         ((ratio - 1.0).abs() > clip_coef).float(),
-        loss_weight,
+        policy_weight,
     )
-    ratio_mean = weighted_mean(ratio, loss_weight)
-    ratio_max = masked_max(ratio, loss_weight > 0)
+    ratio_mean = weighted_mean(ratio, policy_weight)
+    ratio_max = _masked_max_or_zero(ratio, policy_weight > 0)
 
     return (
         loss,
@@ -746,7 +767,8 @@ def validate_ppo_loss_inputs(
     old_values: torch.Tensor,
     returns: torch.Tensor,
     advantages: torch.Tensor,
-    loss_weight: torch.Tensor,
+    policy_weight: torch.Tensor,
+    value_weight: torch.Tensor,
 ) -> None:
     require_same_shape(new_logp, old_logp, left_name="new_logp", right_name="old_logp")
     require_same_shape(new_logp, entropy, left_name="new_logp", right_name="entropy")
@@ -758,7 +780,10 @@ def validate_ppo_loss_inputs(
         new_logp, advantages, left_name="new_logp", right_name="advantages"
     )
     require_same_shape(
-        new_logp, loss_weight, left_name="new_logp", right_name="loss_weight"
+        new_logp, policy_weight, left_name="new_logp", right_name="policy_weight"
+    )
+    require_same_shape(
+        new_logp, value_weight, left_name="new_logp", right_name="value_weight"
     )
     if new_values.numel() != returns.numel():
         raise ValueError(
@@ -772,7 +797,8 @@ def validate_ppo_loss_inputs(
         ("old_values", old_values),
         ("returns", returns),
         ("advantages", advantages),
-        ("loss_weight", loss_weight),
+        ("policy_weight", policy_weight),
+        ("value_weight", value_weight),
     ):
         assert_finite(tensor, name)
 
@@ -881,9 +907,22 @@ def _output_values(output: ModelOutput | ModelEvaluation) -> torch.Tensor:
     return output.values
 
 
+def _policy_mask(obs: ObsBatch) -> torch.Tensor:
+    return obs.still_playing & obs.can_act.any(dim=-1)
+
+
 def _policy_ratios(new_logp: torch.Tensor, old_logp: torch.Tensor) -> torch.Tensor:
     require_same_shape(new_logp, old_logp, left_name="new_logp", right_name="old_logp")
     return (new_logp - old_logp).exp()
+
+
+def _masked_max_or_zero(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    masked = torch.where(mask, values, torch.full_like(values, -torch.inf))
+    return torch.where(
+        mask.any(),
+        masked.max(),
+        torch.zeros((), dtype=values.dtype, device=values.device),
+    )
 
 
 def _segment_sampling_advantages(
