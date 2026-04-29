@@ -590,6 +590,7 @@ fn player_results_from_kaggle(row: &FixtureRow) -> Result<Vec<PlayerResult>, Str
         ));
     }
 
+    let alive_flags = player_alive_flags(&row.expected, row.players);
     row.results
         .iter()
         .enumerate()
@@ -600,6 +601,9 @@ fn player_results_from_kaggle(row: &FixtureRow) -> Result<Vec<PlayerResult>, Str
                         "active player {player_id} had non-zero reward {:?}",
                         result.reward
                     ));
+                }
+                if !alive_flags[player_id] {
+                    return Ok(PlayerResult::Lost);
                 }
                 Ok(PlayerResult::Active)
             },
@@ -615,6 +619,19 @@ fn player_results_from_kaggle(row: &FixtureRow) -> Result<Vec<PlayerResult>, Str
             )),
         })
         .collect()
+}
+
+fn player_alive_flags(observation: &ObservationFixture, player_count: usize) -> Vec<bool> {
+    let mut alive_players = vec![false; player_count];
+    for planet in &observation.planets {
+        if planet[1] != -1.0 {
+            alive_players[planet[1] as usize] = true;
+        }
+    }
+    for fleet in &observation.fleets {
+        alive_players[fleet[1] as usize] = true;
+    }
+    alive_players
 }
 
 fn compare_planets(actual: &[Planet], expected: &[Planet]) -> Result<(), String> {

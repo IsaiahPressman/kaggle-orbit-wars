@@ -436,8 +436,18 @@ fn resolve_combats(state: &mut State, combat_lists: HashMap<u32, Vec<Fleet>>) {
 
 fn player_results(state: &State) -> Vec<PlayerResult> {
     let terminated = is_game_terminated(state);
+    let alive_players = player_alive_flags(state);
     if !terminated {
-        return vec![PlayerResult::Active; state.config.player_count];
+        return alive_players
+            .into_iter()
+            .map(|alive| {
+                if alive {
+                    PlayerResult::Active
+                } else {
+                    PlayerResult::Lost
+                }
+            })
+            .collect();
     }
 
     let scores = player_scores(state);
@@ -583,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn nonterminal_eliminated_player_remains_active_to_match_kaggle_status() {
+    fn nonterminal_eliminated_player_is_lost() {
         let mut state = reset(ResetConfig {
             sim: SimConfig::new(4),
             step: Some(0),
@@ -628,7 +638,7 @@ mod tests {
                 PlayerResult::Active,
                 PlayerResult::Active,
                 PlayerResult::Active,
-                PlayerResult::Active,
+                PlayerResult::Lost,
             ]
         );
     }

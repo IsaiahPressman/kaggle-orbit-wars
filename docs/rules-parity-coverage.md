@@ -21,7 +21,9 @@ Replay coverage is required for:
 The replay parity test checks each transition against the Python reference for:
 
 - step counter
-- per-player Kaggle status/reward, mapped to active, won, or lost
+- per-player Kaggle status/reward, mapped to active, won, or lost. The replay
+  check accounts for the intentional status discrepancy where Kaggle keeps
+  nonterminal eliminated players `ACTIVE`, while Rust reports them as `Lost`.
 - angular velocity
 - planets: id, owner, position, radius, ships, production
 - initial planets
