@@ -3,7 +3,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-use crate::rules_engine::env::{reset, step, PlayerAction};
+use crate::rules_engine::env::{player_alive_flags, reset, step, PlayerAction};
 use crate::rules_engine::state::{PlayerResult, ResetConfig, State};
 
 use super::action_spec::decode_pure_actions;
@@ -484,6 +484,7 @@ fn step_one_env(
 ) {
     let result = step(state, decoded);
     let should_reset = result_is_terminal(&result.player_results);
+    let alive_players = player_alive_flags(state);
     let won_reward = split_won_reward(
         result
             .player_results
@@ -495,7 +496,13 @@ fn step_one_env(
     reward_chunk.fill(0.0);
     done_chunk.fill(true);
     for (player_index, result) in result.player_results.iter().enumerate() {
-        let (reward, done) = player_reward_done(*result, player_finished[player_index], won_reward);
+        let rl_result = if matches!(result, PlayerResult::Active) && !alive_players[player_index] {
+            PlayerResult::Lost
+        } else {
+            *result
+        };
+        let (reward, done) =
+            player_reward_done(rl_result, player_finished[player_index], won_reward);
         let outer_player = player_map.internal_to_outer(player_index);
         reward_chunk[outer_player] = reward;
         done_chunk[outer_player] = done;
