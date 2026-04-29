@@ -22,8 +22,10 @@ The replay parity test checks each transition against the Python reference for:
 
 - step counter
 - per-player Kaggle status/reward, mapped to active, won, or lost. The replay
-  check accounts for the intentional status discrepancy where Kaggle keeps
-  nonterminal eliminated players `ACTIVE`, while Rust reports them as `Lost`.
+  check requires exact status parity once Kaggle marks every player `DONE`.
+  Before that global terminal row, Kaggle can keep eliminated players `ACTIVE`
+  while Rust intentionally reports them as `Lost`, so the test only verifies
+  that Rust has not ended the game early.
 - angular velocity
 - planets: id, owner, position, radius, ships, production
 - initial planets

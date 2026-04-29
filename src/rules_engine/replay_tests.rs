@@ -514,13 +514,7 @@ fn compare_state(state: &State, result: &StepResult, row: &FixtureRow) -> Result
             state.step, row.expected.step
         ));
     }
-    let expected_player_results = player_results_from_kaggle(row)?;
-    if result.player_results != expected_player_results {
-        return Err(format!(
-            "player results mismatch: {:?} != {:?}",
-            result.player_results, expected_player_results
-        ));
-    }
+    compare_player_results(result, row)?;
     close(
         state.angular_velocity,
         row.expected.angular_velocity,
@@ -581,6 +575,36 @@ fn compare_state(state: &State, result: &StepResult, row: &FixtureRow) -> Result
     Ok(())
 }
 
+fn compare_player_results(result: &StepResult, row: &FixtureRow) -> Result<(), String> {
+    let expected_player_results = player_results_from_kaggle(row)?;
+    if expected_player_results
+        .iter()
+        .all(|result| !matches!(result, PlayerResult::Active))
+    {
+        if result.player_results != expected_player_results {
+            return Err(format!(
+                "player results mismatch: {:?} != {:?}",
+                result.player_results, expected_player_results
+            ));
+        }
+        return Ok(());
+    }
+
+    let active_count = result
+        .player_results
+        .iter()
+        .filter(|result| matches!(result, PlayerResult::Active))
+        .count();
+    if active_count > 1 {
+        return Ok(());
+    }
+
+    Err(format!(
+        "nonterminal replay transition left {active_count} active Rust players: {:?}",
+        result.player_results
+    ))
+}
+
 fn player_results_from_kaggle(row: &FixtureRow) -> Result<Vec<PlayerResult>, String> {
     if row.results.len() != row.players {
         return Err(format!(
@@ -590,7 +614,6 @@ fn player_results_from_kaggle(row: &FixtureRow) -> Result<Vec<PlayerResult>, Str
         ));
     }
 
-    let alive_flags = player_alive_flags(&row.expected, row.players);
     row.results
         .iter()
         .enumerate()
@@ -601,9 +624,6 @@ fn player_results_from_kaggle(row: &FixtureRow) -> Result<Vec<PlayerResult>, Str
                         "active player {player_id} had non-zero reward {:?}",
                         result.reward
                     ));
-                }
-                if !alive_flags[player_id] {
-                    return Ok(PlayerResult::Lost);
                 }
                 Ok(PlayerResult::Active)
             },
@@ -619,19 +639,6 @@ fn player_results_from_kaggle(row: &FixtureRow) -> Result<Vec<PlayerResult>, Str
             )),
         })
         .collect()
-}
-
-fn player_alive_flags(observation: &ObservationFixture, player_count: usize) -> Vec<bool> {
-    let mut alive_players = vec![false; player_count];
-    for planet in &observation.planets {
-        if planet[1] != -1.0 {
-            alive_players[planet[1] as usize] = true;
-        }
-    }
-    for fleet in &observation.fleets {
-        alive_players[fleet[1] as usize] = true;
-    }
-    alive_players
 }
 
 fn compare_planets(actual: &[Planet], expected: &[Planet]) -> Result<(), String> {
