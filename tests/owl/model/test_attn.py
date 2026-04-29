@@ -1,7 +1,11 @@
 import pytest
 import torch
 import torch.nn.functional as F
-from owl.model.attn import flash_attn_available, varlen_attention
+from owl.model.attn import (
+    _should_use_flash_attn,
+    flash_attn_available,
+    varlen_attention,
+)
 
 
 def test_varlen_attention_cpu_matches_torch_sdpa_per_sequence() -> None:
@@ -33,6 +37,32 @@ def test_varlen_attention_cpu_matches_torch_sdpa_per_sequence() -> None:
     )
 
     assert torch.allclose(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("device_type", "dtype", "has_flash_attn", "expected"),
+    [
+        ("cuda", torch.float16, True, True),
+        ("cuda", torch.bfloat16, True, True),
+        ("cuda", torch.float32, True, False),
+        ("cuda", torch.float16, False, False),
+        ("cpu", torch.float16, True, False),
+    ],
+)
+def test_flash_attention_backend_selection(
+    device_type: str,
+    dtype: torch.dtype,
+    has_flash_attn: bool,
+    expected: bool,
+) -> None:
+    assert (
+        _should_use_flash_attn(
+            device_type=device_type,
+            dtype=dtype,
+            has_flash_attn=has_flash_attn,
+        )
+        is expected
+    )
 
 
 def _sdpa_varlen_reference(

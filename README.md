@@ -30,6 +30,22 @@ implementation. Resolve the local module and gameplay prose paths with:
 uv run python -c 'from importlib import import_module; from pathlib import Path; m = import_module("kaggle_environments.envs.orbit_wars.orbit_wars"); print(Path(m.__file__).resolve()); print(Path(m.__file__).with_name("README.md").resolve())'
 ```
 
+## PPO training configs
+
+Training presets live in `configs/train/`:
+
+- `debug.yaml`: one environment and one-segment minibatches for smoke tests.
+- `baseline.yaml`: vanilla PPO with larger rollout/minibatch sizing.
+- `pufferish.yaml`: enables GAE+V-trace recomputation and
+  advantage-prioritized segment sampling without changing the core Python
+  defaults.
+
+Run a preset with:
+
+```sh
+uv run python scripts/run_ppo.py configs/train/debug.yaml runs --log-mode debug --max-env-steps 16
+```
+
 ## Orbit Wars replay parity
 
 Replay parity tests use compact Kaggle episode transition fixtures. The
@@ -38,8 +54,8 @@ be large.
 
 The current reference episodes are:
 
-- `75373897`
-- `75377525`
+- `75601099`
+- `75598045`
 
 If fixture files are missing, download them directly into the test fixture
 directory:

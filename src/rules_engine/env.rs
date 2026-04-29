@@ -229,6 +229,22 @@ fn move_fleets(state: &mut State) -> HashMap<u32, Vec<Fleet>> {
         fleet.y += fleet.angle.sin() * speed;
         let new_pos = fleet.position();
 
+        let mut hit_planet = false;
+        for planet in &planets {
+            if point_to_segment_distance(planet.position(), old_pos, new_pos) < planet.radius {
+                combat_lists
+                    .get_mut(&planet.id)
+                    .expect("combat list exists for every planet")
+                    .push(fleet.clone());
+                fleets_to_remove.insert(fleet.id);
+                hit_planet = true;
+                break;
+            }
+        }
+        if hit_planet {
+            continue;
+        }
+
         if !(0.0..=BOARD_SIZE).contains(&fleet.x) || !(0.0..=BOARD_SIZE).contains(&fleet.y) {
             fleets_to_remove.insert(fleet.id);
             continue;
@@ -237,17 +253,6 @@ fn move_fleets(state: &mut State) -> HashMap<u32, Vec<Fleet>> {
         if point_to_segment_distance(Point::new(CENTER, CENTER), old_pos, new_pos) < SUN_RADIUS {
             fleets_to_remove.insert(fleet.id);
             continue;
-        }
-
-        for planet in &planets {
-            if point_to_segment_distance(planet.position(), old_pos, new_pos) < planet.radius {
-                combat_lists
-                    .get_mut(&planet.id)
-                    .expect("combat list exists for every planet")
-                    .push(fleet.clone());
-                fleets_to_remove.insert(fleet.id);
-                break;
-            }
         }
     }
 
@@ -674,6 +679,98 @@ mod tests {
         assert!(state.fleets.is_empty());
         assert_eq!(state.planets[1].owner, 0);
         assert_eq!(state.planets[1].ships, 15);
+    }
+
+    #[test]
+    fn fleet_hits_planet_before_leaving_board() {
+        let mut state = base_state(2);
+        state.config.ship_speed = 10.0;
+        state.planets[1].x = 99.0;
+        state.planets[1].y = 20.0;
+        state.planets[1].radius = 2.0;
+        state.planets[1].ships = 5;
+        state.fleets = vec![Fleet {
+            id: 0,
+            owner: 0,
+            x: 95.0,
+            y: 20.0,
+            angle: 0.0,
+            from_planet_id: 0,
+            ships: 1000,
+        }];
+
+        step(&mut state, &[vec![], vec![]]);
+
+        assert!(state.fleets.is_empty());
+        assert_eq!(state.planets[1].owner, 0);
+        assert_eq!(state.planets[1].ships, 995);
+    }
+
+    #[test]
+    fn fleet_hits_planet_before_crossing_sun() {
+        let mut state = base_state(2);
+        state.config.ship_speed = 20.0;
+        state.planets[1].x = 39.0;
+        state.planets[1].y = CENTER;
+        state.planets[1].radius = 1.0;
+        state.planets[1].ships = 5;
+        state.fleets = vec![Fleet {
+            id: 0,
+            owner: 0,
+            x: 35.0,
+            y: CENTER,
+            angle: 0.0,
+            from_planet_id: 0,
+            ships: 1000,
+        }];
+
+        step(&mut state, &[vec![], vec![]]);
+
+        assert!(state.fleets.is_empty());
+        assert_eq!(state.planets[1].owner, 0);
+        assert_eq!(state.planets[1].ships, 995);
+    }
+
+    #[test]
+    fn fleet_leaving_board_without_planet_hit_is_removed() {
+        let mut state = base_state(2);
+        state.config.ship_speed = 10.0;
+        state.fleets = vec![Fleet {
+            id: 0,
+            owner: 0,
+            x: 95.0,
+            y: 50.0,
+            angle: 0.0,
+            from_planet_id: 0,
+            ships: 1000,
+        }];
+
+        step(&mut state, &[vec![], vec![]]);
+
+        assert!(state.fleets.is_empty());
+        assert_eq!(state.planets[1].owner, -1);
+        assert_eq!(state.planets[1].ships, 10);
+    }
+
+    #[test]
+    fn fleet_crossing_sun_without_planet_hit_is_removed() {
+        let mut state = base_state(2);
+        state.config.ship_speed = 20.0;
+        state.fleets = vec![Fleet {
+            id: 0,
+            owner: 0,
+            x: 35.0,
+            y: CENTER,
+            angle: 0.0,
+            from_planet_id: 0,
+            ships: 1000,
+        }];
+
+        step(&mut state, &[vec![], vec![]]);
+
+        assert!(state.fleets.is_empty());
+        assert_eq!(state.planets[1].owner, -1);
+        assert_eq!(state.planets[1].ships, 10);
     }
 
     #[test]

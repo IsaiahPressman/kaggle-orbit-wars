@@ -72,9 +72,15 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     )
     reward_ptr = env.rewards.data_ptr()
     done_ptr = env.dones.data_ptr()
-    launch = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.bool_)
-    angle = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.float32)
-    ships = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.int64)
+    action_shape = (
+        2,
+        4,
+        ACTION_ENTITY_SLOTS,
+        env.action_spec.max_per_planet_launches,
+    )
+    launch = np.zeros(action_shape, dtype=np.bool_)
+    angle = np.zeros(action_shape, dtype=np.float32)
+    ships = np.zeros(action_shape, dtype=np.int64)
 
     env.rewards.fill_(123)
     env.dones.fill_(True)
@@ -93,6 +99,99 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     assert dones.shape == (2, 4)
     assert torch.equal(rewards, torch.zeros_like(rewards))
     assert torch.equal(dones, torch.zeros_like(dones))
+
+
+@pytest.mark.parametrize(
+    ("launch_dtype", "angle_dtype", "ships_dtype", "message"),
+    [
+        (np.float32, np.float32, np.int64, "launch must have dtype bool"),
+        (np.bool_, np.float64, np.int64, "angle must have dtype float32"),
+        (np.bool_, np.float32, np.float32, "ships must have dtype int64"),
+    ],
+)
+def test_step_rejects_wrong_numpy_action_dtypes(
+    launch_dtype: np.dtype,
+    angle_dtype: np.dtype,
+    ships_dtype: np.dtype,
+    message: str,
+) -> None:
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=ObsV1Config(),
+        action_spec=ActionPureConfig(),
+        pin_memory=False,
+    )
+    shape = (1, 4, ACTION_ENTITY_SLOTS, env.action_spec.max_per_planet_launches)
+    launch = np.zeros(shape, dtype=launch_dtype)
+    angle = np.zeros(shape, dtype=angle_dtype)
+    ships = np.zeros(shape, dtype=ships_dtype)
+
+    with pytest.raises(ValueError, match=message):
+        env.step(launch, angle, ships)
+
+
+@pytest.mark.parametrize(
+    ("launch_dtype", "angle_dtype", "ships_dtype", "message"),
+    [
+        (
+            torch.float32,
+            torch.float32,
+            torch.int64,
+            "launch must have dtype torch.bool",
+        ),
+        (torch.bool, torch.float64, torch.int64, "angle must have dtype torch.float32"),
+        (torch.bool, torch.float32, torch.float32, "ships must have dtype torch.int64"),
+    ],
+)
+def test_step_rejects_wrong_torch_action_dtypes(
+    launch_dtype: torch.dtype,
+    angle_dtype: torch.dtype,
+    ships_dtype: torch.dtype,
+    message: str,
+) -> None:
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=ObsV1Config(),
+        action_spec=ActionPureConfig(),
+        pin_memory=False,
+    )
+    shape = (1, 4, ACTION_ENTITY_SLOTS, env.action_spec.max_per_planet_launches)
+    launch = torch.zeros(shape, dtype=launch_dtype)
+    angle = torch.zeros(shape, dtype=angle_dtype)
+    ships = torch.zeros(shape, dtype=ships_dtype)
+
+    with pytest.raises(ValueError, match=message):
+        env.step(launch, angle, ships)
+
+
+@pytest.mark.parametrize(
+    ("ship_count", "angle_value", "message"),
+    [
+        (0, 0.0, "ships must be >= 1"),
+        (1, np.inf, "angle must be finite"),
+    ],
+)
+def test_step_rejects_invalid_launched_action_values(
+    ship_count: int, angle_value: float, message: str
+) -> None:
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=ObsV1Config(),
+        action_spec=ActionPureConfig(),
+        pin_memory=False,
+    )
+    obs = env.reset()
+    env_index, player, entity = torch.nonzero(obs.can_act, as_tuple=False)[0].tolist()
+    shape = (1, 4, ACTION_ENTITY_SLOTS, env.action_spec.max_per_planet_launches)
+    launch = np.zeros(shape, dtype=np.bool_)
+    angle = np.zeros(shape, dtype=np.float32)
+    ships = np.zeros(shape, dtype=np.int64)
+    launch[env_index, player, entity, 0] = True
+    angle[env_index, player, entity, 0] = angle_value
+    ships[env_index, player, entity, 0] = ship_count
+
+    with pytest.raises(ValueError, match=message):
+        env.step(launch, angle, ships)
 
 
 def test_reset_writes_still_playing_from_rust_env_state() -> None:
@@ -124,9 +223,15 @@ def test_two_player_sample_marks_unused_player_slots_done() -> None:
         two_player_weight=1.0,
         pin_memory=False,
     )
-    launch = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.bool_)
-    angle = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.float32)
-    ships = np.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=np.int64)
+    action_shape = (
+        2,
+        4,
+        ACTION_ENTITY_SLOTS,
+        env.action_spec.max_per_planet_launches,
+    )
+    launch = np.zeros(action_shape, dtype=np.bool_)
+    angle = np.zeros(action_shape, dtype=np.float32)
+    ships = np.zeros(action_shape, dtype=np.int64)
 
     _, rewards, dones = env.step(launch, angle, ships)
 
@@ -150,6 +255,7 @@ def test_vectorized_env_accepts_discriminated_config_dicts() -> None:
 
 
 def test_action_config_validates_max_per_planet_launches() -> None:
+    assert ActionPureConfig().max_per_planet_launches == 3
     assert ActionPureConfig(max_per_planet_launches=4).max_per_planet_launches == 4
 
     with pytest.raises(ValueError, match="less than or equal to 4"):
@@ -204,6 +310,28 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     assert global_features[2] == pytest.approx(1.0)
     assert not can_act.any()
     assert not max_launch.any()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("angular_velocity", np.nan, "angular_velocity must be finite"),
+        ("angular_velocity", np.inf, "angular_velocity must be finite"),
+        ("episode_steps", 0, "episode_steps must be > 0"),
+    ],
+)
+def test_python_observation_encoder_rejects_invalid_globals(
+    field: str, value: float | int, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        encode_python_observation(
+            {
+                field: value,
+                "planets": [],
+                "fleets": [],
+                "comets": [],
+            }
+        )
 
 
 def test_python_observation_encoder_keeps_largest_fleets_first(

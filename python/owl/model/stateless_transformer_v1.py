@@ -2,15 +2,24 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Annotated, Literal, Self, assert_never
+from typing import Annotated, Literal, Self, assert_never, cast
 
 import torch
 import torch.nn.functional as F
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 from torch import nn
 from torch.distributions import Bernoulli, Beta, Binomial, Categorical, VonMises
 
-from owl.model.attn import flash_attn_available, varlen_attention
+from owl.config import BaseConfig
+from owl.model.attn import use_flash_attn, varlen_attention
+from owl.model.base import (
+    BaseModelAPI,
+    ModelActionEntropies,
+    ModelActionLogProbs,
+    ModelActions,
+    ModelEvaluation,
+    ModelOutput,
+)
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     OUTER_PLAYER_SLOTS,
@@ -22,9 +31,13 @@ from owl.rl import (
 STATELESS_TRANSFORMER_V1: Literal["stateless_transformer_v1"] = (
     "stateless_transformer_v1"
 )
+_HIDDEN_INIT_GAIN = math.sqrt(2.0)
+_INPUT_INIT_GAIN = 1.0
+_ACTOR_HEAD_INIT_GAIN = 0.01
+_CRITIC_HEAD_INIT_GAIN = 1.0
 
 
-class StatelessTransformerV1Config(BaseModel):
+class StatelessTransformerV1Config(BaseConfig):
     model_arch: Literal["stateless_transformer_v1"] = STATELESS_TRANSFORMER_V1
     obs_spec: ObsV1Config = Field(default_factory=ObsV1Config)
     action_spec: ActionPureConfig = Field(default_factory=ActionPureConfig)
@@ -33,13 +46,14 @@ class StatelessTransformerV1Config(BaseModel):
     n_heads: int = Field(default=8, ge=1)
     mlp_ratio: float = Field(default=4.0, gt=0.0)
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
-    n_angle_mixtures: int = Field(default=4, ge=1)
+    n_action_mixtures: int = Field(default=4, ge=1)
     kappa_min: float = Field(default=1e-3, gt=0.0)
     kappa_max: float | None = Field(default=200.0, gt=0.0)
     tau_min: float = Field(default=1e-3, gt=0.0)
     alpha_beta_eps: float = Field(default=1e-4, gt=0.0)
     dir_eps: float = Field(default=1e-6, gt=0.0)
     max_ship_normalizer: float = Field(default=250.0, gt=0.0)
+    entropy_ship_support_cap: int = Field(default=256, ge=1)
 
     @model_validator(mode="after")
     def _validate_attention_shape(self) -> Self:
@@ -53,28 +67,6 @@ type ModelConfig = Annotated[
 ]
 
 
-@dataclass
-class ModelActions:
-    launch: torch.Tensor
-    angle: torch.Tensor
-    ships: torch.Tensor
-
-
-@dataclass
-class ModelActionLogProbs:
-    launch: torch.Tensor
-    angle_and_size: torch.Tensor
-    total: torch.Tensor
-
-
-@dataclass
-class ModelOutput:
-    actions: ModelActions
-    log_probs: ModelActionLogProbs
-    values: torch.Tensor
-    winner_probabilities: torch.Tensor
-
-
 @dataclass(frozen=True)
 class PolicyParams:
     continue_logits: torch.Tensor
@@ -84,6 +76,18 @@ class PolicyParams:
     kappa: torch.Tensor
     alpha: torch.Tensor
     beta: torch.Tensor
+
+    def to_distribution_dtype(self) -> PolicyParams:
+        mix_logits = self.mix_logits.float()
+        return PolicyParams(
+            continue_logits=self.continue_logits.float(),
+            mix_logits=mix_logits,
+            log_w=F.log_softmax(mix_logits, dim=-1),
+            loc=self.loc.float(),
+            kappa=self.kappa.float(),
+            alpha=self.alpha.float(),
+            beta=self.beta.float(),
+        )
 
 
 @dataclass(frozen=True)
@@ -96,12 +100,10 @@ class PackedSequence:
     padded_seq_len: int
 
 
-class StatelessTransformerV1(nn.Module):
+class StatelessTransformerV1(BaseModelAPI):
     def __init__(self, config: StatelessTransformerV1Config) -> None:
         super().__init__()
         self.config = config
-        if torch.cuda.is_available() and not flash_attn_available():
-            raise RuntimeError("flash-attn must be installed when CUDA is available")
 
         dim = self.config.embed_dim
         self.planet_proj = nn.Linear(self.config.obs_spec.planet_channels, dim)
@@ -117,10 +119,57 @@ class StatelessTransformerV1(nn.Module):
 
         self.critic_head = nn.Linear(dim, 1)
         self.action_info_proj = nn.Linear(1, dim)
-        self.slot_dynamic_proj = nn.Linear(6, dim)
+        self.launch_slot_tokens = nn.Embedding(
+            self.config.action_spec.max_per_planet_launches,
+            dim,
+        )
+        self.slot_dynamic_proj = nn.Linear(9, dim)
         self.actor_input_proj = nn.Linear(dim * 3, dim)
         self.actor_gru = MinGRUStack(dim, dim, n_layers=2)
         self.actor_heads = LaunchPolicyHeads(self.config)
+
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        self.apply(_init_module)
+        for layer in self.get_input_layers():
+            _init_input_layer(layer)
+        residual_gain = 1.0 / math.sqrt(2.0 * self.config.depth)
+        for module in self.blocks:
+            block = cast(TransformerBlock, module)
+            _init_linear(block.attn.out, gain=residual_gain)
+            _init_linear(block.mlp.down, gain=residual_gain)
+        for layer in self.get_output_layers():
+            gain = (
+                _CRITIC_HEAD_INIT_GAIN
+                if layer is self.critic_head
+                else _ACTOR_HEAD_INIT_GAIN
+            )
+            _init_linear(layer, gain=gain)
+
+    def get_input_layers(self) -> tuple[nn.Module, ...]:
+        return (
+            self.planet_proj,
+            self.fleet_proj,
+            self.comet_proj,
+            self.global_proj,
+            self.player_tokens,
+            self.action_info_proj,
+            self.launch_slot_tokens,
+            self.slot_dynamic_proj,
+            self.actor_input_proj,
+        )
+
+    def get_output_layers(self) -> tuple[nn.Linear, ...]:
+        return (
+            self.critic_head,
+            self.actor_heads.continue_head,
+            self.actor_heads.mix_head,
+            self.actor_heads.dir_head,
+            self.actor_heads.kappa_head,
+            self.actor_heads.size_frac_head,
+            self.actor_heads.size_conc_head,
+        )
 
     def encode_observations(self, obs: ObsBatch) -> tuple[torch.Tensor, torch.Tensor]:
         global_token = self.global_proj(obs.global_features).unsqueeze(1)
@@ -143,11 +192,11 @@ class StatelessTransformerV1(nn.Module):
             dim=1,
         )
         x = torch.cat((planet_x, comet_x, fleet_x, player_tokens), dim=1)
-        packed_x, packed = pack_sequence(x, token_mask)
-
+        packed = build_packed_sequence(token_mask)
         for block in self.blocks:
-            packed_x = block(packed_x, packed)
-        x = unpack_sequence(self.final_norm(packed_x), packed)
+            x = block(x, token_mask, packed)
+        x = self.final_norm(x)
+        x = x.masked_fill(~token_mask.unsqueeze(-1), 0.0)
         return x, token_mask
 
     def forward(
@@ -159,7 +208,7 @@ class StatelessTransformerV1(nn.Module):
         hidden, _ = self.encode_observations(obs)
         player_hidden = hidden[:, -OUTER_PLAYER_SLOTS:, :]
         values, winner_probabilities = self._critic(player_hidden, obs.still_playing)
-        actions, log_probs = self._actor(
+        actions, log_probs, entropies = self._actor(
             hidden,
             obs.can_act,
             obs.max_launch,
@@ -168,17 +217,31 @@ class StatelessTransformerV1(nn.Module):
         return ModelOutput(
             actions=actions,
             log_probs=log_probs,
+            entropies=entropies,
             values=values,
             winner_probabilities=winner_probabilities,
         )
 
-    def log_prob(
+    def evaluate_actions(
         self,
         obs: ObsBatch,
         actions: ModelActions,
-    ) -> ModelActionLogProbs:
+    ) -> ModelEvaluation:
         hidden, _ = self.encode_observations(obs)
-        return self._actor_log_prob(hidden, obs.can_act, obs.max_launch, actions)
+        player_hidden = hidden[:, -OUTER_PLAYER_SLOTS:, :]
+        values, winner_probabilities = self._critic(player_hidden, obs.still_playing)
+        log_probs, entropies = self._actor_log_prob(
+            hidden,
+            obs.can_act,
+            obs.max_launch,
+            actions,
+        )
+        return ModelEvaluation(
+            log_probs=log_probs,
+            entropies=entropies,
+            values=values,
+            winner_probabilities=winner_probabilities,
+        )
 
     def _critic(
         self,
@@ -234,15 +297,16 @@ class StatelessTransformerV1(nn.Module):
         max_launch: torch.Tensor,
         *,
         deterministic: bool,
-    ) -> tuple[ModelActions, ModelActionLogProbs]:
+    ) -> tuple[ModelActions, ModelActionLogProbs, ModelActionEntropies]:
         slot_input = self._actor_inputs(hidden, max_launch)
-        batch_size = slot_input.shape[0]
         max_slots = self.config.action_spec.max_per_planet_launches
         launch_slots: list[torch.Tensor] = []
         angle_slots: list[torch.Tensor] = []
         ship_slots: list[torch.Tensor] = []
         launch_log_slots: list[torch.Tensor] = []
         event_log_slots: list[torch.Tensor] = []
+        launch_entropy_slots: list[torch.Tensor] = []
+        event_entropy_slots: list[torch.Tensor] = []
 
         hidden_state = self.actor_gru.initial_state(
             (*slot_input.shape[:-1],),
@@ -256,12 +320,16 @@ class StatelessTransformerV1(nn.Module):
         last_angle_cos = torch.zeros_like(slot_input[..., 0])
         last_ships = torch.zeros_like(max_launch)
 
+        # The configured slot count is a hard truncation: there is no extra
+        # terminal stop probability after the final slot.
         for slot in range(max_slots):
             slot_hidden, hidden_state = self.actor_gru(
                 self._slot_gru_input(
                     slot_input,
+                    slot,
                     active,
                     remaining,
+                    max_launch,
                     last_launch,
                     last_angle_sin,
                     last_angle_cos,
@@ -270,7 +338,7 @@ class StatelessTransformerV1(nn.Module):
                 ),
                 hidden_state,
             )
-            params = self.actor_heads(slot_hidden)
+            params = self.actor_heads(slot_hidden).to_distribution_dtype()
             launch = self._sample_launch(
                 params.continue_logits,
                 active,
@@ -299,12 +367,20 @@ class StatelessTransformerV1(nn.Module):
                 remaining,
                 event_mask,
             )
+            launch_entropy, event_entropy = masked_action_entropy_from_params(
+                params,
+                remaining,
+                active,
+                max_ship_support=self.config.entropy_ship_support_cap,
+            )
 
             launch_slots.append(launch)
             angle_slots.append(angle)
             ship_slots.append(ships)
             launch_log_slots.append(launch_log_prob)
             event_log_slots.append(event_log_prob)
+            launch_entropy_slots.append(launch_entropy)
+            event_entropy_slots.append(event_entropy)
 
             remaining = (remaining - ships).clamp_min(0)
             active = active & launch & (remaining > 0)
@@ -313,12 +389,12 @@ class StatelessTransformerV1(nn.Module):
                 launch,
                 torch.sin(angle),
                 torch.zeros_like(angle),
-            )
+            ).to(dtype=slot_input.dtype)
             last_angle_cos = torch.where(
                 launch,
                 torch.cos(angle),
                 torch.zeros_like(angle),
-            )
+            ).to(dtype=slot_input.dtype)
             last_ships = ships
 
         launch_tensor = torch.stack(launch_slots, dim=-1)
@@ -326,10 +402,17 @@ class StatelessTransformerV1(nn.Module):
         ship_tensor = torch.stack(ship_slots, dim=-1)
         launch_log_tensor = torch.stack(launch_log_slots, dim=-1)
         event_log_tensor = torch.stack(event_log_slots, dim=-1)
+        launch_entropy_tensor = torch.stack(launch_entropy_slots, dim=-1)
+        event_entropy_tensor = torch.stack(event_entropy_slots, dim=-1)
 
-        total_log_prob = (launch_log_tensor + event_log_tensor).sum(dim=(1, 2, 3))
-        if total_log_prob.shape != (batch_size,):
-            raise RuntimeError("internal error: total log-prob shape mismatch")
+        per_player_action_entity_log_prob = _per_player_action_entity_log_prob(
+            launch_log_tensor,
+            event_log_tensor,
+        )
+        per_player_action_entity_entropy = _per_player_action_entity_log_prob(
+            launch_entropy_tensor,
+            event_entropy_tensor,
+        )
 
         return (
             ModelActions(
@@ -340,7 +423,12 @@ class StatelessTransformerV1(nn.Module):
             ModelActionLogProbs(
                 launch=launch_log_tensor,
                 angle_and_size=event_log_tensor,
-                total=total_log_prob,
+                per_player_entity=per_player_action_entity_log_prob,
+            ),
+            ModelActionEntropies(
+                launch=launch_entropy_tensor,
+                angle_and_size=event_entropy_tensor,
+                per_player_entity=per_player_action_entity_entropy,
             ),
         )
 
@@ -350,7 +438,7 @@ class StatelessTransformerV1(nn.Module):
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
         actions: ModelActions,
-    ) -> ModelActionLogProbs:
+    ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
         _require_actions_shape(
             actions,
             (
@@ -364,6 +452,8 @@ class StatelessTransformerV1(nn.Module):
         slot_input = self._actor_inputs(hidden, max_launch)
         launch_log_slots: list[torch.Tensor] = []
         event_log_slots: list[torch.Tensor] = []
+        launch_entropy_slots: list[torch.Tensor] = []
+        event_entropy_slots: list[torch.Tensor] = []
 
         hidden_state = self.actor_gru.initial_state(
             (*slot_input.shape[:-1],),
@@ -377,12 +467,16 @@ class StatelessTransformerV1(nn.Module):
         last_angle_cos = torch.zeros_like(slot_input[..., 0])
         last_ships = torch.zeros_like(max_launch)
 
+        # The configured slot count is a hard truncation: there is no extra
+        # terminal stop probability after the final slot.
         for slot in range(self.config.action_spec.max_per_planet_launches):
             slot_hidden, hidden_state = self.actor_gru(
                 self._slot_gru_input(
                     slot_input,
+                    slot,
                     active,
                     remaining,
+                    max_launch,
                     last_launch,
                     last_angle_sin,
                     last_angle_cos,
@@ -391,7 +485,7 @@ class StatelessTransformerV1(nn.Module):
                 ),
                 hidden_state,
             )
-            params = self.actor_heads(slot_hidden)
+            params = self.actor_heads(slot_hidden).to_distribution_dtype()
             launch = actions.launch[..., slot]
             angle = actions.angle[..., slot]
             ships = actions.ships[..., slot]
@@ -415,9 +509,17 @@ class StatelessTransformerV1(nn.Module):
                 remaining,
                 event_mask,
             )
+            launch_entropy, event_entropy = masked_action_entropy_from_params(
+                params,
+                remaining,
+                active,
+                max_ship_support=self.config.entropy_ship_support_cap,
+            )
 
             launch_log_slots.append(launch_log_prob)
             event_log_slots.append(event_log_prob)
+            launch_entropy_slots.append(launch_entropy)
+            event_entropy_slots.append(event_entropy)
 
             ships_used = torch.where(launch, ships, torch.zeros_like(ships))
             remaining = (remaining - ships_used).clamp_min(0)
@@ -427,21 +529,37 @@ class StatelessTransformerV1(nn.Module):
                 launch,
                 torch.sin(angle),
                 torch.zeros_like(angle),
-            )
+            ).to(dtype=slot_input.dtype)
             last_angle_cos = torch.where(
                 launch,
                 torch.cos(angle),
                 torch.zeros_like(angle),
-            )
+            ).to(dtype=slot_input.dtype)
             last_ships = ships_used
 
         launch_log_tensor = torch.stack(launch_log_slots, dim=-1)
         event_log_tensor = torch.stack(event_log_slots, dim=-1)
-        total_log_prob = (launch_log_tensor + event_log_tensor).sum(dim=(1, 2, 3))
-        return ModelActionLogProbs(
-            launch=launch_log_tensor,
-            angle_and_size=event_log_tensor,
-            total=total_log_prob,
+        launch_entropy_tensor = torch.stack(launch_entropy_slots, dim=-1)
+        event_entropy_tensor = torch.stack(event_entropy_slots, dim=-1)
+        per_player_action_entity_log_prob = _per_player_action_entity_log_prob(
+            launch_log_tensor,
+            event_log_tensor,
+        )
+        per_player_action_entity_entropy = _per_player_action_entity_log_prob(
+            launch_entropy_tensor,
+            event_entropy_tensor,
+        )
+        return (
+            ModelActionLogProbs(
+                launch=launch_log_tensor,
+                angle_and_size=event_log_tensor,
+                per_player_entity=per_player_action_entity_log_prob,
+            ),
+            ModelActionEntropies(
+                launch=launch_entropy_tensor,
+                angle_and_size=event_entropy_tensor,
+                per_player_entity=per_player_action_entity_entropy,
+            ),
         )
 
     @staticmethod
@@ -451,6 +569,7 @@ class StatelessTransformerV1(nn.Module):
         *,
         deterministic: bool,
     ) -> torch.Tensor:
+        logits = logits.float()
         if deterministic:
             launch = logits.sigmoid() > 0.5
         else:
@@ -464,6 +583,7 @@ class StatelessTransformerV1(nn.Module):
         remaining: torch.Tensor,
         deterministic: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        params = params.to_distribution_dtype()
         if deterministic:
             mixture = params.mix_logits.argmax(dim=-1)
         else:
@@ -492,8 +612,10 @@ class StatelessTransformerV1(nn.Module):
     def _slot_gru_input(
         self,
         slot_input: torch.Tensor,
+        slot: int,
         active: torch.Tensor,
         remaining: torch.Tensor,
+        initial_max_launch: torch.Tensor,
         last_launch: torch.Tensor,
         last_angle_sin: torch.Tensor,
         last_angle_cos: torch.Tensor,
@@ -501,20 +623,57 @@ class StatelessTransformerV1(nn.Module):
         *,
         include_dynamic_features: bool,
     ) -> torch.Tensor:
+        slot_token = self.launch_slot_tokens.weight[slot].to(dtype=slot_input.dtype)
+        slot_context = slot_input + slot_token
         if not include_dynamic_features:
-            return slot_input
-        dynamic_features = torch.stack(
+            return slot_context
+        dynamic_features = self._slot_dynamic_features(
+            slot,
+            active,
+            remaining,
+            initial_max_launch,
+            last_launch,
+            last_angle_sin,
+            last_angle_cos,
+            last_ships,
+            dtype=slot_input.dtype,
+        )
+        return slot_context + self.slot_dynamic_proj(dynamic_features)
+
+    def _slot_dynamic_features(
+        self,
+        slot: int,
+        active: torch.Tensor,
+        remaining: torch.Tensor,
+        initial_max_launch: torch.Tensor,
+        last_launch: torch.Tensor,
+        last_angle_sin: torch.Tensor,
+        last_angle_cos: torch.Tensor,
+        last_ships: torch.Tensor,
+        *,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        initial_available_ships = initial_max_launch.clamp_min(1).to(dtype=dtype)
+        slot_denominator = max(self.config.action_spec.max_per_planet_launches - 1, 1)
+        slot_fraction = torch.full_like(
+            remaining,
+            fill_value=slot / slot_denominator,
+            dtype=dtype,
+        )
+        return torch.stack(
             (
-                active.to(dtype=slot_input.dtype),
-                remaining.to(dtype=slot_input.dtype) / self.config.max_ship_normalizer,
-                last_launch.to(dtype=slot_input.dtype),
-                last_angle_sin.to(dtype=slot_input.dtype),
-                last_angle_cos.to(dtype=slot_input.dtype),
-                last_ships.to(dtype=slot_input.dtype) / self.config.max_ship_normalizer,
+                active.to(dtype=dtype),
+                remaining.to(dtype=dtype) / self.config.max_ship_normalizer,
+                last_launch.to(dtype=dtype),
+                last_angle_sin.to(dtype=dtype),
+                last_angle_cos.to(dtype=dtype),
+                last_ships.to(dtype=dtype) / self.config.max_ship_normalizer,
+                remaining.to(dtype=dtype) / initial_available_ships,
+                last_ships.to(dtype=dtype) / initial_available_ships,
+                slot_fraction,
             ),
             dim=-1,
         )
-        return slot_input + self.slot_dynamic_proj(dynamic_features)
 
 
 class TransformerBlock(nn.Module):
@@ -525,9 +684,15 @@ class TransformerBlock(nn.Module):
         self.norm2 = nn.LayerNorm(config.embed_dim)
         self.mlp = FeedForward(config)
 
-    def forward(self, x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x), packed)
-        return x + self.mlp(self.norm2(x))
+    def forward(
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor,
+        packed: PackedSequence,
+    ) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x), token_mask, packed)
+        x = x + self.mlp(self.norm2(x))
+        return x.masked_fill(~token_mask.unsqueeze(-1), 0.0)
 
 
 class FeedForward(nn.Module):
@@ -568,18 +733,40 @@ class MultiHeadSelfAttention(nn.Module):
         self.v = nn.Linear(config.embed_dim, config.embed_dim)
         self.out = nn.Linear(config.embed_dim, config.embed_dim)
 
-    def forward(self, x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:
-        q = self.q(x).view(x.shape[0], self.n_heads, self.head_dim)
-        k = self.k(x).view(x.shape[0], self.n_heads, self.head_dim)
-        v = self.v(x).view(x.shape[0], self.n_heads, self.head_dim)
+    def forward(
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor,
+        packed: PackedSequence,
+    ) -> torch.Tensor:
+        batch_size, seq_len, _ = x.shape
+        q = self.q(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
+        k = self.k(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
+        v = self.v(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
+
+        if not use_flash_attn(q):
+            attn = F.scaled_dot_product_attention(
+                q.transpose(1, 2),
+                k.transpose(1, 2),
+                v.transpose(1, 2),
+                attn_mask=token_mask[:, None, None, :],
+                dropout_p=0.0,
+            )
+            attn = attn.transpose(1, 2)
+            return self.out(attn.reshape(batch_size, seq_len, -1))
+
+        q_packed = pack_tensor(q, packed)
+        k_packed = pack_tensor(k, packed)
+        v_packed = pack_tensor(v, packed)
         attn = varlen_attention(
-            q,
-            k,
-            v,
+            q_packed,
+            k_packed,
+            v_packed,
             cu_seqlens=packed.cu_seqlens,
             max_seqlen=packed.max_seqlen,
         )
-        return self.out(attn.reshape(x.shape[0], self.n_heads * self.head_dim))
+        attn = unpack_sequence(attn, packed)
+        return self.out(attn.reshape(batch_size, seq_len, -1))
 
 
 class MinGRUStack(nn.Module):
@@ -633,7 +820,7 @@ class LaunchPolicyHeads(nn.Module):
     def __init__(self, config: StatelessTransformerV1Config) -> None:
         super().__init__()
         self.config = config
-        mixtures = config.n_angle_mixtures
+        mixtures = config.n_action_mixtures
         self.continue_head = nn.Linear(config.embed_dim, 1)
         self.mix_head = nn.Linear(config.embed_dim, mixtures)
         self.dir_head = nn.Linear(config.embed_dim, mixtures * 2)
@@ -642,7 +829,7 @@ class LaunchPolicyHeads(nn.Module):
         self.size_conc_head = nn.Linear(config.embed_dim, mixtures)
 
     def forward(self, x: torch.Tensor) -> PolicyParams:
-        mixtures = self.config.n_angle_mixtures
+        mixtures = self.config.n_action_mixtures
         raw_dir = self.dir_head(x).view(*x.shape[:-1], mixtures, 2)
         unit_dir = F.normalize(raw_dir, dim=-1, eps=self.config.dir_eps)
         loc = torch.atan2(unit_dir[..., 1], unit_dir[..., 0])
@@ -668,17 +855,37 @@ class LaunchPolicyHeads(nn.Module):
         )
 
 
-def pack_sequence(
-    x: torch.Tensor,
-    token_mask: torch.Tensor,
-) -> tuple[torch.Tensor, PackedSequence]:
-    batch_size, padded_seq_len, _ = x.shape
+def _init_module(module: nn.Module) -> None:
+    if isinstance(module, nn.Linear):
+        _init_linear(module, gain=_HIDDEN_INIT_GAIN)
+    elif isinstance(module, nn.Embedding):
+        nn.init.normal_(module.weight, mean=0.0, std=module.embedding_dim**-0.5)
+    elif isinstance(module, nn.LayerNorm):
+        nn.init.ones_(module.weight)
+        nn.init.zeros_(module.bias)
+
+
+def _init_input_layer(module: nn.Module) -> None:
+    if isinstance(module, nn.Linear):
+        _init_linear(module, gain=_INPUT_INIT_GAIN)
+    elif isinstance(module, nn.Embedding):
+        nn.init.normal_(module.weight, mean=0.0, std=module.embedding_dim**-0.5)
+
+
+def _init_linear(module: nn.Linear, *, gain: float) -> None:
+    nn.init.orthogonal_(module.weight, gain=gain)
+    if module.bias is not None:
+        nn.init.zeros_(module.bias)
+
+
+def build_packed_sequence(token_mask: torch.Tensor) -> PackedSequence:
+    batch_size, padded_seq_len = token_mask.shape
     flat_mask = token_mask.reshape(-1)
     indices = flat_mask.nonzero(as_tuple=False).flatten()
     seqlens = token_mask.sum(dim=1, dtype=torch.int32)
     if not seqlens.gt(0).all():
         raise ValueError("each batch row must have at least one unmasked token")
-    packed = PackedSequence(
+    return PackedSequence(
         indices=indices,
         cu_seqlens=F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)),
         seqlens=seqlens,
@@ -686,20 +893,33 @@ def pack_sequence(
         batch_size=batch_size,
         padded_seq_len=padded_seq_len,
     )
-    return x.reshape(batch_size * padded_seq_len, -1)[indices], packed
+
+
+def pack_tensor(x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:
+    return x.reshape(packed.batch_size * packed.padded_seq_len, *x.shape[2:])[
+        packed.indices
+    ]
+
+
+def pack_sequence(
+    x: torch.Tensor,
+    token_mask: torch.Tensor,
+) -> tuple[torch.Tensor, PackedSequence]:
+    packed = build_packed_sequence(token_mask)
+    return pack_tensor(x, packed), packed
 
 
 def unpack_sequence(x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:
     out = torch.zeros(
         (
             packed.batch_size * packed.padded_seq_len,
-            x.shape[-1],
+            *x.shape[1:],
         ),
         dtype=x.dtype,
         device=x.device,
     )
     out[packed.indices] = x
-    return out.view(packed.batch_size, packed.padded_seq_len, x.shape[-1])
+    return out.view(packed.batch_size, packed.padded_seq_len, *x.shape[1:])
 
 
 def masked_softmax(
@@ -718,6 +938,7 @@ def event_log_prob_from_params(
     ships: torch.Tensor,
     residual_budget: torch.Tensor,
 ) -> torch.Tensor:
+    params = params.to_distribution_dtype()
     log_angle = von_mises_log_prob(angle, params.loc, params.kappa)
     log_size = shifted_beta_binomial_log_prob(
         ships,
@@ -753,6 +974,104 @@ def masked_event_log_prob_from_params(
         event_log_prob,
         torch.zeros_like(event_log_prob),
     )
+
+
+def masked_action_entropy_from_params(
+    params: PolicyParams,
+    residual_budget: torch.Tensor,
+    active: torch.Tensor,
+    *,
+    max_ship_support: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    params = params.to_distribution_dtype()
+    launch_entropy = binary_entropy_from_logits(params.continue_logits)
+    event_entropy = event_entropy_from_params(
+        params,
+        residual_budget.clamp_min(1),
+        max_ship_support=max_ship_support,
+    )
+    launch_probability = torch.sigmoid(params.continue_logits)
+    return (
+        torch.where(active, launch_entropy, torch.zeros_like(launch_entropy)),
+        torch.where(
+            active,
+            launch_probability * event_entropy,
+            torch.zeros_like(event_entropy),
+        ),
+    )
+
+
+def binary_entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
+    probability = torch.sigmoid(logits)
+    return F.binary_cross_entropy_with_logits(logits, probability, reduction="none")
+
+
+def event_entropy_from_params(
+    params: PolicyParams,
+    residual_budget: torch.Tensor,
+    *,
+    max_ship_support: int,
+) -> torch.Tensor:
+    mix_probabilities = torch.softmax(params.mix_logits, dim=-1)
+    mixture_entropy = -(mix_probabilities * params.log_w).sum(dim=-1)
+    component_entropy = von_mises_entropy(params.kappa) + beta_binomial_entropy(
+        residual_budget,
+        params.alpha,
+        params.beta,
+        max_ship_support=max_ship_support,
+    )
+    return mixture_entropy + (mix_probabilities * component_entropy).sum(dim=-1)
+
+
+def von_mises_entropy(kappa: torch.Tensor) -> torch.Tensor:
+    log_i0 = torch.log(torch.special.i0e(kappa)) + kappa
+    i1_over_i0 = torch.special.i1e(kappa) / torch.special.i0e(kappa)
+    return math.log(2.0 * math.pi) + log_i0 - kappa * i1_over_i0
+
+
+def beta_binomial_entropy(
+    residual_budget: torch.Tensor,
+    alpha: torch.Tensor,
+    beta: torch.Tensor,
+    *,
+    max_ship_support: int,
+) -> torch.Tensor:
+    support = torch.arange(
+        1,
+        max_ship_support + 1,
+        dtype=alpha.dtype,
+        device=alpha.device,
+    )
+    successes = support - 1.0
+    trials = (residual_budget - 1).clamp_min(0).unsqueeze(-1).unsqueeze(-1)
+    successes = successes.view(*((1,) * residual_budget.ndim), max_ship_support, 1)
+    alpha = alpha.unsqueeze(-2)
+    beta = beta.unsqueeze(-2)
+    valid = successes <= trials
+    successes_safe = torch.minimum(successes, trials)
+    log_comb = (
+        torch.lgamma(trials + 1.0)
+        - torch.lgamma(successes_safe + 1.0)
+        - torch.lgamma(trials - successes_safe + 1.0)
+    )
+    log_prob = (
+        log_comb
+        + log_beta(successes_safe + alpha, trials - successes_safe + beta)
+        - log_beta(alpha, beta)
+    )
+    log_prob = torch.where(valid, log_prob, torch.full_like(log_prob, -torch.inf))
+    probabilities = torch.where(valid, log_prob.exp(), torch.zeros_like(log_prob))
+    entropy = -(
+        probabilities * torch.where(valid, log_prob, torch.zeros_like(log_prob))
+    )
+    return entropy.sum(dim=-2)
+
+
+def _per_player_action_entity_log_prob(
+    launch_log_prob: torch.Tensor,
+    event_log_prob: torch.Tensor,
+) -> torch.Tensor:
+    return (launch_log_prob + event_log_prob).sum(dim=-1)
 
 
 def von_mises_log_prob(

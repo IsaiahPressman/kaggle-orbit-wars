@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from pydantic import BaseModel, Field
 
+from owl.config import BaseConfig
 from owl.rs import RlVecEnv as _RustRlVecEnv
 from owl.rs import encode_obs_v1, rl_obs_constants
 
@@ -23,7 +24,7 @@ from owl.rs import encode_obs_v1, rl_obs_constants
 ) = rl_obs_constants()
 
 
-class ObsV1Config(BaseModel):
+class ObsV1Config(BaseConfig):
     obs_spec: Literal["obs_v1"] = "obs_v1"
     max_entities: int = Field(default=DEFAULT_MAX_ENTITIES, gt=MAX_PLANETS + MAX_COMETS)
 
@@ -60,7 +61,7 @@ class ObsV1Config(BaseModel):
         return GLOBAL_CHANNELS
 
 
-class ActionPureConfig(BaseModel):
+class ActionPureConfig(BaseConfig):
     """Pure action spec.
 
     Sharp edge: the action entity axis is ordered as all planet tokens first,
@@ -69,13 +70,21 @@ class ActionPureConfig(BaseModel):
     """
 
     action_spec: Literal["pure"] = "pure"
-    max_per_planet_launches: int = Field(default=1, ge=1, le=4)
+    max_per_planet_launches: int = Field(default=3, ge=1, le=4)
 
 
 type ObsConfig = Annotated[ObsV1Config, Field(discriminator="obs_spec")]
 type ActionConfig = Annotated[ActionPureConfig, Field(discriminator="action_spec")]
 
 OUTER_PLAYER_SLOTS = 4
+
+
+class EnvConfig(BaseConfig):
+    n_envs: int = Field(default=1, ge=1)
+    obs_spec: ObsConfig = Field(default_factory=ObsV1Config)
+    action_spec: ActionConfig = Field(default_factory=ActionPureConfig)
+    two_player_weight: float = Field(default=0.5, ge=0.0, le=1.0)
+    pin_memory: bool = True
 
 
 class ObsBatch(BaseModel):
@@ -122,6 +131,7 @@ class VectorizedEnv:
             pin_memory = False
         self.n_envs = n_envs
         self.n_players = OUTER_PLAYER_SLOTS
+        self.pin_memory_enabled = pin_memory
         self.observations = self._allocate_observations(pin_memory=pin_memory)
         self.rewards = torch.zeros(
             (n_envs, self.n_players), dtype=torch.float32, pin_memory=pin_memory
@@ -164,9 +174,15 @@ class VectorizedEnv:
         angle: np.ndarray | torch.Tensor,
         ships: np.ndarray | torch.Tensor,
     ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor]:
-        launch_array = _actions_to_numpy(launch, dtype=np.bool_)
-        angle_array = _actions_to_numpy(angle, dtype=np.float32)
-        ship_array = _actions_to_numpy(ships, dtype=np.int64)
+        launch_array = _actions_to_numpy(
+            "launch", launch, dtype=np.bool_, torch_dtype=torch.bool
+        )
+        angle_array = _actions_to_numpy(
+            "angle", angle, dtype=np.float32, torch_dtype=torch.float32
+        )
+        ship_array = _actions_to_numpy(
+            "ships", ships, dtype=np.int64, torch_dtype=torch.int64
+        )
         expected_shape = (
             self.n_envs,
             self.n_players,
@@ -264,7 +280,7 @@ class VectorizedEnv:
 
 
 def encode_python_observation(
-    obs: dict[str, object],
+    obs: dict[str, Any],
     obs_spec: ObsV1Config | None = None,
 ) -> tuple[
     np.ndarray,
@@ -295,12 +311,29 @@ def encode_python_observation(
     )
 
 
-def _actions_to_numpy(actions: np.ndarray | torch.Tensor, *, dtype: Any) -> np.ndarray:
+def _actions_to_numpy(
+    name: str,
+    actions: np.ndarray | torch.Tensor,
+    *,
+    dtype: Any,
+    torch_dtype: torch.dtype,
+) -> np.ndarray:
     if isinstance(actions, torch.Tensor):
         if actions.device.type != "cpu":
             raise ValueError("actions must be on CPU before stepping the Rust env")
+        if actions.dtype != torch_dtype:
+            raise ValueError(
+                f"{name} must have dtype {torch_dtype}, got {actions.dtype}"
+            )
         actions = actions.detach().numpy()
-    return np.ascontiguousarray(actions, dtype=dtype)
+    elif isinstance(actions, np.ndarray):
+        if actions.dtype != np.dtype(dtype):
+            raise ValueError(
+                f"{name} must have dtype {np.dtype(dtype).name}, got {actions.dtype}"
+            )
+    else:
+        raise TypeError(f"{name} must be a NumPy array or Torch tensor")
+    return np.ascontiguousarray(actions)
 
 
 def _require_action_shape(
@@ -313,7 +346,7 @@ def _require_action_shape(
     )
 
 
-def _rows_to_array(rows: object, *, name: str) -> np.ndarray:
+def _rows_to_array(rows: Any, *, name: str) -> np.ndarray:
     if not isinstance(rows, list):
         raise TypeError(f"obs['{name}'] must be a list")
     if not rows:
@@ -325,7 +358,7 @@ def _rows_to_array(rows: object, *, name: str) -> np.ndarray:
 
 
 def _comets_to_arrays(
-    comets: object,
+    comets: Any,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if not isinstance(comets, list):
         raise TypeError("obs['comets'] must be a list")

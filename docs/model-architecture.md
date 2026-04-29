@@ -23,15 +23,16 @@ without changing callers that validate config dictionaries through the union.
 | --- | --- | --- |
 | `model_arch` | `"stateless_transformer_v1"` | Pydantic discriminator tag. |
 | `obs_spec` | `ObsV1Config()` | Observation schema and entity capacities. |
-| `action_spec` | `ActionPureConfig()` | Action schema and max launches per source. |
+| `action_spec` | `ActionPureConfig()` | Action schema and max launches per source; defaults to 3 launch slots. |
 | `embed_dim` | `128` | Hidden width for all projected tokens and transformer blocks. |
 | `depth` | `4` | Number of transformer blocks. |
 | `n_heads` | `8` | Attention heads; must evenly divide `embed_dim`. |
 | `mlp_ratio` | `4.0` | FFN hidden width multiplier. |
 | `activation` | `"gelu"` | FFN activation: `"gelu"`, `"silu"`, or `"swiglu"`. |
-| `n_angle_mixtures` | `4` | Mixture components for angle and fleet-size event heads. |
+| `n_action_mixtures` | `4` | Mixture components for launch angle and fleet-size event heads. |
 | `kappa_min` | `1e-3` | Lower bound added to von Mises concentration. |
 | `kappa_max` | `200.0` | Optional cap for von Mises concentration. |
+| `entropy_ship_support_cap` | `256` | Maximum ship-count support enumerated for entropy estimates. |
 | `tau_min` | `1e-3` | Lower bound added to beta-binomial concentration. |
 | `alpha_beta_eps` | `1e-4` | Epsilon added to beta-binomial alpha and beta. |
 | `dir_eps` | `1e-6` | Epsilon for normalizing raw angle direction vectors. |
@@ -60,8 +61,8 @@ giving:
 ```
 
 The planet, comet, fleet, and `still_playing` masks are concatenated into one
-token mask. Masked tokens are packed out before the transformer stack and
-reconstructed after the final transformer block.
+token mask. Masked tokens are excluded from attention keys and are zeroed in
+the returned hidden states.
 
 ## Transformer Trunk
 
@@ -75,15 +76,25 @@ The shared trunk is a stack of pre-norm transformer blocks configured by:
 `n_heads` must evenly divide `embed_dim`. The default activation is GELU. LayerNorm
 is used for normalization, and no dropout is applied.
 
-CPU execution uses torch scaled-dot-product attention. CUDA execution requires
-`flash-attn`; if CUDA is available and `flash-attn` is missing, construction
-raises `RuntimeError`. For CUDA, token packing metadata is built once before the
-transformer stack and reused by each attention block.
+CPU execution uses torch scaled-dot-product attention over regular
+`(batch, seq, dim)` tensors with the token mask passed as the attention key
+mask. CUDA execution uses packed varlen `flash-attn` when it is installed and
+the attention tensors are fp16/bf16; otherwise it uses the same regular-shaped
+scaled-dot-product attention path without packing and unpacking activations.
 
 Attention uses separate `q`, `k`, and `v` linear layers instead of one packed
 QKV projection. SwiGLU also uses separate gate and value projections. This keeps
 each weight matrix tied to one projection role, which is a better fit for Muon
 optimizer assumptions than packing multiple operations into one parameter.
+
+## Initialization
+
+Linear layers use orthogonal initialization with zero biases. Input projections
+use unit gain, hidden projections use ReLU-style gain, and transformer residual
+output projections are scaled by `1 / sqrt(2 * depth)`.
+
+Actor output heads use small `0.01` gain with zero biases, matching the normal
+RL policy-layer initialization. The critic head uses unit gain.
 
 ## Critic
 
@@ -119,12 +130,17 @@ For each `(batch, player, action_entity)` position, the actor combines:
 - normalized `max_launch`
 
 The repeated launch slots are generated autoregressively with a 2-layer minGRU
-stack. Each slot also receives dynamic inputs for current activity, remaining
-ship budget, previous launch decision, the sine and cosine of the previous
-sampled launch angle, and the previous normalized ship count.
+stack. Each recurrent step adds a learned launch-slot embedding so the actor has
+an explicit first/second/third/etc. slot identity. Each slot also receives
+dynamic inputs for current activity, absolute-normalized remaining ship budget,
+previous launch decision, the sine and cosine of the previous sampled launch
+angle, previous absolute-normalized ship count, remaining fraction of the
+initial launch budget, previous ship-count fraction of the initial launch
+budget, and normalized slot index.
 
-The first recurrent slot receives only the static actor input. Dynamic recurrent
-features are added starting with the second launch slot.
+The first recurrent slot receives the static actor input plus its slot
+embedding. Dynamic recurrent features are added starting with the second launch
+slot.
 
 The minGRU cell follows the sequential equation from Feng et al., "Were RNNs
 All We Needed?":
@@ -138,6 +154,10 @@ h_t = (1 - z_t) * h_{t-1} + z_t * h_tilde
 The sequence length is at most `max_per_planet_launches <= 4`, so this
 implementation uses the straightforward sequential recurrence rather than the
 paper's parallel scan variant.
+
+`ActionPureConfig()` defaults to `max_per_planet_launches=3`. Training configs
+validate that the environment and model use the same launch count, so PPO runs
+cannot silently mix different action shapes.
 
 For every slot, the policy emits:
 
@@ -156,14 +176,21 @@ The model returns decomposed action tensors:
 - `angle`: float32, `(batch, 4, 44, max_per_planet_launches)`
 - `ships`: int64, `(batch, 4, 44, max_per_planet_launches)`
 
-It also returns decomposed log-prob tensors for launch gates and angle/size
-events, plus a total per batch row.
+It also returns decomposed log-prob and entropy tensors for launch gates and
+angle/size events, plus per-player action-entity totals with shape
+`(batch, 4, 44)`.
+
+The angle/size entropy is an augmented latent-mixture entropy estimate: mixture
+label entropy plus expected component entropy. It is not the exact marginal
+entropy of the emitted action when mixture components overlap. Ship-count
+entropy enumerates support only up to `entropy_ship_support_cap`; residual ship
+budgets above that cap use truncated support.
 
 ## Log-Prob Replay
 
-The model exposes `log_prob(obs, actions)` to replay externally supplied action
-tensors through the same autoregressive state updates. This is the path PPO
-should use for new-policy log-probs of old rollout actions.
+The model exposes `evaluate_actions(obs, actions)` to replay externally supplied
+action tensors through the same autoregressive state updates and return both
+new-policy log-probs, entropies, and critic values from one encode.
 
 Inactive and stopped slots are given finite dummy event inputs before masking so
 their zeroed log-prob contributions do not introduce NaN gradients.

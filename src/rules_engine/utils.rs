@@ -22,10 +22,10 @@ pub fn orbit_position(initial_position: Point, angular_velocity: f64, step: f64)
 
 pub fn fourfold_symmetric_points(point: Point) -> [Point; 4] {
     [
-        point,
+        Point::new(point.y, point.x),
         Point::new(BOARD_SIZE - point.x, point.y),
         Point::new(point.x, BOARD_SIZE - point.y),
-        Point::new(BOARD_SIZE - point.x, BOARD_SIZE - point.y),
+        Point::new(BOARD_SIZE - point.y, BOARD_SIZE - point.x),
     ]
 }
 

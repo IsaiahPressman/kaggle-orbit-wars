@@ -83,8 +83,11 @@ Start with component tests:
 - Python-reference generation fixtures for planet and comet generation, so Rust
   must consume the same recorded random calls and match Python's generated
   outputs.
-- Planet generation reserves static and orbiting y=x diagonal groups before the
-  random static and fill phases, matching the current Python reference.
+- Planet generation follows the current Python reference phases directly:
+  random static groups first, then random fill groups until the target count and
+  at least one orbiting group are present.
+- Home assignment picks any symmetric group for both 2-player and 4-player
+  games; current fixtures no longer require a y=x diagonal group.
 - Action validation and launch side effects.
 - Production.
 - Fleet movement, out-of-bounds removal, sun collision, planet collision.
@@ -119,8 +122,8 @@ Replay parity tests:
 
 The current downloaded reference episodes are:
 
-- `75373897`: 4-player, 500 recorded steps.
-- `75377525`: 2-player, 296 recorded steps.
+- `75601099`: 4-player, 141 recorded transitions.
+- `75598045`: 2-player, 499 recorded transitions.
 
 ## Maintenance Rules
 
@@ -143,10 +146,13 @@ The current downloaded reference episodes are:
   both before launches and immediately after movement.
 - Planet movement uses `initial_planets` as the orbital anchor, not last turn's
   position.
-- Four-player home assignment chooses among y=x diagonal groups only, using the
+- Four-player home assignment chooses among any symmetric group, using the
   reference RNG stream after planet generation.
 - Combat is queued during fleet movement and sweep, then resolved after all
   movement.
+- Fleet movement queues planet collisions before checking out-of-bounds or sun
+  removal, matching the reference behavior for fast fleets that cross multiple
+  collision/removal zones in one step.
 - Termination happens at `episodeSteps - 2`, which is earlier than the prose
   rule's 500-turn wording suggests.
 - Player 0 observations are the canonical replay observations. Later player

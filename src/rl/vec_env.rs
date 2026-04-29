@@ -40,7 +40,7 @@ pub struct PyRlVecEnv {
 #[pymethods]
 impl PyRlVecEnv {
     #[new]
-    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="obs_v1", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=1))]
+    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="obs_v1", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=3))]
     fn new(
         n_envs: usize,
         two_player_weight: f64,
@@ -202,33 +202,40 @@ impl PyRlVecEnv {
         let angle_chunks = angle.as_slice()?.par_chunks(actions_per_env);
         let ship_chunks = ships.as_slice()?.par_chunks(actions_per_env);
 
-        self.states
-            .par_iter_mut()
-            .zip_eq(self.player_finished.par_iter_mut())
+        let decoded = self
+            .states
+            .par_iter()
             .zip_eq(launch_chunks)
             .zip_eq(angle_chunks)
             .zip_eq(ship_chunks)
-            .zip_eq(reward_chunks)
-            .zip_eq(done_chunks)
-            .for_each(
-                |(
-                    (
-                        ((((state, player_finished), launch_chunk), angle_chunk), ship_chunk),
-                        reward_chunk,
-                    ),
-                    done_chunk,
-                )| {
-                    let decoded = decode_pure_actions(
+            .enumerate()
+            .map(
+                |(env_index, (((state, launch_chunk), angle_chunk), ship_chunk))| {
+                    decode_pure_actions(
                         state,
                         launch_chunk,
                         angle_chunk,
                         ship_chunk,
                         self.max_per_planet_launches,
-                    );
+                    )
+                    .map_err(|err| format!("env {env_index}: {err}"))
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(PyValueError::new_err)?;
+
+        self.states
+            .par_iter_mut()
+            .zip_eq(self.player_finished.par_iter_mut())
+            .zip_eq(decoded.par_iter())
+            .zip_eq(reward_chunks)
+            .zip_eq(done_chunks)
+            .for_each(
+                |((((state, player_finished), decoded), reward_chunk), done_chunk)| {
                     step_one_env(
                         state,
                         player_finished,
-                        &decoded,
+                        decoded,
                         reward_chunk,
                         done_chunk,
                         self.two_player_weight,

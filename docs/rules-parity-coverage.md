@@ -39,10 +39,10 @@ recorded random call stream and compares generated output.
 The generated fixture currently covers:
 
 - planet generation from seed `42`
-- static and orbiting y=x diagonal group reservation before random static
-  groups
+- current Python-reference random static and fill phases, including the
+  reference fourfold symmetry ordering
 - full reset for 2-player and 4-player games, including angular velocity,
-  planet generation, initial planets, and diagonal-only 4-player home assignment
+  planet generation, initial planets, and current random-group home assignment
 - comet paths at spawn steps `50`, `150`, `250`, `350`, and `450`
 - comet path generation with existing comet ids excluded
 - comet path generation where failed attempts occur before success
@@ -58,7 +58,8 @@ replays:
 - launch validation and side effects
 - production order
 - fleet movement and removal
-- sun, planet, and sweep collisions
+- fleet collision priority: planet collisions before out-of-bounds or sun removal
+- sun, planet, out-of-bounds, and sweep collisions
 - combat resolution, ties, and reinforcement
 - comet spawning before same-step movement
 - comet movement and expiry
