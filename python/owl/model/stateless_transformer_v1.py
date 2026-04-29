@@ -192,10 +192,18 @@ class StatelessTransformerV1(BaseModelAPI):
             dim=1,
         )
         x = torch.cat((planet_x, comet_x, fleet_x, player_tokens), dim=1)
-        packed = build_packed_sequence(token_mask)
+        packed: PackedSequence | None
+        if use_flash_attn(x):
+            x, packed = pack_sequence(x, token_mask)
+            block_token_mask = None
+        else:
+            packed = None
+            block_token_mask = token_mask
         for block in self.blocks:
-            x = block(x, token_mask, packed)
+            x = block(x, block_token_mask, packed)
         x = self.final_norm(x)
+        if packed is not None:
+            x = unpack_sequence(x, packed)
         x = x.masked_fill(~token_mask.unsqueeze(-1), 0.0)
         return x, token_mask
 
@@ -687,12 +695,11 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        token_mask: torch.Tensor,
-        packed: PackedSequence,
+        token_mask: torch.Tensor | None,
+        packed: PackedSequence | None,
     ) -> torch.Tensor:
         x = x + self.attn(self.norm1(x), token_mask, packed)
-        x = x + self.mlp(self.norm2(x))
-        return x.masked_fill(~token_mask.unsqueeze(-1), 0.0)
+        return x + self.mlp(self.norm2(x))
 
 
 class FeedForward(nn.Module):
@@ -736,36 +743,42 @@ class MultiHeadSelfAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        token_mask: torch.Tensor,
-        packed: PackedSequence,
+        token_mask: torch.Tensor | None,
+        packed: PackedSequence | None,
     ) -> torch.Tensor:
+        if packed is not None:
+            seq_len, _ = x.shape
+            q = self.q(x).view(seq_len, self.n_heads, self.head_dim)
+            k = self.k(x).view(seq_len, self.n_heads, self.head_dim)
+            v = self.v(x).view(seq_len, self.n_heads, self.head_dim)
+            if not use_flash_attn(q):
+                raise RuntimeError("packed attention requires flash-attn backend")
+            attn = varlen_attention(
+                q,
+                k,
+                v,
+                cu_seqlens=packed.cu_seqlens,
+                max_seqlen=packed.max_seqlen,
+            )
+            return self.out(attn.reshape(seq_len, -1))
+
+        if token_mask is None:
+            raise RuntimeError("unpacked attention requires a token mask")
         batch_size, seq_len, _ = x.shape
         q = self.q(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
         k = self.k(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
         v = self.v(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
 
-        if not use_flash_attn(q):
-            attn = F.scaled_dot_product_attention(
-                q.transpose(1, 2),
-                k.transpose(1, 2),
-                v.transpose(1, 2),
-                attn_mask=token_mask[:, None, None, :],
-                dropout_p=0.0,
-            )
-            attn = attn.transpose(1, 2)
-            return self.out(attn.reshape(batch_size, seq_len, -1))
-
-        q_packed = pack_tensor(q, packed)
-        k_packed = pack_tensor(k, packed)
-        v_packed = pack_tensor(v, packed)
-        attn = varlen_attention(
-            q_packed,
-            k_packed,
-            v_packed,
-            cu_seqlens=packed.cu_seqlens,
-            max_seqlen=packed.max_seqlen,
+        if use_flash_attn(q):
+            raise RuntimeError("flash-attn attention requires packed inputs")
+        attn = F.scaled_dot_product_attention(
+            q.transpose(1, 2),
+            k.transpose(1, 2),
+            v.transpose(1, 2),
+            attn_mask=token_mask[:, None, None, :],
+            dropout_p=0.0,
         )
-        attn = unpack_sequence(attn, packed)
+        attn = attn.transpose(1, 2)
         return self.out(attn.reshape(batch_size, seq_len, -1))
 
 

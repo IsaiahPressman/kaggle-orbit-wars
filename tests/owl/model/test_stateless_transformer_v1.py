@@ -10,7 +10,6 @@ from owl.model.stateless_transformer_v1 import (
     MinGRUCell,
     MultiHeadSelfAttention,
     PolicyParams,
-    build_packed_sequence,
     masked_event_log_prob_from_params,
     pack_sequence,
     unpack_sequence,
@@ -19,6 +18,7 @@ from owl.rl import (
     ACTION_ENTITY_SLOTS,
     MAX_COMETS,
     MAX_PLANETS,
+    OUTER_PLAYER_SLOTS,
     ActionPureConfig,
     ObsBatch,
     ObsV1Config,
@@ -194,7 +194,6 @@ def test_non_flash_attention_uses_regular_shaped_sdpa(
             [False, True, True, False, True],
         ]
     )
-    packed = build_packed_sequence(mask)
 
     def disable_flash_attn(q: torch.Tensor) -> bool:
         return q.numel() < 0
@@ -214,12 +213,12 @@ def test_non_flash_attention_uses_regular_shaped_sdpa(
 
     monkeypatch.setattr(model_impl, "varlen_attention", fail_varlen_attention)
 
-    output = attn(x, mask, packed)
+    output = attn(x, mask, None)
 
     assert output.shape == x.shape
 
 
-def test_flash_attention_packs_regular_shaped_qkv(
+def test_flash_attention_uses_already_packed_sequence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4)
@@ -231,13 +230,27 @@ def test_flash_attention_packs_regular_shaped_qkv(
             [False, True, True, False, True],
         ]
     )
-    packed = build_packed_sequence(mask)
+    packed_x, packed = pack_sequence(x, mask)
     calls: list[tuple[torch.Size, list[int], int]] = []
 
     def enable_flash_attn(q: torch.Tensor) -> bool:
         return q.numel() > 0
 
+    def fail_pack_tensor(
+        _x: torch.Tensor,
+        _packed: model_impl.PackedSequence,
+    ) -> torch.Tensor:
+        pytest.fail("attention should not pack tensors")
+
+    def fail_unpack_sequence(
+        _x: torch.Tensor,
+        _packed: model_impl.PackedSequence,
+    ) -> torch.Tensor:
+        pytest.fail("attention should not unpack tensors")
+
     monkeypatch.setattr(model_impl, "use_flash_attn", enable_flash_attn)
+    monkeypatch.setattr(model_impl, "pack_tensor", fail_pack_tensor)
+    monkeypatch.setattr(model_impl, "unpack_sequence", fail_unpack_sequence)
 
     def fake_varlen_attention(
         q: torch.Tensor,
@@ -254,10 +267,118 @@ def test_flash_attention_packs_regular_shaped_qkv(
 
     monkeypatch.setattr(model_impl, "varlen_attention", fake_varlen_attention)
 
-    output = attn(x, mask, packed)
+    output = attn(packed_x, None, packed)
 
-    assert output.shape == x.shape
+    assert output.shape == packed_x.shape
     assert calls == [(torch.Size((6, config.n_heads, 4)), [0, 3, 6], 3)]
+
+
+def test_non_flash_encoder_does_not_build_or_pack_sequences(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    config = StatelessTransformerV1Config(
+        obs_spec=obs_spec,
+        embed_dim=32,
+        depth=2,
+        n_heads=4,
+    )
+    model = StatelessTransformerV1(config)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=config.action_spec)
+
+    def disable_flash_attn(q: torch.Tensor) -> bool:
+        return q.numel() < 0
+
+    def fail_build_packed_sequence(
+        _token_mask: torch.Tensor,
+    ) -> model_impl.PackedSequence:
+        pytest.fail("SDPA path should not build seqlens")
+
+    def fail_pack_tensor(
+        _x: torch.Tensor,
+        _packed: model_impl.PackedSequence,
+    ) -> torch.Tensor:
+        pytest.fail("SDPA path should not pack tensors")
+
+    def fail_unpack_sequence(
+        _x: torch.Tensor,
+        _packed: model_impl.PackedSequence,
+    ) -> torch.Tensor:
+        pytest.fail("SDPA path should not unpack tensors")
+
+    monkeypatch.setattr(model_impl, "use_flash_attn", disable_flash_attn)
+    monkeypatch.setattr(model_impl, "build_packed_sequence", fail_build_packed_sequence)
+    monkeypatch.setattr(model_impl, "pack_tensor", fail_pack_tensor)
+    monkeypatch.setattr(model_impl, "unpack_sequence", fail_unpack_sequence)
+
+    hidden, mask = model.encode_observations(obs)
+
+    assert hidden.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS, 32)
+    assert mask.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS)
+
+
+def test_flash_encoder_packs_once_before_trunk_and_unpacks_once_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    config = StatelessTransformerV1Config(
+        obs_spec=obs_spec,
+        embed_dim=32,
+        depth=3,
+        n_heads=4,
+    )
+    model = StatelessTransformerV1(config)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=config.action_spec)
+    original_pack_tensor = model_impl.pack_tensor
+    original_unpack_sequence = model_impl.unpack_sequence
+    pack_calls = 0
+    unpack_calls = 0
+    varlen_calls = 0
+
+    def enable_flash_attn(q: torch.Tensor) -> bool:
+        return q.numel() > 0
+
+    def counted_pack_tensor(
+        x: torch.Tensor,
+        packed: model_impl.PackedSequence,
+    ) -> torch.Tensor:
+        nonlocal pack_calls
+        pack_calls += 1
+        return original_pack_tensor(x, packed)
+
+    def counted_unpack_sequence(
+        x: torch.Tensor,
+        packed: model_impl.PackedSequence,
+    ) -> torch.Tensor:
+        nonlocal unpack_calls
+        unpack_calls += 1
+        return original_unpack_sequence(x, packed)
+
+    def fake_varlen_attention(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        nonlocal varlen_calls
+        del k, v, cu_seqlens, max_seqlen
+        varlen_calls += 1
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(model_impl, "use_flash_attn", enable_flash_attn)
+    monkeypatch.setattr(model_impl, "pack_tensor", counted_pack_tensor)
+    monkeypatch.setattr(model_impl, "unpack_sequence", counted_unpack_sequence)
+    monkeypatch.setattr(model_impl, "varlen_attention", fake_varlen_attention)
+
+    hidden, mask = model.encode_observations(obs)
+
+    assert hidden.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS, 32)
+    assert mask.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS)
+    assert pack_calls == 1
+    assert unpack_calls == 1
+    assert varlen_calls == config.depth
 
 
 def test_model_initialization_sets_stable_rl_priors() -> None:
