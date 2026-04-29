@@ -46,6 +46,10 @@ Run a preset with:
 uv run python scripts/run_ppo.py configs/train/debug.yaml runs --log-mode debug --max-env-steps 16
 ```
 
+PPO checkpoints save model, optimizer, scheduler, config, and environment-step
+metadata. They do not save the Rust environment state or current observation, so
+they are not exact resume snapshots.
+
 ## Orbit Wars replay parity
 
 Replay parity tests use compact Kaggle episode transition fixtures. The

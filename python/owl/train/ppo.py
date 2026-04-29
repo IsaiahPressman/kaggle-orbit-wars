@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal, Protocol
 
-import numpy as np
 import torch
 from pydantic import Field
 
@@ -370,7 +368,6 @@ class PPOTrainer:
             ),
             "config": config.model_dump(mode="json", round_trip=True),
             "config_path": str(config_path),
-            "rng_state": _rng_state(),
             "env_steps": env_steps,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1055,17 +1052,6 @@ def _policy_ratios(new_logp: torch.Tensor, old_logp: torch.Tensor) -> torch.Tens
 
 def _uses_uniform_single_pass_sampling(config: PPOConfig) -> bool:
     return config.segment_sampling.sampling == "uniform" and config.replay_ratio == 1.0
-
-
-def _rng_state() -> dict[str, Any]:
-    return {
-        "python": random.getstate(),
-        "numpy": np.random.get_state(),
-        "torch": torch.get_rng_state(),
-        "torch_cuda": torch.cuda.get_rng_state_all()
-        if torch.cuda.is_available()
-        else None,
-    }
 
 
 def _num_minibatches_per_update(config: PPOConfig, n_envs: int) -> int:
