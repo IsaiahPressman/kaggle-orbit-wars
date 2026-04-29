@@ -30,7 +30,6 @@ def test_ppo_loss_matches_clipped_objectives() -> None:
             vf_clip_coef=0.25,
             vf_coef=0.5,
             ent_coef=0.1,
-            normalize_advantages=False,
         ),
     )
 
@@ -83,7 +82,6 @@ def test_ppo_loss_uses_policy_and_value_weights_separately() -> None:
             vf_clip_coef=10.0,
             vf_coef=0.5,
             ent_coef=0.1,
-            normalize_advantages=False,
         ),
     )
 
@@ -99,7 +97,7 @@ def test_ppo_loss_uses_policy_and_value_weights_separately() -> None:
     )
 
 
-def test_ppo_loss_normalizes_advantages_over_policy_weight_only() -> None:
+def test_ppo_loss_uses_raw_advantages() -> None:
     new_logp = torch.log(torch.tensor([[1.1, 0.9, 9.0]]))
     old_logp = torch.zeros((1, 3))
     values = torch.zeros((1, 3))
@@ -123,13 +121,10 @@ def test_ppo_loss_normalizes_advantages_over_policy_weight_only() -> None:
             vf_clip_coef=10.0,
             vf_coef=0.0,
             ent_coef=0.0,
-            normalize_advantages=True,
-            advantage_eps=1e-8,
         ),
     )
 
-    normalized = torch.tensor([[-1.0, 1.0, 98.0]])
-    expected_policy = (-normalized[:, :2] * torch.tensor([[1.1, 0.9]])).mean()
+    expected_policy = (-(advantages[:, :2]) * torch.tensor([[1.1, 0.9]])).mean()
     assert torch.allclose(metrics.policy_loss, expected_policy)
 
 
@@ -146,7 +141,7 @@ def test_ppo_loss_handles_all_policy_invalid_minibatch() -> None:
         advantages=torch.ones(shape),
         policy_weight=policy_weight,
         value_weight=torch.ones(shape),
-        config=PPOConfig(normalize_advantages=True),
+        config=PPOConfig(),
     )
 
     for tensor in (
@@ -187,7 +182,7 @@ def _call_loss_with_broadcast_policy_weight(
 def test_ppo_loss_validates_inputs_only_when_debug_enabled() -> None:
     metrics = _call_loss_with_broadcast_policy_weight(
         ppo_loss,
-        PPOConfig(normalize_advantages=False),
+        PPOConfig(),
     )
     assert torch.isfinite(metrics.loss)
 
@@ -196,7 +191,6 @@ def test_ppo_loss_validates_inputs_only_when_debug_enabled() -> None:
             ppo_loss,
             PPOConfig(
                 debug_validate_ppo_loss_inputs=True,
-                normalize_advantages=False,
             ),
         )
 
@@ -214,7 +208,7 @@ def test_compiled_ppo_loss_validates_inputs_only_when_debug_enabled(
 
     metrics = _call_loss_with_broadcast_policy_weight(
         loss_fn,
-        PPOConfig(normalize_advantages=False),
+        PPOConfig(),
     )
     assert torch.isfinite(metrics.loss)
 
@@ -223,7 +217,6 @@ def test_compiled_ppo_loss_validates_inputs_only_when_debug_enabled(
             loss_fn,
             PPOConfig(
                 debug_validate_ppo_loss_inputs=True,
-                normalize_advantages=False,
             ),
         )
 

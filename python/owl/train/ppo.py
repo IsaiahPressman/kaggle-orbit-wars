@@ -71,8 +71,6 @@ class PPOConfig(BaseConfig):
     ent_coef: float = Field(default=0.01, ge=0.0)
     max_grad_norm: float = Field(default=0.5, gt=0.0)
     target_kl: float | None = Field(default=0.03, gt=0.0)
-    normalize_advantages: bool = True
-    advantage_eps: float = Field(default=1e-8, gt=0.0)
     advantage_mode: AdvantageMode = "gae"
     vtrace_rho_clip: float = Field(default=1.0, gt=0.0)
     vtrace_c_clip: float = Field(default=1.0, gt=0.0)
@@ -687,8 +685,6 @@ def _compile_ppo_loss(compile_mode: CompileMode | None) -> PPOLossFn:
                 advantages,
                 policy_weight,
                 value_weight,
-                config.normalize_advantages,
-                config.advantage_eps,
                 config.clip_coef,
                 config.vf_clip_coef,
                 config.vf_coef,
@@ -735,8 +731,6 @@ def ppo_loss(
             advantages,
             policy_weight,
             value_weight,
-            config.normalize_advantages,
-            config.advantage_eps,
             config.clip_coef,
             config.vf_clip_coef,
             config.vf_coef,
@@ -823,8 +817,6 @@ def _ppo_loss_tensors(
     advantages: torch.Tensor,
     policy_weight: torch.Tensor,
     value_weight: torch.Tensor,
-    normalize_advantages: bool,
-    advantage_eps: float,
     clip_coef: float,
     vf_clip_coef: float,
     vf_coef: float,
@@ -841,19 +833,10 @@ def _ppo_loss_tensors(
     torch.Tensor,
     torch.Tensor,
 ]:
-    normalized_advantages = advantages
-    if normalize_advantages:
-        valid = policy_weight > 0
-        normalized_advantages = (advantages - masked_mean(advantages, valid)) / (
-            masked_std(advantages, valid) + advantage_eps
-        )
-
     logratio = new_logp - old_logp
     ratio = logratio.exp()
-    pg_loss1 = -normalized_advantages * ratio
-    pg_loss2 = -normalized_advantages * torch.clamp(
-        ratio, 1.0 - clip_coef, 1.0 + clip_coef
-    )
+    pg_loss1 = -advantages * ratio
+    pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef)
     policy_loss = weighted_mean(torch.max(pg_loss1, pg_loss2), policy_weight)
 
     value_clipped = old_values + torch.clamp(
