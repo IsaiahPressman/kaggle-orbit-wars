@@ -15,9 +15,9 @@ use crate::rules_engine::utils::{fleet_speed, is_orbiting};
 
 use super::action_spec::encode_action_spec;
 use super::{
-    log_ignored_fleets, require_shape, ACTION_ENTITY_SLOTS, COMET_CHANNELS, DEFAULT_MAX_ENTITIES,
-    FLEET_CHANNELS, GLOBAL_CHANNELS, MAX_COMETS, MAX_COMET_PATH_LENGTH, MAX_PLANETS,
-    OUTER_PLAYER_SLOTS, PLANET_CHANNELS,
+    log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
+    DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, MAX_COMETS, MAX_COMET_PATH_LENGTH,
+    MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS,
 };
 
 type EncodedObsV1<'py> = (
@@ -44,6 +44,7 @@ const INTEGER_TOLERANCE: f64 = 1e-9;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_state(
     state: &State,
+    player_map: &PlayerMap,
     max_fleets: usize,
     planet_obs: &mut [f32],
     fleet_obs: &mut [f32],
@@ -90,11 +91,7 @@ pub(super) fn encode_state(
         let row_start = planet_index * PLANET_CHANNELS;
         let row = &mut planet_obs[row_start..row_start + PLANET_CHANNELS];
 
-        let owner_index = if planet.owner == -1 {
-            4
-        } else {
-            planet.owner as usize
-        };
+        let owner_index = player_map.owner_channel(planet.owner);
         row[owner_index] = 1.0;
         row[OWNER_CHANNELS_WITH_NEUTRAL] = normalize_position(planet.x);
         row[OWNER_CHANNELS_WITH_NEUTRAL + 1] = normalize_position(planet.y);
@@ -113,7 +110,7 @@ pub(super) fn encode_state(
         let row_start = fleet_index * FLEET_CHANNELS;
         let row = &mut fleet_obs[row_start..row_start + FLEET_CHANNELS];
 
-        row[fleet.owner as usize] = 1.0;
+        row[player_map.owner_channel(fleet.owner)] = 1.0;
         row[OWNER_CHANNELS] = normalize_position(fleet.x);
         row[OWNER_CHANNELS + 1] = normalize_position(fleet.y);
         let speed = fleet_speed(fleet.ships, state.config.ship_speed);
@@ -123,9 +120,9 @@ pub(super) fn encode_state(
         row[OWNER_CHANNELS + 5] = normalize_log_ships(fleet.ships);
     }
 
-    encode_comets(state, comet_obs, comet_mask);
+    encode_comets(state, player_map, comet_obs, comet_mask);
     encode_global(state, global_obs);
-    encode_action_spec(state, can_act, max_launch);
+    encode_action_spec(state, player_map, can_act, max_launch);
 
     ignored_fleets
 }
@@ -138,7 +135,12 @@ fn normalize_position(value: f64) -> f32 {
     ((value / BOARD_SIZE) * 2.0 - 1.0) as f32
 }
 
-fn encode_comets(state: &State, comet_obs: &mut [f32], comet_mask: &mut [bool]) {
+fn encode_comets(
+    state: &State,
+    player_map: &PlayerMap,
+    comet_obs: &mut [f32],
+    comet_mask: &mut [bool],
+) {
     let planets_by_id = state
         .planets
         .iter()
@@ -162,11 +164,7 @@ fn encode_comets(state: &State, comet_obs: &mut [f32], comet_mask: &mut [bool]) 
             let row_start = comet_index * COMET_CHANNELS;
             let row = &mut comet_obs[row_start..row_start + COMET_CHANNELS];
 
-            let owner_index = if planet.owner == -1 {
-                4
-            } else {
-                planet.owner as usize
-            };
+            let owner_index = player_map.owner_channel(planet.owner);
             row[owner_index] = 1.0;
             row[OWNER_CHANNELS_WITH_NEUTRAL] = normalize_ships(planet.ships);
             row[OWNER_CHANNELS_WITH_NEUTRAL + 1] = normalize_log_ships(planet.ships);
@@ -473,6 +471,7 @@ pub fn encode_obs_v1<'py>(
 
     let ignored_fleets = encode_state(
         &state,
+        &PlayerMap::identity(),
         max_fleets,
         planet_obs
             .as_slice_mut()
@@ -520,6 +519,7 @@ pub fn encode_obs_v1<'py>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules_engine::state::{Fleet, Planet, SimConfig, State};
 
     #[test]
     fn angular_velocity_normalization_maps_generated_range_to_zero_one() {
@@ -539,5 +539,66 @@ mod tests {
         assert!(finite_i32(4.1, "value").is_err());
         assert!(finite_u32(7.9, "value").is_err());
         assert!(finite_usize(3.5, "value").is_err());
+    }
+
+    #[test]
+    fn encode_state_writes_owners_and_action_masks_to_remapped_outer_slots() {
+        let state = State {
+            config: SimConfig::new(2),
+            step: 0,
+            angular_velocity: 0.025,
+            initial_planets: Vec::new(),
+            planets: vec![Planet {
+                id: 0,
+                owner: 1,
+                x: 50.0,
+                y: 50.0,
+                radius: 2.0,
+                ships: 10,
+                production: 1,
+            }],
+            fleets: vec![Fleet {
+                id: 0,
+                owner: 0,
+                x: 50.0,
+                y: 50.0,
+                angle: 0.0,
+                from_planet_id: 0,
+                ships: 5,
+            }],
+            next_fleet_id: 1,
+            comets: Vec::new(),
+            comet_planet_ids: Vec::new(),
+        };
+        let player_map = PlayerMap::from_outer_slots(2, [3, 1, 0, 2]);
+        let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
+        let mut fleet_obs = vec![0.0; FLEET_CHANNELS];
+        let mut comet_obs = vec![0.0; MAX_COMETS * COMET_CHANNELS];
+        let mut planet_mask = vec![false; MAX_PLANETS];
+        let mut fleet_mask = vec![false; 1];
+        let mut comet_mask = vec![false; MAX_COMETS];
+        let mut global_obs = vec![0.0; GLOBAL_CHANNELS];
+        let mut can_act = vec![false; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+
+        encode_state(
+            &state,
+            &player_map,
+            1,
+            &mut planet_obs,
+            &mut fleet_obs,
+            &mut comet_obs,
+            &mut planet_mask,
+            &mut fleet_mask,
+            &mut comet_mask,
+            &mut global_obs,
+            &mut can_act,
+            &mut max_launch,
+        );
+
+        assert_eq!(planet_obs[1], 1.0);
+        assert_eq!(fleet_obs[3], 1.0);
+        assert!(can_act[ACTION_ENTITY_SLOTS]);
+        assert_eq!(max_launch[ACTION_ENTITY_SLOTS], 10);
     }
 }

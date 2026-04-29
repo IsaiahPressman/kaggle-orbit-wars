@@ -209,10 +209,22 @@ def test_reset_writes_still_playing_from_rust_env_state() -> None:
 
     assert obs.still_playing.data_ptr() == still_playing_ptr
     assert np.shares_memory(obs.still_playing.numpy(), env._still_playing_np)
-    assert torch.equal(
-        obs.still_playing,
-        torch.tensor([[True, True, False, False], [True, True, False, False]]),
+    assert torch.equal(obs.still_playing.sum(dim=1), torch.full((2,), 2))
+
+
+def test_two_player_resets_randomize_active_outer_player_slots() -> None:
+    env = VectorizedEnv(
+        n_envs=32,
+        obs_spec=ObsV1Config(),
+        action_spec=ActionPureConfig(),
+        two_player_weight=1.0,
+        pin_memory=False,
     )
+
+    obs = env.reset()
+
+    assert torch.equal(obs.still_playing.sum(dim=1), torch.full((32,), 2))
+    assert torch.all(obs.still_playing.any(dim=0))
 
 
 def test_two_player_sample_marks_unused_player_slots_done() -> None:
@@ -236,8 +248,7 @@ def test_two_player_sample_marks_unused_player_slots_done() -> None:
     _, rewards, dones = env.step(launch, angle, ships)
 
     assert torch.equal(rewards, torch.zeros_like(rewards))
-    assert torch.equal(dones[:, :2], torch.zeros_like(dones[:, :2]))
-    assert torch.equal(dones[:, 2:], torch.ones_like(dones[:, 2:]))
+    assert torch.equal(dones.sum(dim=1), torch.full((2,), 2))
     assert torch.equal(env.observations.still_playing, ~dones)
 
 

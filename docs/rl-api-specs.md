@@ -63,12 +63,14 @@ environment returns an `ObsBatch` with these tensors:
 All reused buffers are fully overwritten on each observation write. Inactive
 rows are zero-filled and their masks are set to `False`.
 
-`still_playing` is true for player slots that are active in the current
+`still_playing` is true for outer player slots that are active in the current
 observation's episode and have not finished. The Rust vectorized environment
-writes this tensor on every `reset` and `step`; inactive outer player slots are
-`False`. After a terminal auto-reset, `still_playing` describes the returned
-reset observation, while `dones` still describes the transition that just
-finished.
+samples a fresh random internal-to-outer player-slot mapping for each sub-env
+reset. In 4-player episodes all four outer slots are active; in 2-player
+episodes any two of the four outer slots may be active. Inactive outer player
+slots are `False`. After a terminal auto-reset, `still_playing` describes the
+returned reset observation, while `dones` still describes the transition that
+just finished.
 
 ### Normalization
 
@@ -213,9 +215,9 @@ These are written alongside the observation tensors:
 | `can_act` | `bool` | `(n_envs, 4, 44)` | whether a player can launch from an entity slot |
 | `max_launch` | `int64` | `(n_envs, 4, 44)` | maximum launchable ship count for that slot |
 
-`can_act[player, entity]` is true when the entity is owned by that player and
-has at least one ship. In 2-player games, player slots `2` and `3` are always
-inactive.
+`can_act[player, entity]` is true when the entity is owned by that outer player
+slot and has at least one ship. In 2-player games, two random outer player
+slots are active for the episode and the other two are inactive.
 
 ### Submitted Action Tensors
 
