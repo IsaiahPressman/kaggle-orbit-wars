@@ -156,9 +156,8 @@ implementation uses the straightforward sequential recurrence rather than the
 paper's parallel scan variant.
 
 `ActionPureConfig()` defaults to `max_per_planet_launches=3`. Training configs
-reject `max_per_planet_launches=1` so PPO runs cannot silently use the older
-single-launch action formulation while the model is configured for
-autoregressive repeated launch slots.
+validate that the environment and model use the same launch count, so PPO runs
+cannot silently mix different action shapes.
 
 For every slot, the policy emits:
 

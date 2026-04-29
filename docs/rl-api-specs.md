@@ -190,8 +190,7 @@ same entity axis is used for action masks and submitted actions.
 `max_per_planet_launches` is validated in Python and Rust and must be between
 `1` and `4`, inclusive. `ActionPureConfig()` defaults to `3` so callers use the
 multi-launch autoregressive action space unless they explicitly opt into a
-smaller action shape. PPO training configs reject `max_per_planet_launches=1`
-because that silently trains the older single-launch formulation.
+smaller action shape.
 
 Sharp edge: action entity slots are ordered as all `MAX_PLANETS` planet tokens
 first, followed by `MAX_COMETS` comet tokens. This assumes the model appends
