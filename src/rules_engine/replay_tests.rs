@@ -107,6 +107,7 @@ fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
     let mut checked_rows = 0;
     for fixture_path in fixture_paths {
         let file = File::open(&fixture_path)?;
+        let mut final_results = None;
         for line in BufReader::new(file).lines() {
             let line = line?;
             if line.trim().is_empty() {
@@ -114,8 +115,16 @@ fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
             }
 
             let row: FixtureRow = serde_json::from_str(&line)?;
-            check_transition(&row)
+            let result = check_transition(&row)
                 .map_err(|message| format!("{} step {}: {message}", row.episode_id, row.step))?;
+            final_results = Some((
+                row.episode_id,
+                row.step,
+                player_results_from_kaggle(&row).map_err(|message| {
+                    format!("{} step {}: {message}", row.episode_id, row.step)
+                })?,
+                result,
+            ));
             if let Some((rows, players)) = coverage.get_mut(&row.episode_id) {
                 *rows += 1;
                 if players.is_none() {
@@ -130,6 +139,7 @@ fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
             }
             checked_rows += 1;
         }
+        validate_final_results(&fixture_path, final_results)?;
     }
 
     assert!(
@@ -137,6 +147,39 @@ fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
         "replay fixtures contained no transition rows"
     );
     validate_required_coverage(&coverage)?;
+    Ok(())
+}
+
+fn validate_final_results(
+    fixture_path: &Path,
+    final_results: Option<(u64, u32, Vec<PlayerResult>, StepResult)>,
+) -> Result<(), Box<dyn Error>> {
+    let Some((episode_id, step, kaggle_results, rust_result)) = final_results else {
+        return Err(format!("{} contained no transition rows", fixture_path.display()).into());
+    };
+    if kaggle_results
+        .iter()
+        .any(|result| matches!(result, PlayerResult::Active))
+    {
+        return Err(format!(
+            "{} final row episode {episode_id} step {step} had nonterminal Kaggle results: {:?}",
+            fixture_path.display(),
+            kaggle_results
+        )
+        .into());
+    }
+    if rust_result
+        .player_results
+        .iter()
+        .any(|result| matches!(result, PlayerResult::Active))
+    {
+        return Err(format!(
+            "{} final row episode {episode_id} step {step} had nonterminal Rust results: {:?}",
+            fixture_path.display(),
+            rust_result.player_results
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -223,7 +266,7 @@ fn require_parity_fixtures() -> Result<bool, Box<dyn Error>> {
     }
 }
 
-fn check_transition(row: &FixtureRow) -> Result<(), String> {
+fn check_transition(row: &FixtureRow) -> Result<StepResult, String> {
     let mut state = state_from_observation(row)?;
     let actions = python_validated_actions(&state, &row.actions)?;
     let injections = injections_from_expected(row)?;
@@ -231,7 +274,8 @@ fn check_transition(row: &FixtureRow) -> Result<(), String> {
 
     let result = step_with_injections(&mut state, &actions, &mut rng, injections);
 
-    compare_state(&state, &result, row)
+    compare_state(&state, &result, row)?;
+    Ok(result)
 }
 
 fn state_from_observation(row: &FixtureRow) -> Result<State, String> {
