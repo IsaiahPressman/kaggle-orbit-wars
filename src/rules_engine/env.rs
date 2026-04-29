@@ -12,6 +12,7 @@ use super::state::{
 use super::utils::{fleet_speed, is_orbiting, orbit_position, point_to_segment_distance};
 
 const COLLISION_AABB_SLACK: f64 = 1e-12;
+const COMBAT_LIST_PLANET_ID_LIMIT: u32 = 100;
 
 pub type PlayerAction = Vec<LaunchAction>;
 
@@ -218,12 +219,61 @@ fn produce_ships(state: &mut State) {
     }
 }
 
-fn move_fleets(state: &mut State) -> HashMap<u32, Vec<Fleet>> {
-    let mut combat_lists: HashMap<u32, Vec<Fleet>> = state
-        .planets
-        .iter()
-        .map(|planet| (planet.id, Vec::new()))
-        .collect();
+struct CombatLists {
+    buckets: Vec<Option<Vec<Fleet>>>,
+}
+
+impl CombatLists {
+    fn for_planets(planets: &[Planet]) -> Self {
+        let max_planet_id = planets.iter().map(|planet| planet.id).max();
+        if let Some(max_planet_id) = max_planet_id {
+            assert!(
+                max_planet_id < COMBAT_LIST_PLANET_ID_LIMIT,
+                "combat list max planet id must be < {COMBAT_LIST_PLANET_ID_LIMIT}, got {max_planet_id}"
+            );
+        }
+
+        let mut buckets =
+            max_planet_id.map_or_else(Vec::new, |planet_id| vec![None; planet_id as usize + 1]);
+        for planet in planets {
+            buckets[planet.id as usize].get_or_insert_with(Vec::new);
+        }
+
+        Self { buckets }
+    }
+
+    fn push(&mut self, planet_id: u32, fleet: Fleet) {
+        self.bucket_mut(planet_id).push(fleet);
+    }
+
+    #[cfg(test)]
+    fn get(&self, planet_id: u32) -> Option<&Vec<Fleet>> {
+        self.buckets
+            .get(planet_id as usize)
+            .and_then(Option::as_ref)
+    }
+
+    fn bucket_mut(&mut self, planet_id: u32) -> &mut Vec<Fleet> {
+        self.buckets
+            .get_mut(planet_id as usize)
+            .and_then(Option::as_mut)
+            .expect("combat list exists for every planet")
+    }
+
+    fn iter_fleets(&self) -> impl Iterator<Item = &Fleet> {
+        self.buckets.iter().filter_map(Option::as_ref).flatten()
+    }
+
+    fn into_buckets(self) -> impl Iterator<Item = (u32, Vec<Fleet>)> {
+        self.buckets
+            .into_iter()
+            .enumerate()
+            .filter_map(|(planet_id, bucket)| bucket.map(|fleets| (planet_id as u32, fleets)))
+    }
+}
+
+fn move_fleets(state: &mut State) -> CombatLists {
+    let mut combat_lists = CombatLists::for_planets(&state.planets);
     let mut fleets_to_remove = HashSet::new();
 
     for fleet in &mut state.fleets {
@@ -239,10 +289,7 @@ fn move_fleets(state: &mut State) -> HashMap<u32, Vec<Fleet>> {
             if segment_aabb_contains_point(planet_pos, old_pos, new_pos, planet.radius)
                 && point_to_segment_distance(planet_pos, old_pos, new_pos) < planet.radius
             {
-                combat_lists
-                    .get_mut(&planet.id)
-                    .expect("combat list exists for every planet")
-                    .push(fleet.clone());
+                combat_lists.push(planet.id, fleet.clone());
                 fleets_to_remove.insert(fleet.id);
                 hit_planet = true;
                 break;
@@ -271,7 +318,7 @@ fn move_fleets(state: &mut State) -> HashMap<u32, Vec<Fleet>> {
 
 fn move_planets_and_sweep(
     state: &mut State,
-    combat_lists: &mut HashMap<u32, Vec<Fleet>>,
+    combat_lists: &mut CombatLists,
     swept_fleet_ids: &mut HashSet<u32>,
 ) {
     let comet_ids: HashSet<u32> = state.comet_planet_ids.iter().copied().collect();
@@ -321,7 +368,7 @@ fn move_planets_and_sweep(
 
 fn move_comets_and_sweep(
     state: &mut State,
-    combat_lists: &mut HashMap<u32, Vec<Fleet>>,
+    combat_lists: &mut CombatLists,
     swept_fleet_ids: &mut HashSet<u32>,
 ) {
     let mut expired = HashSet::new();
@@ -376,7 +423,7 @@ fn move_comets_and_sweep(
 
 fn sweep_fleets(
     state: &State,
-    combat_lists: &mut HashMap<u32, Vec<Fleet>>,
+    combat_lists: &mut CombatLists,
     swept_fleet_ids: &mut HashSet<u32>,
     planet_id: u32,
     planet_radius: f64,
@@ -395,10 +442,7 @@ fn sweep_fleets(
         if segment_aabb_contains_point(fleet_pos, old_pos, new_pos, planet_radius)
             && point_to_segment_distance(fleet_pos, old_pos, new_pos) < planet_radius
         {
-            combat_lists
-                .entry(planet_id)
-                .or_default()
-                .push(fleet.clone());
+            combat_lists.push(planet_id, fleet.clone());
             swept_fleet_ids.insert(fleet.id);
         }
     }
@@ -414,17 +458,13 @@ fn segment_aabb_contains_point(point: Point, start: Point, end: Point, radius: f
     !(point.x < min_x || point.x > max_x || point.y < min_y || point.y > max_y)
 }
 
-fn remove_marked_fleets(state: &mut State, combat_lists: &HashMap<u32, Vec<Fleet>>) {
-    let removed: HashSet<u32> = combat_lists
-        .values()
-        .flatten()
-        .map(|fleet| fleet.id)
-        .collect();
+fn remove_marked_fleets(state: &mut State, combat_lists: &CombatLists) {
+    let removed: HashSet<u32> = combat_lists.iter_fleets().map(|fleet| fleet.id).collect();
     state.fleets.retain(|fleet| !removed.contains(&fleet.id));
 }
 
-fn resolve_combats(state: &mut State, combat_lists: HashMap<u32, Vec<Fleet>>) {
-    for (planet_id, planet_fleets) in combat_lists {
+fn resolve_combats(state: &mut State, combat_lists: CombatLists) {
+    for (planet_id, planet_fleets) in combat_lists.into_buckets() {
         if planet_fleets.is_empty() {
             continue;
         }
@@ -630,6 +670,18 @@ mod tests {
             ]),
             initial_planets: None,
         })
+    }
+
+    fn planet_with_id(id: u32) -> Planet {
+        Planet {
+            id,
+            owner: -1,
+            x: 0.0,
+            y: 0.0,
+            radius: 1.0,
+            ships: 0,
+            production: 0,
+        }
     }
 
     #[test]
@@ -1132,7 +1184,7 @@ mod tests {
             from_planet_id: 1,
             ships: 4,
         }];
-        let mut combat_lists = HashMap::from([(10, Vec::new()), (11, Vec::new())]);
+        let mut combat_lists = CombatLists::for_planets(&[planet_with_id(10), planet_with_id(11)]);
         let mut swept_fleet_ids = HashSet::new();
 
         sweep_fleets(
@@ -1154,8 +1206,8 @@ mod tests {
             Point::new(50.0, 52.0),
         );
 
-        assert_eq!(combat_lists[&10].len(), 1);
-        assert!(combat_lists[&11].is_empty());
+        assert_eq!(combat_lists.get(10).unwrap().len(), 1);
+        assert!(combat_lists.get(11).unwrap().is_empty());
     }
 
     #[test]
@@ -1172,7 +1224,8 @@ mod tests {
         }];
         let planet_id = 10;
         let comet_id = 11;
-        let mut combat_lists = HashMap::from([(planet_id, Vec::new()), (comet_id, Vec::new())]);
+        let mut combat_lists =
+            CombatLists::for_planets(&[planet_with_id(planet_id), planet_with_id(comet_id)]);
         let mut swept_fleet_ids = HashSet::new();
 
         sweep_fleets(
@@ -1194,8 +1247,137 @@ mod tests {
             Point::new(50.0, 52.0),
         );
 
-        assert_eq!(combat_lists[&planet_id].len(), 1);
-        assert!(combat_lists[&comet_id].is_empty());
+        assert_eq!(combat_lists.get(planet_id).unwrap().len(), 1);
+        assert!(combat_lists.get(comet_id).unwrap().is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "combat list max planet id must be < 100")]
+    fn combat_lists_reject_planet_ids_at_limit() {
+        let _combat_lists = CombatLists::for_planets(&[planet_with_id(100)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "combat list exists for every planet")]
+    fn sweep_fleets_panics_for_missing_combat_bucket() {
+        let mut state = base_state(2);
+        state.fleets = vec![Fleet {
+            id: 0,
+            owner: 1,
+            x: 50.0,
+            y: 50.0,
+            angle: 0.0,
+            from_planet_id: 1,
+            ships: 4,
+        }];
+        let mut combat_lists = CombatLists::for_planets(&[planet_with_id(10)]);
+        let mut swept_fleet_ids = HashSet::new();
+
+        sweep_fleets(
+            &state,
+            &mut combat_lists,
+            &mut swept_fleet_ids,
+            9,
+            2.0,
+            Point::new(48.0, 50.0),
+            Point::new(52.0, 50.0),
+        );
+    }
+
+    #[test]
+    fn queued_combat_for_removed_planet_still_removes_fleet() {
+        let mut state = reset(ResetConfig {
+            sim: SimConfig::new(2),
+            step: None,
+            angular_velocity: Some(0.0),
+            planets: Some(vec![Planet {
+                id: 10,
+                owner: 1,
+                x: 50.0,
+                y: 50.0,
+                radius: 2.0,
+                ships: 10,
+                production: 0,
+            }]),
+            initial_planets: None,
+        });
+        state.fleets = vec![Fleet {
+            id: 0,
+            owner: 0,
+            x: 50.0,
+            y: 50.0,
+            angle: 0.0,
+            from_planet_id: 0,
+            ships: 4,
+        }];
+        let mut combat_lists = CombatLists::for_planets(&state.planets);
+        let mut swept_fleet_ids = HashSet::new();
+
+        sweep_fleets(
+            &state,
+            &mut combat_lists,
+            &mut swept_fleet_ids,
+            10,
+            2.0,
+            Point::new(48.0, 50.0),
+            Point::new(52.0, 50.0),
+        );
+        remove_comet_planets(&mut state, &HashSet::from([10]));
+        remove_marked_fleets(&mut state, &combat_lists);
+        resolve_combats(&mut state, combat_lists);
+
+        assert!(state.planets.is_empty());
+        assert!(state.fleets.is_empty());
+    }
+
+    #[test]
+    fn duplicate_planet_ids_resolve_against_first_planet() {
+        let mut state = reset(ResetConfig {
+            sim: SimConfig::new(2),
+            step: None,
+            angular_velocity: Some(0.0),
+            planets: Some(vec![
+                Planet {
+                    id: 10,
+                    owner: 1,
+                    x: 50.0,
+                    y: 50.0,
+                    radius: 2.0,
+                    ships: 5,
+                    production: 0,
+                },
+                Planet {
+                    id: 10,
+                    owner: -1,
+                    x: 60.0,
+                    y: 60.0,
+                    radius: 2.0,
+                    ships: 20,
+                    production: 0,
+                },
+            ]),
+            initial_planets: None,
+        });
+        let mut combat_lists = CombatLists::for_planets(&state.planets);
+
+        combat_lists.push(
+            10,
+            Fleet {
+                id: 0,
+                owner: 0,
+                x: 50.0,
+                y: 50.0,
+                angle: 0.0,
+                from_planet_id: 0,
+                ships: 10,
+            },
+        );
+        resolve_combats(&mut state, combat_lists);
+
+        assert_eq!(state.planets[0].owner, 0);
+        assert_eq!(state.planets[0].ships, 5);
+        assert_eq!(state.planets[1].owner, -1);
+        assert_eq!(state.planets[1].ships, 20);
     }
 
     #[test]
