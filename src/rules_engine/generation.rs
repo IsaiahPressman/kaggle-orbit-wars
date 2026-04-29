@@ -31,19 +31,6 @@ pub fn generate_planets(rng: &mut impl RandomSource) -> Vec<Planet> {
     let num_q1 = rng.randint(MIN_PLANET_GROUPS, MAX_PLANET_GROUPS) as usize;
     let mut next_id = 0;
 
-    if let Some(group) = place_diagonal_group(&planets, next_id, static_diagonal_orbital_range, rng)
-    {
-        planets.extend(group);
-        next_id += 4;
-    }
-
-    if let Some(group) =
-        place_diagonal_group(&planets, next_id, orbiting_diagonal_orbital_range, rng)
-    {
-        planets.extend(group);
-        next_id += 4;
-    }
-
     let mut static_groups = 0;
     for _ in 0..5000 {
         if static_groups >= MIN_STATIC_GROUPS {
@@ -141,22 +128,7 @@ pub fn assign_home_planets(
         return;
     }
 
-    let home_group = if player_count == 4 {
-        let diagonal_groups = (0..num_groups)
-            .filter(|group_index| {
-                let planet = &planets[group_index * 4];
-                ((planet.x - CENTER) - (planet.y - CENTER)).abs() < 0.01
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            !diagonal_groups.is_empty(),
-            "4p requires at least one y=x diagonal group"
-        );
-        let diagonal_index = rng.randint(0, diagonal_groups.len() as i32 - 1) as usize;
-        diagonal_groups[diagonal_index]
-    } else {
-        rng.randint(0, num_groups as i32 - 1) as usize
-    };
+    let home_group = rng.randint(0, num_groups as i32 - 1) as usize;
     let base = home_group * 4;
 
     if player_count == 2 {
@@ -170,45 +142,6 @@ pub fn assign_home_planets(
             planets[base + player_id].ships = 10;
         }
     }
-}
-
-fn place_diagonal_group(
-    planets: &[Planet],
-    next_id: u32,
-    orbital_range: fn(f64) -> (f64, f64),
-    rng: &mut impl RandomSource,
-) -> Option<Vec<Planet>> {
-    for _ in 0..1000 {
-        let production = rng.randint(1, 5);
-        let radius = planet_radius(production);
-        let (min_orbital, max_orbital) = orbital_range(radius);
-        if min_orbital >= max_orbital {
-            continue;
-        }
-
-        let orbital_radius = rng.uniform(min_orbital, max_orbital);
-        let x = CENTER + orbital_radius * std::f64::consts::FRAC_1_SQRT_2;
-        let y = CENTER + orbital_radius * std::f64::consts::FRAC_1_SQRT_2;
-        let ships = rng.randint(5, 99).min(rng.randint(5, 99));
-        let group = symmetric_planets(next_id, -1, x, y, radius, ships, production);
-
-        if valid_group(&group, planets) {
-            return Some(group);
-        }
-    }
-
-    None
-}
-
-fn static_diagonal_orbital_range(radius: f64) -> (f64, f64) {
-    (
-        (ROTATION_RADIUS_LIMIT - radius).max((radius + 5.0) * std::f64::consts::SQRT_2),
-        (BOARD_SIZE - CENTER - radius) * std::f64::consts::SQRT_2,
-    )
-}
-
-fn orbiting_diagonal_orbital_range(radius: f64) -> (f64, f64) {
-    (SUN_RADIUS + radius + 10.0, ROTATION_RADIUS_LIMIT - radius)
 }
 
 pub fn generate_comet_paths(
@@ -524,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_home_planets_selects_four_player_home_from_diagonal_groups() {
+    fn assign_home_planets_selects_four_player_home_from_any_symmetric_group() {
         let radius = planet_radius(2);
         let mut planets = symmetric_planets(0, -1, 95.0, 95.0, radius, 20, 2);
         planets.extend(symmetric_planets(4, -1, 75.0, 55.0, radius, 20, 2));
@@ -539,7 +472,7 @@ mod tests {
                 .filter(|planet| planet.owner != -1)
                 .map(|planet| planet.id)
                 .collect::<Vec<_>>(),
-            vec![8, 9, 10, 11]
+            vec![4, 5, 6, 7]
         );
     }
 
@@ -576,10 +509,10 @@ mod tests {
         assert_eq!(paths[0].len(), paths[1].len());
 
         for (((q1, q2), q3), q4) in paths[0].iter().zip(&paths[1]).zip(&paths[2]).zip(&paths[3]) {
-            assert_eq!(q2.x, BOARD_SIZE - q1.x);
-            assert_eq!(q2.y, q1.y);
-            assert_eq!(q3.x, q1.x);
-            assert_eq!(q3.y, BOARD_SIZE - q1.y);
+            assert_eq!(q2.x, BOARD_SIZE - q1.y);
+            assert_eq!(q2.y, q1.x);
+            assert_eq!(q3.x, q1.y);
+            assert_eq!(q3.y, BOARD_SIZE - q1.x);
             assert_eq!(q4.x, BOARD_SIZE - q1.x);
             assert_eq!(q4.y, BOARD_SIZE - q1.y);
         }
@@ -605,10 +538,10 @@ mod tests {
 
         for group in planets.chunks_exact(4) {
             let q1 = &group[0];
-            assert_eq!(group[1].x, BOARD_SIZE - q1.x);
-            assert_eq!(group[1].y, q1.y);
-            assert_eq!(group[2].x, q1.x);
-            assert_eq!(group[2].y, BOARD_SIZE - q1.y);
+            assert_eq!(group[1].x, BOARD_SIZE - q1.y);
+            assert_eq!(group[1].y, q1.x);
+            assert_eq!(group[2].x, q1.y);
+            assert_eq!(group[2].y, BOARD_SIZE - q1.x);
             assert_eq!(group[3].x, BOARD_SIZE - q1.x);
             assert_eq!(group[3].y, BOARD_SIZE - q1.y);
         }

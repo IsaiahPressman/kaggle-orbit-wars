@@ -83,8 +83,11 @@ Start with component tests:
 - Python-reference generation fixtures for planet and comet generation, so Rust
   must consume the same recorded random calls and match Python's generated
   outputs.
-- Planet generation reserves static and orbiting y=x diagonal groups before the
-  random static and fill phases, matching the current Python reference.
+- Planet generation follows the current Python reference phases directly:
+  random static groups first, then random fill groups until the target count and
+  at least one orbiting group are present.
+- Home assignment picks any symmetric group for both 2-player and 4-player
+  games; current fixtures no longer require a y=x diagonal group.
 - Action validation and launch side effects.
 - Production.
 - Fleet movement, out-of-bounds removal, sun collision, planet collision.
