@@ -1,4 +1,3 @@
-use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use super::generation::{
@@ -398,24 +397,33 @@ fn resolve_combats(state: &mut State, combat_lists: HashMap<u32, Vec<Fleet>>) {
             continue;
         };
 
-        let mut player_ships: HashMap<i32, i32> = HashMap::new();
+        let mut ships_by_owner = [0_i32; 4];
         for fleet in planet_fleets {
-            *player_ships.entry(fleet.owner).or_default() += fleet.ships;
+            ships_by_owner[fleet.owner as usize] += fleet.ships;
         }
 
-        let mut sorted_players: Vec<(i32, i32)> = player_ships.into_iter().collect();
-        sorted_players.sort_by_key(|player| Reverse(player.1));
+        let mut top_owner = -1;
+        let mut top_ships = 0;
+        let mut second_ships = 0;
+        let mut tied_top = false;
 
-        let (survivor_owner, survivor_ships) = if sorted_players.len() > 1 {
-            let top = sorted_players[0];
-            let second = sorted_players[1];
-            if top.1 == second.1 {
-                (-1, 0)
-            } else {
-                (top.0, top.1 - second.1)
+        for (owner, ships) in ships_by_owner.into_iter().enumerate() {
+            if ships > top_ships {
+                second_ships = top_ships;
+                top_ships = ships;
+                top_owner = owner as i32;
+                tied_top = false;
+            } else if ships == top_ships && ships > 0 {
+                tied_top = true;
+            } else if ships > second_ships {
+                second_ships = ships;
             }
+        }
+
+        let (survivor_owner, survivor_ships) = if tied_top {
+            (-1, 0)
         } else {
-            sorted_players[0]
+            (top_owner, top_ships - second_ships)
         };
 
         if survivor_ships <= 0 {
@@ -806,6 +814,90 @@ mod tests {
         assert!(state.fleets.is_empty());
         assert_eq!(state.planets[1].owner, -1);
         assert_eq!(state.planets[1].ships, 7);
+    }
+
+    #[test]
+    fn four_player_top_attacker_tie_leaves_planet_unchanged() {
+        let mut state = base_state(4);
+        state.fleets = vec![
+            Fleet {
+                id: 0,
+                owner: 0,
+                x: 27.0,
+                y: 20.0,
+                angle: 0.0,
+                from_planet_id: 0,
+                ships: 5,
+            },
+            Fleet {
+                id: 1,
+                owner: 2,
+                x: 27.0,
+                y: 20.0,
+                angle: 0.0,
+                from_planet_id: 0,
+                ships: 12,
+            },
+            Fleet {
+                id: 2,
+                owner: 3,
+                x: 27.0,
+                y: 20.0,
+                angle: 0.0,
+                from_planet_id: 0,
+                ships: 12,
+            },
+        ];
+        state.planets[1].x = 28.0;
+        state.planets[1].ships = 7;
+
+        step(&mut state, &[vec![], vec![], vec![], vec![]]);
+
+        assert!(state.fleets.is_empty());
+        assert_eq!(state.planets[1].owner, -1);
+        assert_eq!(state.planets[1].ships, 7);
+    }
+
+    #[test]
+    fn four_player_unique_top_beats_tied_second_place() {
+        let mut state = base_state(4);
+        state.fleets = vec![
+            Fleet {
+                id: 0,
+                owner: 0,
+                x: 27.0,
+                y: 20.0,
+                angle: 0.0,
+                from_planet_id: 0,
+                ships: 5,
+            },
+            Fleet {
+                id: 1,
+                owner: 1,
+                x: 27.0,
+                y: 20.0,
+                angle: 0.0,
+                from_planet_id: 0,
+                ships: 5,
+            },
+            Fleet {
+                id: 2,
+                owner: 2,
+                x: 27.0,
+                y: 20.0,
+                angle: 0.0,
+                from_planet_id: 0,
+                ships: 12,
+            },
+        ];
+        state.planets[1].x = 28.0;
+        state.planets[1].ships = 3;
+
+        step(&mut state, &[vec![], vec![], vec![], vec![]]);
+
+        assert!(state.fleets.is_empty());
+        assert_eq!(state.planets[1].owner, 2);
+        assert_eq!(state.planets[1].ships, 4);
     }
 
     #[test]
