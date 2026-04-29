@@ -96,7 +96,7 @@ pub(super) fn encode_state(
         row[OWNER_CHANNELS_WITH_NEUTRAL] = normalize_position(planet.x);
         row[OWNER_CHANNELS_WITH_NEUTRAL + 1] = normalize_position(planet.y);
 
-        let production = planet.production.clamp(1, PRODUCTION_CHANNELS as i32) as usize - 1;
+        let production = production_channel(planet.production);
         row[OWNER_CHANNELS_WITH_NEUTRAL + 2 + production] = 1.0;
 
         row[12] = (planet.radius / 3.0) as f32;
@@ -247,7 +247,7 @@ fn state_from_arrays(
                 y: finite_f64(row[3], "planet y")?,
                 radius: finite_f64(row[4], "planet radius")?,
                 ships: finite_i32(row[5], "planet ships")?,
-                production: finite_i32(row[6], "planet production")?,
+                production: finite_production(row[6])?,
             })
         })
         .collect::<PyResult<Vec<_>>>()?;
@@ -372,6 +372,16 @@ fn finite_usize(value: f64, name: &str) -> PyResult<usize> {
     Ok(rounded as usize)
 }
 
+fn finite_production(value: f64) -> PyResult<i32> {
+    let production = finite_i32(value, "planet production")?;
+    if (1..=PRODUCTION_CHANNELS as i32).contains(&production) {
+        return Ok(production);
+    }
+    Err(PyValueError::new_err(format!(
+        "planet production must be between 1 and {PRODUCTION_CHANNELS}"
+    )))
+}
+
 fn finite_integer(value: f64, name: &str) -> PyResult<f64> {
     finite_f64(value, name)?;
     let rounded = value.round();
@@ -379,6 +389,14 @@ fn finite_integer(value: f64, name: &str) -> PyResult<f64> {
         return Ok(rounded);
     }
     Err(PyValueError::new_err(format!("{name} must be an integer")))
+}
+
+fn production_channel(production: i32) -> usize {
+    assert!(
+        (1..=PRODUCTION_CHANNELS as i32).contains(&production),
+        "planet production must be between 1 and {PRODUCTION_CHANNELS}, got {production}"
+    );
+    production as usize - 1
 }
 
 fn require_shape_suffix(name: &str, actual: &[usize], expected_last_dim: usize) -> PyResult<()> {
@@ -539,6 +557,66 @@ mod tests {
         assert!(finite_i32(4.1, "value").is_err());
         assert!(finite_u32(7.9, "value").is_err());
         assert!(finite_usize(3.5, "value").is_err());
+    }
+
+    #[test]
+    fn planet_production_requires_documented_one_hot_range() {
+        assert_eq!(finite_production(1.0).unwrap(), 1);
+        assert_eq!(finite_production(5.0).unwrap(), 5);
+        assert_eq!(production_channel(1), 0);
+        assert_eq!(production_channel(5), 4);
+
+        assert!(finite_production(0.0).is_err());
+        assert!(finite_production(6.0).is_err());
+        assert!(finite_production(-1.0).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "planet production must be between 1 and 5")]
+    fn encode_state_rejects_invalid_planet_production() {
+        let state = State {
+            config: SimConfig::new(2),
+            step: 0,
+            angular_velocity: 0.025,
+            initial_planets: Vec::new(),
+            planets: vec![Planet {
+                id: 0,
+                owner: 0,
+                x: 50.0,
+                y: 50.0,
+                radius: 2.0,
+                ships: 10,
+                production: 0,
+            }],
+            fleets: Vec::new(),
+            next_fleet_id: 0,
+            comets: Vec::new(),
+            comet_planet_ids: Vec::new(),
+        };
+        let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
+        let mut fleet_obs = Vec::new();
+        let mut comet_obs = vec![0.0; MAX_COMETS * COMET_CHANNELS];
+        let mut planet_mask = vec![false; MAX_PLANETS];
+        let mut fleet_mask = Vec::new();
+        let mut comet_mask = vec![false; MAX_COMETS];
+        let mut global_obs = vec![0.0; GLOBAL_CHANNELS];
+        let mut can_act = vec![false; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+
+        encode_state(
+            &state,
+            &PlayerMap::identity(),
+            0,
+            &mut planet_obs,
+            &mut fleet_obs,
+            &mut comet_obs,
+            &mut planet_mask,
+            &mut fleet_mask,
+            &mut comet_mask,
+            &mut global_obs,
+            &mut can_act,
+            &mut max_launch,
+        );
     }
 
     #[test]

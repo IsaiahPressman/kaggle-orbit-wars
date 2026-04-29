@@ -9,10 +9,28 @@ use super::env::{step_with_injections, PlayerAction};
 use super::generation::RandomSource;
 use super::state::{
     CometGroup, CometSpawnInjection, Fleet, LaunchAction, Planet, PlayerResult, Point, SimConfig,
-    State, StepInjections, StepResult,
+    State, StepInjections, StepResult, COMET_SPAWN_STEPS,
 };
 
 const DEFAULT_FIXTURE_DIR: &str = "tests/fixtures/orbit_wars_replays";
+const REQUIRED_REPLAY_COVERAGE: [ReplayCoverageRequirement; 2] = [
+    ReplayCoverageRequirement {
+        episode_id: 75_598_045,
+        players: 2,
+        rows: 499,
+    },
+    ReplayCoverageRequirement {
+        episode_id: 75_601_099,
+        players: 4,
+        rows: 141,
+    },
+];
+
+struct ReplayCoverageRequirement {
+    episode_id: u64,
+    players: usize,
+    rows: usize,
+}
 
 #[derive(Debug, Deserialize)]
 struct FixtureRow {
@@ -22,6 +40,7 @@ struct FixtureRow {
     configuration: ConfigFixture,
     before: ObservationFixture,
     actions: Vec<Vec<[f64; 3]>>,
+    results: Vec<KagglePlayerResult>,
     expected: ObservationFixture,
 }
 
@@ -54,6 +73,12 @@ struct CometFixture {
     path_index: i32,
 }
 
+#[derive(Debug, Deserialize)]
+struct KagglePlayerResult {
+    status: String,
+    reward: Option<f64>,
+}
+
 struct PanicRandom;
 
 impl RandomSource for PanicRandom {
@@ -75,6 +100,10 @@ fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    let mut coverage = REQUIRED_REPLAY_COVERAGE
+        .iter()
+        .map(|requirement| (requirement.episode_id, (0_usize, None)))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let mut checked_rows = 0;
     for fixture_path in fixture_paths {
         let file = File::open(&fixture_path)?;
@@ -87,6 +116,18 @@ fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
             let row: FixtureRow = serde_json::from_str(&line)?;
             check_transition(&row)
                 .map_err(|message| format!("{} step {}: {message}", row.episode_id, row.step))?;
+            if let Some((rows, players)) = coverage.get_mut(&row.episode_id) {
+                *rows += 1;
+                if players.is_none() {
+                    *players = Some(row.players);
+                } else if *players != Some(row.players) {
+                    return Err(format!(
+                        "episode {} mixed player counts in replay fixture",
+                        row.episode_id
+                    )
+                    .into());
+                }
+            }
             checked_rows += 1;
         }
     }
@@ -95,6 +136,36 @@ fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
         checked_rows > 0,
         "replay fixtures contained no transition rows"
     );
+    validate_required_coverage(&coverage)?;
+    Ok(())
+}
+
+fn validate_required_coverage(
+    coverage: &std::collections::BTreeMap<u64, (usize, Option<usize>)>,
+) -> Result<(), Box<dyn Error>> {
+    for requirement in REQUIRED_REPLAY_COVERAGE {
+        let Some((rows, players)) = coverage.get(&requirement.episode_id) else {
+            return Err(format!(
+                "required replay fixture for episode {} is missing",
+                requirement.episode_id
+            )
+            .into());
+        };
+        if *rows != requirement.rows {
+            return Err(format!(
+                "episode {} row count mismatch: {} != {}",
+                requirement.episode_id, rows, requirement.rows
+            )
+            .into());
+        }
+        if *players != Some(requirement.players) {
+            return Err(format!(
+                "episode {} player count mismatch: {:?} != {}",
+                requirement.episode_id, players, requirement.players
+            )
+            .into());
+        }
+    }
     Ok(())
 }
 
@@ -323,12 +394,88 @@ fn python_validated_actions_does_not_truncate_planet_ids() -> Result<(), String>
     Ok(())
 }
 
+#[test]
+fn replay_skip_spawn_injection_does_not_request_rng() {
+    let mut state = State {
+        config: SimConfig::new(2),
+        step: 49,
+        angular_velocity: 0.0,
+        planets: vec![
+            Planet {
+                id: 0,
+                owner: 0,
+                x: 20.0,
+                y: 20.0,
+                radius: 2.0,
+                ships: 10,
+                production: 1,
+            },
+            Planet {
+                id: 1,
+                owner: 1,
+                x: 80.0,
+                y: 80.0,
+                radius: 2.0,
+                ships: 10,
+                production: 1,
+            },
+        ],
+        initial_planets: Vec::new(),
+        fleets: Vec::new(),
+        next_fleet_id: 0,
+        comets: Vec::new(),
+        comet_planet_ids: Vec::new(),
+    };
+    let mut rng = PanicRandom;
+
+    step_with_injections(
+        &mut state,
+        &[vec![], vec![]],
+        &mut rng,
+        StepInjections {
+            comet_spawn: Some(CometSpawnInjection::Skip),
+        },
+    );
+
+    assert!(state.comets.is_empty());
+}
+
 fn injections_from_expected(row: &FixtureRow) -> Result<StepInjections, String> {
-    if row.expected.comets.len() <= row.before.comets.len() {
+    if !COMET_SPAWN_STEPS.contains(&row.step) {
         return Ok(StepInjections::default());
     }
 
-    let comet = &row.expected.comets[row.before.comets.len()];
+    let before_comet_planet_ids = row
+        .before
+        .comets
+        .iter()
+        .flat_map(|comet| comet.planet_ids.iter().copied())
+        .collect::<std::collections::HashSet<_>>();
+    let new_comets = row
+        .expected
+        .comets
+        .iter()
+        .filter(|comet| {
+            comet
+                .planet_ids
+                .first()
+                .is_some_and(|planet_id| !before_comet_planet_ids.contains(planet_id))
+        })
+        .collect::<Vec<_>>();
+
+    if new_comets.is_empty() {
+        return Ok(StepInjections {
+            comet_spawn: Some(CometSpawnInjection::Skip),
+        });
+    }
+    if new_comets.len() > 1 {
+        return Err(format!(
+            "expected at most one spawned comet group, got {}",
+            new_comets.len()
+        ));
+    }
+
+    let comet = new_comets[0];
     let Some(first_planet_id) = comet.planet_ids.first() else {
         return Err("spawned comet group had no planet ids".to_string());
     };
@@ -345,7 +492,7 @@ fn injections_from_expected(row: &FixtureRow) -> Result<StepInjections, String> 
     };
 
     Ok(StepInjections {
-        comet_spawn: Some(CometSpawnInjection {
+        comet_spawn: Some(CometSpawnInjection::Spawn {
             paths: comet
                 .paths
                 .iter()
@@ -367,7 +514,7 @@ fn compare_state(state: &State, result: &StepResult, row: &FixtureRow) -> Result
             state.step, row.expected.step
         ));
     }
-    let expected_player_results = expected_player_results(row);
+    let expected_player_results = player_results_from_kaggle(row)?;
     if result.player_results != expected_player_results {
         return Err(format!(
             "player results mismatch: {:?} != {:?}",
@@ -434,62 +581,40 @@ fn compare_state(state: &State, result: &StepResult, row: &FixtureRow) -> Result
     Ok(())
 }
 
-fn expected_player_results(row: &FixtureRow) -> Vec<PlayerResult> {
-    let reached_step_limit =
-        row.expected.step.saturating_sub(1) >= row.configuration.episode_steps.saturating_sub(2);
-    let alive_flags = player_alive_flags(&row.expected, row.players);
-    let terminated = reached_step_limit || alive_flags.iter().filter(|alive| **alive).count() <= 1;
-    if !terminated {
-        return alive_flags
-            .into_iter()
-            .map(|alive| {
-                if alive {
-                    PlayerResult::Active
-                } else {
-                    PlayerResult::Lost
-                }
-            })
-            .collect();
+fn player_results_from_kaggle(row: &FixtureRow) -> Result<Vec<PlayerResult>, String> {
+    if row.results.len() != row.players {
+        return Err(format!(
+            "expected {} Kaggle player results, got {}",
+            row.players,
+            row.results.len()
+        ));
     }
 
-    let scores = player_scores(row);
-    let max_score = scores.iter().copied().max().unwrap_or(0);
-    scores
-        .into_iter()
-        .map(|score| {
-            if score == max_score && max_score > 0 {
-                PlayerResult::Won
-            } else {
-                PlayerResult::Lost
-            }
+    row.results
+        .iter()
+        .enumerate()
+        .map(|(player_id, result)| match result.status.as_str() {
+            "ACTIVE" => {
+                if result.reward.unwrap_or(0.0) != 0.0 {
+                    return Err(format!(
+                        "active player {player_id} had non-zero reward {:?}",
+                        result.reward
+                    ));
+                }
+                Ok(PlayerResult::Active)
+            },
+            "DONE" => {
+                if result.reward.unwrap_or(0.0) > 0.0 {
+                    Ok(PlayerResult::Won)
+                } else {
+                    Ok(PlayerResult::Lost)
+                }
+            },
+            status => Err(format!(
+                "unsupported Kaggle status for player {player_id}: {status:?}"
+            )),
         })
         .collect()
-}
-
-fn player_alive_flags(observation: &ObservationFixture, player_count: usize) -> Vec<bool> {
-    let mut alive_players = vec![false; player_count];
-    for planet in &observation.planets {
-        if planet[1] != -1.0 {
-            alive_players[planet[1] as usize] = true;
-        }
-    }
-    for fleet in &observation.fleets {
-        alive_players[fleet[1] as usize] = true;
-    }
-    alive_players
-}
-
-fn player_scores(row: &FixtureRow) -> Vec<i32> {
-    let mut scores = vec![0; row.players];
-    for planet in &row.expected.planets {
-        if planet[1] != -1.0 {
-            scores[planet[1] as usize] += planet[5] as i32;
-        }
-    }
-    for fleet in &row.expected.fleets {
-        scores[fleet[1] as usize] += fleet[6] as i32;
-    }
-    scores
 }
 
 fn compare_planets(actual: &[Planet], expected: &[Planet]) -> Result<(), String> {

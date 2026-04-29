@@ -33,10 +33,11 @@ pub fn step(state: &mut State, actions: &[PlayerAction]) -> StepResult;
 `State` owns planets, fleets, comet metadata, the current step, the player
 count, generation constants, and ids needed for deterministic progression.
 
-`StepResult` returns one status per actual player: active, won, or lost. This
-matches the actual player count without making 2-player games carry ignored
-entries. The Python/RL adapter widens this to fixed outer player slots for
-tensor observations, rewards, and dones.
+`StepResult` returns one RL-facing result per actual player: active, won, or
+lost. This matches the actual player count without making 2-player games carry
+ignored entries. Replay parity compares these results against Kaggle
+`status`/`reward` values stored in fixtures, while the Python/RL adapter widens
+results to fixed outer player slots for tensor observations, rewards, and dones.
 
 ## Current Status
 
@@ -97,16 +98,18 @@ Start with component tests:
 
 Replay parity tests:
 
-- Download Kaggle replays directly into compact JSONL fixtures containing typed
-  actions and post-step reference observations.
+- Download Kaggle replays directly into compact JSONL fixtures containing
+  normalized numeric action triples, per-player Kaggle status/reward, and
+  post-step reference observations.
 - Use `steps[t - 1][0].observation` as the transition input, actions from
   `steps[t][player].action`, and `steps[t][0].observation` as the canonical
   expected state.
 - Keep replay fixture downloads out of Git. Download `replay-<episode-id>.jsonl`
   files to the fixture directory or repo root, where `.gitignore` excludes them.
 - `scripts/download_replays.py` writes one JSONL row per transition:
-  `episode_id`, `step`, typed per-player actions, the pre-step observation, and
-  the canonical post-step player 0 observation.
+  `episode_id`, `players`, `step`, normalized per-player action triples,
+  per-player Kaggle `results`, the pre-step observation, and the canonical
+  post-step player 0 observation.
 - `scripts/regenerate_test_fixtures.sh` removes outdated replay fixtures,
   regenerates the Python generation fixture, and downloads the selected replay
   fixture set.
@@ -119,6 +122,9 @@ Replay parity tests:
   fixture-backed parity. When rules change, download new Kaggle episodes as
   JSONL fixtures, update the episode id list below, and leave the test code
   unchanged unless the fixture schema itself changes.
+- Replay parity validates the required documented coverage set in
+  `src/rules_engine/replay_tests.rs`: episode id, player count, and transition
+  row count must match the list below so coverage cannot silently shrink.
 
 The current downloaded reference episodes are:
 
