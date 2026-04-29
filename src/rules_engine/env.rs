@@ -6,7 +6,7 @@ use super::generation::{
 };
 use super::state::{
     CometSpawnInjection, Fleet, LaunchAction, Planet, PlayerResult, Point, ResetConfig, State,
-    StepInjections, StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS, SUN_RADIUS,
+    StepInjections, StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS, MAX_PLAYERS, SUN_RADIUS,
 };
 use super::utils::{fleet_speed, is_orbiting, orbit_position, point_to_segment_distance};
 
@@ -418,7 +418,7 @@ fn resolve_combats(state: &mut State, combat_lists: HashMap<u32, Vec<Fleet>>) {
             continue;
         };
 
-        let mut ships_by_owner = [0_i32; 4];
+        let mut ships_by_owner = [0_i32; MAX_PLAYERS];
         for fleet in planet_fleets {
             ships_by_owner[fleet.owner as usize] += fleet.ships;
         }
@@ -464,13 +464,25 @@ fn resolve_combats(state: &mut State, combat_lists: HashMap<u32, Vec<Fleet>>) {
 }
 
 fn player_results(state: &State) -> Vec<PlayerResult> {
-    let terminated = is_game_terminated(state);
-    let alive_players = player_alive_flags(state);
+    let player_count = state.config.player_count;
+    let mut alive_players = [false; MAX_PLAYERS];
+    for planet in &state.planets {
+        if planet.owner != -1 {
+            alive_players[planet.owner as usize] = true;
+        }
+    }
+    for fleet in &state.fleets {
+        alive_players[fleet.owner as usize] = true;
+    }
+
+    let active_alive_players = &alive_players[..player_count];
+    let remaining_alive_players = active_alive_players.iter().filter(|alive| **alive).count();
+    let terminated = reached_step_limit(state) || remaining_alive_players <= 1;
     if !terminated {
-        return alive_players
-            .into_iter()
+        return active_alive_players
+            .iter()
             .map(|alive| {
-                if alive {
+                if *alive {
                     PlayerResult::Active
                 } else {
                     PlayerResult::Lost
@@ -479,12 +491,22 @@ fn player_results(state: &State) -> Vec<PlayerResult> {
             .collect();
     }
 
-    let scores = player_scores(state);
-    let max_score = scores.iter().copied().max().unwrap_or(0);
-    scores
-        .into_iter()
+    let mut scores = [0_i32; MAX_PLAYERS];
+    for planet in &state.planets {
+        if planet.owner != -1 {
+            scores[planet.owner as usize] += planet.ships;
+        }
+    }
+    for fleet in &state.fleets {
+        scores[fleet.owner as usize] += fleet.ships;
+    }
+
+    let active_scores = &scores[..player_count];
+    let max_score = active_scores.iter().copied().max().unwrap_or(0);
+    active_scores
+        .iter()
         .map(|score| {
-            if score == max_score && max_score > 0 {
+            if *score == max_score && max_score > 0 {
                 PlayerResult::Won
             } else {
                 PlayerResult::Lost
@@ -493,19 +515,8 @@ fn player_results(state: &State) -> Vec<PlayerResult> {
         .collect()
 }
 
-fn is_game_terminated(state: &State) -> bool {
-    reached_step_limit(state) || remaining_alive_players(state) <= 1
-}
-
 fn reached_step_limit(state: &State) -> bool {
     state.step >= state.config.episode_steps.saturating_sub(2)
-}
-
-fn remaining_alive_players(state: &State) -> usize {
-    player_alive_flags(state)
-        .into_iter()
-        .filter(|alive| *alive)
-        .count()
 }
 
 pub fn player_alive_flags(state: &State) -> Vec<bool> {
@@ -519,19 +530,6 @@ pub fn player_alive_flags(state: &State) -> Vec<bool> {
         alive_players[fleet.owner as usize] = true;
     }
     alive_players
-}
-
-fn player_scores(state: &State) -> Vec<i32> {
-    let mut scores = vec![0; state.config.player_count];
-    for planet in &state.planets {
-        if planet.owner != -1 {
-            scores[planet.owner as usize] += planet.ships;
-        }
-    }
-    for fleet in &state.fleets {
-        scores[fleet.owner as usize] += fleet.ships;
-    }
-    scores
 }
 
 #[cfg(test)]
@@ -669,6 +667,50 @@ mod tests {
                 PlayerResult::Active,
                 PlayerResult::Lost,
             ]
+        );
+    }
+
+    #[test]
+    fn nonterminal_player_results_do_not_compute_scores() {
+        let state = reset(ResetConfig {
+            sim: SimConfig::new(2),
+            step: Some(0),
+            angular_velocity: Some(0.0),
+            planets: Some(vec![
+                Planet {
+                    id: 0,
+                    owner: 0,
+                    x: 20.0,
+                    y: 20.0,
+                    radius: 2.0,
+                    ships: i32::MAX,
+                    production: 0,
+                },
+                Planet {
+                    id: 1,
+                    owner: 0,
+                    x: 25.0,
+                    y: 20.0,
+                    radius: 2.0,
+                    ships: i32::MAX,
+                    production: 0,
+                },
+                Planet {
+                    id: 2,
+                    owner: 1,
+                    x: 80.0,
+                    y: 80.0,
+                    radius: 2.0,
+                    ships: 1,
+                    production: 0,
+                },
+            ]),
+            initial_planets: None,
+        });
+
+        assert_eq!(
+            player_results(&state),
+            vec![PlayerResult::Active, PlayerResult::Active]
         );
     }
 

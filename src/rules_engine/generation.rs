@@ -2,7 +2,7 @@ use rand::RngExt;
 
 use super::state::{
     CometGroup, Planet, Point, BOARD_SIZE, CENTER, COMET_PRODUCTION, COMET_RADIUS,
-    MAX_PLANET_GROUPS, MIN_PLANET_GROUPS, MIN_STATIC_GROUPS, PLANET_CLEARANCE,
+    MAX_PLANET_GROUPS, MAX_PLAYERS, MIN_PLANET_GROUPS, MIN_STATIC_GROUPS, PLANET_CLEARANCE,
     ROTATION_RADIUS_LIMIT, SUN_RADIUS,
 };
 use super::utils::{distance, fourfold_symmetric_points, is_orbiting, orbit_position};
@@ -120,7 +120,7 @@ pub fn assign_home_planets(
     rng: &mut impl RandomSource,
 ) {
     assert!(
-        player_count == 2 || player_count == 4,
+        player_count == 2 || player_count == MAX_PLAYERS,
         "Orbit Wars supports exactly 2 or 4 players"
     );
     let num_groups = planets.len() / 4;
@@ -137,7 +137,7 @@ pub fn assign_home_planets(
         planets[base + 3].owner = 1;
         planets[base + 3].ships = 10;
     } else {
-        for player_id in 0..4 {
+        for player_id in 0..MAX_PLAYERS {
             planets[base + player_id].owner = player_id as i32;
             planets[base + player_id].ships = 10;
         }

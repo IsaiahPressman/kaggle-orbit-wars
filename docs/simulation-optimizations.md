@@ -25,6 +25,28 @@ candidates are skipped unless explicitly approved after review.
 - Run focused tests for the touched behavior, then `just rs-prepare` after Rust
   edits and `just py-prepare` after Python edits.
 
+## Benchmark Coverage Notes
+
+The default benchmark uses a random valid-launch policy. It is useful for broad
+RL vector-env throughput, but it can under- or over-represent some workloads:
+
+- Fleet-heavy games: trained policies may create fewer large fleets or many
+  coordinated small fleets. Add an always-launch/high-launch-probability run and
+  a handcrafted fleet-heavy state benchmark for collision, combat, and fleet
+  observation sorting changes.
+- Reset-heavy and spawn-heavy paths: random rollouts include resets and comet
+  spawns, but do not isolate them. Add reset-only and comet-spawn-step
+  benchmarks before judging generation/comet optimizations.
+- Low-action policies: no-op or conservative policies stress production,
+  planet movement, observation writing, and action masks without much fleet
+  churn. Add a no-launch benchmark for changes outside combat and fleet motion.
+- Player-count mix: the default run is 4-player. Also run `--players 2` for
+  changes involving player result, player mapping, action masks, or outer player
+  slots.
+- Observation capacity pressure: benchmark states with fleets below, near, and
+  above `max_fleets`, because overflow logging and fleet sorting/truncation can
+  dominate differently from ordinary random rollouts.
+
 ## Baselines
 
 | Label | Command | Result | Notes |
@@ -40,7 +62,7 @@ candidates are skipped unless explicitly approved after review.
 | 3. Stop rebuilding removed-fleet sets inside every sweep | Accepted | Low for valid simulator states. The optimized path assumes live fleet IDs are unique; invalid/manual states with duplicate live fleet IDs can now skip the second same-id fleet within a single sweep, instead of queueing both from the old per-sweep snapshot. This follows the `next_fleet_id` uniqueness invariant and was approved before keeping the change. | 86,941 -> 95,670 steps/sec in the default release benchmark. | Worker ran `cargo test rules_engine::env::tests` and `just rs-prepare`; reviewer found no valid-state behavior issues. Added sweep precedence tests for first sweep target and planet-before-comet ordering. Final verification: `cargo test rules_engine::env --lib`, `just build-release`, default benchmark, and `just rs-prepare`. | Kept. |
 | 4. Compact combat accumulators instead of cloned fleet lists | Skipped | Low for valid simulator states under the already approved valid-owner and unique-fleet-id invariants. The attempted implementation also changed invalid overflow timing by summing ships at queue time, even for combats that might later target a missing planet. | 95,670 -> 90,984 steps/sec in the default release benchmark. | Worker ran `cargo fmt --check`, `cargo test rules_engine::env --lib`, and `just rs-prepare`; reviewer found no valid-state correctness issue. Final verification before exclusion: `just build-release` and default benchmark. | Code change excluded because it was slower. Likely cause: removing fleet clones did not offset repeated linear lookup over compact planet accumulators; an index map may be required but would increase complexity and overlap with later scratch-structure ideas. |
 | 5. Remove tiny per-step maps/sets | Partially accepted | Low for the accepted subset: direct comet-ID membership preserves `HashSet` membership behavior, including duplicate comet IDs. Skipped direct comet planet lookup because it would change invalid/manual duplicate planet IDs from `HashMap` last-wins to linear-search first-wins. Also skipped ordered `initial_planets` zip to preserve manual states where current and initial planet order differ. | 93,540 -> 96,680 steps/sec in the default release benchmark. | Worker ran focused rules/action/obs tests and `just rs-prepare`; reviewer identified the duplicate planet ID risk, so that subpart was reverted. Final verification: focused rules/action/obs tests, `just build-release`, default benchmark, and `just rs-prepare`. | Kept only direct comet-ID membership in rules movement, observation encoding, and action entity slot filtering. |
-| 6. Rewrite player results with fixed arrays | Pending | Low: terminal scoring and eliminated-player states must match. | Pending | Pending | Pending |
+| 6. Rewrite player results with fixed arrays | Accepted | Low for valid simulator states. The implementation uses `MAX_PLAYERS = 4` fixed buffers and intentionally panics for invalid 5+ player states. Scores are still computed only after terminal status is known, preserving old nonterminal overflow timing. | Short default run was noisy and looked worse; longer isolated comparison with the `MAX_PLAYERS` constant in both versions improved from 81,959 -> 87,363 steps/sec. | Worker ran `cargo fmt --check`, `cargo test rules_engine::env::tests`, and `just rs-prepare`; reviewer found the initial nonterminal score-overflow issue, which was fixed. Added a regression test proving nonterminal result computation does not sum scores. Final verification: focused env/RL tests, `just rs-prepare`, `just build-release`, and a longer release benchmark. | Kept adjusted implementation plus shared `MAX_PLAYERS` constant. |
 | 7. Avoid RNG creation on non-comet steps | Pending | Low: comet-spawn random streams must be unchanged on spawn steps. | Pending | Pending | Pending |
 | 8. Cache action entity slots per environment | Pending | Medium: submitted actions must decode against the prior observation's slots. | Pending | Pending | Pending |
 | 9. Reuse decoded action buffers | Pending | Low: invalid-action no-mutation behavior must be preserved. | Pending | Pending | Pending |
