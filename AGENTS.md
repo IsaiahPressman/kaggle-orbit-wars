@@ -8,9 +8,13 @@
   and known rule risks before changing `src/rules_engine/`.
 - Use `docs/rules-parity-coverage.md` as the parity coverage source of truth.
   Update it whenever rules behavior, fixtures, or coverage changes.
-- Use `docs/rl-api-specs.md` before changing `python/owl/rl.py`, `src/rl/`, or
+- Reference `docs/rl-api-specs.md` before changing `python/owl/rl.py`, `src/rl/`, or
   public RL tensor shapes.
-- Use `docs/pr-checklist.md` before creating, recommending, or merging a PR.
+- Reference `docs/model-architecture.md` before changing `python/owl/model/` or model
+  config, tensor ordering, actor, critic, or initialization behavior.
+- Reference `README.md` and the training config tests before changing
+  `python/owl/train/`, `scripts/run_ppo.py`, or `configs/train/`.
+- Reference `docs/pr-checklist.md` before creating, recommending, or merging a PR.
 
 ## Development Workflow
 
@@ -24,6 +28,11 @@
 - For Orbit Wars rules changes, keep `docs/rules-engine.md` and
   `docs/rules-parity-coverage.md` current with implementation state, test
   surface, and known gaps.
+- `just docs-fresh` requires mapped code changes to update their mapped docs.
+  If docs are already current for a small change, replace the nonce in
+  `.updated-docs` with any new short word or token and stage that file instead
+  of making a fake documentation edit. The nonce is not a counter. Use the
+  marker only when the relevant docs genuinely do not need to change.
 
 ## Error Handling
 
