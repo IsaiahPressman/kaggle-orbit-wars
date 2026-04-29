@@ -11,6 +11,8 @@ use super::state::{
 };
 use super::utils::{fleet_speed, is_orbiting, orbit_position, point_to_segment_distance};
 
+const COLLISION_AABB_SLACK: f64 = 1e-12;
+
 pub type PlayerAction = Vec<LaunchAction>;
 
 pub fn reset(config: ResetConfig) -> State {
@@ -234,7 +236,10 @@ fn move_fleets(state: &mut State) -> HashMap<u32, Vec<Fleet>> {
 
         let mut hit_planet = false;
         for planet in &planets {
-            if point_to_segment_distance(planet.position(), old_pos, new_pos) < planet.radius {
+            let planet_pos = planet.position();
+            if segment_aabb_contains_point(planet_pos, old_pos, new_pos, planet.radius)
+                && point_to_segment_distance(planet_pos, old_pos, new_pos) < planet.radius
+            {
                 combat_lists
                     .get_mut(&planet.id)
                     .expect("combat list exists for every planet")
@@ -387,7 +392,10 @@ fn sweep_fleets(
         if swept_fleet_ids.contains(&fleet.id) {
             continue;
         }
-        if point_to_segment_distance(fleet.position(), old_pos, new_pos) < planet_radius {
+        let fleet_pos = fleet.position();
+        if segment_aabb_contains_point(fleet_pos, old_pos, new_pos, planet_radius)
+            && point_to_segment_distance(fleet_pos, old_pos, new_pos) < planet_radius
+        {
             combat_lists
                 .entry(planet_id)
                 .or_default()
@@ -395,6 +403,16 @@ fn sweep_fleets(
             swept_fleet_ids.insert(fleet.id);
         }
     }
+}
+
+fn segment_aabb_contains_point(point: Point, start: Point, end: Point, radius: f64) -> bool {
+    let expanded_radius = radius + COLLISION_AABB_SLACK;
+    let min_x = start.x.min(end.x) - expanded_radius;
+    let max_x = start.x.max(end.x) + expanded_radius;
+    let min_y = start.y.min(end.y) - expanded_radius;
+    let max_y = start.y.max(end.y) + expanded_radius;
+
+    !(point.x < min_x || point.x > max_x || point.y < min_y || point.y > max_y)
 }
 
 fn remove_marked_fleets(state: &mut State, combat_lists: &HashMap<u32, Vec<Fleet>>) {
@@ -544,6 +562,37 @@ mod tests {
         fn uniform(&mut self, low: f64, high: f64) -> f64 {
             low + (high - low) * self.float
         }
+    }
+
+    #[test]
+    fn segment_aabb_keeps_exact_boundary_candidates() {
+        assert!(segment_aabb_contains_point(
+            Point::new(5.0, 1.0),
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            1.0,
+        ));
+    }
+
+    #[test]
+    fn segment_aabb_keeps_endpoint_collision_candidates() {
+        let point = Point::new(-0.5, 0.5);
+        let start = Point::new(0.0, 0.0);
+        let end = Point::new(10.0, 0.0);
+        let radius = 0.8;
+
+        assert!(point_to_segment_distance(point, start, end) < radius);
+        assert!(segment_aabb_contains_point(point, start, end, radius));
+    }
+
+    #[test]
+    fn segment_aabb_rejects_far_points() {
+        assert!(!segment_aabb_contains_point(
+            Point::new(5.0, 1.1),
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            1.0,
+        ));
     }
 
     fn base_state(player_count: usize) -> State {
