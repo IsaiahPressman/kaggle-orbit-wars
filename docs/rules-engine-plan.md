@@ -146,7 +146,7 @@ The current downloaded reference episodes are:
   both before launches and immediately after movement.
 - Planet movement uses `initial_planets` as the orbital anchor, not last turn's
   position.
-- Four-player home assignment chooses among y=x diagonal groups only, using the
+- Four-player home assignment chooses among any symmetric group, using the
   reference RNG stream after planet generation.
 - Combat is queued during fleet movement and sweep, then resolved after all
   movement.
