@@ -1,6 +1,8 @@
+import owl.train.sampling as sampling_module
 import pytest
 import torch
 from owl.train import (
+    SegmentSamplingConfig,
     sample_segments_by_advantage,
     sample_segments_uniform,
     sample_segments_uniform_single_pass,
@@ -53,3 +55,29 @@ def test_sample_segments_by_advantage_uses_absolute_advantage_priority() -> None
     assert torch.allclose(sample.probabilities, expected)
     assert sample.importance.shape == (5, 1)
     assert sample.importance.max() == pytest.approx(1.0)
+
+
+def test_compiled_priority_sampling_validates_before_tensor_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_compile(target: object, *, mode: str) -> object:
+        assert mode == "default"
+        assert target.__name__ == "_sample_segments_by_advantage_tensors"
+        calls.append(target.__name__)
+        return target
+
+    monkeypatch.setattr(sampling_module.torch, "compile", fake_compile)
+    sample_segments = sampling_module.compile_sample_segments("default")
+
+    with pytest.raises(ValueError, match="advantages must contain only finite values"):
+        sample_segments(
+            torch.tensor([[1.0, float("nan")]]),
+            SegmentSamplingConfig(
+                sampling="advantage_priority",
+                segments_per_minibatch=1,
+            ),
+        )
+
+    assert calls == ["_sample_segments_by_advantage_tensors"]

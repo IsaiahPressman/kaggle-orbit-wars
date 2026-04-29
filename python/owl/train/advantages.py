@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, assert_never
+from typing import Literal, Protocol, assert_never
 
 import torch
 
@@ -12,6 +12,23 @@ from owl.train.utils import (
 )
 
 AdvantageMode = Literal["gae", "gae_vtrace"]
+
+
+class ComputeGAEFn(Protocol):
+    def __call__(
+        self,
+        *,
+        rewards: torch.Tensor,
+        values: torch.Tensor,
+        dones: torch.Tensor,
+        last_values: torch.Tensor,
+        gamma: float,
+        gae_lambda: float,
+        ratios: torch.Tensor | None = None,
+        mode: AdvantageMode = "gae",
+        vtrace_rho_clip: float = 1.0,
+        vtrace_c_clip: float = 1.0,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 
 def compute_gae(
@@ -27,19 +44,75 @@ def compute_gae(
     vtrace_rho_clip: float = 1.0,
     vtrace_c_clip: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    advantages = compute_advantages(
+    next_values, rho, c = _advantage_tensor_inputs(
         values=values,
         rewards=rewards,
         dones=dones,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
         bootstrap_values=last_values,
         ratios=ratios,
         mode=mode,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
         vtrace_rho_clip=vtrace_rho_clip,
         vtrace_c_clip=vtrace_c_clip,
     )
-    return advantages, advantages + values
+    return _compute_gae_tensors(
+        rewards=rewards,
+        values=values,
+        dones=dones,
+        next_values=next_values,
+        rho=rho,
+        c=c,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+    )
+
+
+def compile_compute_gae(compile_mode: str | None) -> ComputeGAEFn:
+    if compile_mode is None:
+        return compute_gae
+    compiled_compute_gae_tensors = torch.compile(
+        _compute_gae_tensors,
+        mode=compile_mode,
+    )
+
+    def compiled_compute_gae(
+        *,
+        rewards: torch.Tensor,
+        values: torch.Tensor,
+        dones: torch.Tensor,
+        last_values: torch.Tensor,
+        gamma: float,
+        gae_lambda: float,
+        ratios: torch.Tensor | None = None,
+        mode: AdvantageMode = "gae",
+        vtrace_rho_clip: float = 1.0,
+        vtrace_c_clip: float = 1.0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        next_values, rho, c = _advantage_tensor_inputs(
+            values=values,
+            rewards=rewards,
+            dones=dones,
+            bootstrap_values=last_values,
+            ratios=ratios,
+            mode=mode,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+            vtrace_rho_clip=vtrace_rho_clip,
+            vtrace_c_clip=vtrace_c_clip,
+        )
+        return compiled_compute_gae_tensors(
+            rewards=rewards,
+            values=values,
+            dones=dones,
+            next_values=next_values,
+            rho=rho,
+            c=c,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+        )
+
+    return compiled_compute_gae
 
 
 def compute_advantages(
@@ -56,6 +129,43 @@ def compute_advantages(
     vtrace_c_clip: float = 1.0,
 ) -> torch.Tensor:
     """Compute advantages for segment-major/time-second tensors [N, T, ...]."""
+    next_values, rho, c = _advantage_tensor_inputs(
+        values=values,
+        rewards=rewards,
+        dones=dones,
+        bootstrap_values=bootstrap_values,
+        ratios=ratios,
+        mode=mode,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+        vtrace_rho_clip=vtrace_rho_clip,
+        vtrace_c_clip=vtrace_c_clip,
+    )
+    return _compute_advantages_tensors(
+        values=values,
+        rewards=rewards,
+        dones=dones,
+        next_values=next_values,
+        rho=rho,
+        c=c,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+    )
+
+
+def _advantage_tensor_inputs(
+    *,
+    values: torch.Tensor,
+    rewards: torch.Tensor,
+    dones: torch.Tensor,
+    bootstrap_values: torch.Tensor | None,
+    ratios: torch.Tensor | None,
+    mode: AdvantageMode,
+    gamma: float,
+    gae_lambda: float,
+    vtrace_rho_clip: float,
+    vtrace_c_clip: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     require_segment_time_major(values, "values")
     require_same_shape(values, rewards, left_name="values", right_name="rewards")
     require_same_shape(values, dones, left_name="values", right_name="dones")
@@ -93,6 +203,44 @@ def compute_advantages(
     else:
         assert_never(mode)
 
+    return next_values, rho, c
+
+
+def _compute_gae_tensors(
+    *,
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    dones: torch.Tensor,
+    next_values: torch.Tensor,
+    rho: torch.Tensor,
+    c: torch.Tensor,
+    gamma: float,
+    gae_lambda: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    advantages = _compute_advantages_tensors(
+        values=values,
+        rewards=rewards,
+        dones=dones,
+        next_values=next_values,
+        rho=rho,
+        c=c,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+    )
+    return advantages, advantages + values
+
+
+def _compute_advantages_tensors(
+    *,
+    values: torch.Tensor,
+    rewards: torch.Tensor,
+    dones: torch.Tensor,
+    next_values: torch.Tensor,
+    rho: torch.Tensor,
+    c: torch.Tensor,
+    gamma: float,
+    gae_lambda: float,
+) -> torch.Tensor:
     dones_float = dones.to(dtype=values.dtype)
     advantages = torch.zeros_like(values)
     last_advantage = torch.zeros_like(values[:, -1])

@@ -646,20 +646,19 @@ def test_ppo_config_defaults_target_kl() -> None:
     assert ppo.PPOConfig().target_kl == pytest.approx(0.03)
 
 
-def test_trainer_compiles_model_when_configured(
+def test_trainer_compile_mode_compiles_only_tensor_helpers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, str]] = []
 
     def fake_compile(target: Any, *, mode: str) -> Any:
-        name = getattr(target, "__name__", target.__class__.__name__)
-        calls.append((name, mode))
+        calls.append((target.__name__, mode))
         return target
 
     monkeypatch.setattr(ppo.torch, "compile", fake_compile)
     env = TinyOrbitEnv(n_envs=2)
     model = TinyOrbitModel()
-    trainer = ppo.PPOTrainer(
+    ppo.PPOTrainer(
         env=env,
         model=model,
         optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
@@ -671,10 +670,9 @@ def test_trainer_compiles_model_when_configured(
         device=torch.device("cpu"),
     )
 
-    assert trainer.model is model
     assert calls == [
-        ("TinyOrbitModel", "default"),
-        ("evaluate_actions", "default"),
+        ("_compute_gae_tensors", "default"),
+        ("_sample_segments_by_advantage_tensors", "default"),
         ("_ppo_loss_tensors", "default"),
     ]
 

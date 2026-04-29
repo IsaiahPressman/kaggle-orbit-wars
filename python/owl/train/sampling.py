@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, assert_never
 
@@ -10,6 +11,7 @@ from owl.config import BaseConfig
 from owl.train.utils import assert_finite, require_2d
 
 SegmentSampling = Literal["uniform", "advantage_priority"]
+SampleSegmentsFn = Callable[[torch.Tensor, "SegmentSamplingConfig"], "SegmentSample"]
 
 
 class SegmentSamplingConfig(BaseConfig):
@@ -60,6 +62,52 @@ def sample_segments(
             eps=config.prio_eps,
         )
     assert_never(config.sampling)
+
+
+def compile_sample_segments(compile_mode: str | None) -> SampleSegmentsFn:
+    if compile_mode is None:
+        return sample_segments
+    compiled_priority_tensors = torch.compile(
+        _sample_segments_by_advantage_tensors,
+        mode=compile_mode,
+    )
+
+    def compiled_sample_segments(
+        advantages: torch.Tensor,
+        config: SegmentSamplingConfig,
+    ) -> SegmentSample:
+        require_2d(advantages, "advantages")
+        if config.segments_per_minibatch <= 0:
+            raise ValueError("segments_per_minibatch must be positive")
+        if config.sampling == "uniform":
+            return sample_segments_uniform(
+                n_segments=advantages.shape[0],
+                segments_per_minibatch=config.segments_per_minibatch,
+                device=advantages.device,
+            )
+        if config.sampling == "advantage_priority":
+            _validate_advantage_priority_sampling_config(
+                segments_per_minibatch=config.segments_per_minibatch,
+                alpha=config.prio_alpha,
+                beta=config.prio_beta,
+                eps=config.prio_eps,
+            )
+            assert_finite(advantages, "advantages")
+            indices, importance, probabilities = compiled_priority_tensors(
+                advantages,
+                config.segments_per_minibatch,
+                config.prio_alpha,
+                config.prio_beta,
+                config.prio_eps,
+            )
+            return SegmentSample(
+                indices=indices,
+                importance=importance,
+                probabilities=probabilities,
+            )
+        assert_never(config.sampling)
+
+    return compiled_sample_segments
 
 
 def sample_segments_uniform(
@@ -129,6 +177,34 @@ def sample_segments_by_advantage(
 ) -> SegmentSample:
     require_2d(advantages, "advantages")
     assert_finite(advantages, "advantages")
+    _validate_advantage_priority_sampling_config(
+        segments_per_minibatch=segments_per_minibatch,
+        alpha=alpha,
+        beta=beta,
+        eps=eps,
+    )
+
+    indices, importance, probabilities = _sample_segments_by_advantage_tensors(
+        advantages,
+        segments_per_minibatch,
+        alpha,
+        beta,
+        eps,
+    )
+    return SegmentSample(
+        indices=indices,
+        importance=importance,
+        probabilities=probabilities,
+    )
+
+
+def _validate_advantage_priority_sampling_config(
+    *,
+    segments_per_minibatch: int,
+    alpha: float,
+    beta: float,
+    eps: float,
+) -> None:
     if segments_per_minibatch <= 0:
         raise ValueError("segments_per_minibatch must be positive")
     if alpha < 0:
@@ -138,6 +214,14 @@ def sample_segments_by_advantage(
     if eps <= 0:
         raise ValueError("eps must be positive")
 
+
+def _sample_segments_by_advantage_tensors(
+    advantages: torch.Tensor,
+    segments_per_minibatch: int,
+    alpha: float,
+    beta: float,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     n_segments = advantages.shape[0]
     priority = advantages.detach().abs().sum(dim=1)
     weights = torch.nan_to_num(
@@ -154,11 +238,7 @@ def sample_segments_by_advantage(
     )
     importance = (n_segments * probabilities[indices]).pow(-beta).unsqueeze(-1)
     importance = importance / importance.max().clamp_min(eps)
-    return SegmentSample(
-        indices=indices,
-        importance=importance,
-        probabilities=probabilities,
-    )
+    return indices, importance, probabilities
 
 
 def segment_sampling_metrics(

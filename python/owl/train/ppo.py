@@ -20,7 +20,12 @@ from owl.rl import (
     ObsV1Config,
     VectorizedEnv,
 )
-from owl.train.advantages import AdvantageMode, compute_gae
+from owl.train.advantages import (
+    AdvantageMode,
+    ComputeGAEFn,
+    compile_compute_gae,
+    compute_gae,
+)
 from owl.train.metrics import (
     explained_variance,
     masked_mean,
@@ -30,9 +35,11 @@ from owl.train.metrics import (
 )
 from owl.train.optimizer import LRScheduler, Optimizer
 from owl.train.sampling import (
+    SampleSegmentsFn,
     SegmentSample,
     SegmentSamplingConfig,
     SegmentSamplingMetrics,
+    compile_sample_segments,
     sample_segments,
     sample_segments_uniform_single_pass,
     segment_sampling_metrics,
@@ -78,16 +85,6 @@ class PPOConfig(BaseConfig):
     debug_validate_ppo_loss_inputs: bool = False
     compile_mode: CompileMode | None = None
     dtype: TrainingDType = "float32"
-
-
-class ModelForwardFn(Protocol):
-    def __call__(
-        self, obs: ObsBatch, *, deterministic: bool = False
-    ) -> ModelOutput: ...
-
-
-class ModelEvaluateActionsFn(Protocol):
-    def __call__(self, obs: ObsBatch, actions: ModelActions) -> ModelEvaluation: ...
 
 
 class PPOLossFn(Protocol):
@@ -290,11 +287,8 @@ class PPOTrainer:
     ) -> None:
         self.env = env
         self.model = model
-        self._model_forward = _compile_model_forward(self.model, config.compile_mode)
-        self._model_evaluate_actions = _compile_model_evaluate_actions(
-            self.model,
-            config.compile_mode,
-        )
+        self._compute_gae = _compile_compute_gae(config.compile_mode)
+        self._sample_segments = _compile_sample_segments(config.compile_mode)
         self._ppo_loss = _compile_ppo_loss(config.compile_mode)
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
@@ -328,7 +322,7 @@ class PPOTrainer:
             if self.config.advantage_mode == "gae_vtrace"
             else None
         )
-        advantages, returns = compute_gae(
+        advantages, returns = self._compute_gae(
             rewards=segments.rewards,
             values=segments.values,
             dones=segments.dones,
@@ -390,7 +384,7 @@ class PPOTrainer:
         with torch.no_grad():
             for step in range(self.config.horizon):
                 with autocast_context(self.config, self.device):
-                    output = self._model_forward(self._obs)
+                    output = self.model(self._obs)
                 actions = _output_actions(output)
                 next_obs, rewards, dones = _step_env(self.env, actions)
                 rewards = rewards.to(
@@ -416,7 +410,7 @@ class PPOTrainer:
                     non_blocking=self._non_blocking_env_to_device,
                 )
             with autocast_context(self.config, self.device):
-                bootstrap = self._model_forward(self._obs)
+                bootstrap = self.model(self._obs)
             return _output_values(bootstrap).detach()
 
     def _update(
@@ -465,7 +459,7 @@ class PPOTrainer:
             sample = (
                 update_sample
                 if update_sample is not None
-                else sample_segments(
+                else self._sample_segments(
                     sampling_advantages,
                     self.config.segment_sampling,
                 )
@@ -528,7 +522,7 @@ class PPOTrainer:
             if self.config.advantage_mode == "gae_vtrace"
             else None
         )
-        return compute_gae(
+        return self._compute_gae(
             rewards=segments.rewards,
             values=current_values,
             dones=segments.dones,
@@ -543,7 +537,7 @@ class PPOTrainer:
 
     def _current_bootstrap_values(self) -> torch.Tensor:
         with torch.no_grad(), autocast_context(self.config, self.device):
-            output = self._model_forward(self._obs)
+            output = self.model(self._obs)
         return _output_values(output).detach()
 
     def _current_segment_logp_values(
@@ -551,7 +545,7 @@ class PPOTrainer:
         segments: PPORolloutSegments,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         with torch.no_grad(), autocast_context(self.config, self.device):
-            output = self._model_evaluate_actions(
+            output = self.model.evaluate_actions(
                 _flatten_obs_time(segments.obs),
                 _flatten_actions_time(segments.actions),
             )
@@ -589,7 +583,7 @@ class PPOTrainer:
         )
 
         with autocast_context(self.config, self.device):
-            output = self._model_evaluate_actions(batch_obs, batch_actions)
+            output = self.model.evaluate_actions(batch_obs, batch_actions)
         new_logp = _output_logp(output).view_as(batch_old_logp)
         entropy = _output_entropy(output, batch_old_logp)
         new_values = _output_values(output).view_as(batch_old_values)
@@ -623,25 +617,18 @@ class PPOTrainer:
         )
 
 
-def _compile_model_forward(
-    model: BaseModelAPI, compile_mode: CompileMode | None
-) -> ModelForwardFn:
+def _compile_compute_gae(compile_mode: CompileMode | None) -> ComputeGAEFn:
     if compile_mode is None:
-        return model
-    compiled: ModelForwardFn = torch.compile(model, mode=compile_mode)
-    return compiled
+        return compute_gae
+    return compile_compute_gae(compile_mode)
 
 
-def _compile_model_evaluate_actions(
-    model: BaseModelAPI, compile_mode: CompileMode | None
-) -> ModelEvaluateActionsFn:
+def _compile_sample_segments(
+    compile_mode: CompileMode | None,
+) -> SampleSegmentsFn:
     if compile_mode is None:
-        return model.evaluate_actions
-    compiled: ModelEvaluateActionsFn = torch.compile(
-        model.evaluate_actions,
-        mode=compile_mode,
-    )
-    return compiled
+        return sample_segments
+    return compile_sample_segments(compile_mode)
 
 
 def _compile_ppo_loss(compile_mode: CompileMode | None) -> PPOLossFn:

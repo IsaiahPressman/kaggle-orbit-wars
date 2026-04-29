@@ -1,3 +1,4 @@
+import owl.train.advantages as advantages_module
 import pytest
 import torch
 from owl.train import compute_advantages
@@ -86,3 +87,34 @@ def test_compute_advantages_rejects_shape_mismatch() -> None:
             gamma=0.99,
             gae_lambda=0.95,
         )
+
+
+def test_compiled_compute_gae_validates_before_tensor_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_compile(target: object, *, mode: str) -> object:
+        assert mode == "default"
+        assert target.__name__ == "_compute_gae_tensors"
+        calls.append(target.__name__)
+        return target
+
+    monkeypatch.setattr(advantages_module.torch, "compile", fake_compile)
+    compute_gae = advantages_module.compile_compute_gae("default")
+
+    with pytest.raises(ValueError, match="rewards must match values shape"):
+        compute_gae(
+            rewards=torch.zeros((3, 2)),
+            values=torch.zeros((2, 3)),
+            dones=torch.zeros((2, 3), dtype=torch.bool),
+            last_values=torch.zeros((2,)),
+            gamma=0.99,
+            gae_lambda=0.95,
+            ratios=torch.zeros((2, 3)),
+            mode="gae_vtrace",
+            vtrace_rho_clip=1.0,
+            vtrace_c_clip=1.0,
+        )
+
+    assert calls == ["_compute_gae_tensors"]
