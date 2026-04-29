@@ -146,7 +146,7 @@ pub struct StepInjections {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct CometSpawnInjection {
-    pub paths: Vec<Vec<Point>>,
-    pub ships: i32,
+pub enum CometSpawnInjection {
+    Spawn { paths: Vec<Vec<Point>>, ships: i32 },
+    Skip,
 }

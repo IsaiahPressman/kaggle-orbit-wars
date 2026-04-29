@@ -202,10 +202,12 @@ def test_ppo_trainer_write_checkpoint_includes_training_state(tmp_path: Path) ->
     assert checkpoint["model"].keys() == model.state_dict().keys()
     assert "state" in checkpoint["optimizer"]
     assert checkpoint["lr_scheduler"] == scheduler.state_dict()
-    assert set(checkpoint["rng_state"]) == {
-        "python",
-        "numpy",
-        "torch",
-        "torch_cuda",
+    assert set(checkpoint) == {
+        "model",
+        "optimizer",
+        "lr_scheduler",
+        "config",
+        "config_path",
+        "env_steps",
     }
     assert not (tmp_path / ".checkpoint.pt.tmp").exists()

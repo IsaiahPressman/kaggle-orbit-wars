@@ -345,6 +345,20 @@ def test_python_observation_encoder_rejects_invalid_globals(
         )
 
 
+@pytest.mark.parametrize("production", [0, 6, -1])
+def test_python_observation_encoder_rejects_invalid_planet_production(
+    production: int,
+) -> None:
+    with pytest.raises(ValueError, match="planet production must be between 1 and 5"):
+        encode_python_observation(
+            {
+                "planets": [[0, -1, 25.0, 75.0, 2.0, 50, production]],
+                "fleets": [],
+                "comets": [],
+            }
+        )
+
+
 def test_python_observation_encoder_keeps_largest_fleets_first(
     capfd: pytest.CaptureFixture[str],
 ) -> None:

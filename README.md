@@ -46,6 +46,10 @@ Run a preset with:
 uv run python scripts/run_ppo.py configs/train/debug.yaml runs --log-mode debug --max-env-steps 16
 ```
 
+PPO checkpoints save model, optimizer, scheduler, config, and environment-step
+metadata. They do not save the Rust environment state or current observation, so
+they are not exact resume snapshots.
+
 ## Orbit Wars replay parity
 
 Replay parity tests use compact Kaggle episode transition fixtures. The
@@ -69,9 +73,10 @@ user.
 
 ### Replay parity workflow
 
-The fixture shape is JSONL with one row per transition: episode id, step, typed
-player actions from `steps[t][player].action`, the input observation from
-`steps[t - 1][0].observation`, and the expected state from
+The fixture shape is JSONL with one row per transition: episode id, player
+count, step, normalized numeric player action triples from
+`steps[t][player].action`, per-player Kaggle `status` and `reward`, the input
+observation from `steps[t - 1][0].observation`, and the expected state from
 `steps[t][0].observation`. `cargo test` discovers all `replay-*.jsonl` files in
 the fixture directory and fails if none are present.
 
@@ -123,7 +128,9 @@ scripts/regenerate_test_fixtures.sh NEW_EPISODE_ID_1 NEW_EPISODE_ID_2
 
 The script removes outdated `replay-*.jsonl` files before downloading the new
 set, and rewrites `tests/fixtures/generation/reference_generation.json` from the
-installed Python environment.
+installed Python environment. Replay tests also validate the documented
+reference episode player counts and row counts, so update the required coverage
+in `src/rules_engine/replay_tests.rs` when replacing the episode set.
 
 3. Update the documented episode IDs in this README and
    `docs/rules-engine.md`.

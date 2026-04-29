@@ -3,14 +3,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections.abc import Iterable
+from numbers import Real
 from pathlib import Path
 from typing import Any
-
-from kaggle.api.kaggle_api_extended import (
-    ApiGetEpisodeReplayRequest,
-    KaggleApi,
-)
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +27,28 @@ def parse_args() -> argparse.Namespace:
         help="Directory to save replay-<episode-id>.jsonl fixtures in",
     )
     return parser.parse_args()
+
+
+def normalize_actions(action: Any) -> list[list[float]]:
+    if not isinstance(action, list):
+        return []
+
+    normalized = []
+    for raw_launch in action:
+        if not isinstance(raw_launch, list) or len(raw_launch) != 3:
+            continue
+        if not all(
+            isinstance(value, Real) and not isinstance(value, bool)
+            for value in raw_launch
+        ):
+            continue
+
+        launch = [float(value) for value in raw_launch]
+        if not all(math.isfinite(value) for value in launch):
+            continue
+        normalized.append(launch)
+
+    return normalized
 
 
 def extract_rows(replay: dict[str, Any]) -> Iterable[dict[str, Any]]:
@@ -53,7 +72,15 @@ def extract_rows(replay: dict[str, Any]) -> Iterable[dict[str, Any]]:
             "configuration": configuration,
             "before": before,
             "actions": [
-                steps[step][player]["action"] for player in range(player_count)
+                normalize_actions(steps[step][player].get("action"))
+                for player in range(player_count)
+            ],
+            "results": [
+                {
+                    "status": steps[step][player]["status"],
+                    "reward": steps[step][player].get("reward"),
+                }
+                for player in range(player_count)
             ],
             "expected": expected,
         }
@@ -64,6 +91,8 @@ def download_replay_fixture(
     episode_id: int,
     save_dir: Path,
 ) -> Path:
+    from kaggle.api.kaggle_api_extended import ApiGetEpisodeReplayRequest
+
     save_dir.mkdir(parents=True, exist_ok=True)
     outfile = save_dir / f"replay-{episode_id}.jsonl"
 
@@ -86,6 +115,8 @@ def download_replay_fixture(
 
 
 def main() -> None:
+    from kaggle.api.kaggle_api_extended import KaggleApi
+
     args = parse_args()
 
     api = KaggleApi()

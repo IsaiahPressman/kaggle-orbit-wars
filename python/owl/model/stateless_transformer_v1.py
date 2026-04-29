@@ -498,7 +498,7 @@ class StatelessTransformerV1(BaseModelAPI):
             angle = actions.angle[..., slot]
             ships = actions.ships[..., slot]
             event_mask = active & launch
-            _require_valid_action_slot(launch, ships, remaining, active)
+            _require_valid_action_slot(launch, angle, ships, remaining, active)
 
             launch_log_prob = -F.binary_cross_entropy_with_logits(
                 params.continue_logits,
@@ -1164,6 +1164,7 @@ def _require_actions_shape(
 
 def _require_valid_action_slot(
     launch: torch.Tensor,
+    angle: torch.Tensor,
     ships: torch.Tensor,
     remaining: torch.Tensor,
     active: torch.Tensor,
@@ -1175,3 +1176,6 @@ def _require_valid_action_slot(
     invalid_ships = launch & (ships.lt(1) | ships.gt(remaining))
     if invalid_ships.any().item():
         raise ValueError("actions.ships must be in 1..remaining for launched slots")
+    launched_active = launch & active
+    if (~torch.isfinite(angle) & launched_active).any().item():
+        raise ValueError("actions.angle must be finite for launched slots")

@@ -889,6 +889,33 @@ def test_evaluate_actions_rejects_invalid_action_dtypes() -> None:
         model.evaluate_actions(obs, output.actions)
 
 
+@pytest.mark.parametrize("angle", [math.nan, math.inf])
+def test_evaluate_actions_rejects_nonfinite_launched_angles(angle: float) -> None:
+    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
+    config = StatelessTransformerV1Config(
+        obs_spec=obs_spec,
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    model = StatelessTransformerV1(config)
+    obs = _obs_batch(
+        batch_size=1,
+        obs_spec=obs_spec,
+        action_spec=config.action_spec,
+    )
+    output = model(obs)
+    output.actions.launch.zero_()
+    output.actions.angle.zero_()
+    output.actions.ships.zero_()
+    output.actions.launch[0, 0, 0, 0] = True
+    output.actions.angle[0, 0, 0, 0] = angle
+    output.actions.ships[0, 0, 0, 0] = 1
+
+    with pytest.raises(ValueError, match=r"actions\.angle must be finite"):
+        model.evaluate_actions(obs, output.actions)
+
+
 def test_critic_requires_still_playing_mask_with_live_player() -> None:
     obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
     config = StatelessTransformerV1Config(

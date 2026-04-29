@@ -92,22 +92,24 @@ fn spawn_comets(
         return;
     }
 
-    let (paths, ships) = if let Some(comet_spawn) = comet_spawn {
-        (comet_spawn.paths, comet_spawn.ships)
-    } else {
-        let Some(paths) = generate_comet_paths(
-            &state.initial_planets,
-            state.angular_velocity,
-            state.step + 1,
-            &state.comet_planet_ids,
-            state.config.comet_speed,
-            rng,
-        ) else {
-            return;
-        };
+    let (paths, ships) = match comet_spawn {
+        Some(CometSpawnInjection::Spawn { paths, ships }) => (paths, ships),
+        Some(CometSpawnInjection::Skip) => return,
+        None => {
+            let Some(paths) = generate_comet_paths(
+                &state.initial_planets,
+                state.angular_velocity,
+                state.step + 1,
+                &state.comet_planet_ids,
+                state.config.comet_speed,
+                rng,
+            ) else {
+                return;
+            };
 
-        let ships = sample_comet_ships(rng);
-        (paths, ships)
+            let ships = sample_comet_ships(rng);
+            (paths, ships)
+        },
     };
 
     let group = spawn_comet_group(

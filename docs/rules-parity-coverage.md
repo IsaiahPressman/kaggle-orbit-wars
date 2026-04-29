@@ -13,10 +13,19 @@ The parity tests fail by default when required fixtures are missing. Set
 `REQUIRE_PARITY_FIXTURES=0` to skip fixture-backed parity on machines that do not
 have local fixtures.
 
+Replay coverage is required for:
+
+- `75601099`: 4 players, 141 recorded transitions.
+- `75598045`: 2 players, 499 recorded transitions.
+
 The replay parity test checks each transition against the Python reference for:
 
 - step counter
-- per-player status: active, won, or lost
+- per-player Kaggle status/reward, mapped to active, won, or lost. The replay
+  check requires exact status parity once Kaggle marks every player `DONE`.
+  Before that global terminal row, Kaggle can keep eliminated players `ACTIVE`
+  while Rust intentionally reports them as `Lost`, so the test only verifies
+  that Rust has not ended the game early.
 - angular velocity
 - planets: id, owner, position, radius, ships, production
 - initial planets
@@ -68,8 +77,10 @@ replays:
 ## Known Boundaries
 
 Replay parity intentionally injects comet paths and comet ships from the
-expected observation. This isolates step parity from random generation. Comet
-generation parity is covered separately by generation fixtures.
+expected observation. It also explicitly injects "skip spawn" on comet spawn
+steps where the replay has no new comet, so replay parity never falls through to
+RNG-backed comet generation. This isolates step parity from random generation.
+Comet generation parity is covered separately by generation fixtures.
 
 The Rust simulator receives typed actions and fails fast on invalid actions.
 Kaggle/Python action parsing is outside the inner simulator API. The replay
