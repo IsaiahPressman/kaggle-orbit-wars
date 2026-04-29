@@ -234,3 +234,18 @@ def test_validate_ppo_loss_inputs_checks_cold_path_invariants() -> None:
             policy_weight=torch.zeros((3, 2)),
             value_weight=torch.zeros((2, 3)),
         )
+
+
+def test_validate_ppo_loss_inputs_rejects_new_values_shape_mismatch() -> None:
+    with pytest.raises(ValueError, match="new_values must match new_logp shape"):
+        validate_ppo_loss_inputs(
+            new_logp=torch.zeros((2, 3)),
+            entropy=torch.zeros((2, 3)),
+            new_values=torch.zeros((3, 2)),
+            old_logp=torch.zeros((2, 3)),
+            old_values=torch.zeros((2, 3)),
+            returns=torch.zeros((2, 3)),
+            advantages=torch.zeros((2, 3)),
+            policy_weight=torch.zeros((2, 3)),
+            value_weight=torch.zeros((2, 3)),
+        )

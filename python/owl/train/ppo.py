@@ -826,6 +826,8 @@ def _ppo_loss_tensors(
     pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef)
     policy_loss = weighted_mean(torch.max(pg_loss1, pg_loss2), policy_weight)
 
+    # TODO: Revisit whether value clipping should anchor to fresher values when
+    # repeated PPO epochs make rollout-time old_values stale.
     value_clipped = old_values + torch.clamp(
         new_values - old_values,
         -vf_clip_coef,
@@ -881,6 +883,9 @@ def validate_ppo_loss_inputs(
     require_same_shape(
         new_logp, old_values, left_name="new_logp", right_name="old_values"
     )
+    require_same_shape(
+        new_logp, new_values, left_name="new_logp", right_name="new_values"
+    )
     require_same_shape(new_logp, returns, left_name="new_logp", right_name="returns")
     require_same_shape(
         new_logp, advantages, left_name="new_logp", right_name="advantages"
@@ -891,10 +896,6 @@ def validate_ppo_loss_inputs(
     require_same_shape(
         new_logp, value_weight, left_name="new_logp", right_name="value_weight"
     )
-    if new_values.numel() != returns.numel():
-        raise ValueError(
-            f"new_values must have {returns.numel()} elements, got {new_values.numel()}"
-        )
     for name, tensor in (
         ("new_logp", new_logp),
         ("entropy", entropy),
