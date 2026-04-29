@@ -13,7 +13,7 @@ use crate::rules_engine::state::{
 };
 use crate::rules_engine::utils::{fleet_speed, is_orbiting};
 
-use super::action_spec::encode_action_spec;
+use super::action_spec::{action_entity_slots, encode_action_spec, ActionEntitySlots};
 use super::{
     log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
     DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, MAX_COMETS, MAX_COMET_PATH_LENGTH,
@@ -55,6 +55,40 @@ pub(super) fn encode_state(
     global_obs: &mut [f32],
     can_act: &mut [bool],
     max_launch: &mut [i64],
+) -> usize {
+    let mut action_slots = [None; ACTION_ENTITY_SLOTS];
+    encode_state_with_action_slots(
+        state,
+        player_map,
+        max_fleets,
+        planet_obs,
+        fleet_obs,
+        comet_obs,
+        planet_mask,
+        fleet_mask,
+        comet_mask,
+        global_obs,
+        can_act,
+        max_launch,
+        &mut action_slots,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn encode_state_with_action_slots(
+    state: &State,
+    player_map: &PlayerMap,
+    max_fleets: usize,
+    planet_obs: &mut [f32],
+    fleet_obs: &mut [f32],
+    comet_obs: &mut [f32],
+    planet_mask: &mut [bool],
+    fleet_mask: &mut [bool],
+    comet_mask: &mut [bool],
+    global_obs: &mut [f32],
+    can_act: &mut [bool],
+    max_launch: &mut [i64],
+    action_slots: &mut ActionEntitySlots,
 ) -> usize {
     let comet_ids = state
         .comet_planet_ids
@@ -122,7 +156,8 @@ pub(super) fn encode_state(
 
     encode_comets(state, player_map, comet_obs, comet_mask);
     encode_global(state, global_obs);
-    encode_action_spec(state, player_map, can_act, max_launch);
+    *action_slots = action_entity_slots(state);
+    encode_action_spec(state, player_map, action_slots, can_act, max_launch);
 
     ignored_fleets
 }

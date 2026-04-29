@@ -6,8 +6,8 @@ use rayon::prelude::*;
 use crate::rules_engine::env::{reset, step, PlayerAction};
 use crate::rules_engine::state::{PlayerResult, ResetConfig, State};
 
-use super::action_spec::decode_pure_actions;
-use super::obs_spec::encode_state;
+use super::action_spec::{action_entity_slots, decode_pure_actions, ActionEntitySlots};
+use super::obs_spec::encode_state_with_action_slots;
 use super::{
     log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
     DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, MAX_COMETS, MAX_PLANETS,
@@ -36,6 +36,7 @@ pub struct PyRlVecEnv {
     max_per_planet_launches: usize,
     states: Vec<State>,
     player_maps: Vec<PlayerMap>,
+    action_slots: Vec<ActionEntitySlots>,
     player_finished: Vec<Vec<bool>>,
 }
 
@@ -82,7 +83,8 @@ impl PyRlVecEnv {
         let envs = (0..n_envs)
             .map(|_| reset_one_env(two_player_weight))
             .collect::<Vec<_>>();
-        let (states, player_maps) = envs.into_iter().unzip();
+        let (states, player_maps): (Vec<_>, Vec<_>) = envs.into_iter().unzip();
+        let action_slots = states.iter().map(action_entity_slots).collect();
 
         Ok(Self {
             n_envs,
@@ -92,6 +94,7 @@ impl PyRlVecEnv {
             max_per_planet_launches,
             states,
             player_maps,
+            action_slots,
             player_finished: vec![vec![false; OUTER_PLAYER_SLOTS]; n_envs],
         })
     }
@@ -143,11 +146,13 @@ impl PyRlVecEnv {
         self.states
             .par_iter_mut()
             .zip_eq(self.player_maps.par_iter_mut())
+            .zip_eq(self.action_slots.par_iter_mut())
             .zip_eq(self.player_finished.par_iter_mut())
-            .for_each(|((state, player_map), player_finished)| {
+            .for_each(|(((state, player_map), action_slots), player_finished)| {
                 let (new_state, new_player_map) = reset_one_env(self.two_player_weight);
                 *state = new_state;
                 *player_map = new_player_map;
+                *action_slots = action_entity_slots(state);
                 player_finished.fill(false);
             });
         self.write_obs(
@@ -213,15 +218,23 @@ impl PyRlVecEnv {
             .states
             .par_iter()
             .zip_eq(self.player_maps.par_iter())
+            .zip_eq(self.action_slots.par_iter())
             .zip_eq(launch_chunks)
             .zip_eq(angle_chunks)
             .zip_eq(ship_chunks)
             .enumerate()
             .map(
-                |(env_index, ((((state, player_map), launch_chunk), angle_chunk), ship_chunk))| {
+                |(
+                    env_index,
+                    (
+                        ((((state, player_map), action_slots), launch_chunk), angle_chunk),
+                        ship_chunk,
+                    ),
+                )| {
                     decode_pure_actions(
                         state,
                         player_map,
+                        action_slots,
                         launch_chunk,
                         angle_chunk,
                         ship_chunk,
@@ -290,7 +303,7 @@ impl PyRlVecEnv {
 impl PyRlVecEnv {
     #[allow(clippy::too_many_arguments)]
     fn write_obs(
-        &self,
+        &mut self,
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
         comet_obs: PyReadwriteArrayDyn<'_, f32>,
@@ -374,6 +387,7 @@ impl PyRlVecEnv {
             .states
             .par_iter()
             .zip_eq(self.player_maps.par_iter())
+            .zip_eq(self.action_slots.par_iter_mut())
             .zip_eq(self.player_finished.par_iter())
             .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
             .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
@@ -416,7 +430,10 @@ impl PyRlVecEnv {
                                             (
                                                 (
                                                     (
-                                                        ((state, player_map), player_finished),
+                                                        (
+                                                            ((state, player_map), action_slots),
+                                                            player_finished,
+                                                        ),
                                                         planet_obs,
                                                     ),
                                                     fleet_obs,
@@ -438,7 +455,7 @@ impl PyRlVecEnv {
                     max_launch,
                 )| {
                     write_still_playing(state, player_map, player_finished, still_playing);
-                    encode_state(
+                    encode_state_with_action_slots(
                         state,
                         player_map,
                         self.max_fleets,
@@ -451,6 +468,7 @@ impl PyRlVecEnv {
                         global_obs,
                         can_act,
                         max_launch,
+                        action_slots,
                     )
                 },
             )
