@@ -32,6 +32,7 @@ without changing callers that validate config dictionaries through the union.
 | `n_action_mixtures` | `4` | Mixture components for launch angle and fleet-size event heads. |
 | `kappa_min` | `1e-3` | Lower bound added to von Mises concentration. |
 | `kappa_max` | `200.0` | Optional cap for von Mises concentration. |
+| `entropy_ship_support_cap` | `256` | Maximum ship-count support enumerated for entropy estimates. |
 | `tau_min` | `1e-3` | Lower bound added to beta-binomial concentration. |
 | `alpha_beta_eps` | `1e-4` | Epsilon added to beta-binomial alpha and beta. |
 | `dir_eps` | `1e-6` | Epsilon for normalizing raw angle direction vectors. |
@@ -176,10 +177,15 @@ The model returns decomposed action tensors:
 - `angle`: float32, `(batch, 4, 44, max_per_planet_launches)`
 - `ships`: int64, `(batch, 4, 44, max_per_planet_launches)`
 
-It also returns decomposed log-prob tensors and sampled entropy estimates for
-launch gates and angle/size events, plus per-player action-entity totals with
-shape `(batch, 4, 44)`. Entropy is estimated from the replayed action as
-`-log_prob(action)`.
+It also returns decomposed log-prob and entropy tensors for launch gates and
+angle/size events, plus per-player action-entity totals with shape
+`(batch, 4, 44)`.
+
+The angle/size entropy is an augmented latent-mixture entropy estimate: mixture
+label entropy plus expected component entropy. It is not the exact marginal
+entropy of the emitted action when mixture components overlap. Ship-count
+entropy enumerates support only up to `entropy_ship_support_cap`; residual ship
+budgets above that cap use truncated support.
 
 ## Log-Prob Replay
 

@@ -415,12 +415,9 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
         output.entropies.per_player_entity,
         (output.entropies.launch + output.entropies.angle_and_size).sum(dim=-1),
     )
-    assert torch.allclose(output.entropies.launch, -output.log_probs.launch)
-    assert torch.allclose(
-        output.entropies.angle_and_size,
-        -output.log_probs.angle_and_size,
-    )
     assert torch.isfinite(output.entropies.per_player_entity).all()
+    assert torch.all(output.entropies.launch >= 0)
+    assert torch.all(output.entropies.angle_and_size >= 0)
     assert output.values.shape == (2, 4)
     assert output.winner_probabilities.shape == (2, 4)
     assert torch.allclose(output.winner_probabilities.sum(dim=1), torch.ones(2))
@@ -448,11 +445,6 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert torch.allclose(
         evaluation.entropies.per_player_entity,
         output.entropies.per_player_entity,
-    )
-    assert torch.allclose(evaluation.entropies.launch, -evaluation.log_probs.launch)
-    assert torch.allclose(
-        evaluation.entropies.angle_and_size,
-        -evaluation.log_probs.angle_and_size,
     )
     assert torch.allclose(evaluation.values, output.values)
     assert torch.allclose(evaluation.winner_probabilities, output.winner_probabilities)
@@ -640,6 +632,51 @@ def test_distribution_helpers_promote_lower_precision_params_to_fp32() -> None:
     for tensor in (event_log_prob,):
         assert tensor.dtype == torch.float32
         assert torch.isfinite(tensor).all()
+
+
+def test_binary_entropy_from_logits_matches_closed_form() -> None:
+    logits = torch.tensor([0.0, math.log(3.0)])
+    probabilities = torch.sigmoid(logits)
+    expected = -(
+        probabilities * probabilities.log()
+        + (1.0 - probabilities) * (1.0 - probabilities).log()
+    )
+
+    assert torch.allclose(model_impl.binary_entropy_from_logits(logits), expected)
+
+
+def test_masked_action_entropy_includes_latent_mixture_entropy() -> None:
+    mix_logits = torch.zeros((2, 2))
+    params = PolicyParams(
+        continue_logits=torch.tensor([0.0, 10.0]),
+        mix_logits=mix_logits,
+        log_w=torch.log_softmax(mix_logits, dim=-1),
+        loc=torch.zeros((2, 2)),
+        kappa=torch.zeros((2, 2)),
+        alpha=torch.ones((2, 2)),
+        beta=torch.ones((2, 2)),
+    )
+    residual_budget = torch.tensor([3, 3])
+    active = torch.tensor([True, False])
+
+    launch_entropy, event_entropy = model_impl.masked_action_entropy_from_params(
+        params,
+        residual_budget,
+        active,
+        max_ship_support=3,
+    )
+
+    expected_event_entropy = math.log(2.0) + math.log(2.0 * math.pi) + math.log(3.0)
+    assert torch.allclose(
+        launch_entropy,
+        torch.tensor([math.log(2.0), 0.0]),
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        event_entropy,
+        torch.tensor([0.5 * expected_event_entropy, 0.0]),
+        atol=1e-6,
+    )
 
 
 def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:

@@ -53,6 +53,7 @@ class StatelessTransformerV1Config(BaseConfig):
     alpha_beta_eps: float = Field(default=1e-4, gt=0.0)
     dir_eps: float = Field(default=1e-6, gt=0.0)
     max_ship_normalizer: float = Field(default=250.0, gt=0.0)
+    entropy_ship_support_cap: int = Field(default=256, ge=1)
 
     @model_validator(mode="after")
     def _validate_attention_shape(self) -> Self:
@@ -366,8 +367,12 @@ class StatelessTransformerV1(BaseModelAPI):
                 remaining,
                 event_mask,
             )
-            launch_entropy = -launch_log_prob
-            event_entropy = -event_log_prob
+            launch_entropy, event_entropy = masked_action_entropy_from_params(
+                params,
+                remaining,
+                active,
+                max_ship_support=self.config.entropy_ship_support_cap,
+            )
 
             launch_slots.append(launch)
             angle_slots.append(angle)
@@ -504,8 +509,12 @@ class StatelessTransformerV1(BaseModelAPI):
                 remaining,
                 event_mask,
             )
-            launch_entropy = -launch_log_prob
-            event_entropy = -event_log_prob
+            launch_entropy, event_entropy = masked_action_entropy_from_params(
+                params,
+                remaining,
+                active,
+                max_ship_support=self.config.entropy_ship_support_cap,
+            )
 
             launch_log_slots.append(launch_log_prob)
             event_log_slots.append(event_log_prob)
@@ -965,6 +974,97 @@ def masked_event_log_prob_from_params(
         event_log_prob,
         torch.zeros_like(event_log_prob),
     )
+
+
+def masked_action_entropy_from_params(
+    params: PolicyParams,
+    residual_budget: torch.Tensor,
+    active: torch.Tensor,
+    *,
+    max_ship_support: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    params = params.to_distribution_dtype()
+    launch_entropy = binary_entropy_from_logits(params.continue_logits)
+    event_entropy = event_entropy_from_params(
+        params,
+        residual_budget.clamp_min(1),
+        max_ship_support=max_ship_support,
+    )
+    launch_probability = torch.sigmoid(params.continue_logits)
+    return (
+        torch.where(active, launch_entropy, torch.zeros_like(launch_entropy)),
+        torch.where(
+            active,
+            launch_probability * event_entropy,
+            torch.zeros_like(event_entropy),
+        ),
+    )
+
+
+def binary_entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
+    probability = torch.sigmoid(logits)
+    return F.binary_cross_entropy_with_logits(logits, probability, reduction="none")
+
+
+def event_entropy_from_params(
+    params: PolicyParams,
+    residual_budget: torch.Tensor,
+    *,
+    max_ship_support: int,
+) -> torch.Tensor:
+    mix_probabilities = torch.softmax(params.mix_logits, dim=-1)
+    mixture_entropy = -(mix_probabilities * params.log_w).sum(dim=-1)
+    component_entropy = von_mises_entropy(params.kappa) + beta_binomial_entropy(
+        residual_budget,
+        params.alpha,
+        params.beta,
+        max_ship_support=max_ship_support,
+    )
+    return mixture_entropy + (mix_probabilities * component_entropy).sum(dim=-1)
+
+
+def von_mises_entropy(kappa: torch.Tensor) -> torch.Tensor:
+    log_i0 = torch.log(torch.special.i0e(kappa)) + kappa
+    i1_over_i0 = torch.special.i1e(kappa) / torch.special.i0e(kappa)
+    return math.log(2.0 * math.pi) + log_i0 - kappa * i1_over_i0
+
+
+def beta_binomial_entropy(
+    residual_budget: torch.Tensor,
+    alpha: torch.Tensor,
+    beta: torch.Tensor,
+    *,
+    max_ship_support: int,
+) -> torch.Tensor:
+    support = torch.arange(
+        1,
+        max_ship_support + 1,
+        dtype=alpha.dtype,
+        device=alpha.device,
+    )
+    successes = support - 1.0
+    trials = (residual_budget - 1).clamp_min(0).unsqueeze(-1).unsqueeze(-1)
+    successes = successes.view(*((1,) * residual_budget.ndim), max_ship_support, 1)
+    alpha = alpha.unsqueeze(-2)
+    beta = beta.unsqueeze(-2)
+    valid = successes <= trials
+    successes_safe = torch.minimum(successes, trials)
+    log_comb = (
+        torch.lgamma(trials + 1.0)
+        - torch.lgamma(successes_safe + 1.0)
+        - torch.lgamma(trials - successes_safe + 1.0)
+    )
+    log_prob = (
+        log_comb
+        + log_beta(successes_safe + alpha, trials - successes_safe + beta)
+        - log_beta(alpha, beta)
+    )
+    log_prob = torch.where(valid, log_prob, torch.full_like(log_prob, -torch.inf))
+    probabilities = torch.where(valid, log_prob.exp(), torch.zeros_like(log_prob))
+    entropy = -(
+        probabilities * torch.where(valid, log_prob, torch.zeros_like(log_prob))
+    )
+    return entropy.sum(dim=-2)
 
 
 def _per_player_action_entity_log_prob(
