@@ -269,7 +269,6 @@ fn move_planets_and_sweep(
     combat_lists: &mut HashMap<u32, Vec<Fleet>>,
     swept_fleet_ids: &mut HashSet<u32>,
 ) {
-    let comet_ids: HashSet<u32> = state.comet_planet_ids.iter().copied().collect();
     let initial_by_id: HashMap<u32, Planet> = state
         .initial_planets
         .iter()
@@ -278,7 +277,7 @@ fn move_planets_and_sweep(
 
     let mut sweep_checks = Vec::new();
     for planet in &mut state.planets {
-        if comet_ids.contains(&planet.id) {
+        if state.comet_planet_ids.contains(&planet.id) {
             continue;
         }
 

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::rules_engine::env::PlayerAction;
 use crate::rules_engine::state::{LaunchAction, Planet, State};
@@ -107,16 +107,11 @@ pub(super) fn encode_action_spec(
 }
 
 fn action_entity_slots(state: &State) -> Vec<Option<&Planet>> {
-    let comet_ids = state
-        .comet_planet_ids
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
     let mut entities = vec![None; ACTION_ENTITY_SLOTS];
     for (entity_index, planet) in state
         .planets
         .iter()
-        .filter(|planet| !comet_ids.contains(&planet.id))
+        .filter(|planet| !state.comet_planet_ids.contains(&planet.id))
         .take(MAX_PLANETS)
         .enumerate()
     {

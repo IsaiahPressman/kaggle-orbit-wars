@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use numpy::ndarray::{Array1, Array2};
 use numpy::{
@@ -56,15 +56,10 @@ pub(super) fn encode_state(
     can_act: &mut [bool],
     max_launch: &mut [i64],
 ) -> usize {
-    let comet_ids = state
-        .comet_planet_ids
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
     let non_comet_planets = state
         .planets
         .iter()
-        .filter(|planet| !comet_ids.contains(&planet.id))
+        .filter(|planet| !state.comet_planet_ids.contains(&planet.id))
         .collect::<Vec<_>>();
     assert!(
         non_comet_planets.len() <= MAX_PLANETS,
