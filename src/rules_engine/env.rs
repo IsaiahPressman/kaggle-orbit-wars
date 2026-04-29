@@ -224,7 +224,6 @@ fn move_fleets(state: &mut State) -> HashMap<u32, Vec<Fleet>> {
         .iter()
         .map(|planet| (planet.id, Vec::new()))
         .collect();
-    let planets = state.planets.clone();
     let mut fleets_to_remove = HashSet::new();
 
     for fleet in &mut state.fleets {
@@ -235,7 +234,7 @@ fn move_fleets(state: &mut State) -> HashMap<u32, Vec<Fleet>> {
         let new_pos = fleet.position();
 
         let mut hit_planet = false;
-        for planet in &planets {
+        for planet in &state.planets {
             let planet_pos = planet.position();
             if segment_aabb_contains_point(planet_pos, old_pos, new_pos, planet.radius)
                 && point_to_segment_distance(planet_pos, old_pos, new_pos) < planet.radius
@@ -276,10 +275,10 @@ fn move_planets_and_sweep(
     swept_fleet_ids: &mut HashSet<u32>,
 ) {
     let comet_ids: HashSet<u32> = state.comet_planet_ids.iter().copied().collect();
-    let initial_by_id: HashMap<u32, Planet> = state
+    let initial_by_id: HashMap<u32, &Planet> = state
         .initial_planets
         .iter()
-        .map(|planet| (planet.id, planet.clone()))
+        .map(|planet| (planet.id, planet))
         .collect();
 
     let mut sweep_checks = Vec::new();
