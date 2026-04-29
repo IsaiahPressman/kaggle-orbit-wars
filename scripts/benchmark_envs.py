@@ -6,6 +6,8 @@ import contextlib
 import importlib
 import io
 import math
+import statistics
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -114,6 +116,18 @@ def parse_args() -> argparse.Namespace:
         "--no-progress",
         action="store_true",
         help="Disable tqdm progress bars.",
+    )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="Number of independent timed benchmark repeats to run.",
+    )
+    parser.add_argument(
+        "--cooldown-seconds",
+        type=float,
+        default=0.0,
+        help="Seconds to wait before each repeat, useful on passively cooled machines.",
     )
     return parser.parse_args()
 
@@ -329,6 +343,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--steps must be positive")
     if args.warmup_steps < 0:
         raise ValueError("--warmup-steps must be non-negative")
+    if args.repeats <= 0:
+        raise ValueError("--repeats must be positive")
+    if args.cooldown_seconds < 0.0:
+        raise ValueError("--cooldown-seconds must be non-negative")
     if not 0.0 < args.launch_prob <= 1.0:
         raise ValueError("--launch-prob must be in (0, 1]")
     if args.max_per_planet_launches <= 0:
@@ -358,6 +376,38 @@ def print_results(results: list[BenchmarkResult]) -> None:
             speedup = rust.steps_per_second / kaggle.steps_per_second
             print(f"\nrust/kaggle speedup: {speedup:.2f}x")
 
+    repeated_names = sorted({result.name for result in results if len(results) > 1})
+    summaries = []
+    for name in repeated_names:
+        name_results = [result for result in results if result.name == name]
+        if len(name_results) <= 1:
+            continue
+        steps_per_second = [result.steps_per_second for result in name_results]
+        summaries.append((name, steps_per_second))
+
+    if summaries:
+        print(
+            f"\n{'implementation':<18} {'runs':>6} {'mean sps':>12} "
+            f"{'std sps':>12} {'min sps':>12} {'max sps':>12}"
+        )
+        for name, steps_per_second in summaries:
+            std = statistics.stdev(steps_per_second)
+            print(
+                f"{name:<18} {len(steps_per_second):>6} "
+                f"{statistics.mean(steps_per_second):>12.0f} "
+                f"{std:>12.0f} {min(steps_per_second):>12.0f} "
+                f"{max(steps_per_second):>12.0f}"
+            )
+
+
+def benchmark_target(target: Target, args: argparse.Namespace) -> list[BenchmarkResult]:
+    results: list[BenchmarkResult] = []
+    if target in ("both", "rust"):
+        results.append(benchmark_rust(args))
+    if target in ("both", "kaggle"):
+        results.append(benchmark_kaggle(args))
+    return results
+
 
 def main() -> None:
     args = parse_args()
@@ -365,10 +415,18 @@ def main() -> None:
     target = cast(Target, args.target)
 
     results: list[BenchmarkResult] = []
-    if target in ("both", "rust"):
-        results.append(benchmark_rust(args))
-    if target in ("both", "kaggle"):
-        results.append(benchmark_kaggle(args))
+    for repeat_index in range(args.repeats):
+        if args.cooldown_seconds > 0.0:
+            print(
+                f"cooling down for {args.cooldown_seconds:g}s before repeat "
+                f"{repeat_index + 1}/{args.repeats}",
+                file=sys.stderr,
+            )
+            time.sleep(args.cooldown_seconds)
+
+        repeat_args = argparse.Namespace(**vars(args))
+        repeat_args.seed = args.seed + repeat_index
+        results.extend(benchmark_target(target, repeat_args))
 
     print_results(results)
 

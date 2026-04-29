@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use super::generation::{
@@ -269,6 +270,7 @@ fn move_planets_and_sweep(
     combat_lists: &mut HashMap<u32, Vec<Fleet>>,
     swept_fleet_ids: &mut HashSet<u32>,
 ) {
+    let comet_ids: HashSet<u32> = state.comet_planet_ids.iter().copied().collect();
     let initial_by_id: HashMap<u32, Planet> = state
         .initial_planets
         .iter()
@@ -277,7 +279,7 @@ fn move_planets_and_sweep(
 
     let mut sweep_checks = Vec::new();
     for planet in &mut state.planets {
-        if state.comet_planet_ids.contains(&planet.id) {
+        if comet_ids.contains(&planet.id) {
             continue;
         }
 
@@ -418,33 +420,24 @@ fn resolve_combats(state: &mut State, combat_lists: HashMap<u32, Vec<Fleet>>) {
             continue;
         };
 
-        let mut ships_by_owner = [0_i32; MAX_PLAYERS];
+        let mut player_ships: HashMap<i32, i32> = HashMap::new();
         for fleet in planet_fleets {
-            ships_by_owner[fleet.owner as usize] += fleet.ships;
+            *player_ships.entry(fleet.owner).or_default() += fleet.ships;
         }
 
-        let mut top_owner = -1;
-        let mut top_ships = 0;
-        let mut second_ships = 0;
-        let mut tied_top = false;
+        let mut sorted_players: Vec<(i32, i32)> = player_ships.into_iter().collect();
+        sorted_players.sort_by_key(|player| Reverse(player.1));
 
-        for (owner, ships) in ships_by_owner.into_iter().enumerate() {
-            if ships > top_ships {
-                second_ships = top_ships;
-                top_ships = ships;
-                top_owner = owner as i32;
-                tied_top = false;
-            } else if ships == top_ships && ships > 0 {
-                tied_top = true;
-            } else if ships > second_ships {
-                second_ships = ships;
+        let (survivor_owner, survivor_ships) = if sorted_players.len() > 1 {
+            let top = sorted_players[0];
+            let second = sorted_players[1];
+            if top.1 == second.1 {
+                (-1, 0)
+            } else {
+                (top.0, top.1 - second.1)
             }
-        }
-
-        let (survivor_owner, survivor_ships) = if tied_top {
-            (-1, 0)
         } else {
-            (top_owner, top_ships - second_ships)
+            sorted_players[0]
         };
 
         if survivor_ships <= 0 {
