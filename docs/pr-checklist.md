@@ -44,8 +44,7 @@ limited and a full prepare would not add signal.
    - Replay fixtures are present in `tests/fixtures/orbit_wars_replays`.
    - `tests/fixtures/generation/reference_generation.json` is current if
      generation behavior changed.
-   - `docs/rules-engine-plan.md` describes the current implementation state, not
-     only historical plans.
+   - `docs/rules-engine.md` describes the current implementation state.
    - `docs/rules-parity-coverage.md` still describes the real coverage and
      residual gaps.
 

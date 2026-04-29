@@ -1,4 +1,4 @@
-# Rust Rules Engine Plan
+# Rust Rules Engine Reference
 
 This document is the current map for the Rust Orbit Wars simulator. The Python
 reference is the installed `kaggle_environments.envs.orbit_wars.orbit_wars`
@@ -21,9 +21,9 @@ uv run python -c 'from importlib import import_module; from pathlib import Path;
   integers/floats.
 - The engine supports both 2-player and 4-player games from the start.
 
-## Target API
+## Public API
 
-The first stable Rust API should stay small:
+The core Rust API is intentionally small:
 
 ```rust
 pub fn reset(config: ResetConfig) -> State;
@@ -50,19 +50,19 @@ Implemented:
 - Replay parity over ignored Kaggle JSONL fixtures.
 - Python RL observation/action wrappers and vectorized environment.
 
-Not yet implemented:
+Open follow-up work:
 
 - Benchmarks and data-structure optimization for training throughput.
 - Mechanical doc freshness checks beyond `docs/pr-checklist.md`.
 - CI-owned parity fixture cache or checked-in minimal parity fixtures.
 
-## Agentic Workflow
+## Rules-Change Workflow
 
 For rules changes, work in this order:
 
 1. Update or add parity/unit tests that state the expected behavior.
 2. Change the Rust simulator or fixture generator.
-3. Update this plan and `docs/rules-parity-coverage.md` in the same change.
+3. Update this reference and `docs/rules-parity-coverage.md` in the same change.
 4. Run `just rs-prepare` with parity fixtures present. Use
    `REQUIRE_PARITY_FIXTURES=0 just rs-test` only when intentionally skipping
    fixture-backed parity.
@@ -127,8 +127,8 @@ The current downloaded reference episodes are:
 
 ## Maintenance Rules
 
-- Treat this file as a current-state map, not a historical plan. When a listed
-  implementation step is completed, move it into `Current Status` or remove it.
+- Treat this file as a current-state map. When a listed implementation step is
+  completed, move it into `Current Status` or remove it.
 - Any rules-engine change should update this file and
   `docs/rules-parity-coverage.md`, or explicitly state why no docs changed in
   the PR checklist.

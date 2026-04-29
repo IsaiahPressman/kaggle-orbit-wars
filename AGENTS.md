@@ -4,7 +4,7 @@
 
 - Start with `README.md` for setup, fixture regeneration, and the current
   reference episode IDs.
-- Use `docs/rules-engine-plan.md` for rules-engine architecture, current status,
+- Use `docs/rules-engine.md` for rules-engine architecture, current status,
   and known rule risks before changing `src/rules_engine/`.
 - Use `docs/rules-parity-coverage.md` as the parity coverage source of truth.
   Update it whenever rules behavior, fixtures, or coverage changes.
@@ -21,7 +21,7 @@
 - Avoid jumping through hoops for backwards compatibility - don't be afraid of
   refactoring and breaking old APIs in order to improve them.
 - Before creating or recommending a PR, complete `docs/pr-checklist.md` and summarize any residual risks.
-- For Orbit Wars rules changes, keep `docs/rules-engine-plan.md` and
+- For Orbit Wars rules changes, keep `docs/rules-engine.md` and
   `docs/rules-parity-coverage.md` current with implementation state, test
   surface, and known gaps.
 

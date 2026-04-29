@@ -1,7 +1,7 @@
 # Model Architecture
 
-This document summarizes the first trainable actor-critic model scaffold for the
-Orbit Wars RL API.
+This document summarizes the current trainable actor-critic model for the Orbit
+Wars RL API.
 
 ## Tagged Config
 

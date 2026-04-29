@@ -54,8 +54,8 @@ be large.
 
 The current reference episodes are:
 
-- `75601099`
-- `75598045`
+- `75601099` (4-player game)
+- `75598045` (2-player 500-step game)
 
 If fixture files are missing, download them directly into the test fixture
 directory:
@@ -85,7 +85,7 @@ Supported test environment variables:
 When the upstream rules change, keep the test code stable: download replacement
 episodes as JSONL fixtures, move them into the fixture directory if needed,
 update the reference episode id list in this README and
-`docs/rules-engine-plan.md`, and run the parity tests against the fixture
+`docs/rules-engine.md`, and run the parity tests against the fixture
 directory.
 
 ## Generation parity
@@ -126,7 +126,7 @@ set, and rewrites `tests/fixtures/generation/reference_generation.json` from the
 installed Python environment.
 
 3. Update the documented episode IDs in this README and
-   `docs/rules-engine-plan.md`.
+   `docs/rules-engine.md`.
 
 4. Run the full checks with the new fixtures present:
 
