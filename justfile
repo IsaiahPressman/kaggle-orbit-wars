@@ -51,10 +51,13 @@ build:
 build-release:
 	RUSTFLAGS="-C target-cpu=native" uv run maturin develop --release
 
+_prepare_base: build rs-format py-format rs-lint py-lint docs-lint py-static rs-test py-test-full
 [group: 'ci']
-prepare: build rs-format py-format rs-lint py-lint docs-lint docs-fresh py-static rs-test py-test-full
+prepare: _prepare_base docs-fresh
 [group: 'ci']
 prepare-rl: prepare build-release
+[group: 'ci']
+prepare-container: _prepare_base build-release
 
 [group: 'misc']
 clean:

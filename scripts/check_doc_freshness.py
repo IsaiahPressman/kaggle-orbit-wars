@@ -75,6 +75,8 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    print("No doc updates required")
     return 0
 
 

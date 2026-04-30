@@ -64,6 +64,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/opt/cargo/registry \
     --mount=type=cache,target=/opt/cargo/git \
     --mount=type=cache,target=/workspace/orbit-wars/target \
-    just prepare-rl
+    just prepare-container
 
 CMD ["bash"]
