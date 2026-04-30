@@ -21,6 +21,12 @@ scripts/regenerate_test_fixtures.sh
 
 4. `just prepare` should run without errors
 
+## Containerized builds
+
+See `docs/containerization.md` for building a Docker image with the locked Python
+dependencies, Rust toolchain, compiled extension module, and example Slurm launch
+patterns.
+
 ## Orbit Wars reference
 
 The Rust rules engine targets the installed `kaggle-environments` Orbit Wars
