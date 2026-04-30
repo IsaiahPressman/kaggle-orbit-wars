@@ -9,7 +9,7 @@ from owl.rl import ActionPureConfig, ObsV1Config, VectorizedEnv
 
 env = VectorizedEnv(
     n_envs=128,
-    obs_spec=ObsV1Config(max_entities=512),
+    obs_spec=ObsV1Config(max_entities=1024),
     action_spec=ActionPureConfig(max_per_planet_launches=3),
 )
 ```
@@ -29,7 +29,7 @@ env = VectorizedEnv(
 max_fleets = max_entities - (MAX_PLANETS + MAX_COMETS)
 ```
 
-The default `max_entities=512` gives `max_fleets=468`.
+The default `max_entities=1024` gives `max_fleets=980`.
 
 `MAX_PLANETS` matches the current generated-map upper bound:
 `MAX_PLANET_GROUPS * 4 = 10 * 4`. `MAX_COMET_PATH_LENGTH` matches the comet
@@ -41,7 +41,7 @@ the range `5..=40` are rejected.
 Config:
 
 ```python
-{"obs_spec": "obs_v1", "max_entities": 512}
+{"obs_spec": "obs_v1", "max_entities": 1024}
 ```
 
 `ObsV1` writes observations into reusable caller-owned buffers. The vectorized
@@ -112,9 +112,10 @@ order after excluding comet planets.
 
 Shape per env: `(max_fleets, 10)`.
 
-Fleets are sorted by descending ship count, with fleet id as the tie-breaker.
-If there are more active fleets than `max_fleets`, the largest fleets are kept
-and the rest are ignored. Each overflow logs to stderr:
+When all active fleets fit in `max_fleets`, fleets are emitted in simulator
+fleet order. If there are more active fleets than `max_fleets`, fleets are
+sorted by descending ship count, with fleet id as the tie-breaker, so the
+largest fleets are kept and the rest are ignored. Each overflow logs to stderr:
 
 ```text
 max_entities exceeded: N fleets ignored
