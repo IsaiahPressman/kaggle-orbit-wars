@@ -241,6 +241,7 @@ def test_training_presets_make_baseline_and_pufferish_modes_explicit() -> None:
     assert pufferish.env.n_envs == 2048
     assert pufferish.rl.advantage_mode == "puffer_vtrace"
     assert pufferish.rl.recompute_advantages_each_minibatch
+    assert pufferish.rl.normalize_advantages
     assert pufferish.rl.segment_sampling.sampling == "advantage_priority"
     assert pufferish.rl.segment_sampling.prio_alpha == pytest.approx(0.5)
     assert pufferish.rl.segment_sampling.prio_beta == pytest.approx(0.2)

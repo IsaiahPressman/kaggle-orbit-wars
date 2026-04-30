@@ -80,6 +80,7 @@ class PPOConfig(BaseConfig):
     vtrace_rho_clip: float = Field(default=1.0, gt=0.0)
     vtrace_c_clip: float = Field(default=1.0, gt=0.0)
     recompute_advantages_each_minibatch: bool = True
+    normalize_advantages: bool = False
     debug_validate_ppo_loss_inputs: bool = False
     compile_mode: CompileMode | None = None
     dtype: TrainingDType = "float32"
@@ -588,6 +589,11 @@ class PPOTrainer:
         while importance.ndim < advantages[idx].ndim:
             importance = importance.unsqueeze(-1)
         batch_advantages = advantages[idx]
+        if self.config.normalize_advantages:
+            batch_advantages = normalize_masked_advantages(
+                batch_advantages,
+                batch_policy_mask,
+            )
         batch_policy_weight = (
             batch_policy_mask.to(dtype=batch_advantages.dtype) * importance
         )
@@ -1126,6 +1132,21 @@ def _masked_max_or_zero(values: torch.Tensor, mask: torch.Tensor) -> torch.Tenso
         masked.max(),
         torch.zeros((), dtype=values.dtype, device=values.device),
     )
+
+
+def normalize_masked_advantages(
+    advantages: torch.Tensor,
+    mask: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    require_same_shape(advantages, mask, left_name="advantages", right_name="mask")
+    mask_float = mask.to(dtype=advantages.dtype)
+    denom = mask_float.sum().clamp_min(1.0)
+
+    mean = (advantages * mask_float).sum() / denom
+    var = ((advantages - mean).pow(2) * mask_float).sum() / denom
+
+    return (advantages - mean) / (var.sqrt() + eps)
 
 
 def _segment_sampling_advantages(

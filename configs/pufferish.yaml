@@ -19,6 +19,7 @@ rl:
   vtrace_rho_clip: 1.0
   vtrace_c_clip: 1.0
   recompute_advantages_each_minibatch: true
+  normalize_advantages: true
   segment_sampling:
     sampling: advantage_priority
     segments_per_minibatch: 16

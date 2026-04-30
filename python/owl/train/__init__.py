@@ -26,6 +26,7 @@ from .ppo import (
     PPORolloutBuffer,
     PPORolloutSegments,
     PPOTrainer,
+    normalize_masked_advantages,
     ppo_loss,
     validate_ppo_loss_inputs,
 )
@@ -73,6 +74,7 @@ __all__ = [
     "create_optimizer",
     "explained_variance",
     "lr_multiplier",
+    "normalize_masked_advantages",
     "ppo_loss",
     "sample_segments",
     "sample_segments_by_advantage",
