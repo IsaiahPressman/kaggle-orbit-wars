@@ -319,7 +319,7 @@ class PPOTrainer:
         policy_mask = _policy_mask(segments.obs)
         ratios = (
             torch.ones_like(segments.logp)
-            if self.config.advantage_mode == "gae_vtrace"
+            if self.config.advantage_mode == "puffer_vtrace"
             else None
         )
         advantages, returns = self._compute_gae(
@@ -511,7 +511,7 @@ class PPOTrainer:
             return False
         return (
             self.config.recompute_advantages_each_minibatch
-            or self.config.advantage_mode == "gae_vtrace"
+            or self.config.advantage_mode == "puffer_vtrace"
         )
 
     def _compute_current_gae(
@@ -524,7 +524,7 @@ class PPOTrainer:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         ratios = (
             _policy_ratios(current_logp, segments.logp)
-            if self.config.advantage_mode == "gae_vtrace"
+            if self.config.advantage_mode == "puffer_vtrace"
             else None
         )
         return self._compute_gae(

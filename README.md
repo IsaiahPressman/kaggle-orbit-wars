@@ -43,7 +43,7 @@ uv run python -c 'from importlib import import_module; from pathlib import Path;
 Training presets live in `configs/`:
 
 - `baseline.yaml`: vanilla PPO with larger rollout/minibatch sizing.
-- `pufferish.yaml`: enables GAE+V-trace recomputation and
+- `pufferish.yaml`: enables Puffer-style V-trace recomputation and
   advantage-prioritized segment sampling without changing the core Python
   defaults.
 - `model/stateless_transformer_5m.yaml`: shared stateless transformer model

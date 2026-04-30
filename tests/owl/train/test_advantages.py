@@ -29,22 +29,6 @@ def test_compute_advantages_uses_bootstrap_value() -> None:
     assert torch.allclose(advantages, torch.tensor([[1.0, 2.0]]))
 
 
-def test_compute_advantages_vtrace_clips_ratios() -> None:
-    advantages = compute_advantages(
-        values=torch.zeros((1, 2)),
-        rewards=torch.ones((1, 2)),
-        dones=torch.zeros((1, 2), dtype=torch.bool),
-        ratios=torch.tensor([[2.0, 0.5]]),
-        gamma=1.0,
-        gae_lambda=1.0,
-        mode="gae_vtrace",
-        vtrace_rho_clip=1.0,
-        vtrace_c_clip=0.25,
-    )
-
-    assert torch.allclose(advantages, torch.tensor([[1.125, 0.5]]))
-
-
 def test_puffer_vtrace_drops_final_transition() -> None:
     advantages, returns = compute_puffer_vtrace_action_aligned(
         values=torch.zeros((1, 3)),
@@ -180,10 +164,6 @@ def test_compiled_compute_gae_validates_before_tensor_helper(
             last_values=torch.zeros((2,)),
             gamma=0.99,
             gae_lambda=0.95,
-            ratios=torch.zeros((2, 3)),
-            mode="gae_vtrace",
-            vtrace_rho_clip=1.0,
-            vtrace_c_clip=1.0,
         )
 
     assert calls == ["_compute_gae_tensors"]

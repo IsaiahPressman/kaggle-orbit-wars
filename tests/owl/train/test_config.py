@@ -34,8 +34,15 @@ def test_ppo_config_validates_with_pydantic() -> None:
     )
 
 
-def test_ppo_config_accepts_vtrace_mode() -> None:
-    assert PPOConfig(advantage_mode="gae_vtrace").advantage_mode == "gae_vtrace"
+def test_ppo_config_accepts_puffer_vtrace_mode() -> None:
+    assert PPOConfig(advantage_mode="puffer_vtrace").advantage_mode == "puffer_vtrace"
+
+
+def test_ppo_config_rejects_removed_vtrace_mode() -> None:
+    old_mode = "gae" + "_vtrace"
+
+    with pytest.raises(ValueError, match="Input should be 'gae' or 'puffer_vtrace'"):
+        PPOConfig(advantage_mode=old_mode)
 
 
 def test_full_config_accepts_nested_discriminated_configs() -> None:
@@ -232,7 +239,7 @@ def test_training_presets_make_baseline_and_pufferish_modes_explicit() -> None:
     assert baseline.rl.segment_sampling.segments_per_minibatch == 16
 
     assert pufferish.env.n_envs == 2048
-    assert pufferish.rl.advantage_mode == "gae_vtrace"
+    assert pufferish.rl.advantage_mode == "puffer_vtrace"
     assert pufferish.rl.recompute_advantages_each_minibatch
     assert pufferish.rl.segment_sampling.sampling == "advantage_priority"
     assert pufferish.rl.segment_sampling.prio_alpha == pytest.approx(0.5)

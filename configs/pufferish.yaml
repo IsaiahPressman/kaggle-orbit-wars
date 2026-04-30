@@ -15,7 +15,7 @@ rl:
   gae_lambda: 0.9
   replay_ratio: 2.0
   target_kl: 0.03
-  advantage_mode: gae_vtrace
+  advantage_mode: puffer_vtrace
   vtrace_rho_clip: 1.0
   vtrace_c_clip: 1.0
   recompute_advantages_each_minibatch: true

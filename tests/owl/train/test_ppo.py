@@ -799,7 +799,7 @@ def test_trainer_vtrace_recomputes_ratios_each_minibatch(
         vtrace_c_clip: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         del dones, last_values, gamma, gae_lambda, vtrace_rho_clip, vtrace_c_clip
-        assert mode == "gae_vtrace"
+        assert mode == "puffer_vtrace"
         assert ratios is not None
         ratios_seen.append(ratios.detach().clone())
         advantages = torch.ones_like(rewards)
@@ -847,7 +847,7 @@ def test_trainer_vtrace_recomputes_ratios_each_minibatch(
             horizon=2,
             replay_ratio=2.0,
             segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
-            advantage_mode="gae_vtrace",
+            advantage_mode="puffer_vtrace",
         ),
         device=torch.device("cpu"),
     )
@@ -879,7 +879,7 @@ def test_trainer_vtrace_refreshes_same_update_replay_tensors(
         vtrace_c_clip: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         del dones, gamma, gae_lambda, vtrace_rho_clip, vtrace_c_clip
-        assert mode == "gae_vtrace"
+        assert mode == "puffer_vtrace"
         assert ratios is not None
         seen.append(
             (
@@ -915,7 +915,7 @@ def test_trainer_vtrace_refreshes_same_update_replay_tensors(
             horizon=2,
             replay_ratio=2.0,
             segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
-            advantage_mode="gae_vtrace",
+            advantage_mode="puffer_vtrace",
         ),
         device=torch.device("cpu"),
     )

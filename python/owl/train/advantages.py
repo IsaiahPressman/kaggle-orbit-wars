@@ -11,8 +11,8 @@ from owl.train.utils import (
     require_segment_time_major,
 )
 
-AdvantageMode = Literal["gae", "gae_vtrace", "puffer_vtrace"]
-type BootstrappedAdvantageMode = Literal["gae", "gae_vtrace"]
+AdvantageMode = Literal["gae", "puffer_vtrace"]
+type BootstrappedAdvantageMode = Literal["gae"]
 
 
 class PufferVTraceFn(Protocol):
@@ -79,12 +79,9 @@ def compute_gae(
         rewards=rewards,
         dones=dones,
         bootstrap_values=last_values,
-        ratios=ratios,
         mode=mode,
         gamma=gamma,
         gae_lambda=gae_lambda,
-        vtrace_rho_clip=vtrace_rho_clip,
-        vtrace_c_clip=vtrace_c_clip,
     )
     return _compute_gae_tensors(
         rewards=rewards,
@@ -155,12 +152,9 @@ def compile_compute_gae(compile_mode: str | None) -> ComputeGAEFn:
             rewards=rewards,
             dones=dones,
             bootstrap_values=last_values,
-            ratios=ratios,
             mode=mode,
             gamma=gamma,
             gae_lambda=gae_lambda,
-            vtrace_rho_clip=vtrace_rho_clip,
-            vtrace_c_clip=vtrace_c_clip,
         )
         return compiled_compute_gae_tensors(
             rewards=rewards,
@@ -210,12 +204,9 @@ def compute_advantages(
         rewards=rewards,
         dones=dones,
         bootstrap_values=bootstrap_values,
-        ratios=ratios,
         mode=mode,
         gamma=gamma,
         gae_lambda=gae_lambda,
-        vtrace_rho_clip=vtrace_rho_clip,
-        vtrace_c_clip=vtrace_c_clip,
     )
     return _compute_advantages_tensors(
         values=values,
@@ -328,12 +319,9 @@ def _advantage_tensor_inputs(
     rewards: torch.Tensor,
     dones: torch.Tensor,
     bootstrap_values: torch.Tensor | None,
-    ratios: torch.Tensor | None,
     mode: BootstrappedAdvantageMode,
     gamma: float,
     gae_lambda: float,
-    vtrace_rho_clip: float,
-    vtrace_c_clip: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     require_segment_time_major(values, "values")
     require_same_shape(values, rewards, left_name="values", right_name="rewards")
@@ -358,17 +346,6 @@ def _advantage_tensor_inputs(
     if mode == "gae":
         rho = torch.ones_like(values)
         c = torch.ones_like(values)
-    elif mode == "gae_vtrace":
-        if ratios is None:
-            raise ValueError("ratios are required when mode='gae_vtrace'")
-        require_same_shape(values, ratios, left_name="values", right_name="ratios")
-        assert_finite(ratios, "ratios")
-        if vtrace_rho_clip <= 0:
-            raise ValueError("vtrace_rho_clip must be positive")
-        if vtrace_c_clip <= 0:
-            raise ValueError("vtrace_c_clip must be positive")
-        rho = torch.clamp(ratios, max=vtrace_rho_clip)
-        c = torch.clamp(ratios, max=vtrace_c_clip)
     else:
         assert_never(mode)
 
