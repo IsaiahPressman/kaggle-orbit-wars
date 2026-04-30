@@ -842,8 +842,6 @@ def _ppo_loss_tensors(
     pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef)
     policy_loss = weighted_mean(torch.max(pg_loss1, pg_loss2), policy_weight)
 
-    # TODO: Revisit whether value clipping should anchor to fresher values when
-    # repeated PPO epochs make rollout-time old_values stale.
     value_clipped = old_values + torch.clamp(
         new_values - old_values,
         -vf_clip_coef,
