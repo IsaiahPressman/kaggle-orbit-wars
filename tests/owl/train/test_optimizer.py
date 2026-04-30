@@ -54,7 +54,7 @@ def test_create_optimizer_supports_adamw_and_muon() -> None:
     )
     muon = create_optimizer(
         muon_model,
-        MuonConfig(learning_rate=3e-4, muon_lr=0.02),
+        MuonConfig(adamw_lr=3e-4, muon_lr=0.02),
     )
 
     assert isinstance(adamw, torch.optim.AdamW)
@@ -79,7 +79,7 @@ def test_composite_optimizer_round_trips_nested_state_dict() -> None:
     model = OptimizerTestModel()
     optimizer = create_optimizer(
         model,
-        MuonConfig(learning_rate=3e-4, muon_lr=0.02),
+        MuonConfig(adamw_lr=3e-4, muon_lr=0.02),
     )
     assert isinstance(optimizer, CompositeOptimizer)
 
@@ -90,7 +90,7 @@ def test_composite_optimizer_round_trips_nested_state_dict() -> None:
 
     replacement = create_optimizer(
         model,
-        MuonConfig(learning_rate=3e-4, muon_lr=0.02),
+        MuonConfig(adamw_lr=3e-4, muon_lr=0.02),
     )
     assert isinstance(replacement, CompositeOptimizer)
     replacement.load_state_dict(state)
@@ -143,7 +143,7 @@ def test_composite_lr_scheduler_round_trips_nested_state_dict() -> None:
     optimizer = create_optimizer(
         model,
         MuonConfig(
-            learning_rate=0.01,
+            adamw_lr=0.01,
             muon_lr=0.02,
             lr_schedule=LRScheduleConfig(warmup_steps=1, decay_steps=2),
         ),

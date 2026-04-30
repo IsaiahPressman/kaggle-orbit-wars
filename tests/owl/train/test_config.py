@@ -206,31 +206,30 @@ def test_full_config_rejects_rl_env_count() -> None:
         )
 
 
-@pytest.mark.parametrize("preset", ["debug", "baseline", "pufferish"])
+@pytest.mark.parametrize("preset", ["baseline", "pufferish"])
 def test_training_presets_load(preset: str) -> None:
-    config = FullConfig.from_file(_REPO_ROOT / "configs" / "train" / f"{preset}.yaml")
+    config = FullConfig.from_file(_REPO_ROOT / "configs" / f"{preset}.yaml")
 
     assert config.model.action_spec.max_per_planet_launches == (
         config.env.action_spec.max_per_planet_launches
     )
+    assert config.model.embed_dim == 256
+    assert config.model.depth == 6
+    assert config.model.n_heads == 8
+    assert config.optimizer.optimizer == "muon"
+    assert config.optimizer.adamw_lr == pytest.approx(3e-4)
+    assert config.optimizer.muon_lr == pytest.approx(0.015)
 
 
-def test_training_presets_make_debug_baseline_and_pufferish_modes_explicit() -> None:
-    debug = FullConfig.from_file(_REPO_ROOT / "configs" / "train" / "debug.yaml")
-    baseline = FullConfig.from_file(_REPO_ROOT / "configs" / "train" / "baseline.yaml")
-    pufferish = FullConfig.from_file(
-        _REPO_ROOT / "configs" / "train" / "pufferish.yaml"
-    )
+def test_training_presets_make_baseline_and_pufferish_modes_explicit() -> None:
+    baseline = FullConfig.from_file(_REPO_ROOT / "configs" / "baseline.yaml")
+    pufferish = FullConfig.from_file(_REPO_ROOT / "configs" / "pufferish.yaml")
 
-    assert debug.env.n_envs == 1
-    assert debug.rl.horizon == 16
-    assert debug.rl.segment_sampling.segments_per_minibatch == 1
-
-    assert baseline.env.n_envs == 1024
+    assert baseline.env.n_envs == 2048
     assert baseline.rl.advantage_mode == "gae"
     assert not baseline.rl.recompute_advantages_each_minibatch
     assert baseline.rl.segment_sampling.sampling == "uniform"
-    assert baseline.rl.segment_sampling.segments_per_minibatch == 64
+    assert baseline.rl.segment_sampling.segments_per_minibatch == 16
 
     assert pufferish.env.n_envs == 2048
     assert pufferish.rl.advantage_mode == "gae_vtrace"
