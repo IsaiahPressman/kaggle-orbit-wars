@@ -47,7 +47,7 @@ class RlVecEnv:
         max_launch: np.ndarray,
         rewards: np.ndarray,
         dones: np.ndarray,
-    ) -> None: ...
+    ) -> dict[str, list[float]]: ...
     def obs_shapes(
         self,
     ) -> tuple[

@@ -50,6 +50,12 @@ PPO checkpoints save model, optimizer, scheduler, config, and environment-step
 metadata. They do not save the Rust environment state or current observation, so
 they are not exact resume snapshots.
 
+Training logs terminal environment metrics under `train/` when episodes finish
+during a rollout, including game length, per-player win rates, launch density,
+planet occupancy for 2-player and 4-player games, max-entity overflow counts,
+terminal fleet counts, full-length game rate, and fleet/ship losses in the sun
+or out of bounds.
+
 ## Orbit Wars replay parity
 
 Replay parity tests use compact Kaggle episode transition fixtures. The

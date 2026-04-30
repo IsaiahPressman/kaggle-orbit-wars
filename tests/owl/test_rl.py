@@ -84,7 +84,7 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
 
     env.rewards.fill_(123)
     env.dones.fill_(True)
-    obs, rewards, dones = env.step(launch, angle, ships)
+    obs, rewards, dones, episode_metrics = env.step(launch, angle, ships)
 
     assert rewards.data_ptr() == reward_ptr
     assert dones.data_ptr() == done_ptr
@@ -97,6 +97,7 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     assert obs.max_launch.shape == (2, 4, ACTION_ENTITY_SLOTS)
     assert rewards.shape == (2, 4)
     assert dones.shape == (2, 4)
+    assert episode_metrics == {}
     assert torch.equal(rewards, torch.zeros_like(rewards))
     assert torch.equal(dones, torch.zeros_like(dones))
 
@@ -245,9 +246,10 @@ def test_two_player_sample_marks_unused_player_slots_done() -> None:
     angle = np.zeros(action_shape, dtype=np.float32)
     ships = np.zeros(action_shape, dtype=np.int64)
 
-    _, rewards, dones = env.step(launch, angle, ships)
+    _, rewards, dones, episode_metrics = env.step(launch, angle, ships)
 
     assert torch.equal(rewards, torch.zeros_like(rewards))
+    assert episode_metrics == {}
     assert torch.equal(dones.sum(dim=1), torch.full((2,), 2))
     assert torch.equal(env.observations.still_playing, ~dones)
 

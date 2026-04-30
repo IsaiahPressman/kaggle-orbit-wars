@@ -173,7 +173,7 @@ class VectorizedEnv:
         launch: np.ndarray | torch.Tensor,
         angle: np.ndarray | torch.Tensor,
         ships: np.ndarray | torch.Tensor,
-    ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor]:
+    ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
         launch_array = _actions_to_numpy(
             "launch", launch, dtype=np.bool_, torch_dtype=torch.bool
         )
@@ -193,7 +193,7 @@ class VectorizedEnv:
         _require_action_shape("angle", angle_array, expected_shape)
         _require_action_shape("ships", ship_array, expected_shape)
 
-        self._rust.step(
+        episode_metrics = self._rust.step(
             launch_array,
             angle_array,
             ship_array,
@@ -210,7 +210,7 @@ class VectorizedEnv:
             self._rewards_np,
             self._dones_np,
         )
-        return self.observations, self.rewards, self.dones
+        return self.observations, self.rewards, self.dones, episode_metrics
 
     def _allocate_observations(self, *, pin_memory: bool) -> ObsBatch:
         return ObsBatch(

@@ -132,6 +132,15 @@ pub struct State {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepResult {
     pub player_results: Vec<PlayerResult>,
+    pub fleet_losses: FleetLossStats,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FleetLossStats {
+    pub fleets_in_sun: u32,
+    pub fleets_out_of_bounds: u32,
+    pub ships_in_sun: i32,
+    pub ships_out_of_bounds: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

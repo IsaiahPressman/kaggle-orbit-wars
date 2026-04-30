@@ -225,7 +225,7 @@ slots are active for the episode and the other two are inactive.
 Call:
 
 ```python
-obs, rewards, dones = env.step(launch, angle, ships)
+obs, rewards, dones, episode_metrics = env.step(launch, angle, ships)
 ```
 
 `rewards` and `dones` have shape `(n_envs, 4)`. Inactive player slots are
@@ -250,3 +250,29 @@ valid source entity, source ownership by the acting player, and enough remaining
 ships on that source are required. Invalid submitted actions raise `ValueError`.
 For each player and source entity, decoding stops at the first `False` launch
 slot, so later slots for that source are ignored.
+
+`episode_metrics` is a `dict[str, list[float]]` populated only for sub-envs that
+terminated during this step. Empty steps return `{}`. Each list contains one
+value per terminal episode for that metric, so Python training can aggregate
+across the rollout before logging W&B scalars under `train/`.
+
+Terminal episode metrics:
+
+| Key | Meaning |
+| --- | --- |
+| `max_entities_exceeded_per_game` | Count of post-step turns where active fleets exceeded `max_fleets`. |
+| `mean_game_length` | Terminal game step count. |
+| `full_length_rate` | `1.0` when a game reaches the configured episode horizon, otherwise `0.0`. |
+| `terminal_fleet_count` | Number of active fleets remaining at terminal. |
+| `win_rate_player_0`..`win_rate_player_3` | `1.0` for a winning model-visible outer player slot, `0.0` otherwise; inactive outer slots have no value in 2-player games. |
+| `mean_launches_per_planet` | Per-game mean launches per occupied non-comet planet per turn. |
+| `mean_launches_per_launch` | Mean launches from a planet on planet-turns where that planet launched at least once. |
+| `mean_ships_per_launch` | Mean submitted ship count per launch action. |
+| `mean_ships_lost_per_game` | Ships removed by sun or out-of-bounds fleet loss. |
+| `mean_ships_lost_in_sun_per_game` | Ships removed by sun fleet loss. |
+| `mean_ships_lost_out_of_bounds_per_game` | Ships removed by out-of-bounds fleet loss. |
+| `mean_fleets_lost_per_game` | Fleets removed by sun or out-of-bounds loss. |
+| `mean_fleets_lost_in_sun_per_game` | Fleets removed by sun loss. |
+| `mean_fleets_lost_out_of_bounds_per_game` | Fleets removed by out-of-bounds loss. |
+| `total_planet_occupancy_rate_2p` | Mean occupied non-comet planet fraction per turn for terminal 2-player games. |
+| `total_planet_occupancy_rate_4p` | Mean occupied non-comet planet fraction per turn for terminal 4-player games. |

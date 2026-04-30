@@ -5,8 +5,9 @@ use super::generation::{
     spawn_comet_group, RandomSource,
 };
 use super::state::{
-    CometSpawnInjection, Fleet, LaunchAction, Planet, PlayerResult, Point, ResetConfig, State,
-    StepInjections, StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS, MAX_PLAYERS, SUN_RADIUS,
+    CometSpawnInjection, Fleet, FleetLossStats, LaunchAction, Planet, PlayerResult, Point,
+    ResetConfig, State, StepInjections, StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS,
+    MAX_PLAYERS, SUN_RADIUS,
 };
 use super::utils::{fleet_speed, is_orbiting, orbit_position, point_to_segment_distance};
 
@@ -73,7 +74,7 @@ pub fn step_with_injections(
     spawn_comets(state, rng, injections.comet_spawn);
     process_launches(state, actions);
     produce_ships(state);
-    let mut combat_lists = move_fleets(state);
+    let (mut combat_lists, fleet_losses) = move_fleets(state);
     let mut swept_fleets = vec![false; state.fleets.len()];
     move_planets_and_sweep(state, &mut combat_lists, &mut swept_fleets);
     move_comets_and_sweep(state, &mut combat_lists, &mut swept_fleets);
@@ -83,7 +84,10 @@ pub fn step_with_injections(
     let player_results = player_results(state);
     state.step += 1;
 
-    StepResult { player_results }
+    StepResult {
+        player_results,
+        fleet_losses,
+    }
 }
 
 fn spawn_comets(
@@ -269,9 +273,10 @@ impl CombatLists {
     }
 }
 
-fn move_fleets(state: &mut State) -> CombatLists {
+fn move_fleets(state: &mut State) -> (CombatLists, FleetLossStats) {
     let mut combat_lists = CombatLists::for_planets(&state.planets);
     let mut fleets_to_remove = Vec::new();
+    let mut losses = FleetLossStats::default();
 
     for fleet in &mut state.fleets {
         let old_pos = fleet.position();
@@ -298,11 +303,15 @@ fn move_fleets(state: &mut State) -> CombatLists {
 
         if !(0.0..=BOARD_SIZE).contains(&fleet.x) || !(0.0..=BOARD_SIZE).contains(&fleet.y) {
             fleets_to_remove.push(fleet.id);
+            losses.fleets_out_of_bounds += 1;
+            losses.ships_out_of_bounds += fleet.ships;
             continue;
         }
 
         if point_to_segment_distance(Point::new(CENTER, CENTER), old_pos, new_pos) < SUN_RADIUS {
             fleets_to_remove.push(fleet.id);
+            losses.fleets_in_sun += 1;
+            losses.ships_in_sun += fleet.ships;
             continue;
         }
     }
@@ -310,7 +319,7 @@ fn move_fleets(state: &mut State) -> CombatLists {
     state
         .fleets
         .retain(|fleet| !fleets_to_remove.contains(&fleet.id));
-    combat_lists
+    (combat_lists, losses)
 }
 
 fn move_planets_and_sweep(
@@ -935,11 +944,19 @@ mod tests {
             ships: 1000,
         }];
 
-        step(&mut state, &[vec![], vec![]]);
+        let result = step(&mut state, &[vec![], vec![]]);
 
         assert!(state.fleets.is_empty());
         assert_eq!(state.planets[1].owner, -1);
         assert_eq!(state.planets[1].ships, 10);
+        assert_eq!(
+            result.fleet_losses,
+            FleetLossStats {
+                fleets_out_of_bounds: 1,
+                ships_out_of_bounds: 1000,
+                ..FleetLossStats::default()
+            }
+        );
     }
 
     #[test]
@@ -956,11 +973,19 @@ mod tests {
             ships: 1000,
         }];
 
-        step(&mut state, &[vec![], vec![]]);
+        let result = step(&mut state, &[vec![], vec![]]);
 
         assert!(state.fleets.is_empty());
         assert_eq!(state.planets[1].owner, -1);
         assert_eq!(state.planets[1].ships, 10);
+        assert_eq!(
+            result.fleet_losses,
+            FleetLossStats {
+                fleets_in_sun: 1,
+                ships_in_sun: 1000,
+                ..FleetLossStats::default()
+            }
+        );
     }
 
     #[test]
