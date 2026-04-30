@@ -48,13 +48,12 @@ COPY pyproject.toml uv.lock Cargo.toml Cargo.lock rustfmt.toml ./
 COPY .cargo/ .cargo/
 COPY src/lib.rs src/lib.rs
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/opt/cargo/registry \
+RUN --mount=type=cache,target=/opt/cargo/registry \
     --mount=type=cache,target=/opt/cargo/git \
     if [ "${SKIP_FLASH_ATTN}" = "1" ]; then \
-        uv sync --frozen --no-install-project --group dev; \
+        uv sync --no-cache --frozen --no-install-project --group dev; \
     else \
-        uv sync --frozen --no-install-project --group dev --extra flash-attn; \
+        uv sync --no-cache --frozen --no-install-project --group dev --extra flash-attn; \
     fi && \
     cargo fetch --locked
 
