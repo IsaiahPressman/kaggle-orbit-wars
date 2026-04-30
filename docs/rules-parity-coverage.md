@@ -34,6 +34,10 @@ The replay parity test checks each transition against the Python reference for:
 - comet planet ids
 - comet groups: planet ids, full paths, path index
 
+Auxiliary Rust `StepResult` counters for fleets and ships lost in the sun or
+out of bounds are not fields in the Kaggle rows. They are covered by focused
+Rust unit tests rather than replay parity assertions.
+
 The current local replay set covers both 2-player and 4-player games, launches,
 production, fleet movement, collisions, captures, comet movement and expiry,
 and step-limit termination.

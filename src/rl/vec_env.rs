@@ -1,10 +1,12 @@
+use std::collections::{HashMap, HashSet};
+
 use numpy::{PyReadonlyArrayDyn, PyReadwriteArrayDyn, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
 use crate::rules_engine::env::{reset, step, PlayerAction};
-use crate::rules_engine::state::{PlayerResult, ResetConfig, State};
+use crate::rules_engine::state::{FleetLossStats, PlayerResult, ResetConfig, State};
 
 use super::action_spec::{action_entity_slots, decode_pure_actions, ActionEntitySlots};
 use super::obs_spec::encode_state_with_action_slots;
@@ -38,6 +40,7 @@ pub struct PyRlVecEnv {
     player_maps: Vec<PlayerMap>,
     action_slots: Vec<ActionEntitySlots>,
     player_finished: Vec<Vec<bool>>,
+    episode_stats: Vec<EpisodeStats>,
 }
 
 #[pymethods]
@@ -96,6 +99,7 @@ impl PyRlVecEnv {
             player_maps,
             action_slots,
             player_finished: vec![vec![false; OUTER_PLAYER_SLOTS]; n_envs],
+            episode_stats: vec![EpisodeStats::default(); n_envs],
         })
     }
 
@@ -148,13 +152,17 @@ impl PyRlVecEnv {
             .zip_eq(self.player_maps.par_iter_mut())
             .zip_eq(self.action_slots.par_iter_mut())
             .zip_eq(self.player_finished.par_iter_mut())
-            .for_each(|(((state, player_map), action_slots), player_finished)| {
-                let (new_state, new_player_map) = reset_one_env(self.two_player_weight);
-                *state = new_state;
-                *player_map = new_player_map;
-                *action_slots = action_entity_slots(state);
-                player_finished.fill(false);
-            });
+            .zip_eq(self.episode_stats.par_iter_mut())
+            .for_each(
+                |((((state, player_map), action_slots), player_finished), episode_stats)| {
+                    let (new_state, new_player_map) = reset_one_env(self.two_player_weight);
+                    *state = new_state;
+                    *player_map = new_player_map;
+                    *action_slots = action_entity_slots(state);
+                    player_finished.fill(false);
+                    *episode_stats = EpisodeStats::default();
+                },
+            );
         self.write_obs(
             planet_obs,
             fleet_obs,
@@ -187,7 +195,7 @@ impl PyRlVecEnv {
         max_launch: PyReadwriteArrayDyn<'_, i64>,
         rewards: PyReadwriteArrayDyn<'_, f32>,
         dones: PyReadwriteArrayDyn<'_, bool>,
-    ) -> PyResult<()> {
+    ) -> PyResult<HashMap<String, Vec<f64>>> {
         let action_shape = [
             self.n_envs,
             OUTER_PLAYER_SLOTS,
@@ -246,29 +254,38 @@ impl PyRlVecEnv {
             .collect::<Result<Vec<_>, _>>()
             .map_err(PyValueError::new_err)?;
 
-        self.states
+        let terminal_metrics = self
+            .states
             .par_iter_mut()
             .zip_eq(self.player_maps.par_iter_mut())
             .zip_eq(self.player_finished.par_iter_mut())
+            .zip_eq(self.episode_stats.par_iter_mut())
             .zip_eq(decoded.par_iter())
             .zip_eq(reward_chunks)
             .zip_eq(done_chunks)
-            .for_each(
+            .map(
                 |(
-                    ((((state, player_map), player_finished), decoded), reward_chunk),
+                    (
+                        ((((state, player_map), player_finished), episode_stats), decoded),
+                        reward_chunk,
+                    ),
                     done_chunk,
                 )| {
                     step_one_env(
                         state,
                         player_map,
                         player_finished,
+                        episode_stats,
                         decoded,
                         reward_chunk,
                         done_chunk,
+                        self.max_fleets,
                         self.two_player_weight,
-                    );
+                    )
                 },
-            );
+            )
+            .collect::<Vec<_>>();
+        let episode_metrics = collect_terminal_metrics(terminal_metrics);
 
         self.write_obs(
             planet_obs,
@@ -281,7 +298,8 @@ impl PyRlVecEnv {
             global_obs,
             can_act,
             max_launch,
-        )
+        )?;
+        Ok(episode_metrics)
     }
 
     fn obs_shapes(&self) -> ObsShapes {
@@ -479,6 +497,210 @@ impl PyRlVecEnv {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct EpisodeStats {
+    occupancy_rate_sum: f64,
+    occupancy_rate_turns: u32,
+    launches_per_occupied_planet_sum: f64,
+    occupied_planet_turns: u32,
+    launches_per_launch_sum: f64,
+    launched_planet_turns: u32,
+    ships_per_launch_sum: i64,
+    launch_count: u32,
+    max_entities_exceeded_turns: u32,
+    fleet_losses: FleetLossStats,
+}
+
+#[derive(Clone, Debug)]
+struct TerminalEpisodeMetrics {
+    player_count: usize,
+    values: Vec<(&'static str, f64)>,
+    win_rates: Vec<(usize, f64)>,
+}
+
+impl EpisodeStats {
+    fn record_turn(&mut self, state: &State, decoded: &[PlayerAction]) {
+        let comet_ids = state
+            .comet_planet_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let mut non_comet_planets = 0_usize;
+        let mut occupied_planets = 0_usize;
+        for planet in &state.planets {
+            if comet_ids.contains(&planet.id) {
+                continue;
+            }
+            non_comet_planets += 1;
+            if planet.owner != -1 {
+                occupied_planets += 1;
+            }
+        }
+
+        if non_comet_planets > 0 {
+            self.occupancy_rate_sum += occupied_planets as f64 / non_comet_planets as f64;
+            self.occupancy_rate_turns += 1;
+        }
+
+        let mut launches_by_planet = HashMap::<u32, u32>::new();
+        for action in decoded.iter().flatten() {
+            *launches_by_planet.entry(action.from_planet_id).or_default() += 1;
+        }
+        let launch_count = launches_by_planet.values().sum::<u32>();
+        if occupied_planets > 0 {
+            self.launches_per_occupied_planet_sum += launch_count as f64 / occupied_planets as f64;
+            self.occupied_planet_turns += 1;
+        }
+        for launches in launches_by_planet.values() {
+            self.launches_per_launch_sum += f64::from(*launches);
+            self.launched_planet_turns += 1;
+        }
+        self.ships_per_launch_sum += decoded
+            .iter()
+            .flatten()
+            .map(|action| i64::from(action.ships))
+            .sum::<i64>();
+        self.launch_count += launch_count;
+    }
+
+    fn record_step_result(
+        &mut self,
+        state: &State,
+        fleet_losses: FleetLossStats,
+        max_fleets: usize,
+    ) {
+        self.fleet_losses.fleets_in_sun += fleet_losses.fleets_in_sun;
+        self.fleet_losses.fleets_out_of_bounds += fleet_losses.fleets_out_of_bounds;
+        self.fleet_losses.ships_in_sun += fleet_losses.ships_in_sun;
+        self.fleet_losses.ships_out_of_bounds += fleet_losses.ships_out_of_bounds;
+        if state.fleets.len() > max_fleets {
+            self.max_entities_exceeded_turns += 1;
+        }
+    }
+
+    fn terminal_metrics(
+        &self,
+        state: &State,
+        player_map: &PlayerMap,
+        player_results: &[PlayerResult],
+    ) -> TerminalEpisodeMetrics {
+        let fleets_lost = self.fleet_losses.fleets_in_sun + self.fleet_losses.fleets_out_of_bounds;
+        let ships_lost = self.fleet_losses.ships_in_sun + self.fleet_losses.ships_out_of_bounds;
+        let occupancy_key = if state.config.player_count == 2 {
+            "total_planet_occupancy_rate_2p"
+        } else {
+            "total_planet_occupancy_rate_4p"
+        };
+        let mut values = vec![
+            (
+                "max_entities_exceeded_per_game",
+                f64::from(self.max_entities_exceeded_turns),
+            ),
+            ("mean_game_length", f64::from(state.step)),
+            ("full_length_rate", full_length_value(state)),
+            ("terminal_fleet_count", state.fleets.len() as f64),
+            (
+                "mean_launches_per_planet",
+                mean_or_zero(
+                    self.launches_per_occupied_planet_sum,
+                    self.occupied_planet_turns,
+                ),
+            ),
+            ("mean_ships_lost_per_game", f64::from(ships_lost)),
+            (
+                "mean_ships_lost_in_sun_per_game",
+                f64::from(self.fleet_losses.ships_in_sun),
+            ),
+            (
+                "mean_ships_lost_out_of_bounds_per_game",
+                f64::from(self.fleet_losses.ships_out_of_bounds),
+            ),
+            ("mean_fleets_lost_per_game", f64::from(fleets_lost)),
+            (
+                "mean_fleets_lost_in_sun_per_game",
+                f64::from(self.fleet_losses.fleets_in_sun),
+            ),
+            (
+                "mean_fleets_lost_out_of_bounds_per_game",
+                f64::from(self.fleet_losses.fleets_out_of_bounds),
+            ),
+            (
+                occupancy_key,
+                mean_or_zero(self.occupancy_rate_sum, self.occupancy_rate_turns),
+            ),
+        ];
+        if self.launched_planet_turns > 0 {
+            values.push((
+                "mean_launches_per_launch",
+                self.launches_per_launch_sum / f64::from(self.launched_planet_turns),
+            ));
+        }
+        if self.launch_count > 0 {
+            values.push((
+                "mean_ships_per_launch",
+                self.ships_per_launch_sum as f64 / f64::from(self.launch_count),
+            ));
+        }
+
+        let win_rates = player_results
+            .iter()
+            .enumerate()
+            .map(|(internal_player, result)| {
+                let won = if matches!(result, PlayerResult::Won) {
+                    1.0
+                } else {
+                    0.0
+                };
+                (player_map.internal_to_outer(internal_player), won)
+            })
+            .collect();
+
+        TerminalEpisodeMetrics {
+            player_count: state.config.player_count,
+            values,
+            win_rates,
+        }
+    }
+}
+
+fn full_length_value(state: &State) -> f64 {
+    if state.step >= state.config.episode_steps.saturating_sub(1) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn mean_or_zero(sum: f64, count: u32) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        sum / f64::from(count)
+    }
+}
+
+fn collect_terminal_metrics(
+    terminals: Vec<Option<TerminalEpisodeMetrics>>,
+) -> HashMap<String, Vec<f64>> {
+    let mut metrics = HashMap::<String, Vec<f64>>::new();
+    for terminal in terminals.into_iter().flatten() {
+        for (key, value) in terminal.values {
+            metrics.entry(key.to_string()).or_default().push(value);
+        }
+        for (player, win_rate) in terminal.win_rates {
+            metrics
+                .entry(format!("win_rate_player_{player}"))
+                .or_default()
+                .push(win_rate);
+        }
+        metrics
+            .entry(format!("terminal_episodes_{}p", terminal.player_count))
+            .or_default()
+            .push(1.0);
+    }
+    metrics
+}
+
 fn write_still_playing(
     state: &State,
     player_map: &PlayerMap,
@@ -491,16 +713,21 @@ fn write_still_playing(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn step_one_env(
     state: &mut State,
     player_map: &mut PlayerMap,
     player_finished: &mut [bool],
+    episode_stats: &mut EpisodeStats,
     decoded: &[PlayerAction],
     reward_chunk: &mut [f32],
     done_chunk: &mut [bool],
+    max_fleets: usize,
     two_player_weight: f64,
-) {
+) -> Option<TerminalEpisodeMetrics> {
+    episode_stats.record_turn(state, decoded);
     let result = step(state, decoded);
+    episode_stats.record_step_result(state, result.fleet_losses, max_fleets);
     let should_reset = result_is_terminal(&result.player_results);
     let won_reward = split_won_reward(
         result
@@ -523,11 +750,16 @@ fn step_one_env(
     }
 
     if should_reset {
+        let terminal_metrics =
+            episode_stats.terminal_metrics(state, player_map, &result.player_results);
         let (new_state, new_player_map) = reset_one_env(two_player_weight);
         *state = new_state;
         *player_map = new_player_map;
         player_finished.fill(false);
+        *episode_stats = EpisodeStats::default();
+        return Some(terminal_metrics);
     }
+    None
 }
 
 fn result_is_terminal(results: &[PlayerResult]) -> bool {
@@ -576,7 +808,7 @@ fn player_reward_done(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules_engine::state::{Planet, SimConfig};
+    use crate::rules_engine::state::{LaunchAction, Planet, SimConfig};
 
     fn state_with_player_three_eliminated() -> State {
         let planets = vec![
@@ -696,6 +928,28 @@ mod tests {
         }
     }
 
+    fn step_one_env_for_test(
+        state: &mut State,
+        player_map: &mut PlayerMap,
+        player_finished: &mut [bool],
+        decoded: &[PlayerAction],
+        reward_chunk: &mut [f32],
+        done_chunk: &mut [bool],
+    ) -> Option<TerminalEpisodeMetrics> {
+        let mut episode_stats = EpisodeStats::default();
+        step_one_env(
+            state,
+            player_map,
+            player_finished,
+            &mut episode_stats,
+            decoded,
+            reward_chunk,
+            done_chunk,
+            usize::MAX,
+            0.0,
+        )
+    }
+
     #[test]
     fn nonterminal_horizon_step_does_not_reset_before_returning_done() {
         let actions = vec![Vec::new(); 4];
@@ -707,14 +961,13 @@ mod tests {
         let mut rewards = vec![99.0; 4];
         let mut dones = vec![true; 4];
 
-        step_one_env(
+        step_one_env_for_test(
             &mut state,
             &mut player_map,
             &mut finished,
             &actions,
             &mut rewards,
             &mut dones,
-            0.0,
         );
 
         assert_eq!(state.step, expected_step);
@@ -732,28 +985,26 @@ mod tests {
         let mut rewards = vec![99.0; 4];
         let mut dones = vec![false; 4];
 
-        step_one_env(
+        step_one_env_for_test(
             &mut state,
             &mut player_map,
             &mut finished,
             &actions,
             &mut rewards,
             &mut dones,
-            0.0,
         );
 
         assert_eq!(rewards, vec![0.0, 0.0, 0.0, -1.0]);
         assert_eq!(dones, vec![false, false, false, true]);
         assert_eq!(finished, vec![false, false, false, true]);
 
-        step_one_env(
+        step_one_env_for_test(
             &mut state,
             &mut player_map,
             &mut finished,
             &actions,
             &mut rewards,
             &mut dones,
-            0.0,
         );
 
         assert_eq!(rewards[3], 0.0);
@@ -779,18 +1030,96 @@ mod tests {
         let mut rewards = vec![99.0; 4];
         let mut dones = vec![false; 4];
 
-        step_one_env(
+        let terminal = step_one_env_for_test(
             &mut state,
             &mut player_map,
             &mut finished,
             &actions,
             &mut rewards,
             &mut dones,
-            0.0,
-        );
+        )
+        .expect("terminal step should return episode metrics");
+        let metrics = collect_terminal_metrics(vec![Some(terminal)]);
 
         assert_eq!(rewards, vec![-0.5; 4]);
         assert_eq!(dones, vec![true; 4]);
+        assert_eq!(metrics["mean_game_length"], vec![499.0]);
+        assert_eq!(metrics["full_length_rate"], vec![1.0]);
+        assert_eq!(metrics["terminal_fleet_count"], vec![0.0]);
+        assert_eq!(metrics["win_rate_player_0"], vec![1.0]);
+        assert_eq!(metrics["win_rate_player_3"], vec![1.0]);
+        assert_eq!(metrics["total_planet_occupancy_rate_4p"], vec![1.0]);
+        assert_eq!(metrics["mean_fleets_lost_per_game"], vec![0.0]);
+    }
+
+    #[test]
+    fn terminal_win_rates_use_remapped_outer_player_slots() {
+        let actions = vec![Vec::new(); 2];
+        let mut state = state_with_all_players_alive();
+        state.config = SimConfig::new(2);
+        state.planets.retain(|planet| planet.owner <= 1);
+        state.planets[0].ships = 20;
+        state.step = state.config.episode_steps.saturating_sub(2);
+        let mut player_map = PlayerMap::from_outer_slots(2, [3, 1, 0, 2]);
+        let mut finished = vec![false; 4];
+        let mut rewards = vec![99.0; 4];
+        let mut dones = vec![false; 4];
+
+        let terminal = step_one_env_for_test(
+            &mut state,
+            &mut player_map,
+            &mut finished,
+            &actions,
+            &mut rewards,
+            &mut dones,
+        )
+        .expect("terminal step should return episode metrics");
+        let metrics = collect_terminal_metrics(vec![Some(terminal)]);
+
+        assert_eq!(rewards, vec![0.0, -1.0, 0.0, 1.0]);
+        assert_eq!(metrics["win_rate_player_3"], vec![1.0]);
+        assert_eq!(metrics["win_rate_player_1"], vec![0.0]);
+        assert!(!metrics.contains_key("win_rate_player_0"));
+    }
+
+    #[test]
+    fn episode_stats_reports_mean_ships_per_launch() {
+        let state = state_with_all_players_alive();
+        let player_map = PlayerMap::identity();
+        let actions = vec![
+            vec![
+                LaunchAction {
+                    from_planet_id: 0,
+                    angle: 0.0,
+                    ships: 3,
+                },
+                LaunchAction {
+                    from_planet_id: 0,
+                    angle: 0.0,
+                    ships: 5,
+                },
+            ],
+            vec![],
+            vec![],
+            vec![],
+        ];
+        let mut episode_stats = EpisodeStats::default();
+
+        episode_stats.record_turn(&state, &actions);
+        let metrics = episode_stats.terminal_metrics(
+            &state,
+            &player_map,
+            &[
+                PlayerResult::Won,
+                PlayerResult::Lost,
+                PlayerResult::Lost,
+                PlayerResult::Lost,
+            ],
+        );
+        let collected = collect_terminal_metrics(vec![Some(metrics)]);
+
+        assert_eq!(collected["mean_ships_per_launch"], vec![4.0]);
+        assert!(!collected.contains_key("mean_fleets_per_launch"));
     }
 
     #[test]
@@ -829,14 +1158,13 @@ mod tests {
         let mut rewards = vec![99.0; 4];
         let mut dones = vec![false; 4];
 
-        step_one_env(
+        step_one_env_for_test(
             &mut state,
             &mut player_map,
             &mut finished,
             &actions,
             &mut rewards,
             &mut dones,
-            0.0,
         );
 
         assert_eq!(rewards, vec![0.0; 4]);
@@ -852,14 +1180,13 @@ mod tests {
         let mut rewards = vec![0.0; 4];
         let mut dones = vec![false; 4];
 
-        step_one_env(
+        step_one_env_for_test(
             &mut state,
             &mut player_map,
             &mut finished,
             &actions,
             &mut rewards,
             &mut dones,
-            0.0,
         );
 
         let mut still_playing = vec![false; 4];

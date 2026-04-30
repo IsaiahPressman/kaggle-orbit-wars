@@ -308,10 +308,12 @@ class PPOTrainer:
             action_spec=env.action_spec,
             device=device,
         )
+        self._last_env_metrics: dict[str, list[float]] = {}
 
     def train_iteration(self) -> dict[str, float]:
         start = perf_counter()
         last_values = self._collect_rollout()
+        env_metrics = self._last_env_metrics
         segments = self.rollout.segment_major()
         value_mask = segments.obs.still_playing
         policy_mask = _policy_mask(segments.obs)
@@ -348,6 +350,7 @@ class PPOTrainer:
         )
         metrics["advantage_mean"] = float(masked_mean(advantages, policy_mask).item())
         metrics["advantage_std"] = float(masked_std(advantages, policy_mask).item())
+        metrics.update(_mean_env_metrics(env_metrics))
         elapsed = max(perf_counter() - start, 1e-12)
         metrics["steps_per_second"] = float(self.config.horizon * self.n_envs / elapsed)
         return metrics
@@ -378,12 +381,16 @@ class PPOTrainer:
     def _collect_rollout(self) -> torch.Tensor:
         self.rollout.rewards.zero_()
         self.rollout.dones.zero_()
+        env_metrics: dict[str, list[float]] = {}
         with torch.no_grad():
             for step in range(self.config.horizon):
                 with autocast_context(self.config, self.device):
                     output = self.model(self._obs)
                 actions = _output_actions(output)
-                next_obs, rewards, dones = _step_env(self.env, actions)
+                next_obs, rewards, dones, step_env_metrics = _step_env(
+                    self.env, actions
+                )
+                _extend_env_metrics(env_metrics, step_env_metrics)
                 rewards = rewards.to(
                     self.device,
                     non_blocking=self._non_blocking_env_to_device,
@@ -408,6 +415,7 @@ class PPOTrainer:
                 )
             with autocast_context(self.config, self.device):
                 bootstrap = self.model(self._obs)
+            self._last_env_metrics = env_metrics
             return _output_values(bootstrap).detach()
 
     def _update(
@@ -1016,11 +1024,39 @@ def _flatten_actions_time(actions: ModelActions) -> ModelActions:
 
 
 def _step_env(
-    env: VectorizedEnv,
+    env: Any,
     actions: ModelActions,
-) -> tuple[ObsBatch, torch.Tensor, torch.Tensor]:
+) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
     cpu_actions = _actions_to_cpu(actions)
-    return env.step(cpu_actions.launch, cpu_actions.angle, cpu_actions.ships)
+    result = env.step(cpu_actions.launch, cpu_actions.angle, cpu_actions.ships)
+    if len(result) == 3:
+        obs, rewards, dones = result
+        return obs, rewards, dones, {}
+    return result
+
+
+def _extend_env_metrics(
+    totals: dict[str, list[float]], step_metrics: dict[str, list[float]]
+) -> None:
+    for key, values in step_metrics.items():
+        totals.setdefault(key, []).extend(values)
+
+
+def _mean_env_metrics(metrics: dict[str, list[float]]) -> dict[str, float]:
+    logged: dict[str, float] = {}
+    terminal_episodes = 0.0
+    for key, values in metrics.items():
+        if not values:
+            continue
+        if key.startswith("terminal_episodes_"):
+            value = float(sum(values))
+            terminal_episodes += value
+        else:
+            value = float(sum(values) / len(values))
+        logged[f"train/{key}"] = value
+    if terminal_episodes > 0:
+        logged["train/terminal_episodes"] = terminal_episodes
+    return logged
 
 
 def _output_actions(output: ModelOutput) -> ModelActions:
