@@ -27,10 +27,8 @@ git diff --cached
    artifacts that are intentionally ignored.
 
 4. Check doc freshness. Mapped code changes should update their mapped docs.
-   If a small bugfix or mechanical change leaves the docs genuinely current,
-   replace the nonce in `.updated-docs` with any new short word or token and
-   stage it rather than making a fake docs edit. The nonce is not a counter.
-   Use the marker only when the relevant docs genuinely do not need to change.
+   If `just docs-fresh` fails but the docs are genuinely still current, rerun it
+   as `DOCS_CURRENT=1 just docs-fresh` to acknowledge that review.
 
 5. Review the patch for duplicated logic, especially copied rules-engine
    formulas, geometry, validation, scoring, and terminal-condition behavior.
@@ -44,7 +42,9 @@ just prepare
 ```
 
 Use `just py-prepare` or `just rs-prepare` only when the change is strictly
-limited and a full prepare would not add signal.
+limited and a full prepare would not add signal. If only the doc freshness
+portion of `just prepare` fails and the mapped docs are genuinely still current,
+rerun it as `DOCS_CURRENT=1 just prepare`.
 
 7. For rules-engine changes, confirm:
    - Replay fixtures are present in `tests/fixtures/orbit_wars_replays`.

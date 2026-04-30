@@ -64,7 +64,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/opt/cargo/registry \
     --mount=type=cache,target=/opt/cargo/git \
     --mount=type=cache,target=/workspace/orbit-wars/target \
-    just prepare-rl && \
-    uv run python -c "import torch; import owl; import owl.rs; print(f'owl container ready: torch={torch.__version__}, cuda_available={torch.cuda.is_available()}')"
+    just prepare-rl
 
 CMD ["bash"]

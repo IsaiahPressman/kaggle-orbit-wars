@@ -1,7 +1,0 @@
-# Docs-current marker.
-#
-# When mapped code changes do not require documentation updates, replace the
-# nonce below with any new short word or token and stage this file. The value is
-# not a counter and has no meaning beyond creating an explicit changed file.
-# Do not use this marker when the docs are stale or incomplete.
-nonce: clone

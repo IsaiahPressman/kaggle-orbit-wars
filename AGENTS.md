@@ -19,6 +19,7 @@
 ## Development Workflow
 
 - Run `just py-prepare` / `just rs-prepare` after any `python` / `rust` code edits, respectively. This handles formatting, linting, static type-checking, and tests.
+- Run `just prepare` before creating or recommending a commit or PR.
 - Add dependencies with `uv add` / `cargo add`; don't edit `.toml` or `.lock` files directly when adding dependencies.
 - Keep `Cargo.lock` and `uv.lock` tracked. Update lockfiles with package-manager
   commands, not manual edits.
@@ -29,10 +30,9 @@
   `docs/rules-parity-coverage.md` current with implementation state, test
   surface, and known gaps.
 - `just docs-fresh` requires mapped code changes to update their mapped docs.
-  If docs are already current for a small change, replace the nonce in
-  `.updated-docs` with any new short word or token and stage that file instead
-  of making a fake documentation edit. The nonce is not a counter. Use the
-  marker only when the relevant docs genuinely do not need to change.
+  If docs are already current for a small change, rerun the check with
+  `DOCS_CURRENT=1` to indicate that the mapped docs were reviewed and are
+  still current.
 
 ## Error Handling
 

@@ -36,18 +36,6 @@ rs-test:
 [group: 'rust']
 rs-prepare: rs-format rs-lint rs-test
 
-[group: 'build']
-build:
-	uv run maturin develop
-[group: 'build']
-build-release:
-	RUSTFLAGS="-C target-cpu=native" uv run maturin develop --release
-
-[group: 'build']
-prepare: build rs-format py-format rs-lint py-lint docs-lint docs-fresh py-static rs-test py-test-full
-[group: 'build']
-prepare-rl: prepare build-release
-
 [group: 'docs']
 docs-lint:
 	uvx pymarkdownlnt scan *.md
@@ -55,6 +43,18 @@ docs-lint:
 [group: 'docs']
 docs-fresh:
 	uv run python scripts/check_doc_freshness.py
+
+[group: 'build']
+build:
+	uv run maturin develop
+[group: 'build']
+build-release:
+	RUSTFLAGS="-C target-cpu=native" uv run maturin develop --release
+
+[group: 'ci']
+prepare: build rs-format py-format rs-lint py-lint docs-lint docs-fresh py-static rs-test py-test-full
+[group: 'ci']
+prepare-rl: prepare build-release
 
 [group: 'misc']
 clean:
