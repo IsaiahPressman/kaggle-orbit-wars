@@ -681,6 +681,119 @@ def test_update_minibatch_normalizes_policy_advantages_only() -> None:
     assert torch.equal(seen["returns"], torch.full_like(seen["returns"], 42.0))
 
 
+def test_update_minibatch_applies_importance_to_policy_advantages_only() -> None:
+    seen: dict[str, torch.Tensor] = {}
+    env = TinyOrbitEnv(n_envs=1)
+    model = FixedEvaluationModel(value=0.0)
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.SGD(model.parameters(), lr=0.0),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+        ),
+        device=torch.device("cpu"),
+    )
+    trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+
+    def fake_ppo_loss(
+        *,
+        new_logp: torch.Tensor,
+        entropy: torch.Tensor,
+        new_values: torch.Tensor,
+        old_logp: torch.Tensor,
+        old_values: torch.Tensor,
+        returns: torch.Tensor,
+        advantages: torch.Tensor,
+        policy_weight: torch.Tensor,
+        value_weight: torch.Tensor,
+        config: ppo.PPOConfig,
+    ) -> ppo.PPOLossMetrics:
+        del entropy, old_logp, old_values, returns, config
+        seen["advantages"] = advantages.detach().clone()
+        seen["policy_weight"] = policy_weight.detach().clone()
+        seen["value_weight"] = value_weight.detach().clone()
+        loss = new_values.mean() + 0.0 * new_logp.mean()
+        return _zero_loss_metrics(loss)
+
+    trainer._ppo_loss = fake_ppo_loss
+    trainer._update_minibatch(
+        segments,
+        advantages=torch.ones_like(segments.values),
+        returns=torch.zeros_like(segments.values),
+        policy_mask=torch.ones_like(segments.values, dtype=torch.bool),
+        value_mask=torch.ones_like(segments.values, dtype=torch.bool),
+        sample=ppo.SegmentSample(
+            indices=torch.zeros((1,), dtype=torch.int64),
+            importance=torch.full((1, 1), 0.25),
+            probabilities=torch.ones((1,)),
+        ),
+        value_clip_anchor=segments.values,
+    )
+
+    assert torch.equal(seen["advantages"], torch.full_like(seen["advantages"], 0.25))
+    assert torch.equal(seen["policy_weight"], torch.ones_like(seen["policy_weight"]))
+    assert torch.equal(seen["value_weight"], torch.ones_like(seen["value_weight"]))
+
+
+def test_update_minibatch_applies_importance_after_normalization() -> None:
+    seen: dict[str, torch.Tensor] = {}
+    env = TinyOrbitEnv(n_envs=1)
+    model = FixedEvaluationModel(value=0.0)
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.SGD(model.parameters(), lr=0.0),
+        config=ppo.PPOConfig(
+            horizon=2,
+            normalize_advantages=True,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+        ),
+        device=torch.device("cpu"),
+    )
+    trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+
+    def fake_ppo_loss(
+        *,
+        new_logp: torch.Tensor,
+        entropy: torch.Tensor,
+        new_values: torch.Tensor,
+        old_logp: torch.Tensor,
+        old_values: torch.Tensor,
+        returns: torch.Tensor,
+        advantages: torch.Tensor,
+        policy_weight: torch.Tensor,
+        value_weight: torch.Tensor,
+        config: ppo.PPOConfig,
+    ) -> ppo.PPOLossMetrics:
+        del entropy, old_logp, old_values, returns, policy_weight, value_weight, config
+        seen["advantages"] = advantages.detach().clone()
+        loss = new_values.mean() + 0.0 * new_logp.mean()
+        return _zero_loss_metrics(loss)
+
+    trainer._ppo_loss = fake_ppo_loss
+    trainer._update_minibatch(
+        segments,
+        advantages=torch.tensor([[[1.0, 3.0, 100.0, 200.0], [5.0, 7.0, 9.0, 11.0]]]),
+        returns=torch.zeros_like(segments.values),
+        policy_mask=torch.tensor(
+            [[[True, True, False, False], [False, False, False, False]]]
+        ),
+        value_mask=torch.ones_like(segments.values, dtype=torch.bool),
+        sample=ppo.SegmentSample(
+            indices=torch.zeros((1,), dtype=torch.int64),
+            importance=torch.full((1, 1), 0.25),
+            probabilities=torch.ones((1,)),
+        ),
+        value_clip_anchor=segments.values,
+    )
+
+    assert torch.allclose(seen["advantages"][0, 0, :2], torch.tensor([-0.25, 0.25]))
+
+
 def test_update_minibatch_value_clipping_uses_current_value_anchor() -> None:
     env = TinyOrbitEnv(n_envs=1)
     model = FixedEvaluationModel(value=12.0)

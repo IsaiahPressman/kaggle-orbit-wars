@@ -594,12 +594,9 @@ class PPOTrainer:
                 batch_advantages,
                 batch_policy_mask,
             )
-        batch_policy_weight = (
-            batch_policy_mask.to(dtype=batch_advantages.dtype) * importance
-        )
-        batch_value_weight = (
-            batch_value_mask.to(dtype=batch_advantages.dtype) * importance
-        )
+        batch_advantages = batch_advantages * importance
+        batch_policy_weight = batch_policy_mask.to(dtype=batch_advantages.dtype)
+        batch_value_weight = batch_value_mask.to(dtype=batch_advantages.dtype)
 
         with autocast_context(self.config, self.device):
             output = self.model.evaluate_actions(batch_obs, batch_actions)
