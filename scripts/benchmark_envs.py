@@ -24,6 +24,7 @@ from owl.rs import assert_release_build
 from tqdm import trange
 
 Target = Literal["both", "rust", "kaggle"]
+KAGGLE_N_ENVS = 8
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,7 @@ def parse_args() -> argparse.Namespace:
         "--n-envs",
         type=int,
         default=128,
-        help="Number of parallel sub-envs to run.",
+        help="Number of parallel Rust sub-envs to run. Kaggle always uses 8.",
     )
     parser.add_argument(
         "-s",
@@ -230,7 +231,7 @@ def benchmark_kaggle(args: argparse.Namespace) -> BenchmarkResult:
     envs = [
         make_kaggle_env(make, args.players, args.seed + env_index)
         for env_index in trange(
-            args.n_envs,
+            KAGGLE_N_ENVS,
             desc="kaggle init",
             disable=args.no_progress,
             leave=False,
@@ -264,8 +265,8 @@ def benchmark_kaggle(args: argparse.Namespace) -> BenchmarkResult:
 
     return BenchmarkResult(
         name="kaggle-python",
-        n_envs=args.n_envs,
-        env_steps=args.n_envs * args.steps,
+        n_envs=KAGGLE_N_ENVS,
+        env_steps=KAGGLE_N_ENVS * args.steps,
         elapsed_seconds=elapsed,
         launches=timed_launches,
     )
@@ -374,7 +375,7 @@ def print_results(results: list[BenchmarkResult]) -> None:
         )
         if rust is not None and kaggle is not None:
             speedup = rust.steps_per_second / kaggle.steps_per_second
-            print(f"\nrust/kaggle speedup: {speedup:.2f}x")
+            print(f"\nrust/kaggle env-step throughput speedup: {speedup:.2f}x")
 
     repeated_names = sorted({result.name for result in results if len(results) > 1})
     summaries = []

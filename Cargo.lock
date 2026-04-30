@@ -252,6 +252,7 @@ version = "0.1.0"
 dependencies = [
  "numpy",
  "pyo3",
+ "pyo3-build-config",
  "rand",
  "rayon",
  "serde",

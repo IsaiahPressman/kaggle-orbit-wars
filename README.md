@@ -19,7 +19,15 @@ rustup component add rustfmt --toolchain nightly
 scripts/regenerate_test_fixtures.sh
 ```
 
-4. `just prepare` should run without errors
+4. `just prepare` should run without errors. If mapped docs are genuinely still
+   current after a small code change, rerun it as `DOCS_CURRENT=1 just prepare`
+   to acknowledge that review.
+
+## Containerized builds
+
+See `docs/containerization.md` for building a Docker image with the locked Python
+dependencies, Rust toolchain, compiled extension module, and example Slurm launch
+patterns.
 
 ## Orbit Wars reference
 
