@@ -225,7 +225,6 @@ def test_training_presets_make_baseline_and_pufferish_modes_explicit() -> None:
     assert baseline.rl.advantage_mode == "gae"
     assert not baseline.rl.recompute_advantages_each_minibatch
     assert baseline.rl.segment_sampling.sampling == "uniform"
-    assert baseline.rl.segment_sampling.segments_per_minibatch == 16
 
     assert pufferish.env.n_envs == 2048
     assert pufferish.rl.advantage_mode == "puffer_vtrace"

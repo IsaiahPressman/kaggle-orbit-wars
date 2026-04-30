@@ -141,6 +141,25 @@ The template defaults to `ghcr.io#isaiahpressman/kaggle-orbit-wars:main`.
 Override `ORBIT_WARS_IMAGE` to pin a different tag, such as a specific commit
 SHA.
 
+`ORBIT_WARS_CONFIG` selects the training config and defaults to
+`configs/baseline.yaml`. The batch script expects to be run from the repository
+root by default, mounts `./configs` read-only at `/config`, and runs training
+with `/config/baseline.yaml`.
+
+To use a different host-edited config without rebuilding the image, set
+`ORBIT_WARS_CONFIG` to another host YAML file:
+
+```sh
+ORBIT_WARS_CONFIG=/sw/isaiah/orbit-wars/configs/experiment.yaml \
+  sbatch scripts/slurm/launch-train.sbatch
+```
+
+The launch script mounts the config file's parent directory read-only at
+`/config` and runs training with `/config/experiment.yaml`. If the config uses
+subconfig references such as `model: stateless_transformer_5m`, keep the
+referenced subconfig directories next to the mounted file, for example
+`/sw/isaiah/orbit-wars/configs/model/stateless_transformer_5m.yaml`.
+
 Override Slurm resources either by editing `scripts/slurm/launch-train.sbatch` or
 by passing normal `sbatch` flags, for example:
 
@@ -188,7 +207,17 @@ uv run python scripts/run_ppo.py configs/baseline.yaml /runs \
 ```
 
 The helper mounts `ORBIT_WARS_OUTPUT_DIR` as `/runs`, sources the optional W&B
-env file, and passes `WANDB_API_KEY` into the container when present.
+env file, and passes `WANDB_API_KEY` into the container when present. It also
+mounts `ORBIT_WARS_CONFIG_DIR`, defaulting to `./configs`, read-only at
+`/config` and exports `ORBIT_WARS_CONFIG_DIR=/config` inside the shell:
+
+```sh
+ORBIT_WARS_CONFIG_DIR=/sw/isaiah/orbit-wars/configs \
+  scripts/slurm/launch-interactive.sh
+
+uv run python scripts/run_ppo.py "$ORBIT_WARS_CONFIG_DIR/experiment.yaml" /runs \
+  --log-mode debug
+```
 
 ## References
 

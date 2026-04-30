@@ -31,7 +31,7 @@ rl:
   replay_ratio: 1.0
   segment_sampling:
     sampling: uniform
-    segments_per_minibatch: 16
+    segments_per_minibatch: 4
     prio_alpha: 0.0
     prio_beta: 0.2
     prio_eps: 1.0e-06
