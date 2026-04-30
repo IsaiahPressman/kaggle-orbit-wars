@@ -44,6 +44,10 @@ explicitly want the latest successful `main` image. For private repositories or
 private packages, the cluster must have GHCR credentials available to
 Enroot/Pyxis.
 
+The CI build frees unused hosted-runner toolchains before Docker starts and runs
+`uv sync` without uv's package cache. This avoids keeping a second unpacked copy
+of the CUDA PyTorch dependency stack while the virtual environment is installed.
+
 The Linux `uv` markers install the CUDA 12.8 PyTorch wheel from `pyproject.toml`.
 At runtime, GPU access still depends on the host NVIDIA driver and the cluster
 container runtime exposing the GPU devices into the container.
