@@ -117,8 +117,10 @@ pub(super) fn encode_state_with_action_slots(
     max_launch.fill(0);
 
     let mut fleets = state.fleets.iter().collect::<Vec<_>>();
-    fleets.sort_by(|left, right| right.ships.cmp(&left.ships).then(left.id.cmp(&right.id)));
     let ignored_fleets = fleets.len().saturating_sub(max_fleets);
+    if ignored_fleets > 0 {
+        fleets.sort_by(|left, right| right.ships.cmp(&left.ships).then(left.id.cmp(&right.id)));
+    }
 
     for (planet_index, planet) in non_comet_planets.iter().enumerate() {
         planet_mask[planet_index] = true;
