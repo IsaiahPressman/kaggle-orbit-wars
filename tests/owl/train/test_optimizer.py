@@ -121,7 +121,7 @@ def test_lr_scheduler_scales_optimizer_param_groups() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
     scheduler = create_lr_scheduler(
         optimizer,
-        LRScheduleConfig(warmup_steps=2, decay_steps=2, lr_min_ratio=0.25),
+        LRScheduleConfig(warmup_steps=2, decay_steps=2, lr_min_ratio=0.025),
     )
     assert scheduler is not None
     assert isinstance(scheduler, torch.optim.lr_scheduler.LambdaLR)
@@ -135,7 +135,13 @@ def test_lr_scheduler_scales_optimizer_param_groups() -> None:
     assert scheduler.get_last_lr() == pytest.approx([0.01])
     optimizer.step()
     scheduler.step()
-    assert scheduler.get_last_lr() == pytest.approx([0.00625])
+    assert scheduler.get_last_lr() == pytest.approx([0.005125])
+    optimizer.step()
+    scheduler.step()
+    assert scheduler.get_last_lr() == pytest.approx([0.00025])
+    optimizer.step()
+    scheduler.step()
+    assert scheduler.get_last_lr() == pytest.approx([0.00025])
 
 
 def test_composite_lr_scheduler_round_trips_nested_state_dict() -> None:

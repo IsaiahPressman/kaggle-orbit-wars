@@ -58,10 +58,6 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
             },
             "model": {
                 "model_arch": "stateless_transformer_v1",
-                "action_spec": {
-                    "action_spec": "pure",
-                    "max_per_planet_launches": 2,
-                },
                 "embed_dim": 32,
                 "depth": 1,
                 "n_heads": 4,
@@ -116,7 +112,6 @@ def test_full_config_defaults_to_multi_launch_actions() -> None:
     )
 
     assert config.env.action_spec.max_per_planet_launches == 3
-    assert config.model.action_spec.max_per_planet_launches == 3
 
 
 def test_full_config_accepts_single_launch_training_actions() -> None:
@@ -131,10 +126,6 @@ def test_full_config_accepts_single_launch_training_actions() -> None:
             },
             "model": {
                 "model_arch": "stateless_transformer_v1",
-                "action_spec": {
-                    "action_spec": "pure",
-                    "max_per_planet_launches": 1,
-                },
                 "embed_dim": 32,
                 "depth": 1,
                 "n_heads": 4,
@@ -150,14 +141,13 @@ def test_full_config_accepts_single_launch_training_actions() -> None:
     )
 
     assert config.env.action_spec.max_per_planet_launches == 1
-    assert config.model.action_spec.max_per_planet_launches == 1
 
 
-def test_full_config_rejects_mismatched_model_and_env_action_specs() -> None:
+@pytest.mark.parametrize("field_name", ["obs_spec", "action_spec"])
+def test_full_config_rejects_model_owned_env_specs(field_name: str) -> None:
     with pytest.raises(
         ValueError,
-        match=r"model\.action_spec\.max_per_planet_launches must match "
-        r"env\.action_spec\.max_per_planet_launches",
+        match=r"Extra inputs are not permitted",
     ):
         FullConfig.model_validate(
             {
@@ -170,6 +160,7 @@ def test_full_config_rejects_mismatched_model_and_env_action_specs() -> None:
                 },
                 "model": {
                     "model_arch": "stateless_transformer_v1",
+                    field_name: {},
                     "embed_dim": 32,
                     "depth": 1,
                     "n_heads": 4,
@@ -217,9 +208,7 @@ def test_full_config_rejects_rl_env_count() -> None:
 def test_training_presets_load(preset: str) -> None:
     config = FullConfig.from_file(_REPO_ROOT / "configs" / f"{preset}.yaml")
 
-    assert config.model.action_spec.max_per_planet_launches == (
-        config.env.action_spec.max_per_planet_launches
-    )
+    assert config.env.action_spec.max_per_planet_launches == 3
     assert config.model.embed_dim == 256
     assert config.model.depth == 6
     assert config.model.n_heads == 8

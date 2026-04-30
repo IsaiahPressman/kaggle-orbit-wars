@@ -20,7 +20,7 @@ class LRScheduleConfig(BaseConfig):
     schedule: LRScheduleName = "linear_warmup_cosine_decay"
     warmup_steps: int = Field(default=0, ge=0)
     decay_steps: int = Field(default=1, ge=1)
-    lr_min_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    lr_min_ratio: float = Field(default=1e-3, ge=1e-3, le=0.1)
 
 
 class Optimizer(Protocol):

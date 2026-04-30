@@ -11,8 +11,8 @@ from typing import Any, assert_never
 import torch
 import yaml
 from owl.model import ModelConfig, StatelessTransformerV1
-from owl.rl import VectorizedEnv
-from owl.train import FullConfig, PPOTrainer
+from owl.rl import ActionConfig, ObsConfig, VectorizedEnv
+from owl.train import FullConfig, PPOTrainer, configure_torch
 from owl.train.logging import LogMode, create_logger
 from owl.train.optimizer import (
     create_lr_scheduler,
@@ -23,6 +23,7 @@ from tqdm import tqdm
 
 def main() -> None:
     args = _parse_args()
+    configure_torch()
     overrides = _parse_cli_overrides(args.overrides)
     cfg = FullConfig.from_file(args.config, overrides=overrides)
 
@@ -37,7 +38,11 @@ def main() -> None:
         two_player_weight=cfg.env.two_player_weight,
         pin_memory=cfg.env.pin_memory,
     )
-    model = _create_model(cfg.model).to(device)
+    model = _create_model(
+        cfg.model,
+        obs_spec=cfg.env.obs_spec,
+        action_spec=cfg.env.action_spec,
+    ).to(device)
     optimizer = create_optimizer(model, cfg.optimizer)
     lr_scheduler = create_lr_scheduler(optimizer, cfg.optimizer.lr_schedule)
     trainer = PPOTrainer(
@@ -231,10 +236,19 @@ def _create_run_dir(output_dir: Path) -> Path:
     return run_dir
 
 
-def _create_model(config: ModelConfig) -> StatelessTransformerV1:
+def _create_model(
+    config: ModelConfig,
+    *,
+    obs_spec: ObsConfig,
+    action_spec: ActionConfig,
+) -> StatelessTransformerV1:
     match config.model_arch:
         case "stateless_transformer_v1":
-            return StatelessTransformerV1(config)
+            return StatelessTransformerV1(
+                config,
+                obs_spec=obs_spec,
+                action_spec=action_spec,
+            )
         case _:
             assert_never(config)
 

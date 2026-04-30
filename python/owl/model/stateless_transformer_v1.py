@@ -39,8 +39,6 @@ _CRITIC_HEAD_INIT_GAIN = 1.0
 
 class StatelessTransformerV1Config(BaseConfig):
     model_arch: Literal["stateless_transformer_v1"] = STATELESS_TRANSFORMER_V1
-    obs_spec: ObsV1Config = Field(default_factory=ObsV1Config)
-    action_spec: ActionPureConfig = Field(default_factory=ActionPureConfig)
     embed_dim: int = Field(default=128, ge=1)
     depth: int = Field(default=4, ge=1)
     n_heads: int = Field(default=8, ge=1)
@@ -101,15 +99,23 @@ class PackedSequence:
 
 
 class StatelessTransformerV1(BaseModelAPI):
-    def __init__(self, config: StatelessTransformerV1Config) -> None:
+    def __init__(
+        self,
+        config: StatelessTransformerV1Config,
+        *,
+        obs_spec: ObsV1Config,
+        action_spec: ActionPureConfig,
+    ) -> None:
         super().__init__()
         self.config = config
+        self.obs_spec = obs_spec
+        self.action_spec = action_spec
 
         dim = self.config.embed_dim
-        self.planet_proj = nn.Linear(self.config.obs_spec.planet_channels, dim)
-        self.fleet_proj = nn.Linear(self.config.obs_spec.fleet_channels, dim)
-        self.comet_proj = nn.Linear(self.config.obs_spec.comet_channels, dim)
-        self.global_proj = nn.Linear(self.config.obs_spec.global_channels, dim)
+        self.planet_proj = nn.Linear(self.obs_spec.planet_channels, dim)
+        self.fleet_proj = nn.Linear(self.obs_spec.fleet_channels, dim)
+        self.comet_proj = nn.Linear(self.obs_spec.comet_channels, dim)
+        self.global_proj = nn.Linear(self.obs_spec.global_channels, dim)
         self.player_tokens = nn.Embedding(OUTER_PLAYER_SLOTS, dim)
 
         self.blocks = nn.ModuleList(
@@ -120,7 +126,7 @@ class StatelessTransformerV1(BaseModelAPI):
         self.critic_head = nn.Linear(dim, 1)
         self.action_info_proj = nn.Linear(1, dim)
         self.launch_slot_tokens = nn.Embedding(
-            self.config.action_spec.max_per_planet_launches,
+            self.action_spec.max_per_planet_launches,
             dim,
         )
         self.slot_dynamic_proj = nn.Linear(9, dim)
@@ -307,7 +313,7 @@ class StatelessTransformerV1(BaseModelAPI):
         deterministic: bool,
     ) -> tuple[ModelActions, ModelActionLogProbs, ModelActionEntropies]:
         slot_input = self._actor_inputs(hidden, max_launch)
-        max_slots = self.config.action_spec.max_per_planet_launches
+        max_slots = self.action_spec.max_per_planet_launches
         launch_slots: list[torch.Tensor] = []
         angle_slots: list[torch.Tensor] = []
         ship_slots: list[torch.Tensor] = []
@@ -453,7 +459,7 @@ class StatelessTransformerV1(BaseModelAPI):
                 hidden.shape[0],
                 OUTER_PLAYER_SLOTS,
                 ACTION_ENTITY_SLOTS,
-                self.config.action_spec.max_per_planet_launches,
+                self.action_spec.max_per_planet_launches,
             ),
         )
 
@@ -477,7 +483,7 @@ class StatelessTransformerV1(BaseModelAPI):
 
         # The configured slot count is a hard truncation: there is no extra
         # terminal stop probability after the final slot.
-        for slot in range(self.config.action_spec.max_per_planet_launches):
+        for slot in range(self.action_spec.max_per_planet_launches):
             slot_hidden, hidden_state = self.actor_gru(
                 self._slot_gru_input(
                     slot_input,
@@ -662,7 +668,7 @@ class StatelessTransformerV1(BaseModelAPI):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         initial_available_ships = initial_max_launch.clamp_min(1).to(dtype=dtype)
-        slot_denominator = max(self.config.action_spec.max_per_planet_launches - 1, 1)
+        slot_denominator = max(self.action_spec.max_per_planet_launches - 1, 1)
         slot_fraction = torch.full_like(
             remaining,
             fill_value=slot / slot_denominator,

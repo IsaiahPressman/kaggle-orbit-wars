@@ -42,12 +42,17 @@ uv run python -c 'from importlib import import_module; from pathlib import Path;
 
 Training presets live in `configs/`:
 
-- `baseline.yaml`: vanilla PPO with larger rollout/minibatch sizing.
+- `baseline.yaml`: vanilla PPO with larger rollout/minibatch sizing, scheduled
+  learning rates, periodic checkpoints, `torch.compile` default mode, and
+  bfloat16 autocast.
 - `pufferish.yaml`: enables Puffer-style V-trace recomputation and
   advantage-prioritized segment sampling without changing the core Python
   defaults.
 - `model/stateless_transformer_5m.yaml`: shared stateless transformer model
   config used by the training presets.
+
+The training entrypoint configures PyTorch for TF32 matmul/conv precision and
+cuDNN benchmarking before constructing the environment, model, and optimizer.
 
 Run a preset with:
 

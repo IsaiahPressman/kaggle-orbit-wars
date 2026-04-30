@@ -22,8 +22,6 @@ without changing callers that validate config dictionaries through the union.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `model_arch` | `"stateless_transformer_v1"` | Pydantic discriminator tag. |
-| `obs_spec` | `ObsV1Config()` | Observation schema and entity capacities. |
-| `action_spec` | `ActionPureConfig()` | Action schema and max launches per source; defaults to 3 launch slots. |
 | `embed_dim` | `128` | Hidden width for all projected tokens and transformer blocks. |
 | `depth` | `4` | Number of transformer blocks. |
 | `n_heads` | `8` | Attention heads; must evenly divide `embed_dim`. |
@@ -37,6 +35,10 @@ without changing callers that validate config dictionaries through the union.
 | `alpha_beta_eps` | `1e-4` | Epsilon added to beta-binomial alpha and beta. |
 | `dir_eps` | `1e-6` | Epsilon for normalizing raw angle direction vectors. |
 | `max_ship_normalizer` | `250.0` | Normalizer for ship-budget actor features. |
+
+Observation and action specs are owned by `EnvConfig`. `StatelessTransformerV1`
+receives `env.obs_spec` and `env.action_spec` when it is instantiated, so model
+config presets cannot silently diverge from the environment tensor shapes.
 
 ## Input Encoding
 
@@ -155,9 +157,9 @@ The sequence length is at most `max_per_planet_launches <= 4`, so this
 implementation uses the straightforward sequential recurrence rather than the
 paper's parallel scan variant.
 
-`ActionPureConfig()` defaults to `max_per_planet_launches=3`. Training configs
-validate that the environment and model use the same launch count, so PPO runs
-cannot silently mix different action shapes.
+`ActionPureConfig()` defaults to `max_per_planet_launches=3`. PPO model
+construction uses the environment action spec as the source of truth, so the
+model launch-slot count matches the action tensors submitted to the environment.
 
 For every slot, the policy emits:
 

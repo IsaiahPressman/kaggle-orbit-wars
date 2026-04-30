@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from owl.rl import MAX_COMETS, MAX_PLANETS, ActionPureConfig, ObsV1Config
 from owl.train import FullConfig, PPOTrainer
 from owl.train.logging import LogMode
 
@@ -123,6 +124,21 @@ def test_max_runtime_hours_converts_to_seconds() -> None:
 def test_validate_args_rejects_non_positive_runtime_hours() -> None:
     with pytest.raises(ValueError, match="--max-runtime-hours must be positive"):
         run_ppo._validate_args(Namespace(max_env_steps=None, max_runtime_hours=0.0))
+
+
+def test_create_model_uses_env_owned_specs() -> None:
+    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=2)
+    model = run_ppo._create_model(
+        _full_config().model,
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+
+    assert model.obs_spec == obs_spec
+    assert model.action_spec == action_spec
+    assert model.fleet_proj.in_features == obs_spec.fleet_channels
+    assert model.launch_slot_tokens.num_embeddings == 2
 
 
 def test_run_training_loop_writes_periodic_checkpoints(tmp_path: Path) -> None:

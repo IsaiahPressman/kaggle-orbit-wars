@@ -13,6 +13,13 @@ class DTypeConfig(Protocol):
     def dtype(self) -> TrainingDType: ...
 
 
+def configure_torch() -> None:
+    torch.backends.fp32_precision = "tf32"  # type: ignore[attr-defined]
+    torch.backends.cuda.matmul.fp32_precision = "tf32"
+    torch.backends.cudnn.conv.fp32_precision = "tf32"  # type: ignore[attr-defined]
+    torch.backends.cudnn.benchmark = True
+
+
 def autocast_context(
     cfg: DTypeConfig,
     device: torch.device,

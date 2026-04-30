@@ -1,19 +1,42 @@
 env:
   n_envs: 2048
+  obs_spec:
+    obs_spec: obs_v1
+    max_entities: 1024
+  action_spec:
+    action_spec: pure
+    max_per_planet_launches: 3
+  two_player_weight: 0.5
+  pin_memory: true
 
 model: stateless_transformer_5m
 
 optimizer:
   optimizer: muon
   adamw_lr: 0.0003
+  adamw_eps: 1.0e-05
+  weight_decay: 0.0
   muon_lr: 0.015
+  muon_weight_decay: 0.1
+  muon_momentum: 0.95
+  lr_schedule: 
+    schedule: linear_warmup_cosine_decay
+    warmup_steps: 100
+    decay_steps: 10_000
+    lr_min_ratio: 0.01
 
 rl:
   horizon: 128
-  checkpoint_freq: 0
+  checkpoint_freq: 1_000
+  replay_ratio: 1.0
+  segment_sampling:
+    sampling: uniform
+    segments_per_minibatch: 16
+    prio_alpha: 0.0
+    prio_beta: 0.2
+    prio_eps: 1.0e-06
   gamma: 0.995
   gae_lambda: 0.95
-  replay_ratio: 1.0
   clip_coef: 0.2
   vf_clip_coef: 0.2
   vf_coef: 0.5
@@ -21,7 +44,10 @@ rl:
   max_grad_norm: 1.0
   target_kl: 0.03
   advantage_mode: gae
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
   recompute_advantages_each_minibatch: false
-  segment_sampling:
-    sampling: uniform
-    segments_per_minibatch: 16
+  normalize_advantages: false
+  debug_validate_ppo_loss_inputs: false
+  compile_mode: default
+  dtype: bfloat16

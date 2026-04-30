@@ -41,7 +41,7 @@ from .sampling import (
     sample_segments_uniform_single_pass,
     segment_sampling_metrics,
 )
-from .utils import TrainingDType, assert_finite, autocast_context
+from .utils import TrainingDType, assert_finite, autocast_context, configure_torch
 
 __all__ = [
     "AdamWConfig",
@@ -70,6 +70,7 @@ __all__ = [
     "compute_advantages",
     "compute_gae",
     "compute_puffer_vtrace_action_aligned",
+    "configure_torch",
     "create_lr_scheduler",
     "create_optimizer",
     "explained_variance",
