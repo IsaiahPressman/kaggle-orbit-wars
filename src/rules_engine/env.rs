@@ -146,22 +146,20 @@ fn remove_expired_comets(state: &mut State) {
         return;
     }
 
-    remove_comet_planets(state, &expired);
+    remove_comet_planets(state, |planet_id| expired.contains(&planet_id));
 }
 
-fn remove_comet_planets(state: &mut State, expired: &HashSet<u32>) {
-    state.planets.retain(|planet| !expired.contains(&planet.id));
+fn remove_comet_planets(state: &mut State, is_expired: impl Fn(u32) -> bool) {
+    state.planets.retain(|planet| !is_expired(planet.id));
     state
         .initial_planets
-        .retain(|planet| !expired.contains(&planet.id));
+        .retain(|planet| !is_expired(planet.id));
     state
         .comet_planet_ids
-        .retain(|planet_id| !expired.contains(planet_id));
+        .retain(|planet_id| !is_expired(*planet_id));
 
     for group in &mut state.comets {
-        group
-            .planet_ids
-            .retain(|planet_id| !expired.contains(planet_id));
+        group.planet_ids.retain(|planet_id| !is_expired(*planet_id));
     }
     state.comets.retain(|group| !group.planet_ids.is_empty());
 }
@@ -371,7 +369,7 @@ fn move_comets_and_sweep(
     combat_lists: &mut CombatLists,
     swept_fleets: &mut [bool],
 ) {
-    let mut expired = HashSet::new();
+    let mut expired = Vec::new();
     let mut sweep_checks = Vec::new();
 
     for group in &mut state.comets {
@@ -389,7 +387,7 @@ fn move_comets_and_sweep(
             let path = &group.paths[path_offset];
 
             if path_index >= path.len() as i32 {
-                expired.insert(*planet_id);
+                expired.push(*planet_id);
                 continue;
             }
 
@@ -405,7 +403,7 @@ fn move_comets_and_sweep(
     }
 
     if !expired.is_empty() {
-        remove_comet_planets(state, &expired);
+        remove_comet_planets(state, |planet_id| expired.contains(&planet_id));
     }
 
     for (planet_id, radius, old_pos, new_pos) in sweep_checks {
@@ -1369,12 +1367,63 @@ mod tests {
             Point::new(48.0, 50.0),
             Point::new(52.0, 50.0),
         );
-        remove_comet_planets(&mut state, &HashSet::from([10]));
+        remove_comet_planets(&mut state, |planet_id| planet_id == 10);
         remove_marked_fleets(&mut state, &combat_lists);
         resolve_combats(&mut state, combat_lists);
 
         assert!(state.planets.is_empty());
         assert!(state.fleets.is_empty());
+    }
+
+    #[test]
+    fn remove_comet_planets_handles_duplicate_expired_ids() {
+        let mut state = reset(ResetConfig {
+            sim: SimConfig::new(2),
+            step: None,
+            angular_velocity: Some(0.0),
+            planets: Some(vec![
+                Planet {
+                    id: 10,
+                    owner: -1,
+                    x: -99.0,
+                    y: -99.0,
+                    radius: 1.0,
+                    ships: 3,
+                    production: 1,
+                },
+                Planet {
+                    id: 11,
+                    owner: -1,
+                    x: -99.0,
+                    y: -99.0,
+                    radius: 1.0,
+                    ships: 3,
+                    production: 1,
+                },
+            ]),
+            initial_planets: None,
+        });
+        state.comet_planet_ids = vec![10, 11];
+        state.comets = vec![CometGroup {
+            planet_ids: vec![10, 11],
+            paths: vec![vec![Point::new(1.0, 1.0)], vec![Point::new(2.0, 2.0)]],
+            path_index: 0,
+        }];
+        let expired = [10, 10];
+
+        remove_comet_planets(&mut state, |planet_id| expired.contains(&planet_id));
+
+        assert_eq!(
+            state
+                .planets
+                .iter()
+                .map(|planet| planet.id)
+                .collect::<Vec<_>>(),
+            vec![11]
+        );
+        assert_eq!(state.initial_planets.len(), 1);
+        assert_eq!(state.comet_planet_ids, vec![11]);
+        assert_eq!(state.comets[0].planet_ids, vec![11]);
     }
 
     #[test]
