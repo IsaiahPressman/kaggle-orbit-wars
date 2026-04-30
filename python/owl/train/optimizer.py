@@ -53,10 +53,10 @@ class AdamWConfig(BaseConfig):
 
 class MuonConfig(BaseConfig):
     optimizer: Literal["muon"] = "muon"
-    learning_rate: float = Field(default=3e-4, gt=0.0)
+    adamw_lr: float = Field(default=3e-4, gt=0.0)
     adamw_eps: float = Field(default=1e-5, gt=0.0)
     weight_decay: float = Field(default=0.0, ge=0.0)
-    muon_lr: float | None = Field(default=None, gt=0.0)
+    muon_lr: float = Field(default=1e-2, gt=0.0)
     muon_weight_decay: float = Field(default=0.1, ge=0.0)
     muon_momentum: float = Field(default=0.95, ge=0.0, lt=1.0)
     lr_schedule: LRScheduleConfig | None = None
@@ -204,7 +204,7 @@ def create_optimizer(model: BaseModelAPI, config: OptimizerConfig) -> Optimizer:
             optimizers.append(
                 torch.optim.Muon(
                     muon_params,
-                    lr=config.muon_lr or config.learning_rate,
+                    lr=config.muon_lr,
                     weight_decay=config.muon_weight_decay,
                     momentum=config.muon_momentum,
                 )
@@ -213,7 +213,7 @@ def create_optimizer(model: BaseModelAPI, config: OptimizerConfig) -> Optimizer:
             optimizers.append(
                 torch.optim.AdamW(
                     adamw_params,
-                    lr=config.learning_rate,
+                    lr=config.adamw_lr,
                     eps=config.adamw_eps,
                     weight_decay=config.weight_decay,
                 )

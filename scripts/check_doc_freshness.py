@@ -27,7 +27,7 @@ DOC_RULES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     ),
     (
         "training",
-        ("python/owl/train/", "scripts/run_ppo.py", "configs/train/"),
+        ("python/owl/train/", "scripts/run_ppo.py"),
         ("README.md",),
     ),
 )

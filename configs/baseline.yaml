@@ -1,15 +1,15 @@
 env:
-  n_envs: 1024
+  n_envs: 2048
 
-model:
-  model_arch: stateless_transformer_v1
+model: stateless_transformer_5m
 
 optimizer:
-  optimizer: adamw
-  learning_rate: 0.0003
+  optimizer: muon
+  adamw_lr: 0.0003
+  muon_lr: 0.015
 
 rl:
-  horizon: 64
+  horizon: 128
   checkpoint_freq: 0
   gamma: 0.995
   gae_lambda: 0.95
@@ -24,4 +24,4 @@ rl:
   recompute_advantages_each_minibatch: false
   segment_sampling:
     sampling: uniform
-    segments_per_minibatch: 64
+    segments_per_minibatch: 16

@@ -40,18 +40,19 @@ uv run python -c 'from importlib import import_module; from pathlib import Path;
 
 ## PPO training configs
 
-Training presets live in `configs/train/`:
+Training presets live in `configs/`:
 
-- `debug.yaml`: one environment and one-segment minibatches for smoke tests.
 - `baseline.yaml`: vanilla PPO with larger rollout/minibatch sizing.
 - `pufferish.yaml`: enables GAE+V-trace recomputation and
   advantage-prioritized segment sampling without changing the core Python
   defaults.
+- `model/stateless_transformer_5m.yaml`: shared stateless transformer model
+  config used by the training presets.
 
 Run a preset with:
 
 ```sh
-uv run python scripts/run_ppo.py configs/train/debug.yaml runs --log-mode debug --max-env-steps 16
+uv run python scripts/run_ppo.py configs/baseline.yaml runs --log-mode debug --max-env-steps 16
 ```
 
 PPO checkpoints save model, optimizer, scheduler, config, and environment-step
