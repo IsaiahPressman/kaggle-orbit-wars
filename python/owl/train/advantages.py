@@ -11,7 +11,23 @@ from owl.train.utils import (
     require_segment_time_major,
 )
 
-AdvantageMode = Literal["gae", "gae_vtrace"]
+AdvantageMode = Literal["gae", "gae_vtrace", "puffer_vtrace"]
+type BootstrappedAdvantageMode = Literal["gae", "gae_vtrace"]
+
+
+class PufferVTraceFn(Protocol):
+    def __call__(
+        self,
+        *,
+        values: torch.Tensor,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+        ratios: torch.Tensor,
+        gamma: float,
+        gae_lambda: float,
+        vtrace_rho_clip: float,
+        vtrace_c_clip: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 
 class ComputeGAEFn(Protocol):
@@ -44,6 +60,20 @@ def compute_gae(
     vtrace_rho_clip: float = 1.0,
     vtrace_c_clip: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if mode == "puffer_vtrace":
+        if ratios is None:
+            raise ValueError("ratios are required when mode='puffer_vtrace'")
+        return compute_puffer_vtrace_action_aligned(
+            values=values,
+            rewards=rewards,
+            dones=dones,
+            ratios=ratios,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+            vtrace_rho_clip=vtrace_rho_clip,
+            vtrace_c_clip=vtrace_c_clip,
+        )
+
     next_values, rho, c = _advantage_tensor_inputs(
         values=values,
         rewards=rewards,
@@ -75,6 +105,7 @@ def compile_compute_gae(compile_mode: str | None) -> ComputeGAEFn:
         _compute_gae_tensors,
         mode=compile_mode,
     )
+    compiled_puffer_vtrace_tensors: PufferVTraceFn | None = None
 
     def compiled_compute_gae(
         *,
@@ -89,6 +120,36 @@ def compile_compute_gae(compile_mode: str | None) -> ComputeGAEFn:
         vtrace_rho_clip: float = 1.0,
         vtrace_c_clip: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if mode == "puffer_vtrace":
+            if ratios is None:
+                raise ValueError("ratios are required when mode='puffer_vtrace'")
+            nonlocal compiled_puffer_vtrace_tensors
+            if compiled_puffer_vtrace_tensors is None:
+                compiled_puffer_vtrace_tensors = torch.compile(
+                    _compute_puffer_vtrace_action_aligned_tensors,
+                    mode=compile_mode,
+                )
+            _validate_puffer_vtrace_inputs(
+                values=values,
+                rewards=rewards,
+                dones=dones,
+                ratios=ratios,
+                gamma=gamma,
+                gae_lambda=gae_lambda,
+                vtrace_rho_clip=vtrace_rho_clip,
+                vtrace_c_clip=vtrace_c_clip,
+            )
+            return compiled_puffer_vtrace_tensors(
+                values=values,
+                rewards=rewards,
+                dones=dones,
+                ratios=ratios,
+                gamma=gamma,
+                gae_lambda=gae_lambda,
+                vtrace_rho_clip=vtrace_rho_clip,
+                vtrace_c_clip=vtrace_c_clip,
+            )
+
         next_values, rho, c = _advantage_tensor_inputs(
             values=values,
             rewards=rewards,
@@ -129,6 +190,21 @@ def compute_advantages(
     vtrace_c_clip: float = 1.0,
 ) -> torch.Tensor:
     """Compute advantages for segment-major/time-second tensors [N, T, ...]."""
+    if mode == "puffer_vtrace":
+        if ratios is None:
+            raise ValueError("ratios are required when mode='puffer_vtrace'")
+        advantages, _returns = compute_puffer_vtrace_action_aligned(
+            values=values,
+            rewards=rewards,
+            dones=dones,
+            ratios=ratios,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+            vtrace_rho_clip=vtrace_rho_clip,
+            vtrace_c_clip=vtrace_c_clip,
+        )
+        return advantages
+
     next_values, rho, c = _advantage_tensor_inputs(
         values=values,
         rewards=rewards,
@@ -153,6 +229,99 @@ def compute_advantages(
     )
 
 
+def compute_puffer_vtrace_action_aligned(
+    *,
+    values: torch.Tensor,
+    rewards: torch.Tensor,
+    dones: torch.Tensor,
+    ratios: torch.Tensor,
+    gamma: float,
+    gae_lambda: float,
+    vtrace_rho_clip: float,
+    vtrace_c_clip: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute Puffer-style V-trace for action-aligned rollout tensors."""
+    _validate_puffer_vtrace_inputs(
+        values=values,
+        rewards=rewards,
+        dones=dones,
+        ratios=ratios,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+        vtrace_rho_clip=vtrace_rho_clip,
+        vtrace_c_clip=vtrace_c_clip,
+    )
+    return _compute_puffer_vtrace_action_aligned_tensors(
+        values=values,
+        rewards=rewards,
+        dones=dones,
+        ratios=ratios,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+        vtrace_rho_clip=vtrace_rho_clip,
+        vtrace_c_clip=vtrace_c_clip,
+    )
+
+
+def _validate_puffer_vtrace_inputs(
+    *,
+    values: torch.Tensor,
+    rewards: torch.Tensor,
+    dones: torch.Tensor,
+    ratios: torch.Tensor,
+    gamma: float,
+    gae_lambda: float,
+    vtrace_rho_clip: float,
+    vtrace_c_clip: float,
+) -> None:
+    require_segment_time_major(values, "values")
+    require_same_shape(values, rewards, left_name="values", right_name="rewards")
+    require_same_shape(values, dones, left_name="values", right_name="dones")
+    require_same_shape(values, ratios, left_name="values", right_name="ratios")
+    require_probability_range(gamma, "gamma")
+    require_probability_range(gae_lambda, "gae_lambda")
+    assert_finite(values, "values")
+    assert_finite(rewards, "rewards")
+    assert_finite(ratios, "ratios")
+    if vtrace_rho_clip <= 0:
+        raise ValueError("vtrace_rho_clip must be positive")
+    if vtrace_c_clip <= 0:
+        raise ValueError("vtrace_c_clip must be positive")
+
+
+def _compute_puffer_vtrace_action_aligned_tensors(
+    *,
+    values: torch.Tensor,
+    rewards: torch.Tensor,
+    dones: torch.Tensor,
+    ratios: torch.Tensor,
+    gamma: float,
+    gae_lambda: float,
+    vtrace_rho_clip: float,
+    vtrace_c_clip: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    advantages = torch.zeros_like(values)
+    last_advantage = torch.zeros_like(values[:, 0])
+
+    rho = torch.clamp(ratios, max=vtrace_rho_clip)
+    c = torch.clamp(ratios, max=vtrace_c_clip)
+    dones_float = dones.to(dtype=values.dtype)
+
+    for step in range(values.shape[1] - 2, -1, -1):
+        next_nonterminal = 1.0 - dones_float[:, step]
+        delta = rho[:, step] * (
+            rewards[:, step]
+            + gamma * values[:, step + 1] * next_nonterminal
+            - values[:, step]
+        )
+        last_advantage = (
+            delta + gamma * gae_lambda * c[:, step] * next_nonterminal * last_advantage
+        )
+        advantages[:, step] = last_advantage
+
+    return advantages, advantages + values
+
+
 def _advantage_tensor_inputs(
     *,
     values: torch.Tensor,
@@ -160,7 +329,7 @@ def _advantage_tensor_inputs(
     dones: torch.Tensor,
     bootstrap_values: torch.Tensor | None,
     ratios: torch.Tensor | None,
-    mode: AdvantageMode,
+    mode: BootstrappedAdvantageMode,
     gamma: float,
     gae_lambda: float,
     vtrace_rho_clip: float,

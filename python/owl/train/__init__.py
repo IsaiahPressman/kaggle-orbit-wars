@@ -1,4 +1,9 @@
-from .advantages import AdvantageMode, compute_advantages, compute_gae
+from .advantages import (
+    AdvantageMode,
+    compute_advantages,
+    compute_gae,
+    compute_puffer_vtrace_action_aligned,
+)
 from .config import FullConfig
 from .metrics import explained_variance
 from .optimizer import (
@@ -63,6 +68,7 @@ __all__ = [
     "autocast_context",
     "compute_advantages",
     "compute_gae",
+    "compute_puffer_vtrace_action_aligned",
     "create_lr_scheduler",
     "create_optimizer",
     "explained_variance",
