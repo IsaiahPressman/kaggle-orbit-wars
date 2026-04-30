@@ -80,6 +80,7 @@ class PPOConfig(BaseConfig):
     vtrace_rho_clip: float = Field(default=1.0, gt=0.0)
     vtrace_c_clip: float = Field(default=1.0, gt=0.0)
     recompute_advantages_each_minibatch: bool = True
+    normalize_advantages: bool = False
     debug_validate_ppo_loss_inputs: bool = False
     compile_mode: CompileMode | None = None
     dtype: TrainingDType = "float32"
@@ -319,7 +320,7 @@ class PPOTrainer:
         policy_mask = _policy_mask(segments.obs)
         ratios = (
             torch.ones_like(segments.logp)
-            if self.config.advantage_mode == "gae_vtrace"
+            if self.config.advantage_mode == "puffer_vtrace"
             else None
         )
         advantages, returns = self._compute_gae(
@@ -430,8 +431,8 @@ class PPOTrainer:
         loss_metrics: list[PPOLossMetrics] = []
         grad_norms: list[torch.Tensor] = []
         sampling_metrics: list[SegmentSamplingMetrics] = []
-        current_logp = segments.logp.clone()
         current_values = segments.values.clone()
+        current_ratios = torch.ones_like(segments.logp)
         current_advantages = advantages
         current_returns = returns
         current_bootstrap_values = bootstrap_values.clone()
@@ -446,16 +447,23 @@ class PPOTrainer:
             n_minibatches=n_minibatches,
         )
         for minibatch_index, update_sample in enumerate(update_samples):
-            if self._should_recompute_advantages(minibatch_index):
-                current_logp, current_values = self._current_segment_logp_values(
+            if self.config.advantage_mode == "puffer_vtrace":
+                current_advantages, current_returns = self._compute_current_gae(
+                    segments=segments,
+                    current_values=current_values,
+                    current_bootstrap_values=current_bootstrap_values,
+                    current_ratios=current_ratios,
+                )
+            elif self._should_recompute_advantages(minibatch_index):
+                _current_logp, current_values = self._current_segment_logp_values(
                     segments
                 )
                 current_bootstrap_values = self._current_bootstrap_values()
                 current_advantages, current_returns = self._compute_current_gae(
                     segments=segments,
-                    current_logp=current_logp,
                     current_values=current_values,
                     current_bootstrap_values=current_bootstrap_values,
+                    current_ratios=None,
                 )
             sampling_advantages = _segment_sampling_advantages(
                 current_advantages,
@@ -480,11 +488,15 @@ class PPOTrainer:
                 policy_mask,
                 value_mask,
                 sample,
+                value_clip_anchor=current_values,
             )
             loss_metrics.append(update.metrics)
             grad_norms.append(update.grad_norm.detach())
-            current_logp[update.indices] = update.new_logp
             current_values[update.indices] = update.new_values
+            if self.config.advantage_mode == "puffer_vtrace":
+                current_ratios[update.indices] = torch.exp(
+                    update.new_logp - segments.logp[update.indices]
+                )
             if (
                 self.config.target_kl is not None
                 and update.metrics.approx_kl.item() > self.config.target_kl
@@ -511,22 +523,17 @@ class PPOTrainer:
             return False
         return (
             self.config.recompute_advantages_each_minibatch
-            or self.config.advantage_mode == "gae_vtrace"
+            or self.config.advantage_mode == "puffer_vtrace"
         )
 
     def _compute_current_gae(
         self,
         *,
         segments: PPORolloutSegments,
-        current_logp: torch.Tensor,
         current_values: torch.Tensor,
         current_bootstrap_values: torch.Tensor,
+        current_ratios: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        ratios = (
-            _policy_ratios(current_logp, segments.logp)
-            if self.config.advantage_mode == "gae_vtrace"
-            else None
-        )
         return self._compute_gae(
             rewards=segments.rewards,
             values=current_values,
@@ -534,7 +541,7 @@ class PPOTrainer:
             last_values=current_bootstrap_values,
             gamma=self.config.gamma,
             gae_lambda=self.config.gae_lambda,
-            ratios=ratios,
+            ratios=current_ratios,
             mode=self.config.advantage_mode,
             vtrace_rho_clip=self.config.vtrace_rho_clip,
             vtrace_c_clip=self.config.vtrace_c_clip,
@@ -567,12 +574,14 @@ class PPOTrainer:
         policy_mask: torch.Tensor,
         value_mask: torch.Tensor,
         sample: SegmentSample,
+        *,
+        value_clip_anchor: torch.Tensor,
     ) -> PPOUpdateResult:
         idx = sample.indices
         batch_actions = _flatten_actions_time(_actions_index(segments.actions, idx))
         batch_obs = _flatten_obs_time(_obs_index(segments.obs, idx))
         batch_old_logp = segments.logp[idx]
-        batch_old_values = segments.values[idx]
+        batch_old_values = value_clip_anchor[idx]
         batch_returns = returns[idx]
         batch_policy_mask = policy_mask[idx]
         batch_value_mask = value_mask[idx]
@@ -580,12 +589,14 @@ class PPOTrainer:
         while importance.ndim < advantages[idx].ndim:
             importance = importance.unsqueeze(-1)
         batch_advantages = advantages[idx]
-        batch_policy_weight = (
-            batch_policy_mask.to(dtype=batch_advantages.dtype) * importance
-        )
-        batch_value_weight = (
-            batch_value_mask.to(dtype=batch_advantages.dtype) * importance
-        )
+        if self.config.normalize_advantages:
+            batch_advantages = normalize_masked_advantages(
+                batch_advantages,
+                batch_policy_mask,
+            )
+        batch_advantages = batch_advantages * importance
+        batch_policy_weight = batch_policy_mask.to(dtype=batch_advantages.dtype)
+        batch_value_weight = batch_value_mask.to(dtype=batch_advantages.dtype)
 
         with autocast_context(self.config, self.device):
             output = self.model.evaluate_actions(batch_obs, batch_actions)
@@ -831,8 +842,6 @@ def _ppo_loss_tensors(
     pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef)
     policy_loss = weighted_mean(torch.max(pg_loss1, pg_loss2), policy_weight)
 
-    # TODO: Revisit whether value clipping should anchor to fresher values when
-    # repeated PPO epochs make rollout-time old_values stale.
     value_clipped = old_values + torch.clamp(
         new_values - old_values,
         -vf_clip_coef,
@@ -1081,11 +1090,6 @@ def _policy_mask(obs: ObsBatch) -> torch.Tensor:
     return obs.still_playing & obs.can_act.any(dim=-1)
 
 
-def _policy_ratios(new_logp: torch.Tensor, old_logp: torch.Tensor) -> torch.Tensor:
-    require_same_shape(new_logp, old_logp, left_name="new_logp", right_name="old_logp")
-    return (new_logp - old_logp).exp()
-
-
 def _uses_uniform_single_pass_sampling(config: PPOConfig) -> bool:
     return config.segment_sampling.sampling == "uniform" and config.replay_ratio == 1.0
 
@@ -1123,6 +1127,21 @@ def _masked_max_or_zero(values: torch.Tensor, mask: torch.Tensor) -> torch.Tenso
         masked.max(),
         torch.zeros((), dtype=values.dtype, device=values.device),
     )
+
+
+def normalize_masked_advantages(
+    advantages: torch.Tensor,
+    mask: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    require_same_shape(advantages, mask, left_name="advantages", right_name="mask")
+    mask_float = mask.to(dtype=advantages.dtype)
+    denom = mask_float.sum().clamp_min(1.0)
+
+    mean = (advantages * mask_float).sum() / denom
+    var = ((advantages - mean).pow(2) * mask_float).sum() / denom
+
+    return (advantages - mean) / (var.sqrt() + eps)
 
 
 def _segment_sampling_advantages(

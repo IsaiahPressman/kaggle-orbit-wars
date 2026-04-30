@@ -1,4 +1,9 @@
-from .advantages import AdvantageMode, compute_advantages, compute_gae
+from .advantages import (
+    AdvantageMode,
+    compute_advantages,
+    compute_gae,
+    compute_puffer_vtrace_action_aligned,
+)
 from .config import FullConfig
 from .metrics import explained_variance
 from .optimizer import (
@@ -21,6 +26,7 @@ from .ppo import (
     PPORolloutBuffer,
     PPORolloutSegments,
     PPOTrainer,
+    normalize_masked_advantages,
     ppo_loss,
     validate_ppo_loss_inputs,
 )
@@ -63,10 +69,12 @@ __all__ = [
     "autocast_context",
     "compute_advantages",
     "compute_gae",
+    "compute_puffer_vtrace_action_aligned",
     "create_lr_scheduler",
     "create_optimizer",
     "explained_variance",
     "lr_multiplier",
+    "normalize_masked_advantages",
     "ppo_loss",
     "sample_segments",
     "sample_segments_by_advantage",
