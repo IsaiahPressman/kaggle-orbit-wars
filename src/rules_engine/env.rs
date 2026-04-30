@@ -1,4 +1,3 @@
-use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use super::generation::{
@@ -475,24 +474,51 @@ fn resolve_combats(state: &mut State, combat_lists: CombatLists) {
             continue;
         };
 
-        let mut player_ships: HashMap<i32, i32> = HashMap::new();
+        let mut player_ships = [0_i32; MAX_PLAYERS];
+        let mut player_present = [false; MAX_PLAYERS];
         for fleet in planet_fleets {
-            *player_ships.entry(fleet.owner).or_default() += fleet.ships;
+            assert!(fleet.owner != -1, "combat fleet owner cannot be neutral");
+            assert!(
+                fleet.owner >= 0 && (fleet.owner as usize) < MAX_PLAYERS,
+                "combat fleet owner out of bounds: {}",
+                fleet.owner
+            );
+            let owner = fleet.owner as usize;
+            player_ships[owner] += fleet.ships;
+            player_present[owner] = true;
         }
 
-        let mut sorted_players: Vec<(i32, i32)> = player_ships.into_iter().collect();
-        sorted_players.sort_by_key(|player| Reverse(player.1));
+        let mut top_player: Option<(i32, i32)> = None;
+        let mut second_player: Option<(i32, i32)> = None;
+        for (owner, ships) in player_ships.into_iter().enumerate() {
+            if !player_present[owner] {
+                continue;
+            }
 
-        let (survivor_owner, survivor_ships) = if sorted_players.len() > 1 {
-            let top = sorted_players[0];
-            let second = sorted_players[1];
+            let player = (owner as i32, ships);
+            if match top_player {
+                Some(top) => player.1 > top.1,
+                None => true,
+            } {
+                second_player = top_player;
+                top_player = Some(player);
+            } else if match second_player {
+                Some(second) => player.1 > second.1,
+                None => true,
+            } {
+                second_player = Some(player);
+            }
+        }
+
+        let top = top_player.expect("combat has at least one fleet");
+        let (survivor_owner, survivor_ships) = if let Some(second) = second_player {
             if top.1 == second.1 {
                 (-1, 0)
             } else {
                 (top.0, top.1 - second.1)
             }
         } else {
-            sorted_players[0]
+            top
         };
 
         if survivor_ships <= 0 {
@@ -1474,6 +1500,48 @@ mod tests {
         assert_eq!(state.planets[0].ships, 5);
         assert_eq!(state.planets[1].owner, -1);
         assert_eq!(state.planets[1].ships, 20);
+    }
+
+    #[test]
+    #[should_panic(expected = "combat fleet owner cannot be neutral")]
+    fn resolve_combats_rejects_neutral_fleet_owner() {
+        let mut state = base_state(2);
+        let mut combat_lists = CombatLists::for_planets(&state.planets);
+        combat_lists.push(
+            1,
+            Fleet {
+                id: 0,
+                owner: -1,
+                x: 80.0,
+                y: 20.0,
+                angle: 0.0,
+                from_planet_id: 0,
+                ships: 1,
+            },
+        );
+
+        resolve_combats(&mut state, combat_lists);
+    }
+
+    #[test]
+    #[should_panic(expected = "combat fleet owner out of bounds")]
+    fn resolve_combats_rejects_out_of_bounds_fleet_owner() {
+        let mut state = base_state(2);
+        let mut combat_lists = CombatLists::for_planets(&state.planets);
+        combat_lists.push(
+            1,
+            Fleet {
+                id: 0,
+                owner: MAX_PLAYERS as i32,
+                x: 80.0,
+                y: 20.0,
+                angle: 0.0,
+                from_planet_id: 0,
+                ships: 1,
+            },
+        );
+
+        resolve_combats(&mut state, combat_lists);
     }
 
     #[test]
