@@ -242,6 +242,52 @@ class TinyOrbitModel(BaseModelAPI):
         )
 
 
+class FixedEvaluationModel(BaseModelAPI):
+    def __init__(self, value: float) -> None:
+        super().__init__()
+        self.action_spec = ActionPureConfig()
+        self.value = nn.Parameter(torch.tensor(value))
+
+    def forward(
+        self,
+        obs: ObsBatch,
+        *,
+        deterministic: bool = False,
+    ) -> ModelOutput:
+        del deterministic
+        n_envs = obs.global_features.shape[0]
+        evaluation = self.evaluate_actions(obs, _actions(n_envs))
+        return ModelOutput(
+            actions=_actions(n_envs),
+            log_probs=evaluation.log_probs,
+            entropies=evaluation.entropies,
+            values=evaluation.values,
+            winner_probabilities=evaluation.winner_probabilities,
+        )
+
+    def evaluate_actions(
+        self,
+        obs: ObsBatch,
+        actions: ModelActions,
+    ) -> ModelEvaluation:
+        del actions
+        values = self.value.expand(obs.global_features.shape[0], 4)
+        log_probs = TinyOrbitModel._log_probs(torch.zeros_like(values))
+        entropies = TinyOrbitModel._entropies(torch.zeros_like(values))
+        return ModelEvaluation(
+            log_probs=log_probs,
+            entropies=entropies,
+            values=values,
+            winner_probabilities=torch.softmax(values, dim=-1),
+        )
+
+    def get_input_layers(self) -> tuple[nn.Module, ...]:
+        return ()
+
+    def get_output_layers(self) -> tuple[nn.Module, ...]:
+        return ()
+
+
 def _zero_loss_metrics(zero: torch.Tensor) -> ppo.PPOLossMetrics:
     return ppo.PPOLossMetrics(
         loss=zero,
@@ -567,6 +613,51 @@ def test_segment_sampling_advantages_use_policy_mask() -> None:
     )
 
 
+def test_update_minibatch_value_clipping_uses_current_value_anchor() -> None:
+    env = TinyOrbitEnv(n_envs=1)
+    model = FixedEvaluationModel(value=12.0)
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.SGD(model.parameters(), lr=0.0),
+        config=ppo.PPOConfig(
+            horizon=2,
+            vf_clip_coef=0.5,
+            vf_coef=1.0,
+            ent_coef=0.0,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+        ),
+        device=torch.device("cpu"),
+    )
+    trainer._collect_rollout()
+    rollout_segments = trainer.rollout.segment_major()
+    segments = ppo.PPORolloutSegments(
+        obs=rollout_segments.obs,
+        actions=rollout_segments.actions,
+        logp=torch.zeros_like(rollout_segments.logp),
+        values=torch.zeros_like(rollout_segments.values),
+        rewards=rollout_segments.rewards,
+        dones=rollout_segments.dones,
+    )
+    sample = ppo.SegmentSample(
+        indices=torch.zeros((1,), dtype=torch.int64),
+        importance=torch.ones((1, 1)),
+        probabilities=torch.ones((1,)),
+    )
+
+    update = trainer._update_minibatch(
+        segments,
+        advantages=torch.zeros_like(segments.values),
+        returns=torch.full_like(segments.values, 10.0),
+        policy_mask=torch.zeros_like(segments.values, dtype=torch.bool),
+        value_mask=torch.ones_like(segments.values, dtype=torch.bool),
+        sample=sample,
+        value_clip_anchor=torch.full_like(segments.values, 10.0),
+    )
+
+    assert update.metrics.value_loss.item() == pytest.approx(2.0)
+
+
 def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -599,8 +690,10 @@ def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
         policy_mask: torch.Tensor,
         value_mask: torch.Tensor,
         sample: ppo.SegmentSample,
+        *,
+        value_clip_anchor: torch.Tensor,
     ) -> ppo.PPOUpdateResult:
-        del advantages, returns, policy_mask, value_mask
+        del advantages, returns, policy_mask, value_mask, value_clip_anchor
         seen.append(sample.indices.detach().clone())
         zero = segments.logp.new_zeros(())
         return ppo.PPOUpdateResult(
@@ -842,8 +935,10 @@ def test_trainer_puffer_vtrace_updates_mutable_replay_tensors(
         policy_mask: torch.Tensor,
         value_mask: torch.Tensor,
         sample: ppo.SegmentSample,
+        *,
+        value_clip_anchor: torch.Tensor,
     ) -> ppo.PPOUpdateResult:
-        del segments, advantages, returns, policy_mask, value_mask
+        del segments, advantages, returns, policy_mask, value_mask, value_clip_anchor
         zero = replacement_logp.new_zeros(())
         metrics = ppo.PPOLossMetrics(
             loss=zero,

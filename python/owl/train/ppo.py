@@ -487,6 +487,7 @@ class PPOTrainer:
                 policy_mask,
                 value_mask,
                 sample,
+                value_clip_anchor=current_values,
             )
             loss_metrics.append(update.metrics)
             grad_norms.append(update.grad_norm.detach())
@@ -572,12 +573,14 @@ class PPOTrainer:
         policy_mask: torch.Tensor,
         value_mask: torch.Tensor,
         sample: SegmentSample,
+        *,
+        value_clip_anchor: torch.Tensor,
     ) -> PPOUpdateResult:
         idx = sample.indices
         batch_actions = _flatten_actions_time(_actions_index(segments.actions, idx))
         batch_obs = _flatten_obs_time(_obs_index(segments.obs, idx))
         batch_old_logp = segments.logp[idx]
-        batch_old_values = segments.values[idx]
+        batch_old_values = value_clip_anchor[idx]
         batch_returns = returns[idx]
         batch_policy_mask = policy_mask[idx]
         batch_value_mask = value_mask[idx]
