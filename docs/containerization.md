@@ -36,13 +36,17 @@ or in GitHub Actions, then pushing it to GHCR.
 
 Pushes to `main` build and publish the image to GHCR with two tags:
 
-- `ghcr.io/OWNER/REPO:main`
-- `ghcr.io/OWNER/REPO:GIT_SHA`
+- Docker/GHCR form: `ghcr.io/OWNER/REPO:main`
+- Docker/GHCR form: `ghcr.io/OWNER/REPO:GIT_SHA`
+- Pyxis/Enroot form: `ghcr.io#OWNER/REPO:GIT_SHA`
 
 Use the SHA tag for reproducible Slurm jobs, and use `main` only when you
 explicitly want the latest successful `main` image. For private repositories or
 private packages, the cluster must have GHCR credentials available to
 Enroot/Pyxis.
+When substituting `OWNER` and `REPO`, use lowercase values. The GitHub Actions
+workflow publishes lowercase GHCR names with `${GITHUB_REPOSITORY,,}`. For this
+repo, use `ghcr.io#isaiahpressman/kaggle-orbit-wars:main`.
 
 The CI build frees unused hosted-runner toolchains before Docker starts and runs
 `uv sync` without uv's package cache. This avoids keeping a second unpacked copy
@@ -64,23 +68,56 @@ docker build --platform linux/amd64 --build-arg SKIP_FLASH_ATTN=1 \
   -t orbit-wars:no-flash-attn .
 ```
 
-## Local smoke test
+## GHCR access from Slurm
 
-CPU-only smoke test:
+For a private GHCR package, create a GitHub personal access token with
+`read:packages`. If the package inherits permissions from a private repository,
+GitHub may also require repository access for that token.
 
-```sh
-docker run --rm orbit-wars:dev \
-  uv run python scripts/run_ppo.py configs/train/debug.yaml /tmp/runs \
-    --log-mode debug \
-    --max-env-steps 16
-```
-
-GPU smoke test on a Docker host with NVIDIA Container Toolkit:
+Configure Enroot credentials on the cluster login node:
 
 ```sh
-docker run --rm --gpus all orbit-wars:dev \
-  uv run python -c "import torch; print(torch.cuda.is_available())"
+mkdir -p ~/.config/enroot
+chmod 700 ~/.config/enroot
+cat > ~/.config/enroot/.credentials <<'EOF'
+machine ghcr.io login GITHUB_USERNAME password GITHUB_TOKEN
+EOF
+chmod 600 ~/.config/enroot/.credentials
 ```
+
+Replace `GITHUB_USERNAME` and `GITHUB_TOKEN` with your GitHub username and token.
+Then test the pull path with Pyxis:
+
+```sh
+srun --container-image=ghcr.io#isaiahpressman/kaggle-orbit-wars:main \
+  --container-workdir=/workspace/orbit-wars \
+  uv run python -c 'import torch, owl, owl.rs; print(torch.__version__)'
+```
+
+Pyxis accepts either an image reference or a `.sqsh` path. For non-default
+registries, use the Enroot-style `REGISTRY#IMAGE` separator, for example
+`ghcr.io#isaiahpressman/kaggle-orbit-wars:main`.
+
+## W&B environment file
+
+Create a private environment file on the cluster:
+
+```sh
+mkdir -p ~/.config/orbit-wars
+cat > ~/.config/orbit-wars/wandb.env <<'EOF'
+WANDB_API_KEY=<API_KEY>
+EOF
+chmod 600 ~/.config/orbit-wars/wandb.env
+```
+
+The Slurm templates source this file on the host, export `WANDB_API_KEY`, and
+pass it into the container with Pyxis `--container-env`. W&B run output is still
+controlled by the training code's `wandb.init(dir=run_dir)` call, where `run_dir`
+is under the mounted `/runs` output directory.
+
+Do not store GHCR tokens in this W&B env file. GHCR pull credentials belong in
+`~/.config/enroot/.credentials` so Enroot can authenticate before the container
+starts.
 
 ## Slurm launch patterns
 
@@ -88,53 +125,74 @@ Clusters differ in how they run OCI images. The important pattern is the same:
 request GPUs with Slurm, mount a host output directory, and run the existing
 training entrypoint inside the prebuilt image.
 
-Example with Enroot/Pyxis:
+### Batch training with Pyxis
+
+Use the checked-in batch template:
 
 ```sh
-#!/usr/bin/env bash
-#SBATCH --job-name=orbit-wars-debug
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --time=01:00:00
-#SBATCH --output=logs/%x-%j.out
-
-set -euo pipefail
-
-IMAGE="ghcr.io/OWNER/REPO:GIT_SHA"
-RUNS_DIR="$PWD/runs"
-mkdir -p "$RUNS_DIR" logs
-
-srun --container-image="$IMAGE" \
-  --container-mounts="$RUNS_DIR:/runs" \
-  uv run python scripts/run_ppo.py configs/train/debug.yaml /runs \
-    --log-mode debug \
-    --max-runtime-hours 0.9
+sbatch scripts/slurm/launch-train.sbatch
 ```
 
-Example with Apptainer:
+`ORBIT_WARS_OUTPUT_DIR` is mounted as `/runs` inside the container. The training
+script creates timestamped subdirectories there and writes checkpoints, configs,
+and W&B files under that mounted directory.
+
+The template defaults to `ghcr.io#isaiahpressman/kaggle-orbit-wars:main`.
+Override `ORBIT_WARS_IMAGE` to pin a different tag, such as a specific commit
+SHA.
+
+Override Slurm resources either by editing `scripts/slurm/launch-train.sbatch` or
+by passing normal `sbatch` flags, for example:
 
 ```sh
-#!/usr/bin/env bash
-#SBATCH --job-name=orbit-wars-debug
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --time=01:00:00
-#SBATCH --output=logs/%x-%j.out
-
-set -euo pipefail
-
-IMAGE="orbit-wars_dev.sif"
-RUNS_DIR="$PWD/runs"
-mkdir -p "$RUNS_DIR" logs
-
-srun apptainer exec --nv --bind "$RUNS_DIR:/runs" "$IMAGE" \
-  uv run python scripts/run_ppo.py configs/train/debug.yaml /runs \
-    --log-mode debug \
-    --max-runtime-hours 0.9
+sbatch --partition=gpu --account=ACCOUNT --time=24:00:00 \
+  scripts/slurm/launch-train.sbatch
 ```
 
-For production jobs, point at `configs/train/baseline.yaml` or another checked-in
-config, and mount any external data, Kaggle credentials, or W&B settings needed
-by the logging mode.
+For production jobs, point at `configs/baseline.yaml` or another checked-in
+config, and mount any external data or required settings.
+
+## Interactive debugging
+
+Use the interactive helper to request a Slurm allocation and open a shell inside
+the container:
+
+```sh
+ORBIT_WARS_OUTPUT_DIR=/sw/isaiah/orbit-wars/debug \
+ORBIT_WARS_PARTITION=gpu \
+ORBIT_WARS_GPUS=1 \
+ORBIT_WARS_TIME=01:00:00 \
+scripts/slurm/launch-interactive.sh
+```
+
+The helper uses `ghcr.io#isaiahpressman/kaggle-orbit-wars:main` by default.
+Set `ORBIT_WARS_IMAGE` to debug a different tag.
+It requests GPUs from Slurm with `--gpus-per-node=$ORBIT_WARS_GPUS`; Docker's
+`--gpus all` flag is not used with Pyxis.
+The image and helper also set `NVIDIA_VISIBLE_DEVICES=all` and
+`NVIDIA_DRIVER_CAPABILITIES=compute,utility` so Enroot's NVIDIA hook exposes
+CUDA devices and driver utilities.
+
+Inside the shell, run focused commands before scheduling a full job:
+
+```sh
+echo "$CUDA_VISIBLE_DEVICES"
+nvidia-smi
+uv run python -c 'import torch; print(torch.cuda.is_available())'
+uv run python scripts/run_ppo.py configs/baseline.yaml /runs \
+  --log-mode debug \
+  -o env.n_envs=1 env.pin_memory=false model.embed_dim=32 model.depth=1 \
+    model.n_heads=4 rl.horizon=16 \
+    rl.segment_sampling.segments_per_minibatch=1 \
+  --max-env-steps 16
+```
+
+The helper mounts `ORBIT_WARS_OUTPUT_DIR` as `/runs`, sources the optional W&B
+env file, and passes `WANDB_API_KEY` into the container when present.
+
+## References
+
+- GitHub Container Registry authentication:
+  <https://docs.github.com/packages/getting-started-with-github-container-registry/about-github-container-registry>
+- Pyxis usage and `--container-image`, `--container-mounts`, and
+  `--container-env` options: <https://github.com/NVIDIA/pyxis>
