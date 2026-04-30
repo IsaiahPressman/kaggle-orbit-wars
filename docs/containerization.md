@@ -32,6 +32,18 @@ Building `linux/amd64` from an ARM host runs under emulation and can be slow or
 fragile for native linking. Prefer building this image on a native amd64 machine
 or in GitHub Actions, then pushing it to GHCR.
 
+## CI image publishing
+
+Pushes to `main` build and publish the image to GHCR with two tags:
+
+- `ghcr.io/OWNER/REPO:main`
+- `ghcr.io/OWNER/REPO:GIT_SHA`
+
+Use the SHA tag for reproducible Slurm jobs, and use `main` only when you
+explicitly want the latest successful `main` image. For private repositories or
+private packages, the cluster must have GHCR credentials available to
+Enroot/Pyxis.
+
 The Linux `uv` markers install the CUDA 12.8 PyTorch wheel from `pyproject.toml`.
 At runtime, GPU access still depends on the host NVIDIA driver and the cluster
 container runtime exposing the GPU devices into the container.
@@ -85,7 +97,7 @@ Example with Enroot/Pyxis:
 
 set -euo pipefail
 
-IMAGE="registry.example.com/orbit-wars:dev"
+IMAGE="ghcr.io/OWNER/REPO:GIT_SHA"
 RUNS_DIR="$PWD/runs"
 mkdir -p "$RUNS_DIR" logs
 
