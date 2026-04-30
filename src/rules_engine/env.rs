@@ -75,9 +75,9 @@ pub fn step_with_injections(
     process_launches(state, actions);
     produce_ships(state);
     let mut combat_lists = move_fleets(state);
-    let mut swept_fleet_ids = HashSet::new();
-    move_planets_and_sweep(state, &mut combat_lists, &mut swept_fleet_ids);
-    move_comets_and_sweep(state, &mut combat_lists, &mut swept_fleet_ids);
+    let mut swept_fleets = vec![false; state.fleets.len()];
+    move_planets_and_sweep(state, &mut combat_lists, &mut swept_fleets);
+    move_comets_and_sweep(state, &mut combat_lists, &mut swept_fleets);
     remove_marked_fleets(state, &combat_lists);
     resolve_combats(state, combat_lists);
 
@@ -274,7 +274,7 @@ impl CombatLists {
 
 fn move_fleets(state: &mut State) -> CombatLists {
     let mut combat_lists = CombatLists::for_planets(&state.planets);
-    let mut fleets_to_remove = HashSet::new();
+    let mut fleets_to_remove = Vec::new();
 
     for fleet in &mut state.fleets {
         let old_pos = fleet.position();
@@ -290,7 +290,7 @@ fn move_fleets(state: &mut State) -> CombatLists {
                 && point_to_segment_distance(planet_pos, old_pos, new_pos) < planet.radius
             {
                 combat_lists.push(planet.id, fleet.clone());
-                fleets_to_remove.insert(fleet.id);
+                fleets_to_remove.push(fleet.id);
                 hit_planet = true;
                 break;
             }
@@ -300,12 +300,12 @@ fn move_fleets(state: &mut State) -> CombatLists {
         }
 
         if !(0.0..=BOARD_SIZE).contains(&fleet.x) || !(0.0..=BOARD_SIZE).contains(&fleet.y) {
-            fleets_to_remove.insert(fleet.id);
+            fleets_to_remove.push(fleet.id);
             continue;
         }
 
         if point_to_segment_distance(Point::new(CENTER, CENTER), old_pos, new_pos) < SUN_RADIUS {
-            fleets_to_remove.insert(fleet.id);
+            fleets_to_remove.push(fleet.id);
             continue;
         }
     }
@@ -319,7 +319,7 @@ fn move_fleets(state: &mut State) -> CombatLists {
 fn move_planets_and_sweep(
     state: &mut State,
     combat_lists: &mut CombatLists,
-    swept_fleet_ids: &mut HashSet<u32>,
+    swept_fleets: &mut [bool],
 ) {
     let comet_ids: HashSet<u32> = state.comet_planet_ids.iter().copied().collect();
     let initial_by_id: HashMap<u32, &Planet> = state
@@ -357,7 +357,7 @@ fn move_planets_and_sweep(
         sweep_fleets(
             state,
             combat_lists,
-            swept_fleet_ids,
+            swept_fleets,
             planet_id,
             radius,
             old_pos,
@@ -369,7 +369,7 @@ fn move_planets_and_sweep(
 fn move_comets_and_sweep(
     state: &mut State,
     combat_lists: &mut CombatLists,
-    swept_fleet_ids: &mut HashSet<u32>,
+    swept_fleets: &mut [bool],
 ) {
     let mut expired = HashSet::new();
     let mut sweep_checks = Vec::new();
@@ -412,7 +412,7 @@ fn move_comets_and_sweep(
         sweep_fleets(
             state,
             combat_lists,
-            swept_fleet_ids,
+            swept_fleets,
             planet_id,
             radius,
             old_pos,
@@ -424,7 +424,7 @@ fn move_comets_and_sweep(
 fn sweep_fleets(
     state: &State,
     combat_lists: &mut CombatLists,
-    swept_fleet_ids: &mut HashSet<u32>,
+    swept_fleets: &mut [bool],
     planet_id: u32,
     planet_radius: f64,
     old_pos: Point,
@@ -434,8 +434,8 @@ fn sweep_fleets(
         return;
     }
 
-    for fleet in &state.fleets {
-        if swept_fleet_ids.contains(&fleet.id) {
+    for (fleet_index, fleet) in state.fleets.iter().enumerate() {
+        if swept_fleets[fleet_index] {
             continue;
         }
         let fleet_pos = fleet.position();
@@ -443,7 +443,7 @@ fn sweep_fleets(
             && point_to_segment_distance(fleet_pos, old_pos, new_pos) < planet_radius
         {
             combat_lists.push(planet_id, fleet.clone());
-            swept_fleet_ids.insert(fleet.id);
+            swept_fleets[fleet_index] = true;
         }
     }
 }
@@ -459,7 +459,7 @@ fn segment_aabb_contains_point(point: Point, start: Point, end: Point, radius: f
 }
 
 fn remove_marked_fleets(state: &mut State, combat_lists: &CombatLists) {
-    let removed: HashSet<u32> = combat_lists.iter_fleets().map(|fleet| fleet.id).collect();
+    let removed: Vec<u32> = combat_lists.iter_fleets().map(|fleet| fleet.id).collect();
     state.fleets.retain(|fleet| !removed.contains(&fleet.id));
 }
 
@@ -1185,12 +1185,12 @@ mod tests {
             ships: 4,
         }];
         let mut combat_lists = CombatLists::for_planets(&[planet_with_id(10), planet_with_id(11)]);
-        let mut swept_fleet_ids = HashSet::new();
+        let mut swept_fleets = vec![false; state.fleets.len()];
 
         sweep_fleets(
             &state,
             &mut combat_lists,
-            &mut swept_fleet_ids,
+            &mut swept_fleets,
             10,
             2.0,
             Point::new(48.0, 50.0),
@@ -1199,7 +1199,7 @@ mod tests {
         sweep_fleets(
             &state,
             &mut combat_lists,
-            &mut swept_fleet_ids,
+            &mut swept_fleets,
             11,
             2.0,
             Point::new(50.0, 48.0),
@@ -1226,12 +1226,12 @@ mod tests {
         let comet_id = 11;
         let mut combat_lists =
             CombatLists::for_planets(&[planet_with_id(planet_id), planet_with_id(comet_id)]);
-        let mut swept_fleet_ids = HashSet::new();
+        let mut swept_fleets = vec![false; state.fleets.len()];
 
         sweep_fleets(
             &state,
             &mut combat_lists,
-            &mut swept_fleet_ids,
+            &mut swept_fleets,
             planet_id,
             2.0,
             Point::new(48.0, 50.0),
@@ -1240,7 +1240,7 @@ mod tests {
         sweep_fleets(
             &state,
             &mut combat_lists,
-            &mut swept_fleet_ids,
+            &mut swept_fleets,
             comet_id,
             2.0,
             Point::new(50.0, 48.0),
@@ -1249,6 +1249,53 @@ mod tests {
 
         assert_eq!(combat_lists.get(planet_id).unwrap().len(), 1);
         assert!(combat_lists.get(comet_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sweep_fleets_tracks_duplicate_ids_by_live_fleet_slot() {
+        let mut state = base_state(2);
+        state.fleets = vec![
+            Fleet {
+                id: 0,
+                owner: 1,
+                x: 50.0,
+                y: 50.0,
+                angle: 0.0,
+                from_planet_id: 1,
+                ships: 4,
+            },
+            Fleet {
+                id: 0,
+                owner: 1,
+                x: 50.5,
+                y: 50.0,
+                angle: 0.0,
+                from_planet_id: 1,
+                ships: 5,
+            },
+        ];
+        let mut combat_lists = CombatLists::for_planets(&[planet_with_id(10)]);
+        let mut swept_fleets = vec![false; state.fleets.len()];
+
+        sweep_fleets(
+            &state,
+            &mut combat_lists,
+            &mut swept_fleets,
+            10,
+            2.0,
+            Point::new(48.0, 50.0),
+            Point::new(52.0, 50.0),
+        );
+
+        assert_eq!(
+            combat_lists
+                .get(10)
+                .unwrap()
+                .iter()
+                .map(|fleet| fleet.ships)
+                .collect::<Vec<_>>(),
+            vec![4, 5]
+        );
     }
 
     #[test]
@@ -1271,12 +1318,12 @@ mod tests {
             ships: 4,
         }];
         let mut combat_lists = CombatLists::for_planets(&[planet_with_id(10)]);
-        let mut swept_fleet_ids = HashSet::new();
+        let mut swept_fleets = vec![false; state.fleets.len()];
 
         sweep_fleets(
             &state,
             &mut combat_lists,
-            &mut swept_fleet_ids,
+            &mut swept_fleets,
             9,
             2.0,
             Point::new(48.0, 50.0),
@@ -1311,12 +1358,12 @@ mod tests {
             ships: 4,
         }];
         let mut combat_lists = CombatLists::for_planets(&state.planets);
-        let mut swept_fleet_ids = HashSet::new();
+        let mut swept_fleets = vec![false; state.fleets.len()];
 
         sweep_fleets(
             &state,
             &mut combat_lists,
-            &mut swept_fleet_ids,
+            &mut swept_fleets,
             10,
             2.0,
             Point::new(48.0, 50.0),
