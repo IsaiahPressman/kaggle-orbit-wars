@@ -6,18 +6,20 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rand::RngExt;
 
+use crate::rules_engine::state::MAX_PLAYERS;
+
 use obs_spec::encode_obs_v1;
 use vec_env::PyRlVecEnv;
 
 pub const MAX_PLANETS: usize = 40;
 pub const MAX_COMETS: usize = 4;
 pub const MAX_COMET_PATH_LENGTH: usize = 40;
-pub const DEFAULT_MAX_ENTITIES: usize = 512;
+pub const DEFAULT_MAX_ENTITIES: usize = 1024;
 pub const PLANET_CHANNELS: usize = 16;
 pub const FLEET_CHANNELS: usize = 10;
 pub const COMET_CHANNELS: usize = OWNER_CHANNELS_WITH_NEUTRAL + 3 + MAX_COMET_PATH_LENGTH * 2;
 pub const GLOBAL_CHANNELS: usize = 3;
-pub const OUTER_PLAYER_SLOTS: usize = 4;
+pub const OUTER_PLAYER_SLOTS: usize = MAX_PLAYERS;
 pub const ACTION_ENTITY_SLOTS: usize = MAX_PLANETS + MAX_COMETS;
 
 const OWNER_CHANNELS_WITH_NEUTRAL: usize = 5;
@@ -35,7 +37,7 @@ impl PlayerMap {
 
     pub(super) fn random(player_count: usize) -> Self {
         assert!(
-            player_count == 2 || player_count == 4,
+            player_count == 2 || player_count == MAX_PLAYERS,
             "Orbit Wars supports exactly 2 or 4 players"
         );
 
@@ -69,7 +71,7 @@ impl PlayerMap {
         slots: [usize; OUTER_PLAYER_SLOTS],
     ) -> Self {
         assert!(
-            player_count == 2 || player_count == 4,
+            player_count == 2 || player_count == MAX_PLAYERS,
             "Orbit Wars supports exactly 2 or 4 players"
         );
 

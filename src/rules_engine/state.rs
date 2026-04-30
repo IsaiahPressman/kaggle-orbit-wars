@@ -8,6 +8,7 @@ pub const PLANET_CLEARANCE: f64 = 7.0;
 pub const MIN_PLANET_GROUPS: i32 = 5;
 pub const MAX_PLANET_GROUPS: i32 = 10;
 pub const MIN_STATIC_GROUPS: usize = 3;
+pub const MAX_PLAYERS: usize = 4;
 pub const COMET_SPAWN_STEPS: [u32; 5] = [50, 150, 250, 350, 450];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -81,7 +82,7 @@ pub struct SimConfig {
 impl SimConfig {
     pub fn new(player_count: usize) -> Self {
         assert!(
-            player_count == 2 || player_count == 4,
+            player_count == 2 || player_count == MAX_PLAYERS,
             "Orbit Wars supports exactly 2 or 4 players"
         );
 

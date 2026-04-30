@@ -2,7 +2,7 @@ use rand::RngExt;
 
 use super::state::{
     CometGroup, Planet, Point, BOARD_SIZE, CENTER, COMET_PRODUCTION, COMET_RADIUS,
-    MAX_PLANET_GROUPS, MIN_PLANET_GROUPS, MIN_STATIC_GROUPS, PLANET_CLEARANCE,
+    MAX_PLANET_GROUPS, MAX_PLAYERS, MIN_PLANET_GROUPS, MIN_STATIC_GROUPS, PLANET_CLEARANCE,
     ROTATION_RADIUS_LIMIT, SUN_RADIUS,
 };
 use super::utils::{distance, fourfold_symmetric_points, is_orbiting, orbit_position};
@@ -120,7 +120,7 @@ pub fn assign_home_planets(
     rng: &mut impl RandomSource,
 ) {
     assert!(
-        player_count == 2 || player_count == 4,
+        player_count == 2 || player_count == MAX_PLAYERS,
         "Orbit Wars supports exactly 2 or 4 players"
     );
     let num_groups = planets.len() / 4;
@@ -137,7 +137,7 @@ pub fn assign_home_planets(
         planets[base + 3].owner = 1;
         planets[base + 3].ships = 10;
     } else {
-        for player_id in 0..4 {
+        for player_id in 0..MAX_PLAYERS {
             planets[base + player_id].owner = player_id as i32;
             planets[base + player_id].ships = 10;
         }
@@ -270,22 +270,20 @@ fn symmetric_planets(
     radius: f64,
     ships: i32,
     production: i32,
-) -> Vec<Planet> {
-    fourfold_symmetric_points(Point::new(x, y))
-        .into_iter()
-        .enumerate()
-        .map(|(index, point)| {
-            planet(
-                id + index as u32,
-                owner,
-                point.x,
-                point.y,
-                radius,
-                ships,
-                production,
-            )
-        })
-        .collect()
+) -> [Planet; MAX_PLAYERS] {
+    let points: [Point; MAX_PLAYERS] = fourfold_symmetric_points(Point::new(x, y));
+    std::array::from_fn(|index| {
+        let point = points[index];
+        planet(
+            id + index as u32,
+            owner,
+            point.x,
+            point.y,
+            radius,
+            ships,
+            production,
+        )
+    })
 }
 
 fn planet(id: u32, owner: i32, x: f64, y: f64, radius: f64, ships: i32, production: i32) -> Planet {
@@ -459,7 +457,7 @@ mod tests {
     #[test]
     fn assign_home_planets_selects_four_player_home_from_any_symmetric_group() {
         let radius = planet_radius(2);
-        let mut planets = symmetric_planets(0, -1, 95.0, 95.0, radius, 20, 2);
+        let mut planets = Vec::from(symmetric_planets(0, -1, 95.0, 95.0, radius, 20, 2));
         planets.extend(symmetric_planets(4, -1, 75.0, 55.0, radius, 20, 2));
         planets.extend(symmetric_planets(8, -1, 70.0, 70.0, radius, 20, 2));
         let mut rng = ScriptedRandom::new([1], []);
@@ -473,6 +471,23 @@ mod tests {
                 .map(|planet| planet.id)
                 .collect::<Vec<_>>(),
             vec![4, 5, 6, 7]
+        );
+    }
+
+    #[test]
+    fn symmetric_planets_preserves_generated_group_order() {
+        let radius = planet_radius(4);
+
+        let planets = symmetric_planets(12, -1, 70.0, 60.0, radius, 15, 4);
+
+        assert_eq!(
+            planets.map(|planet| (planet.id, planet.x, planet.y)),
+            [
+                (12, 60.0, 70.0),
+                (13, 30.0, 60.0),
+                (14, 70.0, 40.0),
+                (15, 40.0, 30.0),
+            ]
         );
     }
 

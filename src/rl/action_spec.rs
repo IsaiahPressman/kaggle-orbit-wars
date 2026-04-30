@@ -5,15 +5,23 @@ use crate::rules_engine::state::{LaunchAction, Planet, State};
 
 use super::{PlayerMap, ACTION_ENTITY_SLOTS, MAX_COMETS, MAX_PLANETS, OUTER_PLAYER_SLOTS};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ActionEntitySlot {
+    planet_id: u32,
+    planet_index: usize,
+}
+
+pub(super) type ActionEntitySlots = [Option<ActionEntitySlot>; ACTION_ENTITY_SLOTS];
+
 pub(super) fn decode_pure_actions(
     state: &State,
     player_map: &PlayerMap,
+    entities: &ActionEntitySlots,
     launch: &[bool],
     angle: &[f32],
     ships: &[i64],
     max_per_planet_launches: usize,
 ) -> Result<Vec<PlayerAction>, String> {
-    let entities = action_entity_slots(state);
     let mut actions = vec![Vec::new(); state.config.player_count];
     for outer_player in 0..OUTER_PLAYER_SLOTS {
         let player_offset = outer_player * ACTION_ENTITY_SLOTS * max_per_planet_launches;
@@ -37,9 +45,14 @@ pub(super) fn decode_pure_actions(
                 if !launch[action_index] {
                     break;
                 }
-                let Some(planet) = planet else {
+                let Some(slot) = planet else {
                     return Err(format!(
                         "player {outer_player} cannot launch from empty action entity slot {entity_index}"
+                    ));
+                };
+                let Some(planet) = planet_for_slot(state, *slot) else {
+                    return Err(format!(
+                        "player {outer_player} cannot launch from stale action entity slot {entity_index}"
                     ));
                 };
                 let ship_count = ships[action_index];
@@ -86,11 +99,15 @@ pub(super) fn decode_pure_actions(
 pub(super) fn encode_action_spec(
     state: &State,
     player_map: &PlayerMap,
+    entities: &ActionEntitySlots,
     can_act: &mut [bool],
     max_launch: &mut [i64],
 ) {
-    for (entity_index, planet) in action_entity_slots(state).iter().enumerate() {
-        let Some(planet) = planet else {
+    for (entity_index, slot) in entities.iter().enumerate() {
+        let Some(slot) = slot else {
+            continue;
+        };
+        let Some(planet) = planet_for_slot(state, *slot) else {
             continue;
         };
         if planet.ships < 1 || planet.owner < 0 {
@@ -106,27 +123,40 @@ pub(super) fn encode_action_spec(
     }
 }
 
-fn action_entity_slots(state: &State) -> Vec<Option<&Planet>> {
+pub(super) fn action_entity_slots(state: &State) -> ActionEntitySlots {
     let comet_ids = state
         .comet_planet_ids
         .iter()
         .copied()
         .collect::<HashSet<_>>();
-    let mut entities = vec![None; ACTION_ENTITY_SLOTS];
-    for (entity_index, planet) in state
+    let mut entities = [None; ACTION_ENTITY_SLOTS];
+    for (entity_index, (planet_index, planet)) in state
         .planets
         .iter()
-        .filter(|planet| !comet_ids.contains(&planet.id))
+        .enumerate()
+        .filter(|(_, planet)| !comet_ids.contains(&planet.id))
         .take(MAX_PLANETS)
         .enumerate()
     {
-        entities[entity_index] = Some(planet);
+        entities[entity_index] = Some(ActionEntitySlot {
+            planet_id: planet.id,
+            planet_index,
+        });
     }
 
     let planets_by_id = state
         .planets
         .iter()
-        .map(|planet| (planet.id, planet))
+        .enumerate()
+        .map(|(planet_index, planet)| {
+            (
+                planet.id,
+                ActionEntitySlot {
+                    planet_id: planet.id,
+                    planet_index,
+                },
+            )
+        })
         .collect::<HashMap<_, _>>();
     let mut comet_index = 0;
     for group in &state.comets {
@@ -141,6 +171,19 @@ fn action_entity_slots(state: &State) -> Vec<Option<&Planet>> {
         }
     }
     entities
+}
+
+fn planet_for_slot(state: &State, slot: ActionEntitySlot) -> Option<&Planet> {
+    state
+        .planets
+        .get(slot.planet_index)
+        .filter(|planet| planet.id == slot.planet_id)
+        .or_else(|| {
+            state
+                .planets
+                .iter()
+                .find(|planet| planet.id == slot.planet_id)
+        })
 }
 
 #[cfg(test)]
@@ -174,12 +217,14 @@ mod tests {
     #[test]
     fn pure_launch_errors_when_ship_count_is_zero() {
         let player_map = PlayerMap::identity();
+        let state = one_planet_state();
+        let entities = action_entity_slots(&state);
         let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
         let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS];
         let ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
         launch[0] = true;
 
-        let err = decode_pure_actions(&one_planet_state(), &player_map, &launch, &angle, &ships, 1)
+        let err = decode_pure_actions(&state, &player_map, &entities, &launch, &angle, &ships, 1)
             .expect_err("zero ships should fail");
 
         assert!(err.contains("ships must be >= 1"));
@@ -188,13 +233,15 @@ mod tests {
     #[test]
     fn pure_launch_errors_when_ship_count_exceeds_i32() {
         let player_map = PlayerMap::identity();
+        let state = one_planet_state();
+        let entities = action_entity_slots(&state);
         let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
         let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS];
         let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
         launch[0] = true;
         ships[0] = i64::from(i32::MAX) + 1;
 
-        let err = decode_pure_actions(&one_planet_state(), &player_map, &launch, &angle, &ships, 1)
+        let err = decode_pure_actions(&state, &player_map, &entities, &launch, &angle, &ships, 1)
             .expect_err("oversized ships should fail");
 
         assert!(err.contains("ships must fit in i32"));
@@ -203,6 +250,8 @@ mod tests {
     #[test]
     fn pure_launch_errors_when_angle_is_not_finite() {
         let player_map = PlayerMap::identity();
+        let state = one_planet_state();
+        let entities = action_entity_slots(&state);
         let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
         let mut angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS];
         let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
@@ -210,7 +259,7 @@ mod tests {
         angle[0] = f32::INFINITY;
         ships[0] = 1;
 
-        let err = decode_pure_actions(&one_planet_state(), &player_map, &launch, &angle, &ships, 1)
+        let err = decode_pure_actions(&state, &player_map, &entities, &launch, &angle, &ships, 1)
             .expect_err("non-finite angle should fail");
 
         assert!(err.contains("angle must be finite"));
@@ -219,13 +268,15 @@ mod tests {
     #[test]
     fn pure_launch_errors_when_player_does_not_own_source() {
         let player_map = PlayerMap::identity();
+        let state = one_planet_state();
+        let entities = action_entity_slots(&state);
         let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
         let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS];
         let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
         launch[ACTION_ENTITY_SLOTS] = true;
         ships[ACTION_ENTITY_SLOTS] = 1;
 
-        let err = decode_pure_actions(&one_planet_state(), &player_map, &launch, &angle, &ships, 1)
+        let err = decode_pure_actions(&state, &player_map, &entities, &launch, &angle, &ships, 1)
             .expect_err("wrong owner should fail");
 
         assert!(err.contains("player 1 cannot launch from planet 7 owned by 0"));
@@ -234,6 +285,8 @@ mod tests {
     #[test]
     fn pure_launch_errors_when_total_launches_exceed_source_ships() {
         let player_map = PlayerMap::identity();
+        let state = one_planet_state();
+        let entities = action_entity_slots(&state);
         let max_per_planet_launches = 2;
         let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS * max_per_planet_launches];
         let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS * max_per_planet_launches];
@@ -244,8 +297,9 @@ mod tests {
         ships[1] = 5;
 
         let err = decode_pure_actions(
-            &one_planet_state(),
+            &state,
             &player_map,
+            &entities,
             &launch,
             &angle,
             &ships,
@@ -259,6 +313,8 @@ mod tests {
     #[test]
     fn pure_launch_emits_multiple_actions_until_first_false_slot() {
         let player_map = PlayerMap::identity();
+        let state = one_planet_state();
+        let entities = action_entity_slots(&state);
         let max_per_planet_launches = 3;
         let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS * max_per_planet_launches];
         let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS * max_per_planet_launches];
@@ -271,8 +327,9 @@ mod tests {
         ships[2] = 4;
 
         let actions = decode_pure_actions(
-            &one_planet_state(),
+            &state,
             &player_map,
+            &entities,
             &launch,
             &angle,
             &ships,
@@ -288,6 +345,8 @@ mod tests {
     #[test]
     fn pure_launch_decodes_from_remapped_outer_player_slot() {
         let player_map = PlayerMap::from_outer_slots(2, [3, 1, 0, 2]);
+        let state = one_planet_state();
+        let entities = action_entity_slots(&state);
         let max_per_planet_launches = 1;
         let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS * max_per_planet_launches];
         let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS * max_per_planet_launches];
@@ -298,8 +357,9 @@ mod tests {
         ships[action_index] = 4;
 
         let actions = decode_pure_actions(
-            &one_planet_state(),
+            &state,
             &player_map,
+            &entities,
             &launch,
             &angle,
             &ships,
@@ -333,8 +393,73 @@ mod tests {
 
         let slots = action_entity_slots(&state);
 
-        assert_eq!(slots[0].map(|planet| planet.id), Some(7));
+        assert_eq!(slots[0].map(|slot| slot.planet_id), Some(7));
         assert!(slots[1..MAX_PLANETS].iter().all(Option::is_none));
-        assert_eq!(slots[MAX_PLANETS].map(|planet| planet.id), Some(8));
+        assert_eq!(slots[MAX_PLANETS].map(|slot| slot.planet_id), Some(8));
+    }
+
+    #[test]
+    fn pure_launch_decodes_against_cached_slot_mapping() {
+        let player_map = PlayerMap::identity();
+        let mut observed_state = one_planet_state();
+        observed_state.planets.push(Planet {
+            id: 8,
+            owner: 0,
+            x: 20.0,
+            y: 20.0,
+            radius: 2.0,
+            ships: 5,
+            production: 1,
+        });
+        let entities = action_entity_slots(&observed_state);
+        let mut current_state = observed_state.clone();
+        current_state.planets.swap(0, 1);
+
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+        let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        ships[0] = 1;
+
+        let actions = decode_pure_actions(
+            &current_state,
+            &player_map,
+            &entities,
+            &launch,
+            &angle,
+            &ships,
+            1,
+        )
+        .expect("cached slot should decode by observed planet id");
+
+        assert_eq!(actions[0][0].from_planet_id, 7);
+    }
+
+    #[test]
+    fn pure_launch_errors_when_cached_slot_planet_is_missing() {
+        let player_map = PlayerMap::identity();
+        let observed_state = one_planet_state();
+        let entities = action_entity_slots(&observed_state);
+        let mut current_state = observed_state.clone();
+        current_state.planets.clear();
+
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+        let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        ships[0] = 1;
+
+        let err = decode_pure_actions(
+            &current_state,
+            &player_map,
+            &entities,
+            &launch,
+            &angle,
+            &ships,
+            1,
+        )
+        .expect_err("missing cached slot planet should fail");
+
+        assert!(err.contains("stale action entity slot"));
     }
 }
