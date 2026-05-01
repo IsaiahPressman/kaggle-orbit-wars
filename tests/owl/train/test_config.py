@@ -19,9 +19,12 @@ def test_ppo_config_validates_with_pydantic() -> None:
     assert config.horizon == 4
     assert config.segment_sampling.segments_per_minibatch == 2
     assert config.gamma == pytest.approx(0.9)
+    assert config.checkpoint_freq is None
 
     with pytest.raises(ValueError, match="greater than or equal to 0"):
         PPOConfig(gamma=-0.1)
+    with pytest.raises(ValueError, match="greater than or equal to 1000"):
+        PPOConfig(checkpoint_freq=999)
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         PPOConfig(segments_per_minibatch=2)
 
@@ -216,12 +219,14 @@ def test_training_presets_make_baseline_and_pufferish_modes_explicit() -> None:
     baseline = FullConfig.from_file(_REPO_ROOT / "configs" / "baseline.yaml")
     pufferish = FullConfig.from_file(_REPO_ROOT / "configs" / "pufferish.yaml")
 
-    assert baseline.env.n_envs == 2048
+    assert baseline.env.n_envs == 256
+    assert baseline.rl.checkpoint_freq is None
     assert baseline.rl.advantage_mode == "gae"
     assert not baseline.rl.recompute_advantages_each_minibatch
     assert baseline.rl.segment_sampling.sampling == "uniform"
 
     assert pufferish.env.n_envs == 2048
+    assert pufferish.rl.checkpoint_freq is None
     assert pufferish.rl.advantage_mode == "puffer_vtrace"
     assert pufferish.rl.recompute_advantages_each_minibatch
     assert pufferish.rl.normalize_advantages

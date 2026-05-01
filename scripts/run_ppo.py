@@ -263,9 +263,9 @@ def _trainable_parameter_count(model: torch.nn.Module) -> int:
 
 
 def _next_periodic_checkpoint_step(
-    *, checkpoint_freq: int, env_steps: int = 0
+    *, checkpoint_freq: int | None, env_steps: int = 0
 ) -> int | None:
-    if checkpoint_freq <= 0:
+    if checkpoint_freq is None:
         return None
     return (env_steps // checkpoint_freq + 1) * checkpoint_freq
 

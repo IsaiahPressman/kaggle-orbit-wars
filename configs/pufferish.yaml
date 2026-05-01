@@ -10,7 +10,7 @@ optimizer:
 
 rl:
   horizon: 128
-  checkpoint_freq: 0
+  checkpoint_freq: null
   gamma: 0.995
   gae_lambda: 0.9
   replay_ratio: 2.0

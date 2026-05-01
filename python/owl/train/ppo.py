@@ -26,12 +26,11 @@ from owl.train.advantages import (
 )
 from owl.train.metrics import (
     explained_variance,
-    masked_max,
     masked_mean,
     masked_std,
     weighted_mean,
 )
-from owl.train.optimizer import LRScheduler, Optimizer
+from owl.train.optimizer import CompositeOptimizer, LRScheduler, Optimizer
 from owl.train.sampling import (
     SampleSegmentsFn,
     SegmentSample,
@@ -63,7 +62,7 @@ _ACTION_FIELDS = tuple(ModelActions.__dataclass_fields__)
 
 class PPOConfig(BaseConfig):
     horizon: int = Field(default=64, ge=1)
-    checkpoint_freq: int = Field(default=0, ge=0)
+    checkpoint_freq: int | None = Field(default=None, ge=1_000)
     replay_ratio: float = Field(default=1.0, gt=0.0)
     segment_sampling: SegmentSamplingConfig = Field(
         default_factory=SegmentSamplingConfig
@@ -295,6 +294,7 @@ class PPOTrainer:
         self.config = config
         self.device = device
         self.n_envs = env.n_envs
+        self.optimizer_steps = 0
         self._non_blocking_env_to_device = device.type == "cuda" and getattr(
             env, "pin_memory_enabled", False
         )
@@ -356,7 +356,7 @@ class PPOTrainer:
             masked_mean(player_returns, player_return_mask).item()
         )
         metrics["train/return_max"] = float(
-            masked_max(player_returns, player_return_mask).item()
+            _masked_reward_max(segments.rewards, value_mask).item()
         )
         metrics["train/explained_variance"] = float(
             explained_variance(segments.values, returns, valid_mask=value_mask).item()
@@ -529,17 +529,16 @@ class PPOTrainer:
             raise RuntimeError("internal error: PPO update produced no minibatches")
         metrics = _mean_loss_metrics(loss_metrics)
         metrics["optimizer/grad_norm"] = float(torch.stack(grad_norms).mean().item())
-        metrics["optimizer/steps"] = float(len(loss_metrics))
-        metrics["optimizer/num_minibatches"] = float(len(loss_metrics))
+        metrics["optimizer/steps"] = float(self.optimizer_steps)
         metrics["optimizer/minibatches_per_update"] = float(n_minibatches)
         metrics["sampling/effective_replay_exposure"] = float(
             sampled_segments / self.n_envs
         )
         metrics["train/policy_active_ratio"] = float(policy_mask.float().mean().item())
-        if self.lr_scheduler is not None:
-            metrics["optimizer/learning_rate"] = float(
-                self.lr_scheduler.get_last_lr()[0]
-            )
+        metrics["optimizer/learning_rate"] = _current_learning_rate(
+            self.optimizer,
+            self.lr_scheduler,
+        )
         if sampling_metrics:
             metrics.update(_mean_sampling_metrics(sampling_metrics))
         return metrics
@@ -648,6 +647,7 @@ class PPOTrainer:
             self.model.parameters(), self.config.max_grad_norm
         )
         self.optimizer.step()
+        self.optimizer_steps += 1
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
         return PPOUpdateResult(
@@ -1106,6 +1106,28 @@ def _player_segment_returns(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     masked_rewards = rewards * value_mask.to(dtype=rewards.dtype)
     return masked_rewards.sum(dim=1), value_mask.any(dim=1)
+
+
+def _masked_reward_max(rewards: torch.Tensor, value_mask: torch.Tensor) -> torch.Tensor:
+    masked_rewards = rewards * value_mask.to(dtype=rewards.dtype)
+    return masked_rewards.max()
+
+
+def _current_learning_rate(
+    optimizer: Optimizer,
+    lr_scheduler: LRScheduler | None,
+) -> float:
+    if lr_scheduler is not None:
+        return float(lr_scheduler.get_last_lr()[0])
+    if isinstance(optimizer, CompositeOptimizer):
+        return _torch_optimizer_learning_rate(optimizer.optimizers[0])
+    if isinstance(optimizer, torch.optim.Optimizer):
+        return _torch_optimizer_learning_rate(optimizer)
+    raise TypeError("optimizer must be a torch optimizer or CompositeOptimizer")
+
+
+def _torch_optimizer_learning_rate(optimizer: torch.optim.Optimizer) -> float:
+    return float(optimizer.param_groups[0]["lr"])
 
 
 def _output_actions(output: ModelOutput) -> ModelActions:

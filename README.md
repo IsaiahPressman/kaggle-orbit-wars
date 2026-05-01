@@ -43,7 +43,7 @@ uv run python -c 'from importlib import import_module; from pathlib import Path;
 Training presets live in `configs/`:
 
 - `baseline.yaml`: vanilla PPO with larger rollout/minibatch sizing, scheduled
-  learning rates, periodic checkpoints, `torch.compile` default mode, and
+  learning rates, disabled periodic checkpoints, `torch.compile` default mode, and
   bfloat16 autocast.
 - `pufferish.yaml`: enables Puffer-style V-trace recomputation and
   advantage-prioritized segment sampling without changing the core Python

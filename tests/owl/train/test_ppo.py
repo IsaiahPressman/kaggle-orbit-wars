@@ -424,6 +424,7 @@ def test_player_segment_returns_preserve_per_player_terminal_rewards() -> None:
             [
                 [0.0, 0.0, 0.0, 0.0],
                 [1.0, -1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
             ]
         ]
     )
@@ -432,15 +433,16 @@ def test_player_segment_returns_preserve_per_player_terminal_rewards() -> None:
             [
                 [True, True, False, False],
                 [True, True, False, False],
+                [True, True, False, False],
             ]
         ]
     )
 
     returns, return_mask = ppo._player_segment_returns(rewards, value_mask)
 
-    assert torch.equal(returns, torch.tensor([[1.0, -1.0, 0.0, 0.0]]))
+    assert torch.equal(returns, torch.tensor([[2.0, -1.0, 0.0, 0.0]]))
     assert torch.equal(return_mask, torch.tensor([[True, True, False, False]]))
-    assert ppo.masked_max(returns, return_mask).item() == 1.0
+    assert ppo._masked_reward_max(rewards, value_mask).item() == 1.0
 
 
 def test_obs_to_device_uses_explicit_non_blocking_policy(
@@ -609,6 +611,8 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "policy/logratio_mean",
         "policy/logratio_abs_max",
         "optimizer/grad_norm",
+        "optimizer/steps",
+        "optimizer/learning_rate",
         "optimizer/minibatches_per_update",
         "sampling/effective_replay_exposure",
         "train/policy_active_ratio",
@@ -627,6 +631,12 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         not torch.allclose(param, old)
         for param, old in zip(model.parameters(), before, strict=True)
     )
+    assert metrics["optimizer/steps"] == pytest.approx(2.0)
+    assert metrics["optimizer/learning_rate"] == pytest.approx(0.05)
+
+    next_metrics = trainer.train_iteration()
+
+    assert next_metrics["optimizer/steps"] == pytest.approx(4.0)
 
 
 def test_rollout_and_update_model_calls_run_under_autocast() -> None:
@@ -995,8 +1005,8 @@ def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
     assert [indices.shape for indices in seen] == [(2,), (2,), (1,)]
     all_indices = torch.cat(seen)
     assert torch.equal(all_indices.sort().values, torch.arange(5))
-    assert metrics["optimizer/num_minibatches"] == pytest.approx(3.0)
     assert metrics["optimizer/minibatches_per_update"] == pytest.approx(3.0)
+    assert "optimizer/num_minibatches" not in metrics
     assert "optimizer/num_total_minibatches" not in metrics
     assert metrics["sampling/effective_replay_exposure"] == pytest.approx(1.0)
 

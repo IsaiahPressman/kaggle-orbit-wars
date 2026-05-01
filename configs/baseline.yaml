@@ -1,5 +1,5 @@
 env:
-  n_envs: 2048
+  n_envs: 256
   obs_spec:
     obs_spec: obs_v1
     max_entities: 1024
@@ -24,11 +24,11 @@ optimizer:
 
 rl:
   horizon: 128
-  checkpoint_freq: 1_000
+  checkpoint_freq: null
   replay_ratio: 1.0
   segment_sampling:
     sampling: uniform
-    segments_per_minibatch: 4
+    segments_per_minibatch: 16
     prio_alpha: 0.0
     prio_beta: 0.2
     prio_eps: 1.0e-06
@@ -36,8 +36,8 @@ rl:
   gae_lambda: 0.95
   clip_coef: 0.2
   vf_clip_coef: 0.2
-  vf_coef: 0.5
-  ent_coef: 0.003
+  vf_coef: 2.0
+  ent_coef: 1e-4
   max_grad_norm: 1.0
   target_kl: null
   advantage_mode: gae

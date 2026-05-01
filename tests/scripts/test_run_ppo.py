@@ -19,7 +19,7 @@ run_ppo = importlib.util.module_from_spec(_RUN_PPO_SPEC)
 _RUN_PPO_SPEC.loader.exec_module(run_ppo)
 
 
-def _full_config(*, checkpoint_freq: int = 0) -> FullConfig:
+def _full_config(*, checkpoint_freq: int | None = None) -> FullConfig:
     return FullConfig.model_validate(
         {
             "env": {
@@ -89,14 +89,14 @@ class _FakeTrainer:
 
 
 def test_next_periodic_checkpoint_step_handles_crossed_cadence() -> None:
-    assert run_ppo._next_periodic_checkpoint_step(checkpoint_freq=0) is None
-    assert run_ppo._next_periodic_checkpoint_step(checkpoint_freq=100) == 100
+    assert run_ppo._next_periodic_checkpoint_step(checkpoint_freq=None) is None
+    assert run_ppo._next_periodic_checkpoint_step(checkpoint_freq=1000) == 1000
     assert (
         run_ppo._next_periodic_checkpoint_step(
-            checkpoint_freq=100,
-            env_steps=256,
+            checkpoint_freq=1000,
+            env_steps=1256,
         )
-        == 300
+        == 2000
     )
 
 
@@ -154,7 +154,7 @@ def test_trainable_parameter_count_ignores_frozen_parameters() -> None:
 
 
 def test_run_training_loop_writes_periodic_checkpoints(tmp_path: Path) -> None:
-    cfg = _full_config(checkpoint_freq=10)
+    cfg = _full_config(checkpoint_freq=1000)
     trainer = _FakeTrainer()
     logger = _FakeLogger()
 
@@ -164,14 +164,14 @@ def test_run_training_loop_writes_periodic_checkpoints(tmp_path: Path) -> None:
         run_dir=tmp_path,
         cfg=cfg,
         config_path=Path("config.yaml"),
-        env_steps_per_iteration=8,
-        max_env_steps=16,
+        env_steps_per_iteration=800,
+        max_env_steps=1600,
         max_runtime_seconds=None,
     )
 
-    assert env_steps == 16
-    assert trainer.checkpoints == [(tmp_path / "checkpoint-16.pt", 16)]
-    assert [step for _metrics, step in logger.logged] == [8, 16]
+    assert env_steps == 1600
+    assert trainer.checkpoints == [(tmp_path / "checkpoint-1600.pt", 1600)]
+    assert [step for _metrics, step in logger.logged] == [800, 1600]
     assert "model/trainable_parameters" not in logger.logged[0][0]
     assert "trainable_parameters" not in logger.logged[0][0]
 
