@@ -57,7 +57,7 @@ environment returns an `ObsBatch` with these tensors:
 | `comet_mask` | `bool` | `(n_envs, MAX_COMETS)` |
 | `still_playing` | `bool` | `(n_envs, 4)` |
 | `global_features` | `float32` | `(n_envs, 3)` |
-| `can_act` | `bool` | `(n_envs, 4, ACTION_ENTITY_SLOTS)` |
+| `can_act` | `bool` | action-spec dependent |
 | `max_launch` | `int64` | `(n_envs, 4, ACTION_ENTITY_SLOTS)` |
 
 All reused buffers are fully overwritten on each observation write. Inactive
@@ -138,9 +138,9 @@ max_entities exceeded: N fleets ignored
 
 Shape per env: `(MAX_COMETS, 88)`.
 
-Comets are encoded separately from normal planets. They are emitted in comet
-group order, then `planet_ids` order within each comet group, up to
-`MAX_COMETS`.
+Comets are encoded separately from normal planets. Active comet planet IDs are
+sorted in ascending ID order, deduplicated, and emitted up to `MAX_COMETS`.
+This matches the comet portion of the action entity axis.
 
 | Channels | Feature |
 | --- | --- |
@@ -181,6 +181,19 @@ Comet spawn steps currently come from the rules engine constant:
 
 If no future comet spawn remains, `steps_until_next_comet_spawn` is `0`.
 
+## Action Entity Slots
+
+Action entity slots are ordered as all `MAX_PLANETS` planet tokens first,
+followed by `MAX_COMETS` comet tokens:
+
+```text
+0..39  -> non-comet planet slots in ascending planet ID order
+40..43 -> comet slots in ascending comet planet ID order
+```
+
+Unused planet slots, unused comet slots, and inactive player slots are explicitly
+filled with `False` / `0` in action-spec output tensors.
+
 ## Pure Action Spec
 
 Config:
@@ -198,19 +211,7 @@ to `max_per_planet_launches=3` and `min_fleet_size=1` so callers use the
 existing multi-launch autoregressive action space unless they explicitly opt
 into a smaller action shape or larger minimum fleet.
 
-Sharp edge: action entity slots are ordered as all `MAX_PLANETS` planet tokens
-first, followed by `MAX_COMETS` comet tokens. This assumes the model appends
-comet hidden states after planet hidden states before producing actions.
-
-```text
-0..39  -> planet slots
-40..43 -> comet slots
-```
-
-Unused planet slots, unused comet slots, and inactive player slots are explicitly
-filled with `False` / `0` in the action-spec output tensors.
-
-### Action-Spec Output Tensors
+### Pure Output Tensors
 
 These are written alongside the observation tensors:
 
@@ -223,7 +224,7 @@ These are written alongside the observation tensors:
 slot and has at least `min_fleet_size` ships. In 2-player games, two random
 outer player slots are active for the episode and the other two are inactive.
 
-### Submitted Action Tensors
+### Pure Submitted Actions
 
 Call:
 
@@ -256,6 +257,63 @@ because decoding, stepping, and observation writing run in one parallel pass per
 env, other sub-envs may have advanced before the error is returned.
 For each player and source entity, decoding stops at the first `False` launch
 slot, so later slots for that source are ignored.
+
+## Discrete Targets Action Spec
+
+Config:
+
+```python
+{"action_spec": "discrete_targets", "max_per_planet_launches": 3, "min_fleet_size": 1}
+```
+
+`ActionDiscreteTargetsConfig` uses the same launch-count and minimum-fleet
+validation as `ActionPureConfig`, but submitted actions choose integer target
+entity slots instead of raw launch angles. Model and PPO support are not yet
+implemented for this action spec; it is currently an environment/API surface.
+
+### Discrete Targets Output Tensors
+
+| Tensor | dtype | Shape | Meaning |
+| --- | --- | --- | --- |
+| `can_act` | `bool` | `(n_envs, 4, 44, 44)` | whether a player can launch from a source slot to a target slot |
+| `max_launch` | `int64` | `(n_envs, 4, 44)` | maximum launchable ship count for that source slot |
+
+`can_act[player, source, target]` is true when the source entity is owned by
+that outer player slot, has at least `min_fleet_size` ships, the target slot
+exists, and `source != target`. Neutral, enemy, owned, planet, and comet targets
+are all legal if they exist.
+
+### Discrete Targets Submitted Actions
+
+Call:
+
+```python
+obs, rewards, dones, episode_metrics = env.step(launch, target, ships)
+```
+
+| Tensor | dtype | Shape | Meaning |
+| --- | --- | --- | --- |
+| `launch` | `bool` | `(n_envs, 4, 44, max_per_planet_launches)` | `True` means execute a launch |
+| `target` | `int64` | `(n_envs, 4, 44, max_per_planet_launches)` | target action entity slot index in `[0, 44)` |
+| `ships` | `int64` | `(n_envs, 4, 44, max_per_planet_launches)` | requested ship count |
+
+Validation matches `pure` for inactive players, source ownership, source budget,
+ship count, missing source slots, and stale source slots. Launched target slots
+must be in range, present, and different from the source slot.
+
+### Targeting Rules
+
+For static planets, decoding first tries the centerline. If that path is blocked
+by the sun or another static planet, it tries both edge paths using
+`target_radius - eps`, then prefers an unobstructed path, then a path that avoids
+the sun, and finally the centerline if every candidate hits the sun.
+
+For orbiting planets, candidate center and edge intercepts are found against the
+analytic orbit curve with bounded scalar root finding; movement is not
+simulated during decoding. For comets, intercepts are found against the known
+future path segments. Moving targets prefer the earliest unobstructed intercept.
+If no comet intercept exists within the known future path, decoding fires toward
+the closest reachable future path point as a best-effort fallback.
 
 `episode_metrics` is a `dict[str, list[float]]` populated only for sub-envs that
 terminated during this step. Empty steps return `{}`. Each list contains one

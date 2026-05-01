@@ -108,6 +108,10 @@ class StatelessTransformerV1(BaseModelAPI):
         action_spec: ActionPureConfig,
     ) -> None:
         super().__init__()
+        if not isinstance(action_spec, ActionPureConfig):
+            raise ValueError(
+                "StatelessTransformerV1 currently supports action_spec='pure' only"
+            )
         self.config = config
         self.obs_spec = obs_spec
         self.action_spec = action_spec

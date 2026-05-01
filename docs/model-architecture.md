@@ -160,6 +160,12 @@ The sequence length is at most `max_per_planet_launches <= 4`, so this
 implementation uses the straightforward sequential recurrence rather than the
 paper's parallel scan variant.
 
+`StatelessTransformerV1` currently supports only `ActionPureConfig`.
+`ActionDiscreteTargetsConfig` is available at the environment/API layer, but a
+matching target-index actor and PPO rollout path have not been implemented.
+PPO fails fast if the model and environment action specs do not match, or if a
+non-`pure` action spec is used with the current trainer.
+
 `ActionPureConfig()` defaults to `max_per_planet_launches=3` and
 `min_fleet_size=1`. PPO model construction uses the environment action spec as
 the source of truth, so the model launch-slot count and minimum launched fleet

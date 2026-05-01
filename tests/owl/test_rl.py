@@ -10,7 +10,9 @@ from owl.rl import (
     MAX_COMETS,
     MAX_PLANETS,
     PLANET_CHANNELS,
+    ActionDiscreteTargetsConfig,
     ActionPureConfig,
+    EnvConfig,
     ObsV1Config,
     VectorizedEnv,
     encode_obs_v1,
@@ -281,6 +283,59 @@ def test_action_config_validates_launch_bounds() -> None:
         ActionPureConfig(min_fleet_size=0)
 
 
+def test_discrete_targets_config_and_env_shapes() -> None:
+    config = EnvConfig.model_validate(
+        {
+            "n_envs": 1,
+            "action_spec": {
+                "action_spec": "discrete_targets",
+                "max_per_planet_launches": 2,
+                "min_fleet_size": 4,
+            },
+            "pin_memory": False,
+        }
+    )
+    assert isinstance(config.action_spec, ActionDiscreteTargetsConfig)
+    assert config.action_spec.max_per_planet_launches == 2
+    assert config.action_spec.min_fleet_size == 4
+
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=ObsV1Config(),
+        action_spec=config.action_spec,
+        pin_memory=False,
+    )
+    obs = env.reset()
+
+    assert obs.can_act.shape == (1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS)
+    assert obs.max_launch.shape == (1, 4, ACTION_ENTITY_SLOTS)
+    assert obs.max_launch[~obs.can_act.any(dim=-1)].eq(0).all()
+
+
+def test_discrete_targets_step_uses_int_target_tensor() -> None:
+    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=2)
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=ObsV1Config(),
+        action_spec=action_spec,
+        pin_memory=False,
+    )
+    shape = (1, 4, ACTION_ENTITY_SLOTS, action_spec.max_per_planet_launches)
+    launch = np.zeros(shape, dtype=np.bool_)
+    target = np.zeros(shape, dtype=np.int64)
+    ships = np.zeros(shape, dtype=np.int64)
+
+    obs, rewards, dones, episode_metrics = env.step(launch, target, ships)
+
+    assert obs.can_act.shape == (1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS)
+    assert rewards.shape == (1, 4)
+    assert dones.shape == (1, 4)
+    assert episode_metrics == {}
+
+    with pytest.raises(ValueError, match="target must have dtype int64"):
+        env.step(launch, target.astype(np.float32), ships)
+
+
 def test_min_fleet_size_controls_action_mask_and_validation() -> None:
     action_spec = ActionPureConfig(min_fleet_size=3)
     (
@@ -324,6 +379,40 @@ def test_min_fleet_size_controls_action_mask_and_validation() -> None:
 
     with pytest.raises(ValueError, match="ships must be >= 3"):
         env.step(launch, angle, ships)
+
+
+def test_python_observation_encoder_writes_discrete_target_mask() -> None:
+    (
+        _planets,
+        _fleets,
+        _comets,
+        planet_mask,
+        _fleet_mask,
+        comet_mask,
+        _global_features,
+        can_act,
+        max_launch,
+    ) = encode_python_observation(
+        {
+            "step": 0,
+            "angular_velocity": 0.025,
+            "planets": [
+                [0, 0, 25.0, 75.0, 2.0, 10, 3],
+                [1, -1, 75.0, 75.0, 2.0, 10, 3],
+            ],
+            "fleets": [],
+            "comets": [],
+        },
+        action_spec=ActionDiscreteTargetsConfig(),
+    )
+
+    assert planet_mask[:2].tolist() == [True, True]
+    assert not comet_mask.any()
+    assert can_act.shape == (4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS)
+    assert not can_act[0, 0, 0]
+    assert can_act[0, 0, 1]
+    assert not can_act[0, 0, 2]
+    assert max_launch[0, 0] == 10
 
 
 def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:

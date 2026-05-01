@@ -50,6 +50,24 @@ class RlVecEnv:
         rewards: np.ndarray,
         dones: np.ndarray,
     ) -> dict[str, list[float]]: ...
+    def step_discrete_targets(
+        self,
+        launch: np.ndarray,
+        target: np.ndarray,
+        ships: np.ndarray,
+        planet_obs: np.ndarray,
+        fleet_obs: np.ndarray,
+        comet_obs: np.ndarray,
+        planet_mask: np.ndarray,
+        fleet_mask: np.ndarray,
+        comet_mask: np.ndarray,
+        still_playing: np.ndarray,
+        global_obs: np.ndarray,
+        can_act: np.ndarray,
+        max_launch: np.ndarray,
+        rewards: np.ndarray,
+        dones: np.ndarray,
+    ) -> dict[str, list[float]]: ...
     def obs_shapes(
         self,
     ) -> tuple[
@@ -61,7 +79,7 @@ class RlVecEnv:
         tuple[int, int],
         tuple[int, int],
         tuple[int, int],
-        tuple[int, int, int],
+        tuple[int, ...],
         tuple[int, int, int],
     ]: ...
 

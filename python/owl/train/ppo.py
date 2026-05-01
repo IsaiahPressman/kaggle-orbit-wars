@@ -286,6 +286,11 @@ class PPOTrainer:
     ) -> None:
         self.env = env
         self.model = model
+        model_action_spec = getattr(model, "action_spec", None)
+        if model_action_spec != env.action_spec:
+            raise ValueError("model and env action_spec must match")
+        if not isinstance(env.action_spec, ActionPureConfig):
+            raise ValueError("PPOTrainer currently supports action_spec='pure' only")
         self._compute_gae = _compile_compute_gae(config.compile_mode)
         self._sample_segments = _compile_sample_segments(config.compile_mode)
         self._ppo_loss = _compile_ppo_loss(config.compile_mode)

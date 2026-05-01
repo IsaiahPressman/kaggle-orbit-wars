@@ -11,7 +11,7 @@ from typing import Any, assert_never
 import torch
 import yaml
 from owl.model import ModelConfig, StatelessTransformerV1
-from owl.rl import ActionConfig, ObsConfig, VectorizedEnv
+from owl.rl import ActionConfig, ActionPureConfig, ObsConfig, VectorizedEnv
 from owl.train import FullConfig, PPOTrainer, configure_torch
 from owl.train.logging import LogMode, create_logger
 from owl.train.optimizer import (
@@ -249,6 +249,10 @@ def _create_model(
 ) -> StatelessTransformerV1:
     match config.model_arch:
         case "stateless_transformer_v1":
+            if not isinstance(action_spec, ActionPureConfig):
+                raise ValueError(
+                    "StatelessTransformerV1 currently supports action_spec='pure' only"
+                )
             return StatelessTransformerV1(
                 config,
                 obs_spec=obs_spec,

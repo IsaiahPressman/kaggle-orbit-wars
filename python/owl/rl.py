@@ -74,8 +74,24 @@ class ActionPureConfig(BaseConfig):
     min_fleet_size: int = Field(default=1, ge=1)
 
 
+class ActionDiscreteTargetsConfig(BaseConfig):
+    """Discrete target action spec.
+
+    The source axis uses the same planet-then-comet action entity slots as the
+    pure spec. For each launched source, the target tensor selects an action
+    entity slot by integer index.
+    """
+
+    action_spec: Literal["discrete_targets"] = "discrete_targets"
+    max_per_planet_launches: int = Field(default=3, ge=1, le=4)
+    min_fleet_size: int = Field(default=1, ge=1)
+
+
 type ObsConfig = Annotated[ObsV1Config, Field(discriminator="obs_spec")]
-type ActionConfig = Annotated[ActionPureConfig, Field(discriminator="action_spec")]
+type ActionConfig = Annotated[
+    ActionPureConfig | ActionDiscreteTargetsConfig,
+    Field(discriminator="action_spec"),
+]
 
 OUTER_PLAYER_SLOTS = 4
 
@@ -173,14 +189,11 @@ class VectorizedEnv:
     def step(
         self,
         launch: np.ndarray | torch.Tensor,
-        angle: np.ndarray | torch.Tensor,
+        action_value: np.ndarray | torch.Tensor,
         ships: np.ndarray | torch.Tensor,
     ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
         launch_array = _actions_to_numpy(
             "launch", launch, dtype=np.bool_, torch_dtype=torch.bool
-        )
-        angle_array = _actions_to_numpy(
-            "angle", angle, dtype=np.float32, torch_dtype=torch.float32
         )
         ship_array = _actions_to_numpy(
             "ships", ships, dtype=np.int64, torch_dtype=torch.int64
@@ -192,29 +205,66 @@ class VectorizedEnv:
             self.action_spec.max_per_planet_launches,
         )
         _require_action_shape("launch", launch_array, expected_shape)
-        _require_action_shape("angle", angle_array, expected_shape)
         _require_action_shape("ships", ship_array, expected_shape)
 
-        episode_metrics = self._rust.step(
-            launch_array,
-            angle_array,
-            ship_array,
-            self._planet_obs_np,
-            self._fleet_obs_np,
-            self._comet_obs_np,
-            self._planet_mask_np,
-            self._fleet_mask_np,
-            self._comet_mask_np,
-            self._still_playing_np,
-            self._global_obs_np,
-            self._can_act_np,
-            self._max_launch_np,
-            self._rewards_np,
-            self._dones_np,
-        )
+        if isinstance(self.action_spec, ActionPureConfig):
+            angle_array = _actions_to_numpy(
+                "angle",
+                action_value,
+                dtype=np.float32,
+                torch_dtype=torch.float32,
+            )
+            _require_action_shape("angle", angle_array, expected_shape)
+            episode_metrics = self._rust.step(
+                launch_array,
+                angle_array,
+                ship_array,
+                self._planet_obs_np,
+                self._fleet_obs_np,
+                self._comet_obs_np,
+                self._planet_mask_np,
+                self._fleet_mask_np,
+                self._comet_mask_np,
+                self._still_playing_np,
+                self._global_obs_np,
+                self._can_act_np,
+                self._max_launch_np,
+                self._rewards_np,
+                self._dones_np,
+            )
+        else:
+            target_array = _actions_to_numpy(
+                "target",
+                action_value,
+                dtype=np.int64,
+                torch_dtype=torch.int64,
+            )
+            _require_action_shape("target", target_array, expected_shape)
+            episode_metrics = self._rust.step_discrete_targets(
+                launch_array,
+                target_array,
+                ship_array,
+                self._planet_obs_np,
+                self._fleet_obs_np,
+                self._comet_obs_np,
+                self._planet_mask_np,
+                self._fleet_mask_np,
+                self._comet_mask_np,
+                self._still_playing_np,
+                self._global_obs_np,
+                self._can_act_np,
+                self._max_launch_np,
+                self._rewards_np,
+                self._dones_np,
+            )
         return self.observations, self.rewards, self.dones, episode_metrics
 
     def _allocate_observations(self, *, pin_memory: bool) -> ObsBatch:
+        can_act_shape = (
+            (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS)
+            if isinstance(self.action_spec, ActionPureConfig)
+            else (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS)
+        )
         return ObsBatch(
             planets=torch.zeros(
                 (
@@ -269,7 +319,7 @@ class VectorizedEnv:
                 pin_memory=pin_memory,
             ),
             can_act=torch.zeros(
-                (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS),
+                can_act_shape,
                 dtype=torch.bool,
                 pin_memory=pin_memory,
             ),
@@ -284,7 +334,7 @@ class VectorizedEnv:
 def encode_python_observation(
     obs: dict[str, Any],
     obs_spec: ObsV1Config | None = None,
-    action_spec: ActionPureConfig | None = None,
+    action_spec: ActionConfig | None = None,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -301,7 +351,7 @@ def encode_python_observation(
     comet_planet_ids, comet_path_indices, comet_path_lengths, comet_paths = (
         _comets_to_arrays(obs.get("comets", []))
     )
-    return encode_obs_v1(
+    encoded = encode_obs_v1(
         _rows_to_array(obs.get("planets", []), name="planets"),
         _rows_to_array(obs.get("fleets", []), name="fleets"),
         comet_planet_ids,
@@ -313,6 +363,35 @@ def encode_python_observation(
         int(cast(SupportsInt, obs.get("episode_steps", 500))),
         spec.max_entities,
         action.min_fleet_size,
+    )
+    if isinstance(action, ActionPureConfig):
+        return encoded
+
+    (
+        planets,
+        fleets,
+        comets,
+        planet_mask,
+        fleet_mask,
+        comet_mask,
+        global_features,
+        source_can_act,
+        max_launch,
+    ) = encoded
+    target_exists = np.concatenate((planet_mask, comet_mask))
+    source_target_can_act = source_can_act[:, :, None] & target_exists[None, None, :]
+    source_indexes = np.arange(ACTION_ENTITY_SLOTS)
+    source_target_can_act[:, source_indexes, source_indexes] = False
+    return (
+        planets,
+        fleets,
+        comets,
+        planet_mask,
+        fleet_mask,
+        comet_mask,
+        global_features,
+        source_target_can_act,
+        max_launch,
     )
 
 
