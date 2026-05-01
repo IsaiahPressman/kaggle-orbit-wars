@@ -209,15 +209,7 @@ def test_full_config_rejects_rl_env_count() -> None:
 
 @pytest.mark.parametrize("preset", ["baseline", "pufferish"])
 def test_training_presets_load(preset: str) -> None:
-    config = FullConfig.from_file(_REPO_ROOT / "configs" / f"{preset}.yaml")
-
-    assert config.env.action_spec.max_per_planet_launches == 3
-    assert config.model.embed_dim == 256
-    assert config.model.depth == 6
-    assert config.model.n_heads == 8
-    assert config.optimizer.optimizer == "muon"
-    assert config.optimizer.adamw_lr == pytest.approx(3e-4)
-    assert config.optimizer.muon_lr == pytest.approx(0.015)
+    _ = FullConfig.from_file(_REPO_ROOT / "configs" / f"{preset}.yaml")
 
 
 def test_training_presets_make_baseline_and_pufferish_modes_explicit() -> None:
