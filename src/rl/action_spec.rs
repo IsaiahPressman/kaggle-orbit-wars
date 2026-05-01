@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::rules_engine::env::PlayerAction;
 use crate::rules_engine::state::{LaunchAction, Planet, State};
@@ -8,7 +8,6 @@ use super::{PlayerMap, ACTION_ENTITY_SLOTS, MAX_COMETS, MAX_PLANETS, OUTER_PLAYE
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ActionEntitySlot {
     planet_id: u32,
-    planet_index: usize,
 }
 
 pub(super) type ActionEntitySlots = [Option<ActionEntitySlot>; ACTION_ENTITY_SLOTS];
@@ -133,42 +132,28 @@ pub(super) fn action_entity_slots(state: &State) -> ActionEntitySlots {
         .copied()
         .collect::<HashSet<_>>();
     let mut entities = [None; ACTION_ENTITY_SLOTS];
-    for (entity_index, (planet_index, planet)) in state
+    for (entity_index, planet) in state
         .planets
         .iter()
-        .enumerate()
-        .filter(|(_, planet)| !comet_ids.contains(&planet.id))
+        .filter(|planet| !comet_ids.contains(&planet.id))
         .take(MAX_PLANETS)
         .enumerate()
     {
         entities[entity_index] = Some(ActionEntitySlot {
             planet_id: planet.id,
-            planet_index,
         });
     }
 
-    let planets_by_id = state
-        .planets
-        .iter()
-        .enumerate()
-        .map(|(planet_index, planet)| {
-            (
-                planet.id,
-                ActionEntitySlot {
-                    planet_id: planet.id,
-                    planet_index,
-                },
-            )
-        })
-        .collect::<HashMap<_, _>>();
     let mut comet_index = 0;
     for group in &state.comets {
         for planet_id in &group.planet_ids {
             if comet_index >= MAX_COMETS {
                 return entities;
             }
-            if let Some(planet) = planets_by_id.get(planet_id) {
-                entities[MAX_PLANETS + comet_index] = Some(*planet);
+            if state.planets.get(*planet_id).is_some() {
+                entities[MAX_PLANETS + comet_index] = Some(ActionEntitySlot {
+                    planet_id: *planet_id,
+                });
                 comet_index += 1;
             }
         }
@@ -177,16 +162,7 @@ pub(super) fn action_entity_slots(state: &State) -> ActionEntitySlots {
 }
 
 fn planet_for_slot(state: &State, slot: ActionEntitySlot) -> Option<&Planet> {
-    state
-        .planets
-        .get(slot.planet_index)
-        .filter(|planet| planet.id == slot.planet_id)
-        .or_else(|| {
-            state
-                .planets
-                .iter()
-                .find(|planet| planet.id == slot.planet_id)
-        })
+    state.planets.get(slot.planet_id)
 }
 
 #[cfg(test)]
@@ -208,8 +184,8 @@ mod tests {
             config: SimConfig::new(4),
             step: 0,
             angular_velocity: 0.025,
-            initial_planets: planets.clone(),
-            planets,
+            initial_planets: planets.clone().into(),
+            planets: planets.into(),
             fleets: Vec::new(),
             next_fleet_id: 0,
             comets: Vec::new(),
@@ -480,8 +456,7 @@ mod tests {
             production: 1,
         });
         let entities = action_entity_slots(&observed_state);
-        let mut current_state = observed_state.clone();
-        current_state.planets.swap(0, 1);
+        let current_state = observed_state.clone();
 
         let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
         let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS];

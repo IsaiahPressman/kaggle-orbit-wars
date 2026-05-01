@@ -8,8 +8,8 @@ use serde::Deserialize;
 use super::env::{step_with_injections, PlayerAction};
 use super::generation::RandomSource;
 use super::state::{
-    CometGroup, CometSpawnInjection, Fleet, LaunchAction, Planet, PlayerResult, Point, SimConfig,
-    State, StepInjections, StepResult, COMET_SPAWN_STEPS,
+    CometGroup, CometSpawnInjection, Fleet, LaunchAction, Planet, PlanetVector, PlayerResult,
+    Point, SimConfig, State, StepInjections, StepResult, COMET_SPAWN_STEPS,
 };
 
 const DEFAULT_FIXTURE_DIR: &str = "tests/fixtures/orbit_wars_replays";
@@ -290,13 +290,20 @@ fn state_from_observation(row: &FixtureRow) -> Result<State, String> {
         config,
         step: row.before.step,
         angular_velocity: row.before.angular_velocity,
-        planets: row.before.planets.iter().map(planet_from_array).collect(),
+        planets: row
+            .before
+            .planets
+            .iter()
+            .map(planet_from_array)
+            .collect::<Vec<_>>()
+            .into(),
         initial_planets: row
             .before
             .initial_planets
             .iter()
             .map(planet_from_array)
-            .collect(),
+            .collect::<Vec<_>>()
+            .into(),
         fleets: row.before.fleets.iter().map(fleet_from_array).collect(),
         next_fleet_id: row.before.next_fleet_id,
         comets: row.before.comets.iter().map(comet_from_fixture).collect(),
@@ -404,8 +411,9 @@ fn python_validated_actions_does_not_truncate_planet_ids() -> Result<(), String>
             radius: 2.0,
             ships: 10,
             production: 1,
-        }],
-        initial_planets: Vec::new(),
+        }]
+        .into(),
+        initial_planets: Vec::new().into(),
         fleets: Vec::new(),
         next_fleet_id: 0,
         comets: Vec::new(),
@@ -463,8 +471,9 @@ fn replay_skip_spawn_injection_does_not_request_rng() {
                 ships: 10,
                 production: 1,
             },
-        ],
-        initial_planets: Vec::new(),
+        ]
+        .into(),
+        initial_planets: Vec::new().into(),
         fleets: Vec::new(),
         next_fleet_id: 0,
         comets: Vec::new(),
@@ -685,7 +694,7 @@ fn player_results_from_kaggle(row: &FixtureRow) -> Result<Vec<PlayerResult>, Str
         .collect()
 }
 
-fn compare_planets(actual: &[Planet], expected: &[Planet]) -> Result<(), String> {
+fn compare_planets(actual: &PlanetVector, expected: &[Planet]) -> Result<(), String> {
     if actual.len() != expected.len() {
         return Err(format!(
             "planet count mismatch: {} != {}",

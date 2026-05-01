@@ -95,6 +95,12 @@ Floating-point parity uses close comparisons rather than bit-for-bit equality.
 Discrete ids, owners, ship counts, production, removals, and player statuses
 must match exactly.
 
+The Rust state stores planets and initial planets in ID-indexed slots. Parity
+comparison iterates live slots in ID order, which matches generated and fixture
+planet ordering because fixture IDs are unique and contiguous for live planets.
+Manual duplicate planet IDs and IDs at/above `MAX_PLANET_ID` are intentionally
+rejected before parity comparison.
+
 Replay and generation fixtures are ignored by Git because full episodes and
 recorded reference streams can be large. A fresh checkout must run
 `scripts/regenerate_test_fixtures.sh` or restore fixtures from cache before

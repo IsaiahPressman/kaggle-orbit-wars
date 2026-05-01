@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use numpy::ndarray::{Array1, Array2};
 use numpy::{
@@ -188,19 +188,13 @@ fn encode_comets(
     comet_obs: &mut [f32],
     comet_mask: &mut [bool],
 ) {
-    let planets_by_id = state
-        .planets
-        .iter()
-        .map(|planet| (planet.id, planet))
-        .collect::<HashMap<_, _>>();
-
     let mut comet_index = 0;
     for group in &state.comets {
         for (path_offset, planet_id) in group.planet_ids.iter().enumerate() {
             if comet_index >= MAX_COMETS {
                 return;
             }
-            let Some(planet) = planets_by_id.get(planet_id) else {
+            let Some(planet) = state.planets.get(*planet_id) else {
                 continue;
             };
             let Some(path) = group.paths.get(path_offset) else {
@@ -372,8 +366,8 @@ fn state_from_arrays(
         config,
         step,
         angular_velocity,
-        initial_planets: planets.clone(),
-        planets,
+        initial_planets: planets.clone().into(),
+        planets: planets.into(),
         fleets,
         next_fleet_id: 0,
         comets,
@@ -633,7 +627,7 @@ mod tests {
             config: SimConfig::new(2),
             step: 0,
             angular_velocity: 0.025,
-            initial_planets: Vec::new(),
+            initial_planets: Vec::new().into(),
             planets: vec![Planet {
                 id: 0,
                 owner: 0,
@@ -642,7 +636,8 @@ mod tests {
                 radius: 2.0,
                 ships: 10,
                 production: 0,
-            }],
+            }]
+            .into(),
             fleets: Vec::new(),
             next_fleet_id: 0,
             comets: Vec::new(),
@@ -681,7 +676,7 @@ mod tests {
             config: SimConfig::new(2),
             step: 0,
             angular_velocity: 0.025,
-            initial_planets: Vec::new(),
+            initial_planets: Vec::new().into(),
             planets: vec![Planet {
                 id: 0,
                 owner: 1,
@@ -690,7 +685,8 @@ mod tests {
                 radius: 2.0,
                 ships: 10,
                 production: 1,
-            }],
+            }]
+            .into(),
             fleets: vec![Fleet {
                 id: 0,
                 owner: 0,
@@ -743,7 +739,7 @@ mod tests {
             config: SimConfig::new(2),
             step: 0,
             angular_velocity: 0.025,
-            initial_planets: Vec::new(),
+            initial_planets: Vec::new().into(),
             planets: vec![Planet {
                 id: 0,
                 owner: 0,
@@ -752,7 +748,8 @@ mod tests {
                 radius: 2.0,
                 ships: 2,
                 production: 1,
-            }],
+            }]
+            .into(),
             fleets: Vec::new(),
             next_fleet_id: 0,
             comets: Vec::new(),

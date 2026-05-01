@@ -9,6 +9,7 @@ pub const MIN_PLANET_GROUPS: i32 = 5;
 pub const MAX_PLANET_GROUPS: i32 = 10;
 pub const MIN_STATIC_GROUPS: usize = 3;
 pub const MAX_PLAYERS: usize = 4;
+pub const MAX_PLANET_ID: u32 = 100;
 pub const COMET_SPAWN_STEPS: [u32; 5] = [50, 150, 250, 350, 450];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,6 +38,129 @@ pub struct Planet {
 impl Planet {
     pub const fn position(&self) -> Point {
         Point::new(self.x, self.y)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlanetVector {
+    slots: Vec<Option<Planet>>,
+    len: usize,
+}
+
+impl PlanetVector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_planets(planets: Vec<Planet>) -> Self {
+        let mut vector = Self::new();
+        for planet in planets {
+            vector.push(planet);
+        }
+        vector
+    }
+
+    pub fn push(&mut self, planet: Planet) {
+        assert!(
+            planet.id < MAX_PLANET_ID,
+            "planet id must be < {MAX_PLANET_ID}, got {}",
+            planet.id
+        );
+        let index = planet.id as usize;
+        if index >= self.slots.len() {
+            self.slots.resize_with(index + 1, || None);
+        }
+        assert!(
+            self.slots[index].is_none(),
+            "duplicate planet id {}",
+            planet.id
+        );
+        self.slots[index] = Some(planet);
+        self.len += 1;
+    }
+
+    pub fn get(&self, id: u32) -> Option<&Planet> {
+        self.slots.get(id as usize).and_then(Option::as_ref)
+    }
+
+    pub fn get_mut(&mut self, id: u32) -> Option<&mut Planet> {
+        self.slots.get_mut(id as usize).and_then(Option::as_mut)
+    }
+
+    pub fn remove(&mut self, id: u32) -> Option<Planet> {
+        let removed = self.slots.get_mut(id as usize)?.take();
+        if removed.is_some() {
+            self.len -= 1;
+        }
+        removed
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&Planet) -> bool) {
+        for slot in &mut self.slots {
+            if slot.as_ref().is_some_and(|planet| !keep(planet)) {
+                *slot = None;
+                self.len -= 1;
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.slots.clear();
+        self.len = 0;
+    }
+
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Planet> {
+        self.slots.iter().filter_map(Option::as_ref)
+    }
+
+    pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut Planet> {
+        self.slots.iter_mut().filter_map(Option::as_mut)
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn slot_len(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn last(&self) -> Option<&Planet> {
+        self.iter().next_back()
+    }
+
+    pub fn next_planet_id(&self) -> u32 {
+        self.last().map_or(1, |planet| planet.id + 1)
+    }
+}
+
+impl From<Vec<Planet>> for PlanetVector {
+    fn from(planets: Vec<Planet>) -> Self {
+        Self::from_planets(planets)
+    }
+}
+
+impl std::ops::Index<usize> for PlanetVector {
+    type Output = Planet;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.slots
+            .get(index)
+            .and_then(Option::as_ref)
+            .unwrap_or_else(|| panic!("planet id {index} does not exist"))
+    }
+}
+
+impl std::ops::IndexMut<usize> for PlanetVector {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        self.slots
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .unwrap_or_else(|| panic!("planet id {index} does not exist"))
     }
 }
 
@@ -121,8 +245,8 @@ pub struct State {
     pub config: SimConfig,
     pub step: u32,
     pub angular_velocity: f64,
-    pub planets: Vec<Planet>,
-    pub initial_planets: Vec<Planet>,
+    pub planets: PlanetVector,
+    pub initial_planets: PlanetVector,
     pub fleets: Vec<Fleet>,
     pub next_fleet_id: u32,
     pub comets: Vec<CometGroup>,

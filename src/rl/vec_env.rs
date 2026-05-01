@@ -560,7 +560,7 @@ impl EpisodeStats {
             .collect::<HashSet<_>>();
         let mut non_comet_planets = 0_usize;
         let mut occupied_planets = 0_usize;
-        for planet in &state.planets {
+        for planet in state.planets.iter() {
             if comet_ids.contains(&planet.id) {
                 continue;
             }
@@ -967,8 +967,8 @@ mod tests {
             config: SimConfig::new(4),
             step: 0,
             angular_velocity: 0.025,
-            initial_planets: planets.clone(),
-            planets,
+            initial_planets: planets.clone().into(),
+            planets: planets.into(),
             fleets: Vec::new(),
             next_fleet_id: 0,
             comets: Vec::new(),
@@ -1019,8 +1019,8 @@ mod tests {
             config: SimConfig::new(4),
             step: 0,
             angular_velocity: 0.025,
-            initial_planets: planets.clone(),
-            planets,
+            initial_planets: planets.clone().into(),
+            planets: planets.into(),
             fleets: Vec::new(),
             next_fleet_id: 0,
             comets: Vec::new(),
@@ -1042,8 +1042,8 @@ mod tests {
             config: SimConfig::new(4),
             step: 0,
             angular_velocity: 0.025,
-            initial_planets: planets.clone(),
-            planets,
+            initial_planets: planets.clone().into(),
+            planets: planets.into(),
             fleets: Vec::new(),
             next_fleet_id: 0,
             comets: Vec::new(),

@@ -1,7 +1,7 @@
 use rand::RngExt;
 
 use super::state::{
-    CometGroup, Planet, Point, BOARD_SIZE, CENTER, COMET_PRODUCTION, COMET_RADIUS,
+    CometGroup, Planet, PlanetVector, Point, BOARD_SIZE, CENTER, COMET_PRODUCTION, COMET_RADIUS,
     MAX_PLANET_GROUPS, MAX_PLAYERS, MIN_PLANET_GROUPS, MIN_STATIC_GROUPS, PLANET_CLEARANCE,
     ROTATION_RADIUS_LIMIT, SUN_RADIUS,
 };
@@ -145,7 +145,7 @@ pub fn assign_home_planets(
 }
 
 pub fn generate_comet_paths(
-    initial_planets: &[Planet],
+    initial_planets: &PlanetVector,
     angular_velocity: f64,
     spawn_step: u32,
     comet_planet_ids: &[u32],
@@ -229,13 +229,13 @@ pub fn sample_comet_ships(rng: &mut impl RandomSource) -> i32 {
 }
 
 pub fn spawn_comet_group(
-    planets: &mut Vec<Planet>,
-    initial_planets: &mut Vec<Planet>,
+    planets: &mut PlanetVector,
+    initial_planets: &mut PlanetVector,
     comet_planet_ids: &mut Vec<u32>,
     paths: Vec<Vec<Point>>,
     ships: i32,
 ) -> CometGroup {
-    let next_id = planets.iter().map(|planet| planet.id).max().unwrap_or(0) + 1;
+    let next_id = planets.next_planet_id();
     let mut group = CometGroup {
         planet_ids: Vec::with_capacity(paths.len()),
         paths,
@@ -338,14 +338,14 @@ fn symmetric_paths(visible: &[Point]) -> Vec<Vec<Point>> {
 
 fn comet_path_is_valid(
     visible: &[Point],
-    initial_planets: &[Planet],
+    initial_planets: &PlanetVector,
     angular_velocity: f64,
     spawn_step: u32,
     comet_ids: &std::collections::HashSet<u32>,
 ) -> bool {
     let mut static_planets = Vec::new();
     let mut orbiting_planets = Vec::new();
-    for planet in initial_planets {
+    for planet in initial_planets.iter() {
         if comet_ids.contains(&planet.id) {
             continue;
         }
@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn spawn_comet_group_adds_placeholder_planets_and_metadata() {
-        let mut planets = vec![planet(7, -1, 20.0, 20.0, 1.0, 5, 1)];
+        let mut planets = PlanetVector::from_planets(vec![planet(7, -1, 20.0, 20.0, 1.0, 5, 1)]);
         let mut initial_planets = planets.clone();
         let mut comet_planet_ids = Vec::new();
         let paths = vec![vec![Point::new(1.0, 2.0)]; 4];
@@ -516,7 +516,7 @@ mod tests {
     fn generate_comet_paths_returns_four_symmetric_paths_without_obstacles() {
         let mut rng = RepeatingRandom { int: 1, float: 0.5 };
 
-        let paths = generate_comet_paths(&[], 0.04, 50, &[], 4.0, &mut rng)
+        let paths = generate_comet_paths(&PlanetVector::new(), 0.04, 50, &[], 4.0, &mut rng)
             .expect("deterministic comet path");
 
         assert_eq!(paths.len(), 4);
@@ -726,7 +726,7 @@ mod tests {
         let planets = generate_planets(&mut rng);
 
         rng.assert_finished();
-        compare_planets(&planets, &fixture.planet_generation.planets);
+        compare_planets(planets.iter(), &fixture.planet_generation.planets);
         Ok(())
     }
 
@@ -811,13 +811,20 @@ mod tests {
             },
             step: case.before.step,
             angular_velocity: case.before.angular_velocity,
-            planets: case.before.planets.iter().map(planet_from_array).collect(),
+            planets: case
+                .before
+                .planets
+                .iter()
+                .map(planet_from_array)
+                .collect::<Vec<_>>()
+                .into(),
             initial_planets: case
                 .before
                 .initial_planets
                 .iter()
                 .map(planet_from_array)
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
             fleets: Vec::new(),
             next_fleet_id: case.before.next_fleet_id,
             comets: Vec::new(),
@@ -843,7 +850,8 @@ mod tests {
             .initial_planets
             .iter()
             .map(planet_from_array)
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+            .into();
         let inputs = &case.inputs;
 
         let paths = generate_comet_paths(
@@ -913,8 +921,8 @@ mod tests {
     fn compare_reset_state(actual: &State, expected: &ResetStateFixture) {
         assert_eq!(actual.step, expected.step);
         close(actual.angular_velocity, expected.angular_velocity);
-        compare_planets(&actual.planets, &expected.planets);
-        compare_planets(&actual.initial_planets, &expected.initial_planets);
+        compare_planets(actual.planets.iter(), &expected.planets);
+        compare_planets(actual.initial_planets.iter(), &expected.initial_planets);
         assert_eq!(actual.fleets.len(), expected.fleets.len());
         assert_eq!(actual.next_fleet_id, expected.next_fleet_id);
         assert_eq!(actual.comet_planet_ids, expected.comet_planet_ids);
@@ -934,7 +942,8 @@ mod tests {
         }
     }
 
-    fn compare_planets(actual: &[Planet], expected: &[[f64; 7]]) {
+    fn compare_planets<'a>(actual: impl IntoIterator<Item = &'a Planet>, expected: &[[f64; 7]]) {
+        let actual = actual.into_iter().collect::<Vec<_>>();
         assert_eq!(actual.len(), expected.len());
         for (actual, expected) in actual.iter().zip(expected) {
             assert_eq!(actual.id, expected[0] as u32);

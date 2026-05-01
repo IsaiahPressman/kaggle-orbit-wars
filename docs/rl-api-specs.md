@@ -91,8 +91,9 @@ Shape per env: `(MAX_PLANETS, 16)`.
 
 Only non-comet planets are included. If more than `MAX_PLANETS` non-comet
 planets exist, the encoder panics. Generated games currently produce up to
-`MAX_PLANET_GROUPS * 4 = 40` planets. Rows are written in the simulator planet
-order after excluding comet planets.
+`MAX_PLANET_GROUPS * 4 = 40` planets. Rows are written in increasing planet ID
+order after excluding comet planets. This matches generated-map order because
+generated planet IDs are unique and contiguous before comet insertion.
 
 | Channels | Feature |
 | --- | --- |
