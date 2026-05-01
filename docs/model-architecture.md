@@ -160,9 +160,10 @@ The sequence length is at most `max_per_planet_launches <= 4`, so this
 implementation uses the straightforward sequential recurrence rather than the
 paper's parallel scan variant.
 
-`ActionPureConfig()` defaults to `max_per_planet_launches=3`. PPO model
-construction uses the environment action spec as the source of truth, so the
-model launch-slot count matches the action tensors submitted to the environment.
+`ActionPureConfig()` defaults to `max_per_planet_launches=3` and
+`min_fleet_size=1`. PPO model construction uses the environment action spec as
+the source of truth, so the model launch-slot count and minimum launched fleet
+size match the action tensors submitted to the environment.
 
 For every slot, the policy emits:
 
@@ -172,8 +173,10 @@ For every slot, the policy emits:
 - shifted beta-binomial size parameters
 
 Sampling stops per `(batch, player, entity)` lane when the previous launch is
-false or when the remaining ship budget reaches zero. The accumulated sampled
-ships are capped by `max_launch`.
+false or when the remaining ship budget falls below `min_fleet_size`. The
+shifted beta-binomial size distribution emits ships in
+`min_fleet_size..remaining`, and the accumulated sampled ships are capped by
+`max_launch`.
 
 The model returns decomposed action tensors:
 

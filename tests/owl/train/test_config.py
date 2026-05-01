@@ -54,6 +54,7 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
                 "action_spec": {
                     "action_spec": "pure",
                     "max_per_planet_launches": 2,
+                    "min_fleet_size": 4,
                 },
             },
             "model": {
@@ -83,6 +84,7 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
     )
 
     assert config.env.n_envs == 2
+    assert config.env.action_spec.min_fleet_size == 4
     assert config.optimizer.learning_rate == pytest.approx(0.001)
     assert config.optimizer.lr_schedule is not None
     assert config.optimizer.lr_schedule.warmup_steps == 2
@@ -112,6 +114,7 @@ def test_full_config_defaults_to_multi_launch_actions() -> None:
     )
 
     assert config.env.action_spec.max_per_planet_launches == 3
+    assert config.env.action_spec.min_fleet_size == 1
 
 
 def test_full_config_accepts_single_launch_training_actions() -> None:

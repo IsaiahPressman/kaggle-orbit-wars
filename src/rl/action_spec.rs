@@ -13,6 +13,7 @@ pub(super) struct ActionEntitySlot {
 
 pub(super) type ActionEntitySlots = [Option<ActionEntitySlot>; ACTION_ENTITY_SLOTS];
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn decode_pure_actions(
     state: &State,
     player_map: &PlayerMap,
@@ -21,6 +22,7 @@ pub(super) fn decode_pure_actions(
     angle: &[f32],
     ships: &[i64],
     max_per_planet_launches: usize,
+    min_fleet_size: i64,
 ) -> Result<Vec<PlayerAction>, String> {
     let mut actions = vec![Vec::new(); state.config.player_count];
     for outer_player in 0..OUTER_PLAYER_SLOTS {
@@ -56,9 +58,9 @@ pub(super) fn decode_pure_actions(
                     ));
                 };
                 let ship_count = ships[action_index];
-                if ship_count < 1 {
+                if ship_count < min_fleet_size {
                     return Err(format!(
-                        "player {outer_player} entity slot {entity_index} launch {launch_index} ships must be >= 1"
+                        "player {outer_player} entity slot {entity_index} launch {launch_index} ships must be >= {min_fleet_size}"
                     ));
                 }
                 if ship_count > i64::from(i32::MAX) {
@@ -102,6 +104,7 @@ pub(super) fn encode_action_spec(
     entities: &ActionEntitySlots,
     can_act: &mut [bool],
     max_launch: &mut [i64],
+    min_fleet_size: i64,
 ) {
     for (entity_index, slot) in entities.iter().enumerate() {
         let Some(slot) = slot else {
@@ -110,7 +113,7 @@ pub(super) fn encode_action_spec(
         let Some(planet) = planet_for_slot(state, *slot) else {
             continue;
         };
-        if planet.ships < 1 || planet.owner < 0 {
+        if i64::from(planet.ships) < min_fleet_size || planet.owner < 0 {
             continue;
         }
         let player = planet.owner as usize;
@@ -224,10 +227,45 @@ mod tests {
         let ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
         launch[0] = true;
 
-        let err = decode_pure_actions(&state, &player_map, &entities, &launch, &angle, &ships, 1)
-            .expect_err("zero ships should fail");
+        let err = decode_pure_actions(
+            &state,
+            &player_map,
+            &entities,
+            &launch,
+            &angle,
+            &ships,
+            1,
+            1,
+        )
+        .expect_err("zero ships should fail");
 
         assert!(err.contains("ships must be >= 1"));
+    }
+
+    #[test]
+    fn pure_launch_errors_when_ship_count_is_below_min_fleet_size() {
+        let player_map = PlayerMap::identity();
+        let state = one_planet_state();
+        let entities = action_entity_slots(&state);
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+        let angle = vec![0.0; 4 * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        ships[0] = 2;
+
+        let err = decode_pure_actions(
+            &state,
+            &player_map,
+            &entities,
+            &launch,
+            &angle,
+            &ships,
+            1,
+            3,
+        )
+        .expect_err("undersized fleet should fail");
+
+        assert!(err.contains("ships must be >= 3"));
     }
 
     #[test]
@@ -241,8 +279,17 @@ mod tests {
         launch[0] = true;
         ships[0] = i64::from(i32::MAX) + 1;
 
-        let err = decode_pure_actions(&state, &player_map, &entities, &launch, &angle, &ships, 1)
-            .expect_err("oversized ships should fail");
+        let err = decode_pure_actions(
+            &state,
+            &player_map,
+            &entities,
+            &launch,
+            &angle,
+            &ships,
+            1,
+            1,
+        )
+        .expect_err("oversized ships should fail");
 
         assert!(err.contains("ships must fit in i32"));
     }
@@ -259,8 +306,17 @@ mod tests {
         angle[0] = f32::INFINITY;
         ships[0] = 1;
 
-        let err = decode_pure_actions(&state, &player_map, &entities, &launch, &angle, &ships, 1)
-            .expect_err("non-finite angle should fail");
+        let err = decode_pure_actions(
+            &state,
+            &player_map,
+            &entities,
+            &launch,
+            &angle,
+            &ships,
+            1,
+            1,
+        )
+        .expect_err("non-finite angle should fail");
 
         assert!(err.contains("angle must be finite"));
     }
@@ -276,8 +332,17 @@ mod tests {
         launch[ACTION_ENTITY_SLOTS] = true;
         ships[ACTION_ENTITY_SLOTS] = 1;
 
-        let err = decode_pure_actions(&state, &player_map, &entities, &launch, &angle, &ships, 1)
-            .expect_err("wrong owner should fail");
+        let err = decode_pure_actions(
+            &state,
+            &player_map,
+            &entities,
+            &launch,
+            &angle,
+            &ships,
+            1,
+            1,
+        )
+        .expect_err("wrong owner should fail");
 
         assert!(err.contains("player 1 cannot launch from planet 7 owned by 0"));
     }
@@ -304,6 +369,7 @@ mod tests {
             &angle,
             &ships,
             max_per_planet_launches,
+            1,
         )
         .expect_err("overspending should fail");
 
@@ -334,6 +400,7 @@ mod tests {
             &angle,
             &ships,
             max_per_planet_launches,
+            1,
         )
         .expect("valid actions should decode");
 
@@ -364,6 +431,7 @@ mod tests {
             &angle,
             &ships,
             max_per_planet_launches,
+            1,
         )
         .expect("valid remapped outer slot should decode");
 
@@ -429,6 +497,7 @@ mod tests {
             &angle,
             &ships,
             1,
+            1,
         )
         .expect("cached slot should decode by observed planet id");
 
@@ -456,6 +525,7 @@ mod tests {
             &launch,
             &angle,
             &ships,
+            1,
             1,
         )
         .expect_err("missing cached slot planet should fail");

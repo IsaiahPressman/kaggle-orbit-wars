@@ -71,6 +71,7 @@ class ActionPureConfig(BaseConfig):
 
     action_spec: Literal["pure"] = "pure"
     max_per_planet_launches: int = Field(default=3, ge=1, le=4)
+    min_fleet_size: int = Field(default=1, ge=1)
 
 
 type ObsConfig = Annotated[ObsV1Config, Field(discriminator="obs_spec")]
@@ -121,6 +122,7 @@ class VectorizedEnv:
             self.action_spec.action_spec,
             self.obs_spec.max_entities,
             self.action_spec.max_per_planet_launches,
+            self.action_spec.min_fleet_size,
         )
         if pin_memory and not torch.cuda.is_available():
             warnings.warn(
@@ -282,6 +284,7 @@ class VectorizedEnv:
 def encode_python_observation(
     obs: dict[str, Any],
     obs_spec: ObsV1Config | None = None,
+    action_spec: ActionPureConfig | None = None,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -294,6 +297,7 @@ def encode_python_observation(
     np.ndarray,
 ]:
     spec = obs_spec or ObsV1Config()
+    action = action_spec or ActionPureConfig()
     comet_planet_ids, comet_path_indices, comet_path_lengths, comet_paths = (
         _comets_to_arrays(obs.get("comets", []))
     )
@@ -308,6 +312,7 @@ def encode_python_observation(
         int(cast(SupportsInt, obs.get("step", 0))),
         int(cast(SupportsInt, obs.get("episode_steps", 500))),
         spec.max_entities,
+        action.min_fleet_size,
     )
 
 

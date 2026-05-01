@@ -255,24 +255,74 @@ def test_two_player_sample_marks_unused_player_slots_done() -> None:
 
 
 def test_vectorized_env_accepts_discriminated_config_dicts() -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=2, min_fleet_size=4)
     env = VectorizedEnv(
         n_envs=1,
         obs_spec=ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1),
-        action_spec=ActionPureConfig(max_per_planet_launches=2),
+        action_spec=action_spec,
         pin_memory=False,
     )
 
     assert env.obs_spec.max_fleets == 1
     assert env.action_spec.action_spec == "pure"
     assert env.action_spec.max_per_planet_launches == 2
+    assert env.action_spec.min_fleet_size == 4
 
 
-def test_action_config_validates_max_per_planet_launches() -> None:
+def test_action_config_validates_launch_bounds() -> None:
     assert ActionPureConfig().max_per_planet_launches == 3
     assert ActionPureConfig(max_per_planet_launches=4).max_per_planet_launches == 4
+    assert ActionPureConfig(min_fleet_size=5).min_fleet_size == 5
 
     with pytest.raises(ValueError, match="less than or equal to 4"):
         ActionPureConfig(max_per_planet_launches=5)
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        ActionPureConfig(min_fleet_size=0)
+
+
+def test_min_fleet_size_controls_action_mask_and_validation() -> None:
+    action_spec = ActionPureConfig(min_fleet_size=3)
+    (
+        _planets,
+        _fleets,
+        _comets,
+        _planet_mask,
+        _fleet_mask,
+        _comet_mask,
+        _global_features,
+        can_act,
+        max_launch,
+    ) = encode_python_observation(
+        {
+            "step": 0,
+            "angular_velocity": 0.025,
+            "planets": [[0, 0, 25.0, 75.0, 2.0, 2, 3]],
+            "fleets": [],
+            "comets": [],
+        },
+        action_spec=action_spec,
+    )
+
+    assert not can_act[0, 0]
+    assert max_launch[0, 0] == 0
+
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=ObsV1Config(),
+        action_spec=action_spec,
+        pin_memory=False,
+    )
+    obs = env.reset()
+    env_index, player, entity = torch.nonzero(obs.can_act, as_tuple=False)[0].tolist()
+    shape = (1, 4, ACTION_ENTITY_SLOTS, action_spec.max_per_planet_launches)
+    launch = np.zeros(shape, dtype=np.bool_)
+    angle = np.zeros(shape, dtype=np.float32)
+    ships = np.zeros(shape, dtype=np.int64)
+    launch[env_index, player, entity, 0] = True
+    ships[env_index, player, entity, 0] = action_spec.min_fleet_size - 1
+
+    with pytest.raises(ValueError, match="ships must be >= 3"):
+        env.step(launch, angle, ships)
 
 
 def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:

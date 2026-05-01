@@ -185,15 +185,17 @@ If no future comet spawn remains, `steps_until_next_comet_spawn` is `0`.
 Config:
 
 ```python
-{"action_spec": "pure", "max_per_planet_launches": 3}
+{"action_spec": "pure", "max_per_planet_launches": 3, "min_fleet_size": 1}
 ```
 
 The pure action spec exposes all launch decisions in direct tensor form. The
 same entity axis is used for action masks and submitted actions.
 `max_per_planet_launches` is validated in Python and Rust and must be between
-`1` and `4`, inclusive. `ActionPureConfig()` defaults to `3` so callers use the
-multi-launch autoregressive action space unless they explicitly opt into a
-smaller action shape.
+`1` and `4`, inclusive. `min_fleet_size` is validated in Python and Rust and
+must fit in the positive `i32` ship-count range. `ActionPureConfig()` defaults
+to `max_per_planet_launches=3` and `min_fleet_size=1` so callers use the
+existing multi-launch autoregressive action space unless they explicitly opt
+into a smaller action shape or larger minimum fleet.
 
 Sharp edge: action entity slots are ordered as all `MAX_PLANETS` planet tokens
 first, followed by `MAX_COMETS` comet tokens. This assumes the model appends
@@ -217,8 +219,8 @@ These are written alongside the observation tensors:
 | `max_launch` | `int64` | `(n_envs, 4, 44)` | maximum launchable ship count for that slot |
 
 `can_act[player, entity]` is true when the entity is owned by that outer player
-slot and has at least one ship. In 2-player games, two random outer player
-slots are active for the episode and the other two are inactive.
+slot and has at least `min_fleet_size` ships. In 2-player games, two random
+outer player slots are active for the episode and the other two are inactive.
 
 ### Submitted Action Tensors
 
@@ -245,9 +247,10 @@ remaining tied loser rewards: `(1 - (winner_count - 1)) / winner_count`.
 Python requires exact submitted action dtypes at the boundary; wrong dtypes are
 rejected instead of cast.
 If `launch` is `False`, that slot is a no-op and `angle` / `ships` are ignored.
-If `launch` is `True`, `ships >= 1`, `ships <= i32::MAX`, a finite `angle`, a
-valid source entity, source ownership by the acting player, and enough remaining
-ships on that source are required. Invalid submitted actions raise `ValueError`.
+If `launch` is `True`, `ships >= min_fleet_size`, `ships <= i32::MAX`, a finite
+`angle`, a valid source entity, source ownership by the acting player, and
+enough remaining ships on that source are required. Invalid submitted actions
+raise `ValueError`.
 For each player and source entity, decoding stops at the first `False` launch
 slot, so later slots for that source are ignored.
 

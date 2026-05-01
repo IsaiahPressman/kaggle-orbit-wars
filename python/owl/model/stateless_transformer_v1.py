@@ -336,7 +336,8 @@ class StatelessTransformerV1(BaseModelAPI):
             device=slot_input.device,
         )
         remaining = max_launch.clone()
-        active = can_act & (remaining > 0)
+        min_fleet_size = self.action_spec.min_fleet_size
+        active = can_act & (remaining >= min_fleet_size)
         last_launch = torch.zeros_like(can_act)
         last_angle_sin = torch.zeros_like(slot_input[..., 0])
         last_angle_cos = torch.zeros_like(slot_input[..., 0])
@@ -368,7 +369,11 @@ class StatelessTransformerV1(BaseModelAPI):
             )
             angle, ships = self._sample_event(params, remaining, deterministic)
             event_mask = active & launch
-            ships = torch.where(launch, ships.clamp_min(1), torch.zeros_like(ships))
+            ships = torch.where(
+                launch,
+                ships.clamp_min(min_fleet_size),
+                torch.zeros_like(ships),
+            )
             ships = torch.minimum(ships, remaining)
             angle = torch.where(launch, angle, torch.zeros_like(angle))
 
@@ -387,12 +392,14 @@ class StatelessTransformerV1(BaseModelAPI):
                 angle,
                 ships,
                 remaining,
+                min_fleet_size,
                 event_mask,
             )
             launch_entropy, event_entropy = masked_action_entropy_from_params(
                 params,
                 remaining,
                 active,
+                min_fleet_size=min_fleet_size,
                 max_ship_support=self.config.entropy_ship_support_cap,
             )
 
@@ -405,7 +412,7 @@ class StatelessTransformerV1(BaseModelAPI):
             event_entropy_slots.append(event_entropy)
 
             remaining = (remaining - ships).clamp_min(0)
-            active = active & launch & (remaining > 0)
+            active = active & launch & (remaining >= min_fleet_size)
             last_launch = launch
             last_angle_sin = torch.where(
                 launch,
@@ -483,7 +490,8 @@ class StatelessTransformerV1(BaseModelAPI):
             device=slot_input.device,
         )
         remaining = max_launch.clone()
-        active = can_act & (remaining > 0)
+        min_fleet_size = self.action_spec.min_fleet_size
+        active = can_act & (remaining >= min_fleet_size)
         last_launch = torch.zeros_like(can_act)
         last_angle_sin = torch.zeros_like(slot_input[..., 0])
         last_angle_cos = torch.zeros_like(slot_input[..., 0])
@@ -512,7 +520,14 @@ class StatelessTransformerV1(BaseModelAPI):
             angle = actions.angle[..., slot]
             ships = actions.ships[..., slot]
             event_mask = active & launch
-            _require_valid_action_slot(launch, angle, ships, remaining, active)
+            _require_valid_action_slot(
+                launch,
+                angle,
+                ships,
+                remaining,
+                active,
+                min_fleet_size,
+            )
 
             launch_log_prob = -F.binary_cross_entropy_with_logits(
                 params.continue_logits,
@@ -529,12 +544,14 @@ class StatelessTransformerV1(BaseModelAPI):
                 angle,
                 ships,
                 remaining,
+                min_fleet_size,
                 event_mask,
             )
             launch_entropy, event_entropy = masked_action_entropy_from_params(
                 params,
                 remaining,
                 active,
+                min_fleet_size=min_fleet_size,
                 max_ship_support=self.config.entropy_ship_support_cap,
             )
 
@@ -545,7 +562,7 @@ class StatelessTransformerV1(BaseModelAPI):
 
             ships_used = torch.where(launch, ships, torch.zeros_like(ships))
             remaining = (remaining - ships_used).clamp_min(0)
-            active = active & launch & (remaining > 0)
+            active = active & launch & (remaining >= min_fleet_size)
             last_launch = launch
             last_angle_sin = torch.where(
                 launch,
@@ -605,6 +622,7 @@ class StatelessTransformerV1(BaseModelAPI):
         remaining: torch.Tensor,
         deterministic: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        min_fleet_size = self.action_spec.min_fleet_size
         params = params.to_distribution_dtype()
         if deterministic:
             mixture = params.mix_logits.argmax(dim=-1)
@@ -619,17 +637,17 @@ class StatelessTransformerV1(BaseModelAPI):
 
         if deterministic:
             angle = loc.remainder(2.0 * math.pi)
-            ship_mean = (remaining - 1).clamp_min(0).to(dtype=alpha.dtype)
+            ship_mean = (remaining - min_fleet_size).clamp_min(0).to(dtype=alpha.dtype)
             ship_mean = ship_mean * alpha / (alpha + beta)
-            ships = ship_mean.round().to(dtype=remaining.dtype) + 1
+            ships = ship_mean.round().to(dtype=remaining.dtype) + min_fleet_size
         else:
             angle = VonMises(loc, kappa).sample().remainder(2.0 * math.pi)
             probs = Beta(alpha, beta).sample()
-            trials = (remaining - 1).clamp_min(0).to(dtype=probs.dtype)
+            trials = (remaining - min_fleet_size).clamp_min(0).to(dtype=probs.dtype)
             ships = Binomial(total_count=trials, probs=probs).sample()
-            ships = ships.to(dtype=remaining.dtype) + 1
+            ships = ships.to(dtype=remaining.dtype) + min_fleet_size
 
-        return angle, torch.minimum(ships, remaining.clamp_min(1))
+        return angle, torch.minimum(ships, remaining.clamp_min(min_fleet_size))
 
     def _slot_gru_input(
         self,
@@ -966,12 +984,14 @@ def event_log_prob_from_params(
     angle: torch.Tensor,
     ships: torch.Tensor,
     residual_budget: torch.Tensor,
+    min_fleet_size: int,
 ) -> torch.Tensor:
     params = params.to_distribution_dtype()
     log_angle = von_mises_log_prob(angle, params.loc, params.kappa)
     log_size = shifted_beta_binomial_log_prob(
         ships,
         residual_budget,
+        min_fleet_size,
         params.alpha,
         params.beta,
     )
@@ -983,20 +1003,26 @@ def masked_event_log_prob_from_params(
     angle: torch.Tensor,
     ships: torch.Tensor,
     residual_budget: torch.Tensor,
+    min_fleet_size: int,
     event_mask: torch.Tensor,
 ) -> torch.Tensor:
     safe_angle = torch.where(event_mask, angle, torch.zeros_like(angle))
-    safe_ships = torch.where(event_mask, ships, torch.ones_like(ships))
+    safe_ships = torch.where(
+        event_mask,
+        ships,
+        torch.full_like(ships, min_fleet_size),
+    )
     safe_residual_budget = torch.where(
         event_mask,
-        residual_budget.clamp_min(1),
-        torch.ones_like(residual_budget),
+        residual_budget.clamp_min(min_fleet_size),
+        torch.full_like(residual_budget, min_fleet_size),
     )
     event_log_prob = event_log_prob_from_params(
         params,
         safe_angle,
         safe_ships,
         safe_residual_budget,
+        min_fleet_size,
     )
     return torch.where(
         event_mask,
@@ -1010,13 +1036,15 @@ def masked_action_entropy_from_params(
     residual_budget: torch.Tensor,
     active: torch.Tensor,
     *,
+    min_fleet_size: int,
     max_ship_support: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     params = params.to_distribution_dtype()
     launch_entropy = binary_entropy_from_logits(params.continue_logits)
     event_entropy = event_entropy_from_params(
         params,
-        residual_budget.clamp_min(1),
+        residual_budget.clamp_min(min_fleet_size),
+        min_fleet_size=min_fleet_size,
         max_ship_support=max_ship_support,
     )
     launch_probability = torch.sigmoid(params.continue_logits)
@@ -1039,12 +1067,14 @@ def event_entropy_from_params(
     params: PolicyParams,
     residual_budget: torch.Tensor,
     *,
+    min_fleet_size: int,
     max_ship_support: int,
 ) -> torch.Tensor:
     mix_probabilities = torch.softmax(params.mix_logits, dim=-1)
     mixture_entropy = -(mix_probabilities * params.log_w).sum(dim=-1)
     component_entropy = von_mises_entropy(params.kappa) + beta_binomial_entropy(
         residual_budget,
+        min_fleet_size,
         params.alpha,
         params.beta,
         max_ship_support=max_ship_support,
@@ -1060,19 +1090,19 @@ def von_mises_entropy(kappa: torch.Tensor) -> torch.Tensor:
 
 def beta_binomial_entropy(
     residual_budget: torch.Tensor,
+    min_fleet_size: int,
     alpha: torch.Tensor,
     beta: torch.Tensor,
     *,
     max_ship_support: int,
 ) -> torch.Tensor:
-    support = torch.arange(
-        1,
-        max_ship_support + 1,
+    successes = torch.arange(
+        0,
+        max_ship_support,
         dtype=alpha.dtype,
         device=alpha.device,
     )
-    successes = support - 1.0
-    trials = (residual_budget - 1).clamp_min(0).unsqueeze(-1).unsqueeze(-1)
+    trials = (residual_budget - min_fleet_size).clamp_min(0).unsqueeze(-1).unsqueeze(-1)
     successes = successes.view(*((1,) * residual_budget.ndim), max_ship_support, 1)
     alpha = alpha.unsqueeze(-2)
     beta = beta.unsqueeze(-2)
@@ -1117,6 +1147,7 @@ def von_mises_log_prob(
 def shifted_beta_binomial_log_prob(
     ships: torch.Tensor,
     residual_budget: torch.Tensor,
+    min_fleet_size: int,
     alpha: torch.Tensor,
     beta: torch.Tensor,
 ) -> torch.Tensor:
@@ -1124,11 +1155,11 @@ def shifted_beta_binomial_log_prob(
     residual = residual_budget.to(device=alpha.device)
     n_ships = ships.to(device=alpha.device)
 
-    trials = (residual - 1).clamp_min(0).unsqueeze(-1).to(dtype=dtype)
-    successes_raw = (n_ships - 1).unsqueeze(-1).to(dtype=dtype)
+    trials = (residual - min_fleet_size).clamp_min(0).unsqueeze(-1).to(dtype=dtype)
+    successes_raw = (n_ships - min_fleet_size).unsqueeze(-1).to(dtype=dtype)
     valid = (
-        residual.unsqueeze(-1).ge(1)
-        & n_ships.unsqueeze(-1).ge(1)
+        residual.unsqueeze(-1).ge(min_fleet_size)
+        & n_ships.unsqueeze(-1).ge(min_fleet_size)
         & n_ships.unsqueeze(-1).le(residual.unsqueeze(-1))
     )
 
@@ -1184,14 +1215,17 @@ def _require_valid_action_slot(
     ships: torch.Tensor,
     remaining: torch.Tensor,
     active: torch.Tensor,
+    min_fleet_size: int,
 ) -> None:
     if (launch & ~active).any().item():
         raise ValueError(
             "actions.launch cannot be true after a lane has stopped or is inactive"
         )
-    invalid_ships = launch & (ships.lt(1) | ships.gt(remaining))
+    invalid_ships = launch & (ships.lt(min_fleet_size) | ships.gt(remaining))
     if invalid_ships.any().item():
-        raise ValueError("actions.ships must be in 1..remaining for launched slots")
+        raise ValueError(
+            f"actions.ships must be in {min_fleet_size}..remaining for launched slots"
+        )
     launched_active = launch & active
     if (~torch.isfinite(angle) & launched_active).any().item():
         raise ValueError("actions.angle must be finite for launched slots")

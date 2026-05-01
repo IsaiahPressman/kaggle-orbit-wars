@@ -36,6 +36,7 @@ pub struct PyRlVecEnv {
     max_entities: usize,
     max_fleets: usize,
     max_per_planet_launches: usize,
+    min_fleet_size: i64,
     states: Vec<State>,
     player_maps: Vec<PlayerMap>,
     action_slots: Vec<ActionEntitySlots>,
@@ -46,7 +47,7 @@ pub struct PyRlVecEnv {
 #[pymethods]
 impl PyRlVecEnv {
     #[new]
-    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="obs_v1", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=3))]
+    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="obs_v1", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=3, min_fleet_size=1))]
     fn new(
         n_envs: usize,
         two_player_weight: f64,
@@ -54,6 +55,7 @@ impl PyRlVecEnv {
         action_spec: &str,
         max_entities: usize,
         max_per_planet_launches: usize,
+        min_fleet_size: i64,
     ) -> PyResult<Self> {
         if n_envs == 0 {
             return Err(PyValueError::new_err("n_envs must be positive"));
@@ -82,6 +84,11 @@ impl PyRlVecEnv {
                 "max_per_planet_launches must be between 1 and 4",
             ));
         }
+        if min_fleet_size < 1 || min_fleet_size > i64::from(i32::MAX) {
+            return Err(PyValueError::new_err(
+                "min_fleet_size must be between 1 and i32::MAX",
+            ));
+        }
 
         let envs = (0..n_envs)
             .map(|_| reset_one_env(two_player_weight))
@@ -95,6 +102,7 @@ impl PyRlVecEnv {
             max_entities,
             max_fleets: max_entities - (MAX_PLANETS + MAX_COMETS),
             max_per_planet_launches,
+            min_fleet_size,
             states,
             player_maps,
             action_slots,
@@ -131,6 +139,11 @@ impl PyRlVecEnv {
     #[getter]
     fn max_per_planet_launches(&self) -> usize {
         self.max_per_planet_launches
+    }
+
+    #[getter]
+    fn min_fleet_size(&self) -> i64 {
+        self.min_fleet_size
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -247,6 +260,7 @@ impl PyRlVecEnv {
                         angle_chunk,
                         ship_chunk,
                         self.max_per_planet_launches,
+                        self.min_fleet_size,
                     )
                     .map_err(|err| format!("env {env_index}: {err}"))
                 },
@@ -487,6 +501,7 @@ impl PyRlVecEnv {
                         can_act,
                         max_launch,
                         action_slots,
+                        self.min_fleet_size,
                     )
                 },
             )
