@@ -1,0 +1,5 @@
+model_arch: stateless_transformer_v1
+embed_dim: 128
+depth: 4
+n_heads: 4
+force_flash_attn: true
