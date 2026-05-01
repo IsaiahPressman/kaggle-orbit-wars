@@ -30,6 +30,12 @@ still matches the original rules.
 - Historical benchmark rows used smaller `--n-envs` values unless the row says
   otherwise. The 1024-env default will report higher perceived steps/sec, but
   should better match training-scale vector-env usage.
+- `scripts/benchmark_envs.py` reports both step-only throughput and end-to-end
+  throughput. The primary timed seconds measure only `env.step(...)` calls;
+  total throughput includes action sampling, action tensor construction, and
+  explicit Kaggle resets.
+- Use `env sps`, not `total sps`, when deciding whether simulator changes
+  improved benchmarked environment performance.
 - If results are close, run paired before/after measurements with longer timing
   and cooldown before deciding.
 - Use `--repeats` to report mean, standard deviation, min, and max throughput

@@ -33,11 +33,16 @@ class BenchmarkResult:
     n_envs: int
     env_steps: int
     elapsed_seconds: float
+    total_elapsed_seconds: float
     launches: int
 
     @property
     def steps_per_second(self) -> float:
         return self.env_steps / self.elapsed_seconds
+
+    @property
+    def end_to_end_steps_per_second(self) -> float:
+        return self.env_steps / self.total_elapsed_seconds
 
     @property
     def launches_per_env_step(self) -> float:
@@ -47,8 +52,8 @@ class BenchmarkResult:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Benchmark the Rust vectorized Orbit Wars env against the Kaggle "
-            "Python environment with random valid launches."
+            "Benchmark only env.step() time for the Rust vectorized Orbit Wars "
+            "env and the Kaggle Python environment with random valid launches."
         )
     )
     parser.add_argument(
@@ -175,18 +180,22 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
         env.step(launch, angle, ships)
 
     timed_launches = 0
-    started_at = time.perf_counter()
+    elapsed = 0.0
+    total_elapsed = 0.0
     for _ in trange(
         args.steps,
         desc="rust timed",
         disable=args.no_progress,
         unit="tick",
     ):
+        total_started_at = time.perf_counter()
         timed_launches += sample_rust_actions(
             env, rng, args.launch_prob, launch, angle, ships
         )
+        started_at = time.perf_counter()
         env.step(launch, angle, ships)
-    elapsed = time.perf_counter() - started_at
+        elapsed += time.perf_counter() - started_at
+        total_elapsed += time.perf_counter() - total_started_at
 
     if launches + timed_launches == 0:
         raise RuntimeError("Rust benchmark sampled only no-op actions")
@@ -196,6 +205,7 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
         n_envs=args.n_envs,
         env_steps=args.n_envs * args.steps,
         elapsed_seconds=elapsed,
+        total_elapsed_seconds=total_elapsed,
         launches=timed_launches,
     )
 
@@ -250,15 +260,24 @@ def benchmark_kaggle(args: argparse.Namespace) -> BenchmarkResult:
         launches += step_kaggle_envs(envs, rng, args.players, args.launch_prob)
 
     timed_launches = 0
-    started_at = time.perf_counter()
+    elapsed = 0.0
+    total_elapsed = 0.0
     for _ in trange(
         args.steps,
         desc="kaggle timed",
         disable=args.no_progress,
         unit="tick",
     ):
-        timed_launches += step_kaggle_envs(envs, rng, args.players, args.launch_prob)
-    elapsed = time.perf_counter() - started_at
+        total_started_at = time.perf_counter()
+        action_batches = sample_kaggle_env_actions(
+            envs, rng, args.players, args.launch_prob
+        )
+        for env, actions, action_count in action_batches:
+            timed_launches += action_count
+            started_at = time.perf_counter()
+            env.step(actions)
+            elapsed += time.perf_counter() - started_at
+        total_elapsed += time.perf_counter() - total_started_at
 
     if launches + timed_launches == 0:
         raise RuntimeError("Kaggle benchmark sampled only no-op actions")
@@ -268,6 +287,7 @@ def benchmark_kaggle(args: argparse.Namespace) -> BenchmarkResult:
         n_envs=KAGGLE_N_ENVS,
         env_steps=KAGGLE_N_ENVS * args.steps,
         elapsed_seconds=elapsed,
+        total_elapsed_seconds=total_elapsed,
         launches=timed_launches,
     )
 
@@ -297,13 +317,27 @@ def step_kaggle_envs(
     launch_prob: float,
 ) -> int:
     launches = 0
+    for env, actions, action_count in sample_kaggle_env_actions(
+        envs, rng, players, launch_prob
+    ):
+        launches += action_count
+        env.step(actions)
+    return launches
+
+
+def sample_kaggle_env_actions(
+    envs: list[Any],
+    rng: np.random.Generator,
+    players: int,
+    launch_prob: float,
+) -> list[tuple[Any, list[list[list[int | float]]], int]]:
+    action_batches = []
     for env in envs:
         if env.done:
             env.reset(players)
         actions, action_count = sample_kaggle_actions(env, rng, launch_prob)
-        launches += action_count
-        env.step(actions)
-    return launches
+        action_batches.append((env, actions, action_count))
+    return action_batches
 
 
 def sample_kaggle_actions(
@@ -357,12 +391,14 @@ def validate_args(args: argparse.Namespace) -> None:
 def print_results(results: list[BenchmarkResult]) -> None:
     print(
         f"{'implementation':<18} {'n_envs':>8} {'env_steps':>10} "
-        f"{'seconds':>10} {'steps/sec':>12} {'launches/step':>14}"
+        f"{'step sec':>10} {'env sps':>12} {'total sps':>12} "
+        f"{'launches/step':>14}"
     )
     for result in results:
         print(
             f"{result.name:<18} {result.n_envs:>8} {result.env_steps:>10} "
             f"{result.elapsed_seconds:>10.3f} {result.steps_per_second:>12.0f} "
+            f"{result.end_to_end_steps_per_second:>12.0f} "
             f"{result.launches_per_env_step:>14.3f}"
         )
 
@@ -388,16 +424,22 @@ def print_results(results: list[BenchmarkResult]) -> None:
 
     if summaries:
         print(
-            f"\n{'implementation':<18} {'runs':>6} {'mean sps':>12} "
-            f"{'std sps':>12} {'min sps':>12} {'max sps':>12}"
+            f"\n{'implementation':<18} {'runs':>6} {'mean step':>12} "
+            f"{'std step':>12} {'mean total':>12} {'std total':>12}"
         )
         for name, steps_per_second in summaries:
-            std = statistics.stdev(steps_per_second)
+            name_results = [result for result in results if result.name == name]
+            end_to_end_steps_per_second = [
+                result.end_to_end_steps_per_second for result in name_results
+            ]
+            step_std = statistics.stdev(steps_per_second)
+            total_std = statistics.stdev(end_to_end_steps_per_second)
             print(
                 f"{name:<18} {len(steps_per_second):>6} "
                 f"{statistics.mean(steps_per_second):>12.0f} "
-                f"{std:>12.0f} {min(steps_per_second):>12.0f} "
-                f"{max(steps_per_second):>12.0f}"
+                f"{step_std:>12.0f} "
+                f"{statistics.mean(end_to_end_steps_per_second):>12.0f} "
+                f"{total_std:>12.0f}"
             )
 
 
