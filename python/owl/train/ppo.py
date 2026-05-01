@@ -13,6 +13,8 @@ from owl.model import BaseModelAPI, ModelActions, ModelEvaluation, ModelOutput
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     OUTER_PLAYER_SLOTS,
+    ActionConfig,
+    ActionDiscreteTargetsConfig,
     ActionPureConfig,
     ObsBatch,
     ObsV1Config,
@@ -147,7 +149,7 @@ class PPORolloutBuffer:
         horizon: int,
         n_envs: int,
         obs_spec: ObsV1Config,
-        action_spec: ActionPureConfig,
+        action_spec: ActionConfig,
         device: torch.device,
     ) -> None:
         if horizon <= 0:
@@ -156,6 +158,17 @@ class PPORolloutBuffer:
             raise ValueError("n_envs must be positive")
         self.horizon = horizon
         self.n_envs = n_envs
+        can_act_shape = (
+            (horizon, n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS)
+            if isinstance(action_spec, ActionPureConfig)
+            else (
+                horizon,
+                n_envs,
+                OUTER_PLAYER_SLOTS,
+                ACTION_ENTITY_SLOTS,
+                ACTION_ENTITY_SLOTS,
+            )
+        )
         self.obs = ObsBatch(
             planets=torch.zeros(
                 (horizon, n_envs, obs_spec.max_planets, obs_spec.planet_channels),
@@ -198,7 +211,7 @@ class PPORolloutBuffer:
                 device=device,
             ),
             can_act=torch.zeros(
-                (horizon, n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
+                can_act_shape,
                 dtype=torch.bool,
                 device=device,
             ),
@@ -218,6 +231,7 @@ class PPORolloutBuffer:
         self.actions = ModelActions(
             launch=torch.zeros(action_shape, dtype=torch.bool, device=device),
             angle=torch.zeros(action_shape, dtype=torch.float32, device=device),
+            target=torch.zeros(action_shape, dtype=torch.int64, device=device),
             ships=torch.zeros(action_shape, dtype=torch.int64, device=device),
         )
         self.logp = torch.zeros(
@@ -289,8 +303,6 @@ class PPOTrainer:
         model_action_spec = getattr(model, "action_spec", None)
         if model_action_spec != env.action_spec:
             raise ValueError("model and env action_spec must match")
-        if not isinstance(env.action_spec, ActionPureConfig):
-            raise ValueError("PPOTrainer currently supports action_spec='pure' only")
         self._compute_gae = _compile_compute_gae(config.compile_mode)
         self._sample_segments = _compile_sample_segments(config.compile_mode)
         self._ppo_loss = _compile_ppo_loss(config.compile_mode)
@@ -593,7 +605,7 @@ class PPOTrainer:
             )
         return (
             _output_logp(output).detach().view_as(segments.logp),
-            _output_values(output).detach().view_as(segments.values),
+            _output_values(output).detach().view_as(segments.values).clone(),
         )
 
     def _update_minibatch(
@@ -1074,7 +1086,12 @@ def _step_env(
     actions: ModelActions,
 ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
     cpu_actions = _actions_to_cpu(actions)
-    result = env.step(cpu_actions.launch, cpu_actions.angle, cpu_actions.ships)
+    action_value = (
+        cpu_actions.target
+        if isinstance(env.action_spec, ActionDiscreteTargetsConfig)
+        else cpu_actions.angle
+    )
+    result = env.step(cpu_actions.launch, action_value, cpu_actions.ships)
     if len(result) == 3:
         obs, rewards, dones = result
         return obs, rewards, dones, {}
@@ -1154,7 +1171,8 @@ def _output_values(output: ModelOutput | ModelEvaluation) -> torch.Tensor:
 
 
 def _policy_mask(obs: ObsBatch) -> torch.Tensor:
-    return obs.still_playing & obs.can_act.any(dim=-1)
+    can_act = obs.can_act.flatten(start_dim=3).any(dim=-1)
+    return obs.still_playing & can_act
 
 
 def _uses_uniform_single_pass_sampling(config: PPOConfig) -> bool:

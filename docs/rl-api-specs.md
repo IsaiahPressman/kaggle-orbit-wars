@@ -268,8 +268,9 @@ Config:
 
 `ActionDiscreteTargetsConfig` uses the same launch-count and minimum-fleet
 validation as `ActionPureConfig`, but submitted actions choose integer target
-entity slots instead of raw launch angles. Model and PPO support are not yet
-implemented for this action spec; it is currently an environment/API surface.
+entity slots instead of raw launch angles. `StatelessTransformerV1` and PPO can
+train against this action spec when the model actor config also uses
+`"discrete_targets"` and `max_per_planet_launches=1`.
 
 ### Discrete Targets Output Tensors
 

@@ -13,6 +13,7 @@ from owl.rl import ObsBatch
 class ModelActions:
     launch: torch.Tensor
     angle: torch.Tensor
+    target: torch.Tensor
     ships: torch.Tensor
 
 
@@ -21,6 +22,7 @@ class ModelActionLogProbs:
     launch: torch.Tensor
     angle_and_size: torch.Tensor
     per_player_entity: torch.Tensor
+    target: torch.Tensor | None = None
 
 
 @dataclass
@@ -28,6 +30,7 @@ class ModelActionEntropies:
     launch: torch.Tensor
     angle_and_size: torch.Tensor
     per_player_entity: torch.Tensor
+    target: torch.Tensor | None = None
 
 
 @dataclass

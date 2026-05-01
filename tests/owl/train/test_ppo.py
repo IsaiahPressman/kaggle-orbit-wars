@@ -5,18 +5,23 @@ from typing import Any
 import pytest
 import torch
 from owl.model import (
+    ActorDiscreteTargetsConfig,
     BaseModelAPI,
     ModelActionEntropies,
     ModelActionLogProbs,
     ModelActions,
     ModelEvaluation,
     ModelOutput,
+    StatelessTransformerV1,
+    StatelessTransformerV1Config,
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
+    ActionDiscreteTargetsConfig,
     ActionPureConfig,
     ObsBatch,
     ObsV1Config,
+    VectorizedEnv,
 )
 from owl.train import ppo
 from torch import nn
@@ -57,8 +62,18 @@ def _actions(
     return ModelActions(
         launch=torch.zeros(shape, dtype=torch.bool),
         angle=torch.zeros(shape, dtype=torch.float32),
+        target=torch.zeros(shape, dtype=torch.int64),
         ships=torch.zeros(shape, dtype=torch.int64),
     )
+
+
+def _discrete_obs_batch(*, n_envs: int, obs_spec: ObsV1Config) -> ObsBatch:
+    obs = _obs_batch(n_envs=n_envs, obs_spec=obs_spec)
+    obs.can_act = torch.zeros(
+        (n_envs, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
+        dtype=torch.bool,
+    )
+    return obs
 
 
 class TinyOrbitEnv:
@@ -116,6 +131,40 @@ class TinyOrbitEnv:
         if self.two_player:
             still_playing[:, 2:] = False
         return still_playing
+
+
+class TinyDiscreteTargetEnv:
+    def __init__(self, *, n_envs: int) -> None:
+        self.n_envs = n_envs
+        self.pin_memory_enabled = False
+        self.obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 2)
+        self.action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+        self.last_target: torch.Tensor | None = None
+
+    def reset(self) -> ObsBatch:
+        return self._obs()
+
+    def step(
+        self,
+        launch: torch.Tensor,
+        target: torch.Tensor,
+        ships: torch.Tensor,
+    ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor]:
+        assert target.dtype == torch.int64
+        self.last_target = target.clone()
+        rewards = launch[:, :, 0, 0].to(torch.float32) + ships[:, :, 0, 0].to(
+            torch.float32
+        )
+        dones = torch.zeros((self.n_envs, 4), dtype=torch.bool)
+        return self._obs(), rewards, dones
+
+    def _obs(self) -> ObsBatch:
+        obs = _discrete_obs_batch(n_envs=self.n_envs, obs_spec=self.obs_spec)
+        obs.still_playing.fill_(True)
+        obs.planet_mask[:, :2] = True
+        obs.can_act[:, :, 0, 1] = True
+        obs.max_launch[:, :, 0] = 3
+        return obs
 
 
 class ReusingObservationEnv(TinyOrbitEnv):
@@ -240,6 +289,58 @@ class TinyOrbitModel(BaseModelAPI):
             angle_and_size=angle_and_size,
             per_player_entity=per_player_entity,
         )
+
+
+class TinyDiscreteTargetModel(BaseModelAPI):
+    def __init__(self) -> None:
+        super().__init__()
+        self.action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+        self.value = nn.Parameter(torch.zeros(()))
+
+    def forward(
+        self,
+        obs: ObsBatch,
+        *,
+        deterministic: bool = False,
+    ) -> ModelOutput:
+        del deterministic
+        n_envs = obs.global_features.shape[0]
+        actions = _actions(n_envs, self.action_spec.max_per_planet_launches)
+        actions.launch[:, :, 0, 0] = obs.still_playing
+        actions.target[:, :, 0, 0] = 1
+        actions.ships[:, :, 0, 0] = 1
+        values = self.value.expand(n_envs, 4)
+        log_probs = TinyOrbitModel._log_probs(torch.zeros_like(values))
+        entropies = TinyOrbitModel._entropies(torch.zeros_like(values))
+        return ModelOutput(
+            actions=actions,
+            log_probs=log_probs,
+            entropies=entropies,
+            values=values,
+            winner_probabilities=torch.softmax(values, dim=-1),
+        )
+
+    def evaluate_actions(
+        self,
+        obs: ObsBatch,
+        actions: ModelActions,
+    ) -> ModelEvaluation:
+        del actions
+        values = self.value.expand(obs.global_features.shape[0], 4)
+        log_probs = TinyOrbitModel._log_probs(torch.zeros_like(values))
+        entropies = TinyOrbitModel._entropies(torch.zeros_like(values))
+        return ModelEvaluation(
+            log_probs=log_probs,
+            entropies=entropies,
+            values=values,
+            winner_probabilities=torch.softmax(values, dim=-1),
+        )
+
+    def get_input_layers(self) -> tuple[nn.Module, ...]:
+        return ()
+
+    def get_output_layers(self) -> tuple[nn.Module, ...]:
+        return ()
 
 
 class AutocastRecordingModel(TinyOrbitModel):
@@ -1306,3 +1407,128 @@ def test_trainer_overwrites_dones_when_envs_terminate_inside_rollout() -> None:
         torch.ones((env.n_envs, trainer.config.horizon, 4), dtype=torch.bool),
     )
     assert torch.isfinite(segments.rewards).all()
+
+
+def test_discrete_target_rollout_buffer_and_policy_mask() -> None:
+    obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 2)
+    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+    buffer = ppo.PPORolloutBuffer(
+        horizon=2,
+        n_envs=3,
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+        device=torch.device("cpu"),
+    )
+    obs = _discrete_obs_batch(n_envs=3, obs_spec=obs_spec)
+    obs.still_playing[:, :2] = True
+    obs.still_playing[:, 2:] = False
+    obs.can_act[:, 0, 0, 1] = True
+    obs.max_launch[:, 0, 0] = 3
+    actions = _actions(3, max_launches=1)
+    actions.launch[:, 0, 0, 0] = True
+    actions.target[:, 0, 0, 0] = 1
+    actions.ships[:, 0, 0, 0] = 1
+
+    buffer.write_step(
+        0,
+        obs=obs,
+        actions=actions,
+        logp=torch.zeros((3, 4)),
+        values=torch.zeros((3, 4)),
+        rewards=torch.zeros((3, 4)),
+        dones=torch.zeros((3, 4), dtype=torch.bool),
+    )
+    segments = buffer.segment_major()
+
+    assert segments.obs.can_act.shape == (
+        3,
+        2,
+        4,
+        ACTION_ENTITY_SLOTS,
+        ACTION_ENTITY_SLOTS,
+    )
+    assert segments.actions.target.shape == (3, 2, 4, ACTION_ENTITY_SLOTS, 1)
+    policy_mask = ppo._policy_mask(segments.obs)
+    assert policy_mask.shape == (3, 2, 4)
+    assert policy_mask[:, 0, 0].all()
+    assert not policy_mask[:, 0, 1:].any()
+
+
+def test_step_env_passes_discrete_target_tensor() -> None:
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    actions = _actions(2, max_launches=1)
+    actions.launch[:, :, 0, 0] = True
+    actions.target[:, :, 0, 0] = 1
+    actions.ships[:, :, 0, 0] = 1
+
+    _obs, rewards, _dones, metrics = ppo._step_env(env, actions)
+
+    assert metrics == {}
+    assert env.last_target is not None
+    assert torch.equal(env.last_target, actions.target)
+    assert rewards.shape == (2, 4)
+
+
+def test_discrete_target_train_iteration_runs() -> None:
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model = TinyDiscreteTargetModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+        ),
+        device=torch.device("cpu"),
+    )
+
+    metrics = trainer.train_iteration()
+
+    assert env.last_target is not None
+    for key in ("loss/total_loss", "policy/entropy", "optimizer/grad_norm"):
+        assert metrics[key] == pytest.approx(float(metrics[key]))
+
+
+def test_discrete_target_transformer_train_iteration_keeps_parameters_finite() -> None:
+    torch.manual_seed(0)
+    obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 2)
+    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+    env = VectorizedEnv(
+        n_envs=2,
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+        two_player_weight=1.0,
+        pin_memory=False,
+    )
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(
+            action_spec="discrete_targets",
+            actor=ActorDiscreteTargetsConfig(),
+            embed_dim=32,
+            depth=1,
+            n_heads=4,
+            n_action_mixtures=2,
+            entropy_ship_support_cap=16,
+        ),
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+        ),
+        device=torch.device("cpu"),
+    )
+
+    metrics = trainer.train_iteration()
+
+    assert torch.isfinite(torch.tensor(list(metrics.values()))).all()
+    for parameter in model.parameters():
+        assert torch.isfinite(parameter).all()
+        if parameter.grad is not None:
+            assert torch.isfinite(parameter.grad).all()
