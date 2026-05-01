@@ -403,6 +403,7 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
             "mean_game_length": [10.0, 14.0],
             "full_length_rate": [1.0, 0.0],
             "terminal_ship_count": [20.0, 40.0],
+            "launches_per_game": [3.0, 7.0],
             "win_rate_player_0": [1.0, 0.0],
             "terminal_episodes_2p": [1.0, 1.0],
             "terminal_episodes_4p": [1.0],
@@ -412,6 +413,7 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
     assert metrics["train/mean_game_length"] == 12.0
     assert metrics["train/full_length_rate"] == 0.5
     assert metrics["train/terminal_ship_count"] == 30.0
+    assert metrics["train/launches_per_game"] == 5.0
     assert metrics["train/win_rate_player_0"] == 0.5
     assert metrics["train/terminal_episodes_2p"] == 2.0
     assert metrics["train/terminal_episodes_4p"] == 1.0
