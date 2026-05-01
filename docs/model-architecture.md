@@ -35,6 +35,7 @@ without changing callers that validate config dictionaries through the union.
 | `alpha_beta_eps` | `1e-4` | Epsilon added to beta-binomial alpha and beta. |
 | `dir_eps` | `1e-6` | Epsilon for normalizing raw angle direction vectors. |
 | `max_ship_normalizer` | `250.0` | Normalizer for ship-budget actor features. |
+| `force_flash_attn` | `False` | Require packed varlen flash-attn; raise an error instead of falling back when tensors are not flash-compatible. |
 
 Observation and action specs are owned by `EnvConfig`. `StatelessTransformerV1`
 receives `env.obs_spec` and `env.action_spec` when it is instantiated, so model
@@ -83,6 +84,8 @@ CPU execution uses torch scaled-dot-product attention over regular
 mask. CUDA execution uses packed varlen `flash-attn` when it is installed and
 the attention tensors are fp16/bf16; otherwise it uses the same regular-shaped
 scaled-dot-product attention path without packing and unpacking activations.
+Set `force_flash_attn=True` to require packed varlen flash-attn and fail fast
+when the backend, device, or dtype is not compatible.
 
 Attention uses separate `q`, `k`, and `v` linear layers instead of one packed
 QKV projection. SwiGLU also uses separate gate and value projections. This keeps

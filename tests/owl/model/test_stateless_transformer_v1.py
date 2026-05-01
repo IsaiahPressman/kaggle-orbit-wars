@@ -1,4 +1,5 @@
 import math
+from typing import Any
 
 import owl.model.stateless_transformer_v1 as model_impl
 import pytest
@@ -113,6 +114,7 @@ def test_model_config_has_discriminator_tag() -> None:
     )
 
     assert config.model_arch == "stateless_transformer_v1"
+    assert not config.force_flash_attn
 
 
 def test_model_config_rejects_removed_angle_mixture_alias() -> None:
@@ -240,6 +242,50 @@ def test_non_flash_attention_uses_regular_shaped_sdpa(
     assert output.shape == x.shape
 
 
+def test_unpacked_attention_uses_sdpa_when_projected_q_supports_flash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4)
+    attn = MultiHeadSelfAttention(config)
+    x = torch.randn((2, 5, config.embed_dim))
+    mask = torch.tensor(
+        [
+            [True, False, True, True, False],
+            [False, True, True, False, True],
+        ]
+    )
+    sdpa_calls = 0
+    original_sdpa = F.scaled_dot_product_attention
+
+    def projected_q_uses_flash(q: torch.Tensor) -> bool:
+        return q.ndim == 4
+
+    def fail_varlen_attention(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        del q, k, v, cu_seqlens, max_seqlen
+        raise AssertionError("unpacked attention should use regular-shaped SDPA")
+
+    def counted_sdpa(*args: Any, **kwargs: Any) -> torch.Tensor:
+        nonlocal sdpa_calls
+        sdpa_calls += 1
+        return original_sdpa(*args, **kwargs)
+
+    monkeypatch.setattr(model_impl, "use_flash_attn", projected_q_uses_flash)
+    monkeypatch.setattr(model_impl, "varlen_attention", fail_varlen_attention)
+    monkeypatch.setattr(model_impl.F, "scaled_dot_product_attention", counted_sdpa)
+
+    output = attn(x, mask, None)
+
+    assert output.shape == x.shape
+    assert sdpa_calls == 1
+
+
 def test_flash_attention_uses_already_packed_sequence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -295,6 +341,46 @@ def test_flash_attention_uses_already_packed_sequence(
     assert calls == [(torch.Size((6, config.n_heads, 4)), [0, 3, 6], 3)]
 
 
+def test_force_flash_attention_rejects_non_flash_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = StatelessTransformerV1Config(
+        embed_dim=16,
+        depth=1,
+        n_heads=4,
+        force_flash_attn=True,
+    )
+    attn = MultiHeadSelfAttention(config)
+    x = torch.randn((2, 5, config.embed_dim))
+    mask = torch.tensor(
+        [
+            [True, False, True, True, False],
+            [False, True, True, False, True],
+        ]
+    )
+    packed_x, packed = pack_sequence(x, mask)
+
+    def disable_flash_attn(q: torch.Tensor) -> bool:
+        return q.numel() < 0
+
+    def fail_varlen_attention(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        del q, k, v, cu_seqlens, max_seqlen
+        raise AssertionError("forced flash attention should fail before fallback")
+
+    monkeypatch.setattr(model_impl, "use_flash_attn", disable_flash_attn)
+    monkeypatch.setattr(model_impl, "varlen_attention", fail_varlen_attention)
+
+    with pytest.raises(RuntimeError, match="force_flash_attn=True"):
+        attn(packed_x, None, packed)
+
+
 def test_non_flash_encoder_does_not_build_or_pack_sequences(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -339,6 +425,36 @@ def test_non_flash_encoder_does_not_build_or_pack_sequences(
     assert mask.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS)
 
 
+def test_force_flash_encoder_rejects_non_flash_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        force_flash_attn=True,
+    )
+    action_spec = ActionPureConfig()
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+
+    def disable_flash_attn(q: torch.Tensor) -> bool:
+        return q.numel() < 0
+
+    def fail_pack_sequence(
+        _x: torch.Tensor,
+        _token_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, model_impl.PackedSequence]:
+        pytest.fail("forced flash attention should fail before packing")
+
+    monkeypatch.setattr(model_impl, "use_flash_attn", disable_flash_attn)
+    monkeypatch.setattr(model_impl, "pack_sequence", fail_pack_sequence)
+
+    with pytest.raises(RuntimeError, match="force_flash_attn=True"):
+        model.encode_observations(obs)
+
+
 def test_flash_encoder_packs_once_before_trunk_and_unpacks_once_after(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -347,6 +463,7 @@ def test_flash_encoder_packs_once_before_trunk_and_unpacks_once_after(
         embed_dim=32,
         depth=3,
         n_heads=4,
+        force_flash_attn=True,
     )
     action_spec = ActionPureConfig()
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
@@ -401,6 +518,58 @@ def test_flash_encoder_packs_once_before_trunk_and_unpacks_once_after(
     assert pack_calls == 1
     assert unpack_calls == 1
     assert varlen_calls == config.depth
+
+
+def test_autocast_encoder_packs_after_appending_player_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        force_flash_attn=True,
+    )
+    action_spec = ActionPureConfig()
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    original_pack_sequence = model_impl.pack_sequence
+    pack_calls = 0
+
+    def use_bfloat16_flash_attn(q: torch.Tensor) -> bool:
+        return q.dtype == torch.bfloat16
+
+    def counted_pack_sequence(
+        x: torch.Tensor,
+        token_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, model_impl.PackedSequence]:
+        nonlocal pack_calls
+        pack_calls += 1
+        assert x.dtype == torch.bfloat16
+        return original_pack_sequence(x, token_mask)
+
+    def fake_varlen_attention(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        del k, v, cu_seqlens, max_seqlen
+        assert q.dtype == torch.bfloat16
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(model_impl, "use_flash_attn", use_bfloat16_flash_attn)
+    monkeypatch.setattr(model_impl, "pack_sequence", counted_pack_sequence)
+    monkeypatch.setattr(model_impl, "varlen_attention", fake_varlen_attention)
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        hidden, mask = model.encode_observations(obs)
+
+    assert hidden.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS, 32)
+    assert mask.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS)
+    assert pack_calls == 1
 
 
 def test_model_initialization_sets_stable_rl_priors() -> None:

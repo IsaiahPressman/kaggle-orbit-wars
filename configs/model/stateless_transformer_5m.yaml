@@ -2,3 +2,4 @@ model_arch: stateless_transformer_v1
 embed_dim: 256
 depth: 6
 n_heads: 8
+force_flash_attn: true

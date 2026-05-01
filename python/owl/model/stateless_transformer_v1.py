@@ -52,6 +52,7 @@ class StatelessTransformerV1Config(BaseConfig):
     dir_eps: float = Field(default=1e-6, gt=0.0)
     max_ship_normalizer: float = Field(default=250.0, gt=0.0)
     entropy_ship_support_cap: int = Field(default=256, ge=1)
+    force_flash_attn: bool = False
 
     @model_validator(mode="after")
     def _validate_attention_shape(self) -> Self:
@@ -182,7 +183,8 @@ class StatelessTransformerV1(BaseModelAPI):
         planet_x = self.planet_proj(obs.planets) + global_token
         fleet_x = self.fleet_proj(obs.fleets) + global_token
         comet_x = self.comet_proj(obs.comets) + global_token
-        player_tokens = self.player_tokens.weight.unsqueeze(0).expand(
+        player_tokens = self.player_tokens.weight.to(dtype=global_token.dtype)
+        player_tokens = player_tokens.unsqueeze(0).expand(
             obs.planets.shape[0],
             -1,
             -1,
@@ -199,7 +201,13 @@ class StatelessTransformerV1(BaseModelAPI):
         )
         x = torch.cat((planet_x, comet_x, fleet_x, player_tokens), dim=1)
         packed: PackedSequence | None
-        if use_flash_attn(x):
+        should_use_flash = use_flash_attn(x)
+        if self.config.force_flash_attn and not should_use_flash:
+            raise RuntimeError(
+                "force_flash_attn=True requires CUDA fp16/bf16 tensors "
+                "and the flash-attn package"
+            )
+        if should_use_flash:
             x, packed = pack_sequence(x, token_mask)
             block_token_mask = None
         else:
@@ -739,6 +747,7 @@ class FeedForward(nn.Module):
 class MultiHeadSelfAttention(nn.Module):
     def __init__(self, config: StatelessTransformerV1Config) -> None:
         super().__init__()
+        self.force_flash_attn = config.force_flash_attn
         self.n_heads = config.n_heads
         self.head_dim = config.embed_dim // config.n_heads
         self.q = nn.Linear(config.embed_dim, config.embed_dim)
@@ -757,8 +766,11 @@ class MultiHeadSelfAttention(nn.Module):
             q = self.q(x).view(seq_len, self.n_heads, self.head_dim)
             k = self.k(x).view(seq_len, self.n_heads, self.head_dim)
             v = self.v(x).view(seq_len, self.n_heads, self.head_dim)
-            if not use_flash_attn(q):
-                raise RuntimeError("packed attention requires flash-attn backend")
+            if self.force_flash_attn and not use_flash_attn(q):
+                raise RuntimeError(
+                    "force_flash_attn=True requires CUDA fp16/bf16 attention "
+                    "projections and the flash-attn package"
+                )
             attn = varlen_attention(
                 q,
                 k,
@@ -775,8 +787,6 @@ class MultiHeadSelfAttention(nn.Module):
         k = self.k(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
         v = self.v(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
 
-        if use_flash_attn(q):
-            raise RuntimeError("flash-attn attention requires packed inputs")
         attn = F.scaled_dot_product_attention(
             q.transpose(1, 2),
             k.transpose(1, 2),

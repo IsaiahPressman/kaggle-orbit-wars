@@ -242,6 +242,35 @@ class TinyOrbitModel(BaseModelAPI):
         )
 
 
+class AutocastRecordingModel(TinyOrbitModel):
+    def __init__(self, device_type: str) -> None:
+        super().__init__()
+        self.device_type = device_type
+        self.forward_autocast_enabled: list[bool] = []
+        self.evaluate_autocast_enabled: list[bool] = []
+
+    def forward(
+        self,
+        obs: ObsBatch,
+        *,
+        deterministic: bool = False,
+    ) -> ModelOutput:
+        self.forward_autocast_enabled.append(
+            torch.is_autocast_enabled(self.device_type)
+        )
+        return super().forward(obs, deterministic=deterministic)
+
+    def evaluate_actions(
+        self,
+        obs: ObsBatch,
+        actions: ModelActions,
+    ) -> ModelEvaluation:
+        self.evaluate_autocast_enabled.append(
+            torch.is_autocast_enabled(self.device_type)
+        )
+        return super().evaluate_actions(obs, actions)
+
+
 class FixedEvaluationModel(BaseModelAPI):
     def __init__(self, value: float) -> None:
         super().__init__()
@@ -567,6 +596,42 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         not torch.allclose(param, old)
         for param, old in zip(model.parameters(), before, strict=True)
     )
+
+
+def test_rollout_and_update_model_calls_run_under_autocast() -> None:
+    torch.manual_seed(0)
+    env = TinyOrbitEnv(n_envs=2, episode_length=3)
+    model = AutocastRecordingModel("cpu")
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            dtype="bfloat16",
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+        ),
+        device=torch.device("cpu"),
+    )
+
+    trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+    trainer._update_minibatch(
+        segments,
+        advantages=torch.ones_like(segments.values),
+        returns=torch.zeros_like(segments.values),
+        policy_mask=torch.ones_like(segments.values, dtype=torch.bool),
+        value_mask=torch.ones_like(segments.values, dtype=torch.bool),
+        sample=ppo.SegmentSample(
+            indices=torch.zeros((1,), dtype=torch.int64),
+            importance=torch.ones((1, 1)),
+            probabilities=torch.ones((1,)),
+        ),
+        value_clip_anchor=segments.values,
+    )
+
+    assert model.forward_autocast_enabled == [True, True, True]
+    assert model.evaluate_autocast_enabled == [True]
 
 
 def test_trainer_masks_inactive_player_slots() -> None:
