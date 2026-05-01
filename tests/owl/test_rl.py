@@ -13,6 +13,7 @@ from owl.rl import (
     ActionPureConfig,
     ObsV1Config,
     VectorizedEnv,
+    encode_obs_v1,
     encode_python_observation,
 )
 
@@ -373,6 +374,251 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     assert global_features[2] == pytest.approx(1.0)
     assert not can_act.any()
     assert not max_launch.any()
+
+
+def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
+    spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 5)
+    min_fleet_size = 12
+    planets_in = np.array(
+        [
+            [0, 0, 25.0, 75.0, 2.0, 50, 3],
+            [1, -1, 50.0, 50.0, 1.5, 0, 1],
+            [2, 2, 100.0, 0.0, 3.0, 125, 5],
+            [3, 3, 0.0, 100.0, 1.0, 10, 2],
+            [4, 1, 75.0, 25.0, 2.5, 30, 4],
+        ],
+        dtype=np.float64,
+    )
+    fleets_in = np.array(
+        [
+            [10, 1, 0.0, 100.0, 0.0, 0, 8],
+            [11, 3, 100.0, 0.0, np.pi / 2, 1, 27],
+            [12, 2, 50.0, 25.0, np.pi, 3, 64],
+            [13, 0, 25.0, 50.0, np.pi / 4, 0, 125],
+        ],
+        dtype=np.float64,
+    )
+    comet_planet_ids = np.full((1, MAX_COMETS), -1.0, dtype=np.float64)
+    comet_planet_ids[0, :2] = [2, 4]
+    comet_path_indices = np.array([1.0], dtype=np.float64)
+    comet_path_lengths = np.zeros((1, MAX_COMETS), dtype=np.float64)
+    comet_path_lengths[0, :2] = [4, 3]
+    comet_paths = np.zeros(
+        (1, MAX_COMETS, MAX_COMET_PATH_LENGTH, 2),
+        dtype=np.float64,
+    )
+    comet_paths[0, 0, :4] = [
+        [0.0, 0.0],
+        [50.0, 100.0],
+        [100.0, 50.0],
+        [25.0, 25.0],
+    ]
+    comet_paths[0, 1, :3] = [
+        [100.0, 100.0],
+        [0.0, 50.0],
+        [50.0, 0.0],
+    ]
+
+    (
+        planets,
+        fleets,
+        comets,
+        planet_mask,
+        fleet_mask,
+        comet_mask,
+        global_features,
+        can_act,
+        max_launch,
+    ) = encode_obs_v1(
+        planets_in,
+        fleets_in,
+        comet_planet_ids,
+        comet_path_indices,
+        comet_path_lengths,
+        comet_paths,
+        0.0375,
+        120,
+        600,
+        spec.max_entities,
+        min_fleet_size,
+    )
+
+    expected_planet_mask = np.zeros(MAX_PLANETS, dtype=np.bool_)
+    expected_planet_mask[:3] = True
+    expected_fleet_mask = np.zeros(spec.max_fleets, dtype=np.bool_)
+    expected_fleet_mask[:4] = True
+    expected_comet_mask = np.array([True, True, False, False])
+    np.testing.assert_array_equal(planet_mask, expected_planet_mask)
+    np.testing.assert_array_equal(fleet_mask, expected_fleet_mask)
+    np.testing.assert_array_equal(comet_mask, expected_comet_mask)
+
+    def normalized_position(value: float) -> float:
+        return value / 50.0 - 1.0
+
+    def normalized_log_ships(ships: int) -> float:
+        return np.log(np.float32(max(ships, 0) + 1)) / np.float32(4.6051702)
+
+    def normalized_fleet_speed(ships: int) -> float:
+        return (1.0 + 5.0 * (np.log(ships) / np.log(1000)) ** 1.5) / 6.0
+
+    expected_planets = np.array(
+        [
+            [
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                normalized_position(25.0),
+                normalized_position(75.0),
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                2.0 / 3.0,
+                50.0 / 250.0,
+                normalized_log_ships(50),
+                1.0,
+            ],
+            [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                normalized_position(50.0),
+                normalized_position(50.0),
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.5 / 3.0,
+                0.0,
+                normalized_log_ships(0),
+                1.0,
+            ],
+            [
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                normalized_position(0.0),
+                normalized_position(100.0),
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0 / 3.0,
+                10.0 / 250.0,
+                normalized_log_ships(10),
+                0.0,
+            ],
+        ],
+        dtype=np.float32,
+    )
+    np.testing.assert_allclose(planets[planet_mask], expected_planets, atol=0.0)
+
+    speed_8 = normalized_fleet_speed(8)
+    speed_27 = normalized_fleet_speed(27)
+    speed_64 = normalized_fleet_speed(64)
+    speed_125 = normalized_fleet_speed(125)
+    expected_fleets = np.array(
+        [
+            [
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                normalized_position(0.0),
+                normalized_position(100.0),
+                speed_8,
+                0.0,
+                8.0 / 250.0,
+                normalized_log_ships(8),
+            ],
+            [
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                normalized_position(100.0),
+                normalized_position(0.0),
+                np.cos(np.pi / 2) * speed_27,
+                np.sin(np.pi / 2) * speed_27,
+                27.0 / 250.0,
+                normalized_log_ships(27),
+            ],
+            [
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                normalized_position(50.0),
+                normalized_position(25.0),
+                np.cos(np.pi) * speed_64,
+                np.sin(np.pi) * speed_64,
+                64.0 / 250.0,
+                normalized_log_ships(64),
+            ],
+            [
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                normalized_position(25.0),
+                normalized_position(50.0),
+                np.cos(np.pi / 4) * speed_125,
+                np.sin(np.pi / 4) * speed_125,
+                125.0 / 250.0,
+                normalized_log_ships(125),
+            ],
+        ],
+        dtype=np.float32,
+    )
+    np.testing.assert_allclose(fleets[fleet_mask], expected_fleets, atol=0.0)
+
+    expected_comets = np.zeros((2, COMET_CHANNELS), dtype=np.float32)
+    expected_comets[0, 2] = 1.0
+    expected_comets[0, 5] = 125.0 / 250.0
+    expected_comets[0, 6] = normalized_log_ships(125)
+    expected_comets[0, 7] = 3.0 / MAX_COMET_PATH_LENGTH
+    expected_comets[0, 8:14] = [0.0, 1.0, 1.0, 0.0, -0.5, -0.5]
+    expected_comets[1, 1] = 1.0
+    expected_comets[1, 5] = 30.0 / 250.0
+    expected_comets[1, 6] = normalized_log_ships(30)
+    expected_comets[1, 7] = 2.0 / MAX_COMET_PATH_LENGTH
+    expected_comets[1, 8:12] = [-1.0, 0.0, 0.0, -1.0]
+    np.testing.assert_allclose(comets[comet_mask], expected_comets, atol=0.0)
+    np.testing.assert_array_equal(comets[0, 14:], np.zeros(COMET_CHANNELS - 14))
+    np.testing.assert_array_equal(comets[1, 12:], np.zeros(COMET_CHANNELS - 12))
+
+    np.testing.assert_allclose(
+        global_features,
+        np.array(
+            [
+                120.0 / 600.0,
+                30.0 / 100.0,
+                (np.float32(0.0375) - np.float32(0.025)) / np.float32(0.025),
+            ],
+            dtype=np.float32,
+        ),
+        atol=0.0,
+    )
+
+    expected_can_act = np.zeros((4, ACTION_ENTITY_SLOTS), dtype=np.bool_)
+    expected_can_act[0, 0] = True
+    expected_can_act[2, MAX_PLANETS] = True
+    expected_can_act[1, MAX_PLANETS + 1] = True
+    expected_max_launch = np.zeros((4, ACTION_ENTITY_SLOTS), dtype=np.int64)
+    expected_max_launch[0, 0] = 50
+    expected_max_launch[2, MAX_PLANETS] = 125
+    expected_max_launch[1, MAX_PLANETS + 1] = 30
+    np.testing.assert_array_equal(can_act, expected_can_act)
+    np.testing.assert_array_equal(max_launch, expected_max_launch)
 
 
 @pytest.mark.parametrize(
