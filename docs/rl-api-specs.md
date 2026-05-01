@@ -250,7 +250,9 @@ If `launch` is `False`, that slot is a no-op and `angle` / `ships` are ignored.
 If `launch` is `True`, `ships >= min_fleet_size`, `ships <= i32::MAX`, a finite
 `angle`, a valid source entity, source ownership by the acting player, and
 enough remaining ships on that source are required. Invalid submitted actions
-raise `ValueError`.
+raise `ValueError`. Invalid-action errors are not atomic across sub-envs:
+because decoding, stepping, and observation writing run in one parallel pass per
+env, other sub-envs may have advanced before the error is returned.
 For each player and source entity, decoding stops at the first `False` launch
 slot, so later slots for that source are ignored.
 
