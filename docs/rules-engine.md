@@ -34,9 +34,10 @@ pub fn step(state: &mut State, actions: &[PlayerAction]) -> StepResult;
 count, generation constants, and ids needed for deterministic progression.
 
 `StepResult` returns one result per actual player: active, won, or lost. It also
-returns auxiliary fleet-loss counters for fleets removed by the sun or by leaving
-the board. Combat fleets are excluded from those loss counters. This matches the
-actual player count without making 2-player games carry ignored entries. Orbit
+returns auxiliary counters for fleets and ships removed by the sun or by leaving
+the board, plus the number of planets captured during the step. Combat fleets
+are excluded from those loss counters. This matches the actual player count
+without making 2-player games carry ignored entries. Orbit
 Wars' Python reference leaves nonterminal eliminated players in Kaggle `ACTIVE`
 status until global termination; this simulator intentionally marks those
 players `Lost` immediately so the RL adapter can emit early loss/done signals

@@ -119,7 +119,7 @@ def _run_training_loop(
             metrics = trainer.train_iteration()
             env_steps += env_steps_per_iteration
             progress.update(env_steps_per_iteration)
-            logger.log({**metrics, "env_steps": float(env_steps)}, step=env_steps)
+            logger.log({**metrics, "train/env_steps": float(env_steps)}, step=env_steps)
             if (
                 next_checkpoint_env_steps is not None
                 and env_steps >= next_checkpoint_env_steps

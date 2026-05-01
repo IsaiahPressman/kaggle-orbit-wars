@@ -322,6 +322,7 @@ def _zero_loss_metrics(zero: torch.Tensor) -> ppo.PPOLossMetrics:
         loss=zero,
         policy_loss=zero,
         value_loss=zero,
+        entropy_loss=zero,
         entropy=zero,
         approx_kl=zero,
         clipfrac=zero,
@@ -401,7 +402,7 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
         {
             "mean_game_length": [10.0, 14.0],
             "full_length_rate": [1.0, 0.0],
-            "terminal_fleet_count": [2.0, 4.0],
+            "terminal_ship_count": [20.0, 40.0],
             "win_rate_player_0": [1.0, 0.0],
             "terminal_episodes_2p": [1.0, 1.0],
             "terminal_episodes_4p": [1.0],
@@ -410,7 +411,7 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
 
     assert metrics["train/mean_game_length"] == 12.0
     assert metrics["train/full_length_rate"] == 0.5
-    assert metrics["train/terminal_fleet_count"] == 3.0
+    assert metrics["train/terminal_ship_count"] == 30.0
     assert metrics["train/win_rate_player_0"] == 0.5
     assert metrics["train/terminal_episodes_2p"] == 2.0
     assert metrics["train/terminal_episodes_4p"] == 1.0
@@ -595,26 +596,31 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
     metrics = trainer.train_iteration()
 
     for key in (
-        "return_mean",
-        "policy_loss",
-        "value_loss",
-        "entropy",
-        "approx_kl",
-        "clipfrac",
-        "ratio_mean",
-        "ratio_max",
-        "logratio_mean",
-        "logratio_abs_max",
-        "grad_norm",
-        "num_minibatches_per_update",
-        "num_total_minibatches",
-        "effective_replay_exposure",
-        "policy_active_ratio",
-        "advantage_mean",
-        "advantage_std",
-        "priority_mean",
-        "priority_entropy",
-        "sample_duplicate_frac",
+        "train/return_mean",
+        "loss/total_loss",
+        "loss/policy_loss",
+        "loss/value_loss",
+        "loss/entropy_loss",
+        "policy/entropy",
+        "policy/approx_kl",
+        "policy/clipfrac",
+        "policy/ratio_mean",
+        "policy/ratio_max",
+        "policy/logratio_mean",
+        "policy/logratio_abs_max",
+        "optimizer/grad_norm",
+        "optimizer/minibatches_per_update",
+        "sampling/effective_replay_exposure",
+        "train/policy_active_ratio",
+        "train/advantage_mean",
+        "train/advantage_std",
+        "sampling/priority_mean",
+        "sampling/priority_entropy",
+        "sampling/sample_duplicate_frac",
+        "time/rollout_seconds",
+        "time/update_seconds",
+        "perf/rollout_sps",
+        "perf/update_sps",
     ):
         assert metrics[key] == pytest.approx(float(metrics[key]))
     assert any(
@@ -989,10 +995,10 @@ def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
     assert [indices.shape for indices in seen] == [(2,), (2,), (1,)]
     all_indices = torch.cat(seen)
     assert torch.equal(all_indices.sort().values, torch.arange(5))
-    assert metrics["num_minibatches"] == pytest.approx(3.0)
-    assert metrics["num_minibatches_per_update"] == pytest.approx(3.0)
-    assert metrics["num_total_minibatches"] == pytest.approx(3.0)
-    assert metrics["effective_replay_exposure"] == pytest.approx(1.0)
+    assert metrics["optimizer/num_minibatches"] == pytest.approx(3.0)
+    assert metrics["optimizer/minibatches_per_update"] == pytest.approx(3.0)
+    assert "optimizer/num_total_minibatches" not in metrics
+    assert metrics["sampling/effective_replay_exposure"] == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize(
@@ -1110,6 +1116,7 @@ def test_trainer_recomputes_advantages_each_minibatch(
             loss=loss,
             policy_loss=zero,
             value_loss=zero,
+            entropy_loss=zero,
             entropy=zero,
             approx_kl=zero,
             clipfrac=zero,
@@ -1215,6 +1222,7 @@ def test_trainer_puffer_vtrace_updates_mutable_replay_tensors(
             loss=zero,
             policy_loss=zero,
             value_loss=zero,
+            entropy_loss=zero,
             entropy=zero,
             approx_kl=zero,
             clipfrac=zero,

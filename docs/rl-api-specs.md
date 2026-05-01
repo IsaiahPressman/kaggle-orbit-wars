@@ -263,7 +263,11 @@ Terminal episode metrics:
 | `max_entities_exceeded_per_game` | Count of post-step turns where active fleets exceeded `max_fleets`. |
 | `mean_game_length` | Terminal game step count. |
 | `full_length_rate` | `1.0` when a game reaches the configured episode horizon, otherwise `0.0`. |
-| `terminal_fleet_count` | Number of active fleets remaining at terminal. |
+| `terminal_ship_count` | Total ships on planets and in active fleets at terminal. |
+| `planets_captured` | Total planet captures over the episode, counting repeat captures. |
+| `launches_per_turn` | Mean launches per player per turn. |
+| `max_fleet_size` | Largest fleet launched during the episode. |
+| `fleet_size_std` | Population standard deviation of launched fleet sizes during the episode. |
 | `win_rate_player_0`..`win_rate_player_3` | `1.0` for a winning model-visible outer player slot, `0.0` otherwise; inactive outer slots have no value in 2-player games. |
 | `mean_launches_per_planet` | Per-game mean launches per occupied non-comet planet per turn. |
 | `mean_launches_per_launch` | Mean launches from a planet on planet-turns where that planet launched at least once. |

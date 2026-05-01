@@ -506,7 +506,11 @@ struct EpisodeStats {
     launches_per_launch_sum: f64,
     launched_planet_turns: u32,
     ships_per_launch_sum: i64,
+    ships_per_launch_squared_sum: i64,
     launch_count: u32,
+    turn_count: u32,
+    max_fleet_size: i32,
+    planets_captured: u32,
     max_entities_exceeded_turns: u32,
     fleet_losses: FleetLossStats,
 }
@@ -560,7 +564,20 @@ impl EpisodeStats {
             .flatten()
             .map(|action| i64::from(action.ships))
             .sum::<i64>();
+        self.ships_per_launch_squared_sum += decoded
+            .iter()
+            .flatten()
+            .map(|action| i64::from(action.ships).pow(2))
+            .sum::<i64>();
         self.launch_count += launch_count;
+        self.turn_count += 1;
+        self.max_fleet_size = decoded
+            .iter()
+            .flatten()
+            .map(|action| action.ships)
+            .max()
+            .unwrap_or(0)
+            .max(self.max_fleet_size);
     }
 
     fn record_step_result(
@@ -576,6 +593,10 @@ impl EpisodeStats {
         if state.fleets.len() > max_fleets {
             self.max_entities_exceeded_turns += 1;
         }
+    }
+
+    fn record_planets_captured(&mut self, planets_captured: u32) {
+        self.planets_captured += planets_captured;
     }
 
     fn terminal_metrics(
@@ -598,7 +619,17 @@ impl EpisodeStats {
             ),
             ("mean_game_length", f64::from(state.step)),
             ("full_length_rate", full_length_value(state)),
-            ("terminal_fleet_count", state.fleets.len() as f64),
+            ("terminal_ship_count", terminal_ship_count(state)),
+            ("planets_captured", f64::from(self.planets_captured)),
+            (
+                "launches_per_turn",
+                mean_or_zero(
+                    f64::from(self.launch_count) / state.config.player_count as f64,
+                    self.turn_count,
+                ),
+            ),
+            ("max_fleet_size", f64::from(self.max_fleet_size)),
+            ("fleet_size_std", self.fleet_size_std()),
             (
                 "mean_launches_per_planet",
                 mean_or_zero(
@@ -661,6 +692,15 @@ impl EpisodeStats {
             win_rates,
         }
     }
+
+    fn fleet_size_std(&self) -> f64 {
+        if self.launch_count == 0 {
+            return 0.0;
+        }
+        let mean = self.ships_per_launch_sum as f64 / f64::from(self.launch_count);
+        let square_mean = self.ships_per_launch_squared_sum as f64 / f64::from(self.launch_count);
+        (square_mean - mean.powi(2)).max(0.0).sqrt()
+    }
 }
 
 fn full_length_value(state: &State) -> f64 {
@@ -677,6 +717,20 @@ fn mean_or_zero(sum: f64, count: u32) -> f64 {
     } else {
         sum / f64::from(count)
     }
+}
+
+fn terminal_ship_count(state: &State) -> f64 {
+    let planet_ships = state
+        .planets
+        .iter()
+        .map(|planet| i64::from(planet.ships))
+        .sum::<i64>();
+    let fleet_ships = state
+        .fleets
+        .iter()
+        .map(|fleet| i64::from(fleet.ships))
+        .sum::<i64>();
+    (planet_ships + fleet_ships) as f64
 }
 
 fn collect_terminal_metrics(
@@ -728,6 +782,7 @@ fn step_one_env(
     episode_stats.record_turn(state, decoded);
     let result = step(state, decoded);
     episode_stats.record_step_result(state, result.fleet_losses, max_fleets);
+    episode_stats.record_planets_captured(result.planets_captured);
     let should_reset = result_is_terminal(&result.player_results);
     let won_reward = split_won_reward(
         result
@@ -1045,7 +1100,7 @@ mod tests {
         assert_eq!(dones, vec![true; 4]);
         assert_eq!(metrics["mean_game_length"], vec![499.0]);
         assert_eq!(metrics["full_length_rate"], vec![1.0]);
-        assert_eq!(metrics["terminal_fleet_count"], vec![0.0]);
+        assert_eq!(metrics["terminal_ship_count"], vec![44.0]);
         assert_eq!(metrics["win_rate_player_0"], vec![1.0]);
         assert_eq!(metrics["win_rate_player_3"], vec![1.0]);
         assert_eq!(metrics["total_planet_occupancy_rate_4p"], vec![1.0]);
@@ -1119,6 +1174,10 @@ mod tests {
         let collected = collect_terminal_metrics(vec![Some(metrics)]);
 
         assert_eq!(collected["mean_ships_per_launch"], vec![4.0]);
+        assert_eq!(collected["launches_per_turn"], vec![0.5]);
+        assert_eq!(collected["max_fleet_size"], vec![5.0]);
+        assert_eq!(collected["fleet_size_std"], vec![1.0]);
+        assert_eq!(collected["planets_captured"], vec![0.0]);
         assert!(!collected.contains_key("mean_fleets_per_launch"));
     }
 
