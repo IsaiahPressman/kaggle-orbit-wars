@@ -417,6 +417,31 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
     assert metrics["train/terminal_episodes"] == 3.0
 
 
+def test_player_segment_returns_preserve_per_player_terminal_rewards() -> None:
+    rewards = torch.tensor(
+        [
+            [
+                [0.0, 0.0, 0.0, 0.0],
+                [1.0, -1.0, 0.0, 0.0],
+            ]
+        ]
+    )
+    value_mask = torch.tensor(
+        [
+            [
+                [True, True, False, False],
+                [True, True, False, False],
+            ]
+        ]
+    )
+
+    returns, return_mask = ppo._player_segment_returns(rewards, value_mask)
+
+    assert torch.equal(returns, torch.tensor([[1.0, -1.0, 0.0, 0.0]]))
+    assert torch.equal(return_mask, torch.tensor([[True, True, False, False]]))
+    assert ppo.masked_max(returns, return_mask).item() == 1.0
+
+
 def test_obs_to_device_uses_explicit_non_blocking_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

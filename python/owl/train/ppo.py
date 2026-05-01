@@ -26,9 +26,9 @@ from owl.train.advantages import (
 )
 from owl.train.metrics import (
     explained_variance,
+    masked_max,
     masked_mean,
     masked_std,
-    masked_sum_by_segment,
     weighted_mean,
 )
 from owl.train.optimizer import LRScheduler, Optimizer
@@ -343,9 +343,16 @@ class PPOTrainer:
             policy_mask,
             value_mask,
         )
-        episode_returns = masked_sum_by_segment(segments.rewards, value_mask)
-        metrics["return_mean"] = float(episode_returns.mean().item())
-        metrics["return_max"] = float(episode_returns.max().item())
+        player_returns, player_return_mask = _player_segment_returns(
+            segments.rewards,
+            value_mask,
+        )
+        metrics["return_mean"] = float(
+            masked_mean(player_returns, player_return_mask).item()
+        )
+        metrics["return_max"] = float(
+            masked_max(player_returns, player_return_mask).item()
+        )
         metrics["explained_variance"] = float(
             explained_variance(segments.values, returns, valid_mask=value_mask).item()
         )
@@ -1066,6 +1073,14 @@ def _mean_env_metrics(metrics: dict[str, list[float]]) -> dict[str, float]:
     if terminal_episodes > 0:
         logged["train/terminal_episodes"] = terminal_episodes
     return logged
+
+
+def _player_segment_returns(
+    rewards: torch.Tensor,
+    value_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    masked_rewards = rewards * value_mask.to(dtype=rewards.dtype)
+    return masked_rewards.sum(dim=1), value_mask.any(dim=1)
 
 
 def _output_actions(output: ModelOutput) -> ModelActions:
