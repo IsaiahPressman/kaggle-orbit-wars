@@ -67,8 +67,8 @@ they are not exact resume snapshots.
 Training logs terminal environment metrics under `train/` when episodes finish
 during a rollout, including game length, per-player win rates, launch density,
 planet occupancy for 2-player and 4-player games, max-entity overflow counts,
-terminal fleet counts, full-length game rate, and fleet/ship losses in the sun
-or out of bounds.
+terminal ship counts, planet captures, launch and fleet-size statistics,
+full-length game rate, and fleet/ship losses in the sun or out of bounds.
 
 ## Orbit Wars replay parity
 

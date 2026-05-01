@@ -7,6 +7,7 @@ class RlVecEnv:
     max_entities: int
     max_fleets: int
     max_per_planet_launches: int
+    min_fleet_size: int
 
     def __init__(
         self,
@@ -16,6 +17,7 @@ class RlVecEnv:
         action_spec: str = ...,
         max_entities: int = ...,
         max_per_planet_launches: int = ...,
+        min_fleet_size: int = ...,
     ) -> None: ...
     def reset(
         self,
@@ -76,6 +78,7 @@ def encode_obs_v1(
     step: int = ...,
     episode_steps: int = ...,
     max_entities: int = ...,
+    min_fleet_size: int = ...,
 ) -> tuple[
     np.ndarray,
     np.ndarray,

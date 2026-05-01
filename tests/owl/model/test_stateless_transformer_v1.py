@@ -760,6 +760,44 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert torch.allclose(evaluation.winner_probabilities, output.winner_probabilities)
 
 
+def test_min_fleet_size_masks_and_shifts_ship_distribution() -> None:
+    torch.manual_seed(3)
+    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=2, min_fleet_size=3)
+    config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        n_action_mixtures=2,
+    )
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _obs_batch(batch_size=1, obs_spec=obs_spec, action_spec=action_spec)
+    with torch.no_grad():
+        model.actor_heads.continue_head.bias.fill_(100.0)
+
+    output = model(obs, deterministic=True)
+
+    assert not output.actions.launch[0, 2, MAX_PLANETS].any()
+    launched_ships = output.actions.ships[output.actions.launch]
+    assert launched_ships.numel() > 0
+    assert torch.all(launched_ships >= action_spec.min_fleet_size)
+
+    evaluation = model.evaluate_actions(obs, output.actions)
+    assert torch.allclose(
+        evaluation.log_probs.angle_and_size,
+        output.log_probs.angle_and_size,
+    )
+
+    output.actions.launch.zero_()
+    output.actions.ships.zero_()
+    output.actions.angle.zero_()
+    output.actions.launch[0, 0, 0, 0] = True
+    output.actions.ships[0, 0, 0, 0] = action_spec.min_fleet_size - 1
+
+    with pytest.raises(ValueError, match=r"actions\.ships must be in 3\.\.remaining"):
+        model.evaluate_actions(obs, output.actions)
+
+
 def test_launch_slot_embedding_is_added_to_each_slot_input() -> None:
     action_spec = ActionPureConfig(max_per_planet_launches=4)
     config = StatelessTransformerV1Config(
@@ -927,6 +965,7 @@ def test_distribution_helpers_promote_lower_precision_params_to_fp32() -> None:
         angle,
         ships,
         residual_budget,
+        1,
         active,
     )
 
@@ -967,6 +1006,7 @@ def test_masked_action_entropy_includes_latent_mixture_entropy() -> None:
         params,
         residual_budget,
         active,
+        min_fleet_size=1,
         max_ship_support=3,
     )
 

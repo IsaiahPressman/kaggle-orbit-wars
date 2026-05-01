@@ -26,9 +26,9 @@ from owl.train.advantages import (
 )
 from owl.train.metrics import (
     explained_variance,
+    masked_max,
     masked_mean,
     masked_std,
-    masked_sum_by_segment,
     weighted_mean,
 )
 from owl.train.optimizer import LRScheduler, Optimizer
@@ -108,6 +108,7 @@ class PPOLossMetrics:
     loss: torch.Tensor
     policy_loss: torch.Tensor
     value_loss: torch.Tensor
+    entropy_loss: torch.Tensor
     entropy: torch.Tensor
     approx_kl: torch.Tensor
     clipfrac: torch.Tensor
@@ -313,7 +314,9 @@ class PPOTrainer:
 
     def train_iteration(self) -> dict[str, float]:
         start = perf_counter()
+        rollout_start = perf_counter()
         last_values = self._collect_rollout()
+        rollout_elapsed = max(perf_counter() - rollout_start, 1e-12)
         env_metrics = self._last_env_metrics
         segments = self.rollout.segment_major()
         value_mask = segments.obs.still_playing
@@ -335,6 +338,7 @@ class PPOTrainer:
             vtrace_rho_clip=self.config.vtrace_rho_clip,
             vtrace_c_clip=self.config.vtrace_c_clip,
         )
+        update_start = perf_counter()
         metrics = self._update(
             segments,
             advantages,
@@ -343,17 +347,35 @@ class PPOTrainer:
             policy_mask,
             value_mask,
         )
-        episode_returns = masked_sum_by_segment(segments.rewards, value_mask)
-        metrics["return_mean"] = float(episode_returns.mean().item())
-        metrics["return_max"] = float(episode_returns.max().item())
-        metrics["explained_variance"] = float(
+        update_elapsed = max(perf_counter() - update_start, 1e-12)
+        player_returns, player_return_mask = _player_segment_returns(
+            segments.rewards,
+            value_mask,
+        )
+        metrics["train/return_mean"] = float(
+            masked_mean(player_returns, player_return_mask).item()
+        )
+        metrics["train/return_max"] = float(
+            masked_max(player_returns, player_return_mask).item()
+        )
+        metrics["train/explained_variance"] = float(
             explained_variance(segments.values, returns, valid_mask=value_mask).item()
         )
-        metrics["advantage_mean"] = float(masked_mean(advantages, policy_mask).item())
-        metrics["advantage_std"] = float(masked_std(advantages, policy_mask).item())
+        metrics["train/advantage_mean"] = float(
+            masked_mean(advantages, policy_mask).item()
+        )
+        metrics["train/advantage_std"] = float(
+            masked_std(advantages, policy_mask).item()
+        )
         metrics.update(_mean_env_metrics(env_metrics))
         elapsed = max(perf_counter() - start, 1e-12)
-        metrics["steps_per_second"] = float(self.config.horizon * self.n_envs / elapsed)
+        rollout_steps = self.config.horizon * self.n_envs
+        metrics["time/rollout_seconds"] = float(rollout_elapsed)
+        metrics["time/update_seconds"] = float(update_elapsed)
+        metrics["time/iteration_seconds"] = float(elapsed)
+        metrics["perf/rollout_sps"] = float(rollout_steps / rollout_elapsed)
+        metrics["perf/update_sps"] = float(rollout_steps / update_elapsed)
+        metrics["perf/steps_per_second"] = float(rollout_steps / elapsed)
         return metrics
 
     def write_checkpoint(
@@ -506,14 +528,18 @@ class PPOTrainer:
         if not loss_metrics:
             raise RuntimeError("internal error: PPO update produced no minibatches")
         metrics = _mean_loss_metrics(loss_metrics)
-        metrics["grad_norm"] = float(torch.stack(grad_norms).mean().item())
-        metrics["num_minibatches"] = float(len(loss_metrics))
-        metrics["num_minibatches_per_update"] = float(n_minibatches)
-        metrics["num_total_minibatches"] = float(n_minibatches)
-        metrics["effective_replay_exposure"] = float(sampled_segments / self.n_envs)
-        metrics["policy_active_ratio"] = float(policy_mask.float().mean().item())
+        metrics["optimizer/grad_norm"] = float(torch.stack(grad_norms).mean().item())
+        metrics["optimizer/steps"] = float(len(loss_metrics))
+        metrics["optimizer/num_minibatches"] = float(len(loss_metrics))
+        metrics["optimizer/minibatches_per_update"] = float(n_minibatches)
+        metrics["sampling/effective_replay_exposure"] = float(
+            sampled_segments / self.n_envs
+        )
+        metrics["train/policy_active_ratio"] = float(policy_mask.float().mean().item())
         if self.lr_scheduler is not None:
-            metrics["learning_rate"] = float(self.lr_scheduler.get_last_lr()[0])
+            metrics["optimizer/learning_rate"] = float(
+                self.lr_scheduler.get_last_lr()[0]
+            )
         if sampling_metrics:
             metrics.update(_mean_sampling_metrics(sampling_metrics))
         return metrics
@@ -782,12 +808,14 @@ def _ppo_loss_metrics_from_tuple(
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        torch.Tensor,
     ],
 ) -> PPOLossMetrics:
     (
         loss,
         policy_loss,
         value_loss,
+        entropy_loss,
         entropy,
         approx_kl,
         clipfrac,
@@ -800,6 +828,7 @@ def _ppo_loss_metrics_from_tuple(
         loss=loss,
         policy_loss=policy_loss,
         value_loss=value_loss,
+        entropy_loss=entropy_loss,
         entropy=entropy,
         approx_kl=approx_kl,
         clipfrac=clipfrac,
@@ -835,6 +864,7 @@ def _ppo_loss_tensors(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor,
 ]:
     logratio = new_logp - old_logp
     ratio = logratio.exp()
@@ -856,6 +886,7 @@ def _ppo_loss_tensors(
 
     entropy_mean = weighted_mean(entropy, policy_weight)
     loss = policy_loss + vf_coef * value_loss - ent_coef * entropy_mean
+    entropy_loss = -ent_coef * entropy_mean
     approx_kl = weighted_mean((ratio - 1.0) - logratio, policy_weight)
     clipfrac = weighted_mean(
         ((ratio - 1.0).abs() > clip_coef).float(),
@@ -870,6 +901,7 @@ def _ppo_loss_tensors(
         loss,
         policy_loss,
         value_loss,
+        entropy_loss,
         entropy_mean,
         approx_kl,
         clipfrac,
@@ -1068,6 +1100,14 @@ def _mean_env_metrics(metrics: dict[str, list[float]]) -> dict[str, float]:
     return logged
 
 
+def _player_segment_returns(
+    rewards: torch.Tensor,
+    value_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    masked_rewards = rewards * value_mask.to(dtype=rewards.dtype)
+    return masked_rewards.sum(dim=1), value_mask.any(dim=1)
+
+
 def _output_actions(output: ModelOutput) -> ModelActions:
     return output.actions
 
@@ -1159,34 +1199,38 @@ def _segment_sampling_advantages(
 
 
 def _mean_loss_metrics(metrics: list[PPOLossMetrics]) -> dict[str, float]:
-    names = (
-        "policy_loss",
-        "value_loss",
-        "entropy",
-        "approx_kl",
-        "clipfrac",
-        "ratio_mean",
-        "ratio_max",
-        "logratio_mean",
-        "logratio_abs_max",
+    metric_names = (
+        ("loss/total_loss", "loss"),
+        ("loss/policy_loss", "policy_loss"),
+        ("loss/value_loss", "value_loss"),
+        ("loss/entropy_loss", "entropy_loss"),
+        ("policy/entropy", "entropy"),
+        ("policy/approx_kl", "approx_kl"),
+        ("policy/clipfrac", "clipfrac"),
+        ("policy/ratio_mean", "ratio_mean"),
+        ("policy/ratio_max", "ratio_max"),
+        ("policy/logratio_mean", "logratio_mean"),
+        ("policy/logratio_abs_max", "logratio_abs_max"),
     )
     return {
-        name: float(
-            torch.stack([getattr(metric, name) for metric in metrics]).mean().item()
+        output_name: float(
+            torch.stack([getattr(metric, attr_name) for metric in metrics])
+            .mean()
+            .item()
         )
-        for name in names
+        for output_name, attr_name in metric_names
     }
 
 
 def _mean_sampling_metrics(metrics: list[SegmentSamplingMetrics]) -> dict[str, float]:
     metric_names = (
-        ("priority_min", "priority_min"),
-        ("priority_mean", "priority_mean"),
-        ("priority_max", "priority_max"),
-        ("priority_entropy", "probability_entropy"),
-        ("sample_duplicate_frac", "duplicate_fraction"),
-        ("importance_mean", "importance_mean"),
-        ("importance_max", "importance_max"),
+        ("sampling/priority_min", "priority_min"),
+        ("sampling/priority_mean", "priority_mean"),
+        ("sampling/priority_max", "priority_max"),
+        ("sampling/priority_entropy", "probability_entropy"),
+        ("sampling/sample_duplicate_frac", "duplicate_fraction"),
+        ("sampling/importance_mean", "importance_mean"),
+        ("sampling/importance_max", "importance_max"),
     )
     return {
         output_name: float(

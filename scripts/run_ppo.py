@@ -43,6 +43,7 @@ def main() -> None:
         obs_spec=cfg.env.obs_spec,
         action_spec=cfg.env.action_spec,
     ).to(device)
+    trainable_parameters = _trainable_parameter_count(model)
     optimizer = create_optimizer(model, cfg.optimizer)
     lr_scheduler = create_lr_scheduler(optimizer, cfg.optimizer.lr_schedule)
     trainer = PPOTrainer(
@@ -65,6 +66,7 @@ def main() -> None:
         env_steps_per_iteration=env_steps_per_iteration,
         max_env_steps=args.max_env_steps,
         max_runtime_seconds=max_runtime_seconds,
+        trainable_parameters=trainable_parameters,
     )
 
 
@@ -78,8 +80,11 @@ def _run_training_session(
     env_steps_per_iteration: int,
     max_env_steps: int | None,
     max_runtime_seconds: float | None,
+    trainable_parameters: int | None = None,
 ) -> None:
     with closing(create_logger(log_mode, run_dir, cfg)) as logger:
+        if trainable_parameters is not None:
+            logger.set_summary("trainable_parameters", trainable_parameters)
         env_steps = _run_training_loop(
             trainer=trainer,
             logger=logger,
@@ -119,7 +124,7 @@ def _run_training_loop(
             metrics = trainer.train_iteration()
             env_steps += env_steps_per_iteration
             progress.update(env_steps_per_iteration)
-            logger.log({**metrics, "env_steps": float(env_steps)}, step=env_steps)
+            logger.log({**metrics, "train/env_steps": float(env_steps)}, step=env_steps)
             if (
                 next_checkpoint_env_steps is not None
                 and env_steps >= next_checkpoint_env_steps
@@ -251,6 +256,10 @@ def _create_model(
             )
         case _:
             assert_never(config)
+
+
+def _trainable_parameter_count(model: torch.nn.Module) -> int:
+    return sum(param.numel() for param in model.parameters() if param.requires_grad)
 
 
 def _next_periodic_checkpoint_step(

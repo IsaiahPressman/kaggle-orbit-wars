@@ -79,7 +79,7 @@ pub fn step_with_injections(
     move_planets_and_sweep(state, &mut combat_lists, &mut swept_fleets);
     move_comets_and_sweep(state, &mut combat_lists, &mut swept_fleets);
     remove_marked_fleets(state, &combat_lists);
-    resolve_combats(state, combat_lists);
+    let planets_captured = resolve_combats(state, combat_lists);
 
     let player_results = player_results(state);
     state.step += 1;
@@ -87,6 +87,7 @@ pub fn step_with_injections(
     StepResult {
         player_results,
         fleet_losses,
+        planets_captured,
     }
 }
 
@@ -469,7 +470,8 @@ fn remove_marked_fleets(state: &mut State, combat_lists: &CombatLists) {
     state.fleets.retain(|fleet| !removed.contains(&fleet.id));
 }
 
-fn resolve_combats(state: &mut State, combat_lists: CombatLists) {
+fn resolve_combats(state: &mut State, combat_lists: CombatLists) -> u32 {
+    let mut planets_captured = 0;
     for (planet_id, planet_fleets) in combat_lists.into_buckets() {
         if planet_fleets.is_empty() {
             continue;
@@ -541,9 +543,11 @@ fn resolve_combats(state: &mut State, combat_lists: CombatLists) {
             if planet.ships < 0 {
                 planet.owner = survivor_owner;
                 planet.ships = planet.ships.abs();
+                planets_captured += 1;
             }
         }
     }
+    planets_captured
 }
 
 fn player_results(state: &State) -> Vec<PlayerResult> {
@@ -863,7 +867,7 @@ mod tests {
         state.planets[1].x = 25.0;
         state.planets[1].ships = 5;
 
-        step(
+        let result = step(
             &mut state,
             &[
                 vec![LaunchAction {
@@ -878,6 +882,7 @@ mod tests {
         assert!(state.fleets.is_empty());
         assert_eq!(state.planets[1].owner, 0);
         assert_eq!(state.planets[1].ships, 15);
+        assert_eq!(result.planets_captured, 1);
     }
 
     #[test]

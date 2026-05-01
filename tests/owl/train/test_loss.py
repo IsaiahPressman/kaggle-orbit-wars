@@ -47,10 +47,12 @@ def test_ppo_loss_matches_clipped_objectives() -> None:
         ).mean()
     )
     expected_entropy = entropy.mean()
+    expected_entropy_loss = -0.1 * expected_entropy
     expected_loss = expected_policy + 0.5 * expected_value - 0.1 * expected_entropy
 
     assert torch.allclose(metrics.policy_loss, expected_policy)
     assert torch.allclose(metrics.value_loss, expected_value)
+    assert torch.allclose(metrics.entropy_loss, expected_entropy_loss)
     assert torch.allclose(metrics.entropy, expected_entropy)
     assert torch.allclose(metrics.loss, expected_loss)
     assert torch.allclose(metrics.clipfrac, torch.tensor(1.0))
@@ -87,6 +89,7 @@ def test_ppo_loss_uses_policy_and_value_weights_separately() -> None:
 
     assert torch.allclose(metrics.policy_loss, torch.tensor(-3.3))
     assert torch.allclose(metrics.value_loss, torch.tensor(5.0))
+    assert torch.allclose(metrics.entropy_loss, torch.tensor(-0.025))
     assert torch.allclose(metrics.entropy, torch.tensor(0.25))
     assert torch.allclose(metrics.ratio_mean, torch.tensor(1.1))
     assert torch.allclose(metrics.ratio_max, torch.tensor(1.1))
@@ -148,6 +151,7 @@ def test_ppo_loss_handles_all_policy_invalid_minibatch() -> None:
         metrics.loss,
         metrics.policy_loss,
         metrics.value_loss,
+        metrics.entropy_loss,
         metrics.entropy,
         metrics.approx_kl,
         metrics.clipfrac,

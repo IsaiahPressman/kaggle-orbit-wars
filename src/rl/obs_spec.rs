@@ -55,6 +55,7 @@ pub(super) fn encode_state(
     global_obs: &mut [f32],
     can_act: &mut [bool],
     max_launch: &mut [i64],
+    min_fleet_size: i64,
 ) -> usize {
     let mut action_slots = [None; ACTION_ENTITY_SLOTS];
     encode_state_with_action_slots(
@@ -71,6 +72,7 @@ pub(super) fn encode_state(
         can_act,
         max_launch,
         &mut action_slots,
+        min_fleet_size,
     )
 }
 
@@ -89,6 +91,7 @@ pub(super) fn encode_state_with_action_slots(
     can_act: &mut [bool],
     max_launch: &mut [i64],
     action_slots: &mut ActionEntitySlots,
+    min_fleet_size: i64,
 ) -> usize {
     let comet_ids = state
         .comet_planet_ids
@@ -159,7 +162,14 @@ pub(super) fn encode_state_with_action_slots(
     encode_comets(state, player_map, comet_obs, comet_mask);
     encode_global(state, global_obs);
     *action_slots = action_entity_slots(state);
-    encode_action_spec(state, player_map, action_slots, can_act, max_launch);
+    encode_action_spec(
+        state,
+        player_map,
+        action_slots,
+        can_act,
+        max_launch,
+        min_fleet_size,
+    );
 
     ignored_fleets
 }
@@ -457,7 +467,8 @@ fn require_shape_suffix(name: &str, actual: &[usize], expected_last_dim: usize) 
     angular_velocity,
     step=0,
     episode_steps=500,
-    max_entities=DEFAULT_MAX_ENTITIES
+    max_entities=DEFAULT_MAX_ENTITIES,
+    min_fleet_size=1
 ))]
 pub fn encode_obs_v1<'py>(
     py: Python<'py>,
@@ -471,12 +482,18 @@ pub fn encode_obs_v1<'py>(
     step: u32,
     episode_steps: u32,
     max_entities: usize,
+    min_fleet_size: i64,
 ) -> PyResult<EncodedObsV1<'py>> {
     if max_entities <= MAX_PLANETS + MAX_COMETS {
         return Err(PyValueError::new_err(format!(
             "max_entities must be greater than MAX_PLANETS + MAX_COMETS ({})",
             MAX_PLANETS + MAX_COMETS
         )));
+    }
+    if min_fleet_size < 1 || min_fleet_size > i64::from(i32::MAX) {
+        return Err(PyValueError::new_err(
+            "min_fleet_size must be between 1 and i32::MAX",
+        ));
     }
     require_shape_suffix("planets", planets.shape(), 7)?;
     require_shape_suffix("fleets", fleets.shape(), 7)?;
@@ -555,6 +572,7 @@ pub fn encode_obs_v1<'py>(
         max_launch
             .as_slice_mut()
             .expect("newly allocated max_launch array is contiguous"),
+        min_fleet_size,
     );
     log_ignored_fleets(ignored_fleets);
 
@@ -653,6 +671,7 @@ mod tests {
             &mut global_obs,
             &mut can_act,
             &mut max_launch,
+            1,
         );
     }
 
@@ -709,11 +728,63 @@ mod tests {
             &mut global_obs,
             &mut can_act,
             &mut max_launch,
+            1,
         );
 
         assert_eq!(planet_obs[1], 1.0);
         assert_eq!(fleet_obs[3], 1.0);
         assert!(can_act[ACTION_ENTITY_SLOTS]);
         assert_eq!(max_launch[ACTION_ENTITY_SLOTS], 10);
+    }
+
+    #[test]
+    fn encode_state_respects_min_fleet_size_action_mask() {
+        let state = State {
+            config: SimConfig::new(2),
+            step: 0,
+            angular_velocity: 0.025,
+            initial_planets: Vec::new(),
+            planets: vec![Planet {
+                id: 0,
+                owner: 0,
+                x: 50.0,
+                y: 50.0,
+                radius: 2.0,
+                ships: 2,
+                production: 1,
+            }],
+            fleets: Vec::new(),
+            next_fleet_id: 0,
+            comets: Vec::new(),
+            comet_planet_ids: Vec::new(),
+        };
+        let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
+        let mut fleet_obs = Vec::new();
+        let mut comet_obs = vec![0.0; MAX_COMETS * COMET_CHANNELS];
+        let mut planet_mask = vec![false; MAX_PLANETS];
+        let mut fleet_mask = Vec::new();
+        let mut comet_mask = vec![false; MAX_COMETS];
+        let mut global_obs = vec![0.0; GLOBAL_CHANNELS];
+        let mut can_act = vec![false; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+
+        encode_state(
+            &state,
+            &PlayerMap::identity(),
+            0,
+            &mut planet_obs,
+            &mut fleet_obs,
+            &mut comet_obs,
+            &mut planet_mask,
+            &mut fleet_mask,
+            &mut comet_mask,
+            &mut global_obs,
+            &mut can_act,
+            &mut max_launch,
+            3,
+        );
+
+        assert!(!can_act[0]);
+        assert_eq!(max_launch[0], 0);
     }
 }

@@ -16,6 +16,9 @@ class MetricLogger:
     def log(self, metrics: dict[str, float], *, step: int) -> None:
         raise NotImplementedError
 
+    def set_summary(self, key: str, value: int | float) -> None:
+        raise NotImplementedError
+
     def close(self) -> None:
         raise NotImplementedError
 
@@ -24,6 +27,9 @@ class DebugLogger(MetricLogger):
     def log(self, metrics: dict[str, float], *, step: int) -> None:
         del step
         print(metrics)
+
+    def set_summary(self, key: str, value: int | float) -> None:
+        del key, value
 
     def close(self) -> None:
         return None
@@ -43,6 +49,12 @@ class WandbLogger(MetricLogger):
 
     def log(self, metrics: dict[str, float], *, step: int) -> None:
         self._wandb.log(metrics, step=step)
+
+    def set_summary(self, key: str, value: int | float) -> None:
+        run = self._wandb.run
+        if run is None:
+            raise RuntimeError("wandb run is not initialized")
+        run.summary[key] = value
 
     def close(self) -> None:
         self._run.finish()

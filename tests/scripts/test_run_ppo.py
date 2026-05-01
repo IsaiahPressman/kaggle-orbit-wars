@@ -51,9 +51,14 @@ def _full_config(*, checkpoint_freq: int = 0) -> FullConfig:
 class _FakeLogger:
     def __init__(self) -> None:
         self.closed = False
+        self.logged: list[tuple[dict[str, float], int]] = []
+        self.summary: dict[str, int | float] = {}
 
     def log(self, metrics: dict[str, float], *, step: int) -> None:
-        pass
+        self.logged.append((metrics, step))
+
+    def set_summary(self, key: str, value: int | float) -> None:
+        self.summary[key] = value
 
     def close(self) -> None:
         self.closed = True
@@ -141,6 +146,13 @@ def test_create_model_uses_env_owned_specs() -> None:
     assert model.launch_slot_tokens.num_embeddings == 2
 
 
+def test_trainable_parameter_count_ignores_frozen_parameters() -> None:
+    model = torch.nn.Sequential(torch.nn.Linear(2, 3), torch.nn.Linear(3, 1))
+    model[1].weight.requires_grad = False
+
+    assert run_ppo._trainable_parameter_count(model) == 10
+
+
 def test_run_training_loop_writes_periodic_checkpoints(tmp_path: Path) -> None:
     cfg = _full_config(checkpoint_freq=10)
     trainer = _FakeTrainer()
@@ -159,6 +171,37 @@ def test_run_training_loop_writes_periodic_checkpoints(tmp_path: Path) -> None:
 
     assert env_steps == 16
     assert trainer.checkpoints == [(tmp_path / "checkpoint-16.pt", 16)]
+    assert [step for _metrics, step in logger.logged] == [8, 16]
+    assert "model/trainable_parameters" not in logger.logged[0][0]
+    assert "trainable_parameters" not in logger.logged[0][0]
+
+
+def test_run_training_session_sets_trainable_parameter_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _full_config()
+    trainer = _FakeTrainer()
+    logger = _FakeLogger()
+
+    def create_fake_logger(*_args: object) -> _FakeLogger:
+        return logger
+
+    monkeypatch.setattr(run_ppo, "create_logger", create_fake_logger)
+
+    run_ppo._run_training_session(
+        trainer=trainer,
+        run_dir=tmp_path,
+        cfg=cfg,
+        config_path=Path("config.yaml"),
+        log_mode=LogMode.DEBUG,
+        env_steps_per_iteration=8,
+        max_env_steps=8,
+        max_runtime_seconds=None,
+        trainable_parameters=123,
+    )
+
+    assert logger.summary == {"trainable_parameters": 123}
+    assert logger.closed
 
 
 def test_run_training_session_closes_logger_and_skips_final_checkpoint_on_error(
