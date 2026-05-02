@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 import torch
@@ -57,13 +57,18 @@ def _obs_batch(*, n_envs: int, obs_spec: ObsV1Config) -> ObsBatch:
 def _actions(
     n_envs: int,
     max_launches: int = ActionPureConfig().max_per_planet_launches,
+    kind: Literal["pure", "discrete_targets"] = "pure",
 ) -> ModelActions:
     shape = (n_envs, 4, ACTION_ENTITY_SLOTS, max_launches)
     return ModelActions(
         launch=torch.zeros(shape, dtype=torch.bool),
-        angle=torch.zeros(shape, dtype=torch.float32),
-        target=torch.zeros(shape, dtype=torch.int64),
         ships=torch.zeros(shape, dtype=torch.int64),
+        angle=(torch.zeros(shape, dtype=torch.float32) if kind == "pure" else None),
+        target=(
+            torch.zeros(shape, dtype=torch.int64)
+            if kind == "discrete_targets"
+            else None
+        ),
     )
 
 
@@ -305,8 +310,13 @@ class TinyDiscreteTargetModel(BaseModelAPI):
     ) -> ModelOutput:
         del deterministic
         n_envs = obs.global_features.shape[0]
-        actions = _actions(n_envs, self.action_spec.max_per_planet_launches)
+        actions = _actions(
+            n_envs,
+            self.action_spec.max_per_planet_launches,
+            kind="discrete_targets",
+        )
         actions.launch[:, :, 0, 0] = obs.still_playing
+        assert actions.target is not None
         actions.target[:, :, 0, 0] = 1
         actions.ships[:, :, 0, 0] = 1
         values = self.value.expand(n_envs, 4)
@@ -602,9 +612,8 @@ def test_actions_to_cpu_transfer_policy_is_explicit(
     ppo._actions_to_cpu(actions)
     ppo._actions_to_cpu(actions, non_blocking=True)
 
-    assert non_blocking_args == [False] * len(ppo._ACTION_FIELDS) + [True] * len(
-        ppo._ACTION_FIELDS
-    )
+    copied_fields = 3
+    assert non_blocking_args == [False] * copied_fields + [True] * copied_fields
 
 
 def test_trainer_sets_static_env_transfer_policy(
@@ -1424,8 +1433,9 @@ def test_discrete_target_rollout_buffer_and_policy_mask() -> None:
     obs.still_playing[:, 2:] = False
     obs.can_act[:, 0, 0, 1] = True
     obs.max_launch[:, 0, 0] = 3
-    actions = _actions(3, max_launches=1)
+    actions = _actions(3, max_launches=1, kind="discrete_targets")
     actions.launch[:, 0, 0, 0] = True
+    assert actions.target is not None
     actions.target[:, 0, 0, 0] = 1
     actions.ships[:, 0, 0, 0] = 1
 
@@ -1447,6 +1457,7 @@ def test_discrete_target_rollout_buffer_and_policy_mask() -> None:
         ACTION_ENTITY_SLOTS,
         ACTION_ENTITY_SLOTS,
     )
+    assert segments.actions.target is not None
     assert segments.actions.target.shape == (3, 2, 4, ACTION_ENTITY_SLOTS, 1)
     policy_mask = ppo._policy_mask(segments.obs)
     assert policy_mask.shape == (3, 2, 4)
@@ -1456,8 +1467,9 @@ def test_discrete_target_rollout_buffer_and_policy_mask() -> None:
 
 def test_step_env_passes_discrete_target_tensor() -> None:
     env = TinyDiscreteTargetEnv(n_envs=2)
-    actions = _actions(2, max_launches=1)
+    actions = _actions(2, max_launches=1, kind="discrete_targets")
     actions.launch[:, :, 0, 0] = True
+    assert actions.target is not None
     actions.target[:, :, 0, 0] = 1
     actions.ships[:, :, 0, 0] = 1
 
@@ -1465,6 +1477,7 @@ def test_step_env_passes_discrete_target_tensor() -> None:
 
     assert metrics == {}
     assert env.last_target is not None
+    assert actions.target is not None
     assert torch.equal(env.last_target, actions.target)
     assert rewards.shape == (2, 4)
 
@@ -1503,13 +1516,13 @@ def test_discrete_target_transformer_train_iteration_keeps_parameters_finite() -
     )
     model = StatelessTransformerV1(
         StatelessTransformerV1Config(
-            action_spec="discrete_targets",
-            actor=ActorDiscreteTargetsConfig(),
+            actor=ActorDiscreteTargetsConfig(
+                n_action_mixtures=2,
+                entropy_ship_support_cap=16,
+            ),
             embed_dim=32,
             depth=1,
             n_heads=4,
-            n_action_mixtures=2,
-            entropy_ship_support_cap=16,
         ),
         obs_spec=obs_spec,
         action_spec=action_spec,

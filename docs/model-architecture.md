@@ -22,27 +22,25 @@ without changing callers that validate config dictionaries through the union.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `model_arch` | `"stateless_transformer_v1"` | Pydantic discriminator tag. |
-| `action_spec` | `"pure"` | Model action-space discriminator; must match the environment action spec and `actor.action_spec`. |
 | `embed_dim` | `128` | Hidden width for all projected tokens and transformer blocks. |
 | `depth` | `4` | Number of transformer blocks. |
 | `n_heads` | `8` | Attention heads; must evenly divide `embed_dim`. |
 | `mlp_ratio` | `4.0` | FFN hidden width multiplier. |
 | `activation` | `"gelu"` | FFN activation: `"gelu"`, `"silu"`, or `"swiglu"`. |
-| `n_action_mixtures` | `4` | Mixture components for pure launch angle/size heads or discrete-target fleet-size heads. |
-| `kappa_min` | `1e-3` | Lower bound added to von Mises concentration. |
-| `kappa_max` | `200.0` | Optional cap for von Mises concentration. |
-| `entropy_ship_support_cap` | `256` | Maximum ship-count support enumerated for entropy estimates. |
-| `tau_min` | `1e-3` | Lower bound added to beta-binomial concentration. |
-| `alpha_beta_eps` | `1e-4` | Epsilon added to beta-binomial alpha and beta. |
-| `dir_eps` | `1e-6` | Epsilon for normalizing raw angle direction vectors. |
-| `max_ship_normalizer` | `250.0` | Normalizer for ship-budget actor features. |
 | `force_flash_attn` | `False` | Require packed varlen flash-attn; raise an error instead of falling back when tensors are not flash-compatible. |
 | `actor` | `{"action_spec": "pure"}` | Discriminated actor-head config. Supported actor specs are `"pure"` and `"discrete_targets"`. |
 
-`ActorDiscreteTargetsConfig` also exposes the fleet-size logistic-mixture scale
-parameters `scale_min=0.25`, `min_log_scale=-7.0`, and `max_log_scale=0.5`.
-The model config validator rejects actor/action-spec mismatches before model
-construction.
+Actor-specific fields live inside the actor config. `ActorPureConfig` owns
+pure-head fields such as `n_action_mixtures`, `kappa_min`, `kappa_max`,
+`tau_min`, `alpha_beta_eps`, `dir_eps`, `max_ship_normalizer`, and
+`entropy_ship_support_cap`. `ActorDiscreteTargetsConfig` owns
+`n_action_mixtures`, `max_ship_normalizer`, `entropy_ship_support_cap`, and
+the logistic-mixture scale parameters `scale_min=0.25`,
+`min_log_scale=-7.0`, and `max_log_scale=0.5`.
+
+`FullConfig` validates that `env.action_spec.action_spec` matches
+`model.actor.action_spec`. Direct model construction performs the same check
+against the supplied environment action spec.
 
 Observation and action specs are owned by `EnvConfig`. `StatelessTransformerV1`
 receives `env.obs_spec` and `env.action_spec` when it is instantiated, so model
@@ -142,7 +140,9 @@ Both actor heads start from the same shared transformer trunk. For each
 - player hidden token
 - normalized `max_launch`
 
-The final action head is selected by `config.actor.action_spec`.
+The final action head is selected by `config.actor.action_spec`. The concrete
+heads live under `python/owl/model/actor/`: `PureActor` for raw angles and
+`DiscreteTargetsActor` for target slots.
 
 ### Pure Actor
 
@@ -192,17 +192,18 @@ shifted beta-binomial size distribution emits ships in
 `min_fleet_size..remaining`, and the accumulated sampled ships are capped by
 `max_launch`.
 
-The model returns decomposed action tensors:
+The model returns decomposed action tensors. The `launch` tensor always keeps
+the final launch-slot dimension expected by the Rust API:
 
 - `launch`: bool, `(batch, 4, 44, max_per_planet_launches)`
-- `angle`: float32, `(batch, 4, 44, max_per_planet_launches)`
-- `target`: int64, `(batch, 4, 44, max_per_planet_launches)`
 - `ships`: int64, `(batch, 4, 44, max_per_planet_launches)`
+- `angle`: float32, same shape, pure actor only
+- `target`: int64, same shape, discrete-target actor only
 
 It also returns decomposed log-prob and entropy tensors for launch gates and
 target or angle/size events, plus per-player action-entity totals with shape
-`(batch, 4, 44)`. Pure actions set `target` to zeros. Discrete-target actions
-set `angle` to zeros and submit `target` through the environment step boundary.
+`(batch, 4, 44)`. PPO asks the action container for the submitted action-value
+tensor, so the trainer does not branch on action-spec-specific tensor names.
 
 The angle/size entropy is an augmented latent-mixture entropy estimate: mixture
 label entropy plus expected component entropy. It is not the exact marginal

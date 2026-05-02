@@ -193,7 +193,6 @@ def test_full_config_accepts_discrete_target_model_action_spec() -> None:
             },
             "model": {
                 "model_arch": "stateless_transformer_v1",
-                "action_spec": "discrete_targets",
                 "actor": {"action_spec": "discrete_targets"},
                 "embed_dim": 32,
                 "depth": 1,
@@ -210,7 +209,6 @@ def test_full_config_accepts_discrete_target_model_action_spec() -> None:
     )
 
     assert config.env.action_spec.action_spec == "discrete_targets"
-    assert config.model.action_spec == "discrete_targets"
     assert config.model.actor.action_spec == "discrete_targets"
 
 

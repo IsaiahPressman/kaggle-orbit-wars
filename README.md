@@ -54,9 +54,8 @@ Training presets live in `configs/`:
 The training entrypoint configures PyTorch for TF32 matmul/conv precision and
 cuDNN benchmarking before constructing the environment, model, and optimizer.
 PPO supports both `pure` and `discrete_targets` action specs when the
-`StatelessTransformerV1` model `action_spec` and actor discriminator match the
-environment. The current discrete-target actor requires
-`max_per_planet_launches: 1`.
+`StatelessTransformerV1` actor discriminator matches the environment action
+spec. The current discrete-target actor requires `max_per_planet_launches: 1`.
 
 Run a preset with:
 
