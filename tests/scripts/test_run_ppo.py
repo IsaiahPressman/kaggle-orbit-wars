@@ -162,10 +162,11 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
     current_model.train()
     last_best_model.eval()
     seen_eval_sizes: list[tuple[int, int]] = []
+    perf_times = iter([10.0, 14.0])
 
     def fake_evaluate_player_count(
         **kwargs: object,
-    ) -> tuple[object, dict[str, list[float]]]:
+    ) -> tuple[object, dict[str, list[float]], int]:
         assert kwargs["current_model"] is current_model
         assert kwargs["last_best_model"] is last_best_model
         assert not current_model.training
@@ -174,16 +175,21 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
         seen_eval_sizes.append((kwargs["n_games"], kwargs["n_envs"]))
         stats = run_ppo._EvalStats.empty()
         stats.add_game_result(run_ppo.MODEL_CURRENT)
-        return stats, {
-            "game_length_mean": [12.0],
-            "terminal_episodes_2p": [1.0],
-        }
+        return (
+            stats,
+            {
+                "game_length_mean": [12.0],
+                "terminal_episodes_2p": [1.0],
+            },
+            6,
+        )
 
     monkeypatch.setattr(
         run_ppo,
         "_evaluate_player_count",
         fake_evaluate_player_count,
     )
+    monkeypatch.setattr(run_ppo.time, "perf_counter", lambda: next(perf_times))
 
     metrics = run_ppo._evaluate_against_last_best(
         current_model=current_model,
@@ -196,6 +202,8 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
     assert metrics["eval/game_length_mean"] == pytest.approx(12.0)
     assert metrics["eval/terminal_episodes_2p"] == pytest.approx(2.0)
     assert metrics["eval/terminal_episodes"] == pytest.approx(2.0)
+    assert metrics["time/eval_seconds"] == pytest.approx(4.0)
+    assert metrics["perf/eval_sps"] == pytest.approx(3.0)
     assert seen_eval_sizes == [(2, 2), (2, 2)]
     assert current_model.training
     assert not last_best_model.training

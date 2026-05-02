@@ -329,6 +329,10 @@ def _evaluate_against_last_best(
     device: torch.device,
 ) -> dict[str, float]:
     _validate_checkpoint_eval_config(cfg)
+    started_at = time.perf_counter()
+    eval_steps = 0
+    current_was_training = current_model.training
+    last_best_was_training = last_best_model.training
     current_model.eval()
     last_best_model.eval()
     stats = _EvalStats.empty()
@@ -338,7 +342,7 @@ def _evaluate_against_last_best(
             per_player_count_games = cfg.env.n_envs // len(PLAYER_COUNTS)
             eval_n_envs = cfg.env.n_envs // 2
             for player_count in PLAYER_COUNTS:
-                player_stats, player_env_metrics = _evaluate_player_count(
+                player_stats, player_env_metrics, player_steps = _evaluate_player_count(
                     current_model=current_model,
                     last_best_model=last_best_model,
                     cfg=cfg,
@@ -349,11 +353,16 @@ def _evaluate_against_last_best(
                 )
                 stats.merge(player_stats)
                 _extend_env_metrics(env_metrics, player_env_metrics)
+                eval_steps += player_steps
     finally:
-        current_model.train()
+        current_model.train(current_was_training)
+        last_best_model.train(last_best_was_training)
 
+    elapsed = max(time.perf_counter() - started_at, 1e-12)
     metrics = _eval_env_metrics(env_metrics)
     metrics["eval/win_rate_against_last_best"] = stats.win_rate(MODEL_CURRENT)
+    metrics["time/eval_seconds"] = float(elapsed)
+    metrics["perf/eval_sps"] = float(eval_steps / elapsed)
     return metrics
 
 
@@ -366,7 +375,7 @@ def _evaluate_player_count(
     n_games: int,
     n_envs: int,
     device: torch.device,
-) -> tuple[_EvalStats, dict[str, list[float]]]:
+) -> tuple[_EvalStats, dict[str, list[float]], int]:
     env = VectorizedEnv(
         n_envs=n_envs,
         obs_spec=cfg.env.obs_spec,
@@ -387,6 +396,7 @@ def _evaluate_player_count(
         )
 
     games = 0
+    steps = 0
     stats = _EvalStats.empty()
     env_metrics: dict[str, list[float]] = {}
     while games < n_games:
@@ -403,6 +413,7 @@ def _evaluate_player_count(
             actions.action_value(),
             actions.ships,
         )
+        steps += n_envs
         _extend_env_metrics(env_metrics, step_env_metrics)
         returns += rewards
         terminal_envs = torch.nonzero(dones.all(dim=1), as_tuple=False).flatten()
@@ -426,7 +437,7 @@ def _evaluate_player_count(
                 active_slots=start_masks[env_index],
                 player_count=player_count,
             )
-    return stats, env_metrics
+    return stats, env_metrics, steps
 
 
 class _EvalStats:
