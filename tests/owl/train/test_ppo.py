@@ -103,10 +103,9 @@ class TinyOrbitEnv:
     def step(
         self,
         launch: torch.Tensor,
-        angle: torch.Tensor,
-        ships: torch.Tensor,
+        angle: torch.Tensor,  # noqa: ARG002
+        ships: torch.Tensor,  # noqa: ARG002
     ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor]:
-        del angle, ships
         active = self._still_playing()
         player_launch = launch[:, :, 0, 0].to(dtype=torch.float32)
         reward = torch.where(player_launch.eq(self._targets[:, None]), 1.0, -0.25)
@@ -303,9 +302,8 @@ class TinyDiscreteTargetModel(BaseModelAPI):
         self,
         obs: ObsBatch,
         *,
-        deterministic: bool = False,
+        deterministic: bool = False,  # noqa: ARG002
     ) -> ModelOutput:
-        del deterministic
         n_envs = obs.global_features.shape[0]
         actions = _actions(
             n_envs,
@@ -330,9 +328,8 @@ class TinyDiscreteTargetModel(BaseModelAPI):
     def evaluate_actions(
         self,
         obs: ObsBatch,
-        actions: ModelActions,
+        actions: ModelActions,  # noqa: ARG002
     ) -> ModelEvaluation:
-        del actions
         values = self.value.expand(obs.global_features.shape[0], 4)
         log_probs = TinyOrbitModel._log_probs(torch.zeros_like(values))
         entropies = TinyOrbitModel._entropies(torch.zeros_like(values))
@@ -389,9 +386,8 @@ class FixedEvaluationModel(BaseModelAPI):
         self,
         obs: ObsBatch,
         *,
-        deterministic: bool = False,
+        deterministic: bool = False,  # noqa: ARG002
     ) -> ModelOutput:
-        del deterministic
         n_envs = obs.global_features.shape[0]
         evaluation = self.evaluate_actions(obs, _actions(n_envs))
         return ModelOutput(
@@ -405,9 +401,8 @@ class FixedEvaluationModel(BaseModelAPI):
     def evaluate_actions(
         self,
         obs: ObsBatch,
-        actions: ModelActions,
+        actions: ModelActions,  # noqa: ARG002
     ) -> ModelEvaluation:
-        del actions
         values = self.value.expand(obs.global_features.shape[0], 4)
         log_probs = TinyOrbitModel._log_probs(torch.zeros_like(values))
         entropies = TinyOrbitModel._entropies(torch.zeros_like(values))
@@ -570,8 +565,11 @@ def test_obs_to_device_uses_explicit_non_blocking_policy(
     obs = _obs_batch(n_envs=2, obs_spec=obs_spec)
     non_blocking_args: list[bool] = []
 
-    def fake_to(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
-        del args
+    def fake_to(
+        self: torch.Tensor,
+        *args: Any,  # noqa: ARG001
+        **kwargs: Any,
+    ) -> torch.Tensor:
         non_blocking_args.append(kwargs["non_blocking"])
         return self
 
@@ -589,8 +587,11 @@ def test_obs_to_device_defaults_to_blocking_transfer(
     obs = _obs_batch(n_envs=2, obs_spec=obs_spec)
     non_blocking_args: list[bool] = []
 
-    def fake_to(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
-        del args
+    def fake_to(
+        self: torch.Tensor,
+        *args: Any,  # noqa: ARG001
+        **kwargs: Any,
+    ) -> torch.Tensor:
         non_blocking_args.append(kwargs["non_blocking"])
         return self
 
@@ -607,8 +608,11 @@ def test_actions_to_cpu_transfer_policy_is_explicit(
     actions = _actions(n_envs=2)
     non_blocking_args: list[bool] = []
 
-    def fake_to(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
-        del args
+    def fake_to(
+        self: torch.Tensor,
+        *args: Any,  # noqa: ARG001
+        **kwargs: Any,
+    ) -> torch.Tensor:
         non_blocking_args.append(kwargs["non_blocking"])
         return self
 
@@ -631,11 +635,10 @@ def test_trainer_sets_static_env_transfer_policy(
 
     def fake_obs_to_device(
         obs: ObsBatch,
-        device: torch.device,
+        device: torch.device,  # noqa: ARG001
         *,
         non_blocking: bool = False,
     ) -> ObsBatch:
-        del device
         non_blocking_args.append(non_blocking)
         return obs
 
@@ -869,17 +872,16 @@ def test_update_minibatch_normalizes_policy_advantages_only() -> None:
     def fake_ppo_loss(
         *,
         new_logp: torch.Tensor,
-        entropy: torch.Tensor,
+        entropy: torch.Tensor,  # noqa: ARG001
         new_values: torch.Tensor,
-        old_logp: torch.Tensor,
-        old_values: torch.Tensor,
+        old_logp: torch.Tensor,  # noqa: ARG001
+        old_values: torch.Tensor,  # noqa: ARG001
         returns: torch.Tensor,
         advantages: torch.Tensor,
         policy_weight: torch.Tensor,
-        value_weight: torch.Tensor,
-        config: ppo.PPOConfig,
+        value_weight: torch.Tensor,  # noqa: ARG001
+        config: ppo.PPOConfig,  # noqa: ARG001
     ) -> ppo.PPOLossMetrics:
-        del entropy, old_logp, old_values, value_weight, config
         seen["advantages"] = advantages.detach().clone()
         seen["returns"] = returns.detach().clone()
         loss = new_values.mean() + 0.0 * new_logp.mean() + 0.0 * policy_weight.mean()
@@ -926,17 +928,16 @@ def test_update_minibatch_applies_importance_to_policy_advantages_only() -> None
     def fake_ppo_loss(
         *,
         new_logp: torch.Tensor,
-        entropy: torch.Tensor,
+        entropy: torch.Tensor,  # noqa: ARG001
         new_values: torch.Tensor,
-        old_logp: torch.Tensor,
-        old_values: torch.Tensor,
-        returns: torch.Tensor,
+        old_logp: torch.Tensor,  # noqa: ARG001
+        old_values: torch.Tensor,  # noqa: ARG001
+        returns: torch.Tensor,  # noqa: ARG001
         advantages: torch.Tensor,
         policy_weight: torch.Tensor,
         value_weight: torch.Tensor,
-        config: ppo.PPOConfig,
+        config: ppo.PPOConfig,  # noqa: ARG001
     ) -> ppo.PPOLossMetrics:
-        del entropy, old_logp, old_values, returns, config
         seen["advantages"] = advantages.detach().clone()
         seen["policy_weight"] = policy_weight.detach().clone()
         seen["value_weight"] = value_weight.detach().clone()
@@ -984,17 +985,16 @@ def test_update_minibatch_applies_importance_after_normalization() -> None:
     def fake_ppo_loss(
         *,
         new_logp: torch.Tensor,
-        entropy: torch.Tensor,
+        entropy: torch.Tensor,  # noqa: ARG001
         new_values: torch.Tensor,
-        old_logp: torch.Tensor,
-        old_values: torch.Tensor,
-        returns: torch.Tensor,
+        old_logp: torch.Tensor,  # noqa: ARG001
+        old_values: torch.Tensor,  # noqa: ARG001
+        returns: torch.Tensor,  # noqa: ARG001
         advantages: torch.Tensor,
-        policy_weight: torch.Tensor,
-        value_weight: torch.Tensor,
-        config: ppo.PPOConfig,
+        policy_weight: torch.Tensor,  # noqa: ARG001
+        value_weight: torch.Tensor,  # noqa: ARG001
+        config: ppo.PPOConfig,  # noqa: ARG001
     ) -> ppo.PPOLossMetrics:
-        del entropy, old_logp, old_values, returns, policy_weight, value_weight, config
         seen["advantages"] = advantages.detach().clone()
         loss = new_values.mean() + 0.0 * new_logp.mean()
         return _zero_loss_metrics(loss)
@@ -1091,15 +1091,14 @@ def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
 
     def fake_update_minibatch(
         segments: ppo.PPORolloutSegments,
-        advantages: torch.Tensor,
-        returns: torch.Tensor,
-        policy_mask: torch.Tensor,
-        value_mask: torch.Tensor,
+        advantages: torch.Tensor,  # noqa: ARG001
+        returns: torch.Tensor,  # noqa: ARG001
+        policy_mask: torch.Tensor,  # noqa: ARG001
+        value_mask: torch.Tensor,  # noqa: ARG001
         sample: ppo.SegmentSample,
         *,
-        value_clip_anchor: torch.Tensor,
+        value_clip_anchor: torch.Tensor,  # noqa: ARG001
     ) -> ppo.PPOUpdateResult:
-        del advantages, returns, policy_mask, value_mask, value_clip_anchor
         seen.append(sample.indices.detach().clone())
         zero = segments.logp.new_zeros(())
         return ppo.PPOUpdateResult(
@@ -1208,17 +1207,15 @@ def test_trainer_recomputes_advantages_each_minibatch(
         *,
         rewards: torch.Tensor,
         values: torch.Tensor,
-        dones: torch.Tensor,
-        last_values: torch.Tensor,
-        gamma: float,
-        gae_lambda: float,
-        ratios: torch.Tensor | None = None,
-        mode: ppo.AdvantageMode = "gae",
-        vtrace_rho_clip: float = 1.0,
-        vtrace_c_clip: float = 1.0,
+        dones: torch.Tensor,  # noqa: ARG001
+        last_values: torch.Tensor,  # noqa: ARG001
+        gamma: float,  # noqa: ARG001
+        gae_lambda: float,  # noqa: ARG001
+        ratios: torch.Tensor | None = None,  # noqa: ARG001
+        mode: ppo.AdvantageMode = "gae",  # noqa: ARG001
+        vtrace_rho_clip: float = 1.0,  # noqa: ARG001
+        vtrace_c_clip: float = 1.0,  # noqa: ARG001
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        del dones, last_values, gamma, gae_lambda, ratios, mode, vtrace_rho_clip
-        del vtrace_c_clip
         nonlocal compute_gae_calls
         compute_gae_calls += 1
         advantages = torch.full_like(rewards, float(compute_gae_calls))
@@ -1227,17 +1224,16 @@ def test_trainer_recomputes_advantages_each_minibatch(
     def fake_ppo_loss(
         *,
         new_logp: torch.Tensor,
-        entropy: torch.Tensor,
+        entropy: torch.Tensor,  # noqa: ARG001
         new_values: torch.Tensor,
-        old_logp: torch.Tensor,
-        old_values: torch.Tensor,
-        returns: torch.Tensor,
+        old_logp: torch.Tensor,  # noqa: ARG001
+        old_values: torch.Tensor,  # noqa: ARG001
+        returns: torch.Tensor,  # noqa: ARG001
         advantages: torch.Tensor,
         policy_weight: torch.Tensor,
-        value_weight: torch.Tensor,
-        config: ppo.PPOConfig,
+        value_weight: torch.Tensor,  # noqa: ARG001
+        config: ppo.PPOConfig,  # noqa: ARG001
     ) -> ppo.PPOLossMetrics:
-        del entropy, old_logp, old_values, returns, value_weight, config
         means_seen.append(float((advantages * policy_weight).mean().item()))
         loss = new_values.mean() + 0.0 * new_logp.mean()
         zero = loss.detach().new_zeros(())
@@ -1289,16 +1285,15 @@ def test_trainer_puffer_vtrace_updates_mutable_replay_tensors(
         *,
         rewards: torch.Tensor,
         values: torch.Tensor,
-        dones: torch.Tensor,
+        dones: torch.Tensor,  # noqa: ARG001
         last_values: torch.Tensor,
-        gamma: float,
-        gae_lambda: float,
+        gamma: float,  # noqa: ARG001
+        gae_lambda: float,  # noqa: ARG001
         ratios: torch.Tensor | None = None,
         mode: ppo.AdvantageMode = "gae",
-        vtrace_rho_clip: float = 1.0,
-        vtrace_c_clip: float = 1.0,
+        vtrace_rho_clip: float = 1.0,  # noqa: ARG001
+        vtrace_c_clip: float = 1.0,  # noqa: ARG001
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        del dones, gamma, gae_lambda, vtrace_rho_clip, vtrace_c_clip
         assert mode == "puffer_vtrace"
         assert ratios is not None
         seen.append(
@@ -1336,16 +1331,15 @@ def test_trainer_puffer_vtrace_updates_mutable_replay_tensors(
     replacement_values = torch.full_like(segments.values[:1], 2.0)
 
     def fake_update_minibatch(
-        segments: ppo.PPORolloutSegments,
-        advantages: torch.Tensor,
-        returns: torch.Tensor,
-        policy_mask: torch.Tensor,
-        value_mask: torch.Tensor,
+        segments: ppo.PPORolloutSegments,  # noqa: ARG001
+        advantages: torch.Tensor,  # noqa: ARG001
+        returns: torch.Tensor,  # noqa: ARG001
+        policy_mask: torch.Tensor,  # noqa: ARG001
+        value_mask: torch.Tensor,  # noqa: ARG001
         sample: ppo.SegmentSample,
         *,
-        value_clip_anchor: torch.Tensor,
+        value_clip_anchor: torch.Tensor,  # noqa: ARG001
     ) -> ppo.PPOUpdateResult:
-        del segments, advantages, returns, policy_mask, value_mask, value_clip_anchor
         zero = replacement_logp.new_zeros(())
         metrics = ppo.PPOLossMetrics(
             loss=zero,

@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+import torch
+from owl.model import ModelActions, StatelessTransformerV1
+from owl.rl import ObsBatch, VectorizedEnv
+from owl.rs import assert_release_build
+from owl.train import FullConfig, configure_torch
+from tqdm import tqdm
+
+MODEL_A = 0
+MODEL_B = 1
+PLAYER_COUNTS = (2, 4)
+
+
+@dataclass(frozen=True)
+class LoadedCheckpoint:
+    path: Path
+    config: FullConfig
+    model: StatelessTransformerV1
+    env_steps: int | None
+
+
+@dataclass
+class MatchupStats:
+    player_games: list[int]
+    wins: list[int]
+
+    @classmethod
+    def empty(cls) -> MatchupStats:
+        return cls(player_games=[0, 0], wins=[0, 0])
+
+    def add_player_result(self, model_index: int, *, won: bool) -> None:
+        self.player_games[model_index] += 1
+        if won:
+            self.wins[model_index] += 1
+
+    def merge(self, other: MatchupStats) -> None:
+        for model_index in range(2):
+            self.player_games[model_index] += other.player_games[model_index]
+            self.wins[model_index] += other.wins[model_index]
+
+
+@dataclass(frozen=True)
+class BenchmarkResult:
+    player_count: int
+    games: int
+    steps: int
+    elapsed_seconds: float
+    stats: MatchupStats
+
+    @property
+    def steps_per_second(self) -> float:
+        return self.steps / self.elapsed_seconds
+
+
+def main() -> None:
+    args = _parse_args()
+
+    assert_release_build()
+    configure_torch()
+    device = torch.device(args.device)
+    checkpoint_a = _load_checkpoint(args.checkpoint_a, device=device)
+    checkpoint_b = _load_checkpoint(args.checkpoint_b, device=device)
+    _validate_compatible_checkpoints(checkpoint_a, checkpoint_b)
+
+    per_player_count_games = args.n_games // len(PLAYER_COUNTS)
+    results = [
+        run_benchmark(
+            checkpoint_a=checkpoint_a,
+            checkpoint_b=checkpoint_b,
+            player_count=player_count,
+            n_games=per_player_count_games,
+            n_envs=args.n_envs,
+            device=device,
+            deterministic=args.deterministic,
+            no_progress=args.no_progress,
+        )
+        for player_count in PLAYER_COUNTS
+    ]
+
+    _print_results(checkpoint_a, checkpoint_b, results)
+
+
+def run_benchmark(
+    *,
+    checkpoint_a: LoadedCheckpoint,
+    checkpoint_b: LoadedCheckpoint,
+    player_count: int,
+    n_games: int,
+    n_envs: int,
+    device: torch.device,
+    deterministic: bool,
+    no_progress: bool,
+) -> BenchmarkResult:
+    cfg = checkpoint_a.config
+    env = VectorizedEnv(
+        n_envs=n_envs,
+        obs_spec=cfg.env.obs_spec,
+        action_spec=cfg.env.action_spec,
+        two_player_weight=1.0 if player_count == 2 else 0.0,
+        pin_memory=device.type == "cuda",
+    )
+    obs = env.reset()
+    assignments = torch.full((n_envs, 4), -1, dtype=torch.int64)
+    start_masks = obs.still_playing.clone()
+    returns = torch.zeros((n_envs, 4), dtype=torch.float32)
+    for env_index in range(n_envs):
+        _assign_episode_models(
+            assignments,
+            env_index,
+            active_slots=start_masks[env_index],
+            player_count=player_count,
+        )
+
+    games = 0
+    steps = 0
+    stats = MatchupStats.empty()
+    progress = tqdm(
+        total=n_games,
+        desc=f"{player_count}p games",
+        unit="game",
+        disable=no_progress,
+    )
+    started_at = time.perf_counter()
+    try:
+        while games < n_games:
+            actions = _actions_for_assignments(
+                obs,
+                assignments,
+                model_a=checkpoint_a.model,
+                model_b=checkpoint_b.model,
+                device=device,
+                deterministic=deterministic,
+            )
+            obs, rewards, dones, _episode_metrics = env.step(
+                actions.launch,
+                actions.action_value(),
+                actions.ships,
+            )
+            steps += n_envs
+            returns += rewards
+            terminal_envs = torch.nonzero(dones.all(dim=1), as_tuple=False).flatten()
+            for env_index_tensor in terminal_envs:
+                if games >= n_games:
+                    break
+                env_index = int(env_index_tensor.item())
+                _record_terminal_result(
+                    stats,
+                    assignments[env_index],
+                    start_masks[env_index],
+                    returns[env_index],
+                )
+                games += 1
+                progress.update(1)
+
+                returns[env_index].zero_()
+                start_masks[env_index].copy_(obs.still_playing[env_index])
+                _assign_episode_models(
+                    assignments,
+                    env_index,
+                    active_slots=start_masks[env_index],
+                    player_count=player_count,
+                )
+    finally:
+        progress.close()
+
+    return BenchmarkResult(
+        player_count=player_count,
+        games=games,
+        steps=steps,
+        elapsed_seconds=time.perf_counter() - started_at,
+        stats=stats,
+    )
+
+
+def _load_checkpoint(path: Path, *, device: torch.device) -> LoadedCheckpoint:
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    if not isinstance(checkpoint, dict):
+        raise ValueError(f"{path} must contain a checkpoint mapping")
+
+    config = FullConfig.from_file(_checkpoint_config_path(path))
+    model = StatelessTransformerV1(
+        config.model,
+        obs_spec=config.env.obs_spec,
+        action_spec=config.env.action_spec,
+    ).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    env_steps = checkpoint.get("env_steps")
+    if env_steps is not None:
+        env_steps = int(env_steps)
+    return LoadedCheckpoint(path=path, config=config, model=model, env_steps=env_steps)
+
+
+def _checkpoint_config_path(checkpoint_path: Path) -> Path:
+    config_path = checkpoint_path.parent / "config.yaml"
+    if not config_path.is_file():
+        raise ValueError(f"expected checkpoint config at {config_path}")
+    return config_path
+
+
+def _validate_compatible_checkpoints(
+    checkpoint_a: LoadedCheckpoint,
+    checkpoint_b: LoadedCheckpoint,
+) -> None:
+    env_a = checkpoint_a.config.env
+    env_b = checkpoint_b.config.env
+    if env_a.obs_spec != env_b.obs_spec:
+        raise ValueError("checkpoint observation specs must match")
+    if env_a.action_spec != env_b.action_spec:
+        raise ValueError("checkpoint action specs must match")
+
+
+@torch.no_grad()
+def _actions_for_assignments(
+    obs: ObsBatch,
+    assignments: torch.Tensor,
+    *,
+    model_a: StatelessTransformerV1,
+    model_b: StatelessTransformerV1,
+    device: torch.device,
+    deterministic: bool,
+) -> ModelActions:
+    device_obs = _obs_to_device(obs, device)
+    output_a = model_a(device_obs, deterministic=deterministic)
+    output_b = model_b(device_obs, deterministic=deterministic)
+    use_a = assignments.to(device=device).eq(MODEL_A)
+    return _select_actions(output_a.actions, output_b.actions, use_a)
+
+
+def _obs_to_device(obs: ObsBatch, device: torch.device) -> ObsBatch:
+    return ObsBatch(
+        **{
+            field: getattr(obs, field).to(
+                device=device, non_blocking=device.type == "cuda"
+            )
+            for field in ObsBatch.model_fields
+        }
+    )
+
+
+def _select_actions(
+    actions_a: ModelActions,
+    actions_b: ModelActions,
+    use_a: torch.Tensor,
+) -> ModelActions:
+    action_mask = use_a[:, :, None, None]
+    return ModelActions(
+        launch=torch.where(action_mask, actions_a.launch, actions_b.launch).cpu(),
+        ships=torch.where(action_mask, actions_a.ships, actions_b.ships).cpu(),
+        angle=_select_optional_action(actions_a.angle, actions_b.angle, action_mask),
+        target=_select_optional_action(actions_a.target, actions_b.target, action_mask),
+    )
+
+
+def _select_optional_action(
+    tensor_a: torch.Tensor | None,
+    tensor_b: torch.Tensor | None,
+    mask: torch.Tensor,
+) -> torch.Tensor | None:
+    if tensor_a is None and tensor_b is None:
+        return None
+    if tensor_a is None or tensor_b is None:
+        raise ValueError("checkpoint action value tensors must have matching kinds")
+    return torch.where(mask, tensor_a, tensor_b).cpu()
+
+
+def _assign_episode_models(
+    assignments: torch.Tensor,
+    env_index: int,
+    *,
+    active_slots: torch.Tensor,
+    player_count: int,
+) -> None:
+    active = torch.nonzero(active_slots, as_tuple=False).flatten().tolist()
+    if len(active) != player_count:
+        raise ValueError(
+            f"expected {player_count} active players, got {len(active)} "
+            f"for env {env_index}"
+        )
+
+    pattern = _assignment_pattern(player_count)
+    assignments[env_index].fill_(-1)
+    for slot, model_index in zip(active, pattern, strict=True):
+        assignments[env_index, slot] = model_index
+
+
+def _assignment_pattern(player_count: int) -> tuple[int, ...]:
+    if player_count == 2:
+        return (MODEL_A, MODEL_B)
+    if player_count == 4:
+        return (MODEL_A, MODEL_A, MODEL_B, MODEL_B)
+    raise ValueError(f"player_count must be 2 or 4, got {player_count}")
+
+
+def _record_terminal_result(
+    stats: MatchupStats,
+    assignment: torch.Tensor,
+    start_mask: torch.Tensor,
+    returns: torch.Tensor,
+) -> None:
+    active_returns = returns[start_mask]
+    if active_returns.numel() == 0:
+        raise ValueError("cannot record a terminal result without starting players")
+    max_return = active_returns.max()
+    for player in torch.nonzero(start_mask, as_tuple=False).flatten().tolist():
+        model_index = int(assignment[player].item())
+        if model_index not in (MODEL_A, MODEL_B):
+            raise ValueError(f"missing model assignment for player slot {player}")
+        stats.add_player_result(
+            model_index,
+            won=bool(torch.isclose(returns[player], max_return).item()),
+        )
+
+
+def _print_results(
+    checkpoint_a: LoadedCheckpoint,
+    checkpoint_b: LoadedCheckpoint,
+    results: list[BenchmarkResult],
+) -> None:
+    total = MatchupStats.empty()
+    print()
+    print("Checkpoints")
+    print(f"  A: {checkpoint_a.path} ({_env_steps_label(checkpoint_a)})")
+    print(f"  B: {checkpoint_b.path} ({_env_steps_label(checkpoint_b)})")
+    print()
+    for result in results:
+        total.merge(result.stats)
+        print(
+            f"{result.player_count}p: {result.games} games, "
+            f"{result.steps:,} env steps, {result.steps_per_second:,.0f} steps/s"
+        )
+        _print_matrix(result.stats)
+        print()
+
+    print("Overall")
+    _print_matrix(total)
+
+
+def _env_steps_label(checkpoint: LoadedCheckpoint) -> str:
+    if checkpoint.env_steps is None:
+        return "env_steps unknown"
+    return f"{checkpoint.env_steps:,} env steps"
+
+
+def _print_matrix(stats: MatchupStats) -> None:
+    print("       vs A              vs B")
+    print(f"A      {'-':<16} {_matrix_cell(stats, MODEL_A):<16}")
+    print(f"B      {_matrix_cell(stats, MODEL_B):<16} {'-':<16}")
+
+
+def _matrix_cell(stats: MatchupStats, model_index: int) -> str:
+    games = stats.player_games[model_index]
+    wins = stats.wins[model_index]
+    losses = games - wins
+    winrate = wins / games if games else 0.0
+    return f"{wins}-{losses} ({winrate:.1%})"
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Benchmark two Orbit Wars model checkpoints against each other in "
+            "balanced 2-player and 4-player games using the Rust vectorized env."
+        )
+    )
+    parser.add_argument("checkpoint_a", type=Path, help="First checkpoint .pt file")
+    parser.add_argument("checkpoint_b", type=Path, help="Second checkpoint .pt file")
+    parser.add_argument(
+        "--n-games",
+        type=int,
+        required=True,
+        help="Total completed games to count, split evenly between 2p and 4p.",
+    )
+    parser.add_argument(
+        "--n-envs",
+        type=int,
+        default=64,
+        help="Number of parallel Rust sub-envs.",
+    )
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Torch device for model inference.",
+    )
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Use deterministic policy actions instead of sampling.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable progress bars.",
+    )
+    args = parser.parse_args()
+    _validate_args(args)
+    return args
+
+
+def _validate_args(args: argparse.Namespace) -> None:
+    if args.n_games <= 0:
+        raise ValueError("--n-games must be positive")
+    if args.n_games % len(PLAYER_COUNTS) != 0:
+        raise ValueError("--n-games must be even so 2p and 4p games are balanced")
+    if args.n_envs <= 0:
+        raise ValueError("--n-envs must be positive")
+
+
+if __name__ == "__main__":
+    main()

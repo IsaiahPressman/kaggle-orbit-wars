@@ -285,14 +285,13 @@ def test_non_flash_attention_uses_regular_shaped_sdpa(
     monkeypatch.setattr(model_impl, "use_flash_attn", disable_flash_attn)
 
     def fail_varlen_attention(
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        q: torch.Tensor,  # noqa: ARG001
+        k: torch.Tensor,  # noqa: ARG001
+        v: torch.Tensor,  # noqa: ARG001
         *,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
+        cu_seqlens: torch.Tensor,  # noqa: ARG001
+        max_seqlen: int,  # noqa: ARG001
     ) -> torch.Tensor:
-        del q, k, v, cu_seqlens, max_seqlen
         raise AssertionError("non-flash attention should not pack through varlen")
 
     monkeypatch.setattr(model_impl, "varlen_attention", fail_varlen_attention)
@@ -321,14 +320,13 @@ def test_unpacked_attention_uses_sdpa_when_projected_q_supports_flash(
         return q.ndim == 4
 
     def fail_varlen_attention(
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        q: torch.Tensor,  # noqa: ARG001
+        k: torch.Tensor,  # noqa: ARG001
+        v: torch.Tensor,  # noqa: ARG001
         *,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
+        cu_seqlens: torch.Tensor,  # noqa: ARG001
+        max_seqlen: int,  # noqa: ARG001
     ) -> torch.Tensor:
-        del q, k, v, cu_seqlens, max_seqlen
         raise AssertionError("unpacked attention should use regular-shaped SDPA")
 
     def counted_sdpa(*args: Any, **kwargs: Any) -> torch.Tensor:
@@ -424,14 +422,13 @@ def test_force_flash_attention_rejects_non_flash_projection(
         return q.numel() < 0
 
     def fail_varlen_attention(
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        q: torch.Tensor,  # noqa: ARG001
+        k: torch.Tensor,  # noqa: ARG001
+        v: torch.Tensor,  # noqa: ARG001
         *,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
+        cu_seqlens: torch.Tensor,  # noqa: ARG001
+        max_seqlen: int,  # noqa: ARG001
     ) -> torch.Tensor:
-        del q, k, v, cu_seqlens, max_seqlen
         raise AssertionError("forced flash attention should fail before fallback")
 
     monkeypatch.setattr(model_impl, "use_flash_attn", disable_flash_attn)
@@ -555,14 +552,13 @@ def test_flash_encoder_packs_once_before_trunk_and_unpacks_once_after(
 
     def fake_varlen_attention(
         q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        k: torch.Tensor,  # noqa: ARG001
+        v: torch.Tensor,  # noqa: ARG001
         *,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
+        cu_seqlens: torch.Tensor,  # noqa: ARG001
+        max_seqlen: int,  # noqa: ARG001
     ) -> torch.Tensor:
         nonlocal varlen_calls
-        del k, v, cu_seqlens, max_seqlen
         varlen_calls += 1
         return torch.zeros_like(q)
 
@@ -610,13 +606,12 @@ def test_autocast_encoder_packs_after_appending_player_tokens(
 
     def fake_varlen_attention(
         q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        k: torch.Tensor,  # noqa: ARG001
+        v: torch.Tensor,  # noqa: ARG001
         *,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
+        cu_seqlens: torch.Tensor,  # noqa: ARG001
+        max_seqlen: int,  # noqa: ARG001
     ) -> torch.Tensor:
-        del k, v, cu_seqlens, max_seqlen
         assert q.dtype == torch.bfloat16
         return torch.zeros_like(q)
 

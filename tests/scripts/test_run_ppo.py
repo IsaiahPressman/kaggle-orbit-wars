@@ -80,11 +80,8 @@ class _FakeTrainer:
         self,
         path: Path,
         *,
-        config: FullConfig,
-        config_path: Path,
         env_steps: int,
     ) -> None:
-        del config, config_path
         self.checkpoints.append((path, env_steps))
 
 
@@ -163,7 +160,6 @@ def test_run_training_loop_writes_periodic_checkpoints(tmp_path: Path) -> None:
         logger=logger,
         run_dir=tmp_path,
         cfg=cfg,
-        config_path=Path("config.yaml"),
         env_steps_per_iteration=800,
         max_env_steps=1600,
         max_runtime_seconds=None,
@@ -192,7 +188,6 @@ def test_run_training_session_sets_trainable_parameter_summary(
         trainer=trainer,
         run_dir=tmp_path,
         cfg=cfg,
-        config_path=Path("config.yaml"),
         log_mode=LogMode.DEBUG,
         env_steps_per_iteration=8,
         max_env_steps=8,
@@ -225,7 +220,6 @@ def test_run_training_session_closes_logger_and_skips_final_checkpoint_on_error(
             trainer=trainer,
             run_dir=tmp_path,
             cfg=cfg,
-            config_path=Path("config.yaml"),
             log_mode=LogMode.DEBUG,
             env_steps_per_iteration=8,
             max_env_steps=8,
@@ -237,7 +231,6 @@ def test_run_training_session_closes_logger_and_skips_final_checkpoint_on_error(
 
 
 def test_ppo_trainer_write_checkpoint_includes_training_state(tmp_path: Path) -> None:
-    cfg = _full_config()
     model = torch.nn.Linear(2, 1)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
@@ -249,15 +242,11 @@ def test_ppo_trainer_write_checkpoint_includes_training_state(tmp_path: Path) ->
 
     trainer.write_checkpoint(
         path,
-        config=cfg,
-        config_path=Path("config.yaml"),
         env_steps=512,
     )
 
     checkpoint = torch.load(path, weights_only=False)
     assert checkpoint["env_steps"] == 512
-    assert checkpoint["config"]["env"]["n_envs"] == 2
-    assert checkpoint["config_path"] == "config.yaml"
     assert checkpoint["model"].keys() == model.state_dict().keys()
     assert "state" in checkpoint["optimizer"]
     assert checkpoint["lr_scheduler"] == scheduler.state_dict()
@@ -265,8 +254,6 @@ def test_ppo_trainer_write_checkpoint_includes_training_state(tmp_path: Path) ->
         "model",
         "optimizer",
         "lr_scheduler",
-        "config",
-        "config_path",
         "env_steps",
     }
     assert not (tmp_path / ".checkpoint.pt.tmp").exists()

@@ -24,12 +24,15 @@ class MetricLogger:
 
 
 class DebugLogger(MetricLogger):
-    def log(self, metrics: dict[str, float], *, step: int) -> None:
-        del step
+    def log(self, metrics: dict[str, float], *, step: int) -> None:  # noqa: ARG002
         print(metrics)
 
-    def set_summary(self, key: str, value: int | float) -> None:
-        del key, value
+    def set_summary(
+        self,
+        key: str,  # noqa: ARG002
+        value: int | float,  # noqa: ARG002
+    ) -> None:
+        return None
 
     def close(self) -> None:
         return None

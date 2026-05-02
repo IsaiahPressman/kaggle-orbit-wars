@@ -63,9 +63,10 @@ Run a preset with:
 uv run python scripts/run_ppo.py configs/baseline.yaml runs --log-mode debug --max-env-steps 16
 ```
 
-PPO checkpoints save model, optimizer, scheduler, config, and environment-step
-metadata. They do not save the Rust environment state or current observation, so
-they are not exact resume snapshots.
+PPO run directories save `config.yaml` alongside checkpoints. Checkpoints save
+model, optimizer, scheduler, and environment-step metadata. They do not save the
+Rust environment state or current observation, so they are not exact resume
+snapshots.
 
 Training logs terminal environment metrics under `train/` when episodes finish
 during a rollout, including game length, per-player win rates, launch density,

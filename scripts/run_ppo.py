@@ -63,7 +63,6 @@ def main() -> None:
         trainer=trainer,
         run_dir=run_dir,
         cfg=cfg,
-        config_path=args.config,
         log_mode=args.log_mode,
         env_steps_per_iteration=env_steps_per_iteration,
         max_env_steps=args.max_env_steps,
@@ -77,7 +76,6 @@ def _run_training_session(
     trainer: PPOTrainer,
     run_dir: Path,
     cfg: FullConfig,
-    config_path: Path,
     log_mode: LogMode,
     env_steps_per_iteration: int,
     max_env_steps: int | None,
@@ -92,15 +90,12 @@ def _run_training_session(
             logger=logger,
             run_dir=run_dir,
             cfg=cfg,
-            config_path=config_path,
             env_steps_per_iteration=env_steps_per_iteration,
             max_env_steps=max_env_steps,
             max_runtime_seconds=max_runtime_seconds,
         )
         trainer.write_checkpoint(
             run_dir / "checkpoint-final.pt",
-            config=cfg,
-            config_path=config_path,
             env_steps=env_steps,
         )
 
@@ -111,7 +106,6 @@ def _run_training_loop(
     logger: Any,
     run_dir: Path,
     cfg: FullConfig,
-    config_path: Path,
     env_steps_per_iteration: int,
     max_env_steps: int | None,
     max_runtime_seconds: float | None,
@@ -133,8 +127,6 @@ def _run_training_loop(
             ):
                 trainer.write_checkpoint(
                     run_dir / f"checkpoint-{env_steps}.pt",
-                    config=cfg,
-                    config_path=config_path,
                     env_steps=env_steps,
                 )
                 next_checkpoint_env_steps = _next_periodic_checkpoint_step(

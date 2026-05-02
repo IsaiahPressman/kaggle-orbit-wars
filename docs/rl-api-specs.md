@@ -69,9 +69,11 @@ observation's episode and have not finished. The Rust vectorized environment
 samples a fresh random internal-to-outer player-slot mapping for each sub-env
 reset. In 4-player episodes all four outer slots are active; in 2-player
 episodes any two of the four outer slots may be active. Inactive outer player
-slots are `False`. After a terminal auto-reset, `still_playing` describes the
-returned reset observation, while `dones` still describes the transition that
-just finished.
+slots are `False`. This mapping also randomizes starting-seat assignment for
+fixed outer-slot policies in evaluation and benchmarking code, so callers do not
+need to rotate policy-to-slot assignments themselves. After a terminal
+auto-reset, `still_playing` describes the returned reset observation, while
+`dones` still describes the transition that just finished.
 
 ### Normalization
 

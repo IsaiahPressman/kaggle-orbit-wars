@@ -398,8 +398,6 @@ class PPOTrainer:
         self,
         path: Path,
         *,
-        config: Any,
-        config_path: Path,
         env_steps: int,
     ) -> None:
         checkpoint = {
@@ -408,8 +406,6 @@ class PPOTrainer:
             "lr_scheduler": (
                 None if self.lr_scheduler is None else self.lr_scheduler.state_dict()
             ),
-            "config": config.model_dump(mode="json", round_trip=True),
-            "config_path": str(config_path),
             "env_steps": env_steps,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
