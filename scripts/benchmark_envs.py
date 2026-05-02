@@ -16,6 +16,7 @@ from typing import Any, Literal, cast
 import numpy as np
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
+    ActionDiscreteTargetsConfig,
     ActionPureConfig,
     ObsV1Config,
     VectorizedEnv,
@@ -114,6 +115,15 @@ def parse_args() -> argparse.Namespace:
         help="Rust action slots per source. The benchmark only fills the first slot.",
     )
     parser.add_argument(
+        "--action-spec",
+        choices=["pure", "discrete_targets"],
+        default="pure",
+        help=(
+            "Rust action spec to benchmark. Kaggle always uses its native "
+            "angle actions."
+        ),
+    )
+    parser.add_argument(
         "--verbose-kaggle-import",
         action="store_true",
         help="Do not suppress Kaggle registry import noise.",
@@ -144,12 +154,17 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
     if args.max_entities is not None:
         obs_spec = ObsV1Config(max_entities=args.max_entities)
 
+    action_spec = (
+        ActionPureConfig(max_per_planet_launches=args.max_per_planet_launches)
+        if args.action_spec == "pure"
+        else ActionDiscreteTargetsConfig(
+            max_per_planet_launches=args.max_per_planet_launches
+        )
+    )
     env = VectorizedEnv(
         n_envs=args.n_envs,
         obs_spec=obs_spec,
-        action_spec=ActionPureConfig(
-            max_per_planet_launches=args.max_per_planet_launches
-        ),
+        action_spec=action_spec,
         two_player_weight=1.0 if args.players == 2 else 0.0,
         pin_memory=False,
     )
@@ -163,7 +178,10 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
         args.max_per_planet_launches,
     )
     launch = np.zeros(action_shape, dtype=np.bool_)
-    angle = np.zeros(action_shape, dtype=np.float32)
+    action_value = np.zeros(
+        action_shape,
+        dtype=np.float32 if args.action_spec == "pure" else np.int64,
+    )
     ships = np.zeros(action_shape, dtype=np.int64)
 
     launches = 0
@@ -175,9 +193,9 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
         unit="tick",
     ):
         launches += sample_rust_actions(
-            env, rng, args.launch_prob, launch, angle, ships
+            env, rng, args.launch_prob, launch, action_value, ships
         )
-        env.step(launch, angle, ships)
+        env.step(launch, action_value, ships)
 
     timed_launches = 0
     elapsed = 0.0
@@ -190,10 +208,10 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
     ):
         total_started_at = time.perf_counter()
         timed_launches += sample_rust_actions(
-            env, rng, args.launch_prob, launch, angle, ships
+            env, rng, args.launch_prob, launch, action_value, ships
         )
         started_at = time.perf_counter()
-        env.step(launch, angle, ships)
+        env.step(launch, action_value, ships)
         elapsed += time.perf_counter() - started_at
         total_elapsed += time.perf_counter() - total_started_at
 
@@ -215,19 +233,29 @@ def sample_rust_actions(
     rng: np.random.Generator,
     launch_prob: float,
     launch: np.ndarray,
-    angle: np.ndarray,
+    action_value: np.ndarray,
     ships: np.ndarray,
 ) -> int:
     can_act = env.observations.can_act.numpy()
     max_launch = env.observations.max_launch.numpy()
-    selected = can_act & (rng.random(can_act.shape) < launch_prob)
+    if can_act.ndim == 3:
+        selected = can_act & (rng.random(can_act.shape) < launch_prob)
+        action_value[..., 0] = rng.uniform(0.0, math.tau, size=can_act.shape).astype(
+            np.float32
+        )
+    else:
+        source_can_act = can_act.any(axis=-1)
+        selected = source_can_act & (rng.random(source_can_act.shape) < launch_prob)
+        action_value.fill(0)
+        for env_index, player, source in np.argwhere(selected):
+            valid_targets = np.flatnonzero(can_act[env_index, player, source])
+            action_value[env_index, player, source, 0] = int(rng.choice(valid_targets))
 
     launch.fill(False)
     launch[..., 0] = selected
-    angle[..., 0] = rng.uniform(0.0, math.tau, size=can_act.shape).astype(np.float32)
 
     high = np.maximum(max_launch + 1, 2)
-    sampled_ships = rng.integers(1, high, size=can_act.shape, dtype=np.int64)
+    sampled_ships = rng.integers(1, high, size=max_launch.shape, dtype=np.int64)
     sampled_ships[~selected] = 0
     ships.fill(0)
     ships[..., 0] = sampled_ships

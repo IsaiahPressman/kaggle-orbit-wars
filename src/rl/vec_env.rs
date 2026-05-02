@@ -724,6 +724,7 @@ struct EpisodeStats {
     turn_count: u32,
     max_fleet_size: i32,
     planets_captured: u32,
+    asteroids_captured: u32,
     max_entities_exceeded_turns: u32,
     fleet_losses: FleetLossStats,
 }
@@ -812,6 +813,10 @@ impl EpisodeStats {
         self.planets_captured += planets_captured;
     }
 
+    fn record_asteroids_captured(&mut self, asteroids_captured: u32) {
+        self.asteroids_captured += asteroids_captured;
+    }
+
     fn terminal_metrics(
         &self,
         state: &State,
@@ -834,6 +839,7 @@ impl EpisodeStats {
             ("full_length_rate", full_length_value(state)),
             ("terminal_ship_count", terminal_ship_count(state)),
             ("planets_captured", f64::from(self.planets_captured)),
+            ("asteroids_captured", f64::from(self.asteroids_captured)),
             ("launches_per_game", f64::from(self.launch_count)),
             (
                 "launches_per_turn",
@@ -1037,6 +1043,7 @@ fn step_one_env(
     let result = step(state, decoded);
     episode_stats.record_step_result(state, result.fleet_losses, max_fleets);
     episode_stats.record_planets_captured(result.planets_captured);
+    episode_stats.record_asteroids_captured(result.asteroids_captured);
     let should_reset = result_is_terminal(&result.player_results);
     let won_reward = split_won_reward(
         result
@@ -1434,6 +1441,7 @@ mod tests {
         assert_eq!(collected["max_fleet_size"], vec![5.0]);
         assert_eq!(collected["fleet_size_std"], vec![1.0]);
         assert_eq!(collected["planets_captured"], vec![0.0]);
+        assert_eq!(collected["asteroids_captured"], vec![0.0]);
         assert!(!collected.contains_key("mean_fleets_per_launch"));
     }
 

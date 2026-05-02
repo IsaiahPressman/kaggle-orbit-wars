@@ -72,7 +72,7 @@ class DiscreteTargetsActor(nn.Module):
         self.log_scale_head = nn.Linear(transformer_config.embed_dim, mixtures)
 
     def get_input_layers(self) -> tuple[nn.Module, ...]:
-        return (self.source_proj,)
+        return ()
 
     def get_output_layers(self) -> tuple[nn.Linear, ...]:
         return (

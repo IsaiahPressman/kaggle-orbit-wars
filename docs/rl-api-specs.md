@@ -332,6 +332,7 @@ Terminal episode metrics:
 | `full_length_rate` | `1.0` when a game reaches the configured episode horizon, otherwise `0.0`. |
 | `terminal_ship_count` | Total ships on planets and in active fleets at terminal. |
 | `planets_captured` | Total planet captures over the episode, counting repeat captures. |
+| `asteroids_captured` | Total comet/asteroid planet captures over the episode, counting repeat captures. |
 | `launches_per_turn` | Mean launches per player per turn. |
 | `max_fleet_size` | Largest fleet launched during the episode. |
 | `fleet_size_std` | Population standard deviation of launched fleet sizes during the episode. |
