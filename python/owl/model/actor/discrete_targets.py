@@ -62,7 +62,11 @@ class DiscreteTargetsActor(nn.Module):
         self.out = nn.Linear(transformer_config.embed_dim, transformer_config.embed_dim)
         self.norm2 = nn.LayerNorm(transformer_config.embed_dim)
         self.mlp = FeedForward(transformer_config)
-        self.source_proj = nn.Linear(
+        self.continue_source_proj = nn.Linear(
+            transformer_config.embed_dim,
+            transformer_config.embed_dim,
+        )
+        self.size_pair_proj = nn.Linear(
             transformer_config.embed_dim,
             transformer_config.embed_dim,
         )
@@ -103,11 +107,12 @@ class DiscreteTargetsActor(nn.Module):
         else:
             target = Categorical(logits=selection.target_logits.float()).sample()
         target = torch.where(launch, target, torch.zeros_like(target))
-        all_size_params = self._all_size_params(selection, slot_input, max_launch)
-        params = policy_params_for_selected_target(
+        params = self._policy_params_for_selected_target(
             selection,
-            all_size_params,
+            slot_input,
+            max_launch,
             target,
+            min_fleet_size=min_fleet_size,
         )
         ships = sample_discretized_logistic_mixture(
             params.size_mix_logits,
@@ -119,6 +124,12 @@ class DiscreteTargetsActor(nn.Module):
         )
         ships = torch.where(launch, ships, torch.zeros_like(ships))
 
+        entropy_params = self._policy_params_for_entropy(
+            selection,
+            slot_input,
+            max_launch,
+            min_fleet_size=min_fleet_size,
+        )
         launch_log_prob, target_log_prob, size_log_prob = discrete_action_log_probs(
             params,
             launch,
@@ -129,8 +140,7 @@ class DiscreteTargetsActor(nn.Module):
             min_fleet_size=min_fleet_size,
         )
         launch_entropy, target_entropy, size_entropy = discrete_action_entropy(
-            params,
-            all_size_params,
+            entropy_params,
             max_launch,
             source_active,
             can_act,
@@ -194,11 +204,18 @@ class DiscreteTargetsActor(nn.Module):
             can_act,
             min_fleet_size,
         )
-        all_size_params = self._all_size_params(selection, slot_input, max_launch)
-        params = policy_params_for_selected_target(
+        params = self._policy_params_for_selected_target(
             selection,
-            all_size_params,
+            slot_input,
+            max_launch,
             target.clamp(0, ACTION_ENTITY_SLOTS - 1),
+            min_fleet_size=min_fleet_size,
+        )
+        entropy_params = self._policy_params_for_entropy(
+            selection,
+            slot_input,
+            max_launch,
+            min_fleet_size=min_fleet_size,
         )
         launch_log_prob, target_log_prob, size_log_prob = discrete_action_log_probs(
             params,
@@ -210,8 +227,7 @@ class DiscreteTargetsActor(nn.Module):
             min_fleet_size=min_fleet_size,
         )
         launch_entropy, target_entropy, size_entropy = discrete_action_entropy(
-            params,
-            all_size_params,
+            entropy_params,
             max_launch,
             source_active,
             can_act,
@@ -271,11 +287,49 @@ class DiscreteTargetsActor(nn.Module):
             target_logits,
             torch.zeros_like(target_logits),
         )
-        launch_hidden = self.source_proj(slot_input)
+        launch_hidden = self.continue_source_proj(slot_input)
         return DiscreteTargetSelectionParams(
             continue_logits=self.continue_head(launch_hidden).squeeze(-1),
             target_logits=safe_target_logits,
             target_values=v,
+        )
+
+    def _policy_params_for_selected_target(
+        self,
+        selection: DiscreteTargetSelectionParams,
+        slot_input: torch.Tensor,
+        max_launch: torch.Tensor,
+        target_index: torch.Tensor,
+        *,
+        min_fleet_size: int,
+    ) -> DiscreteTargetPolicyParams:
+        selected_target_values = gather_selected_target_values(
+            selection.target_values,
+            target_index,
+        )
+        size_params = self._size_params_from_target_values(
+            slot_input,
+            max_launch,
+            selected_target_values,
+            min_fleet_size=min_fleet_size,
+        )
+        return policy_params_for_selected_target(selection, size_params)
+
+    def _policy_params_for_entropy(
+        self,
+        selection: DiscreteTargetSelectionParams,
+        slot_input: torch.Tensor,
+        max_launch: torch.Tensor,
+        *,
+        min_fleet_size: int,
+    ) -> DiscreteTargetPolicyParams:
+        target_index = selection.target_logits.argmax(dim=-1)
+        return self._policy_params_for_selected_target(
+            selection,
+            slot_input,
+            max_launch,
+            target_index,
+            min_fleet_size=min_fleet_size,
         )
 
     def _all_size_params(
@@ -283,6 +337,8 @@ class DiscreteTargetsActor(nn.Module):
         selection: DiscreteTargetSelectionParams,
         slot_input: torch.Tensor,
         max_launch: torch.Tensor,
+        *,
+        min_fleet_size: int,
     ) -> DiscreteTargetSizeParams:
         batch, players, source_slots, _ = slot_input.shape
         target_slots = selection.target_values.shape[2]
@@ -297,6 +353,7 @@ class DiscreteTargetsActor(nn.Module):
             slot_input.unsqueeze(3),
             max_launch,
             target_values,
+            min_fleet_size=min_fleet_size,
         )
 
     def _size_params_from_target_values(
@@ -304,25 +361,25 @@ class DiscreteTargetsActor(nn.Module):
         slot_input: torch.Tensor,
         max_launch: torch.Tensor,
         target_values: torch.Tensor,
+        *,
+        min_fleet_size: int,
     ) -> DiscreteTargetSizeParams:
         selected_v = self.out(target_values)
         enriched = slot_input + selected_v
         enriched = enriched + self.mlp(self.norm2(enriched))
-        source_hidden = self.source_proj(enriched)
+        source_hidden = self.size_pair_proj(enriched)
 
-        residual_budget = (
-            max_launch.clamp_min(1)
-            .to(dtype=torch.float32)
-            .view(
-                *max_launch.shape,
-                *((1,) * (source_hidden.ndim - max_launch.ndim)),
-            )
+        residual_budget = max_launch.to(dtype=torch.float32).view(
+            *max_launch.shape,
+            *((1,) * (source_hidden.ndim - max_launch.ndim)),
         )
+        support_lo = torch.full_like(residual_budget, float(min_fleet_size))
+        support_width = (residual_budget - support_lo + 1.0).clamp_min(1.0)
         rho = torch.sigmoid(self.mean_head(source_hidden).float())
-        mu = 1.0 + rho * (residual_budget - 1.0)
+        mu = support_lo + rho * (residual_budget - support_lo).clamp_min(0.0)
         scale_upper = torch.maximum(
             torch.full_like(residual_budget, self.config.scale_max_abs_floor),
-            residual_budget * self.config.scale_max_frac,
+            support_width * self.config.scale_max_frac,
         )
         scale = log_interpolate(
             self.config.scale_min,
@@ -338,37 +395,26 @@ class DiscreteTargetsActor(nn.Module):
 
 def policy_params_for_selected_target(
     selection: DiscreteTargetSelectionParams,
-    all_size_params: DiscreteTargetSizeParams,
-    target_index: torch.Tensor,
+    size_params: DiscreteTargetSizeParams,
 ) -> DiscreteTargetPolicyParams:
     return DiscreteTargetPolicyParams(
         continue_logits=selection.continue_logits,
         target_logits=selection.target_logits,
-        size_mix_logits=gather_selected_target_params(
-            all_size_params.size_mix_logits,
-            target_index,
-        ),
-        size_mu=gather_selected_target_params(
-            all_size_params.size_mu,
-            target_index,
-        ),
-        size_scale=gather_selected_target_params(
-            all_size_params.size_scale,
-            target_index,
-        ),
+        size_mix_logits=size_params.size_mix_logits,
+        size_mu=size_params.size_mu,
+        size_scale=size_params.size_scale,
     )
 
 
-def gather_selected_target_params(
-    values: torch.Tensor,
+def gather_selected_target_values(
+    target_values: torch.Tensor,
     target_index: torch.Tensor,
 ) -> torch.Tensor:
-    gather_index = target_index[..., None, None].expand(
+    gather_index = target_index[..., None].expand(
         *target_index.shape,
-        1,
-        values.shape[-1],
+        target_values.shape[-1],
     )
-    return values.gather(dim=3, index=gather_index).squeeze(3)
+    return target_values.gather(dim=2, index=gather_index)
 
 
 def log_interpolate(
@@ -450,10 +496,29 @@ def sample_discretized_logistic_mixture(
     min_fleet_size: int,
     deterministic: bool,
 ) -> torch.Tensor:
+    if not deterministic:
+        mix_index = Categorical(logits=mix_logits.float()).sample()
+        gather_index = mix_index.unsqueeze(-1)
+        selected_mu = mu.gather(-1, gather_index).squeeze(-1).float()
+        selected_scale = scale.gather(-1, gather_index).squeeze(-1).float()
+
+        residual = residual_budget.float()
+        lo_count = float(min_fleet_size) - 0.5
+        hi_count = residual + 0.5
+        cdf_lo = torch.sigmoid((lo_count - selected_mu) / selected_scale)
+        cdf_hi = torch.sigmoid((hi_count - selected_mu) / selected_scale)
+        support_mass = (cdf_hi - cdf_lo).clamp_min(1e-12)
+        u = cdf_lo + torch.rand_like(cdf_lo) * support_mass
+        y = selected_mu + selected_scale * torch.logit(u.clamp(1e-6, 1.0 - 1e-6))
+        ships = y.round().to(dtype=torch.int64).clamp_min(min_fleet_size)
+        return torch.minimum(ships, residual_budget.clamp_min(min_fleet_size))
+
     support = ship_support(
         residual_budget,
         min_fleet_size=min_fleet_size,
-        max_ship_support=int(residual_budget.max().clamp_min(min_fleet_size).item()),
+        max_ship_support=int(
+            residual_budget.max().clamp_min(min_fleet_size).item() - min_fleet_size + 1
+        ),
     )
     log_probs = discretized_logistic_mixture_log_prob(
         support,
@@ -479,9 +544,19 @@ def ship_support(
     min_fleet_size: int,
     max_ship_support: int,
 ) -> torch.Tensor:
-    max_count = max(max_ship_support, 1)
-    offsets = torch.arange(max_count, device=residual_budget.device)
-    return min_fleet_size + offsets.view(*((1,) * residual_budget.ndim), max_count)
+    max_residual = int(residual_budget.max().item())
+    support_count = max(max_residual - min_fleet_size + 1, 1)
+    support_count = min(support_count, max_ship_support)
+    support_count = max(support_count, 1)
+    offsets = torch.arange(
+        support_count,
+        device=residual_budget.device,
+        dtype=residual_budget.dtype,
+    )
+    return min_fleet_size + offsets.view(
+        *((1,) * residual_budget.ndim),
+        support_count,
+    )
 
 
 def discrete_action_log_probs(
@@ -525,7 +600,6 @@ def discrete_action_log_probs(
 
 def discrete_action_entropy(
     params: DiscreteTargetPolicyParams,
-    all_size_params: DiscreteTargetSizeParams,
     residual_budget: torch.Tensor,
     source_active: torch.Tensor,
     can_act: torch.Tensor,
@@ -546,37 +620,28 @@ def discrete_action_entropy(
         max_ship_support=max_ship_support,
     )
     log_probs = discretized_logistic_mixture_log_prob(
-        support.unsqueeze(-2),
-        residual_budget.unsqueeze(-1).unsqueeze(-1),
-        all_size_params.size_mix_logits.unsqueeze(-2),
-        all_size_params.size_mu.unsqueeze(-2),
-        all_size_params.size_scale.unsqueeze(-2),
+        support,
+        residual_budget.unsqueeze(-1),
+        params.size_mix_logits.unsqueeze(-2),
+        params.size_mu.unsqueeze(-2),
+        params.size_scale.unsqueeze(-2),
         min_fleet_size=min_fleet_size,
     )
-    valid = support.unsqueeze(-2) <= residual_budget.unsqueeze(-1).unsqueeze(-1)
+    valid = support <= residual_budget.unsqueeze(-1)
     probs = torch.where(valid, log_probs.exp(), torch.zeros_like(log_probs))
-    size_entropy_by_target = -(
+    size_entropy = -(
         probs * torch.where(valid, log_probs, torch.zeros_like(log_probs))
     ).sum(dim=-1)
-    size_entropy = (
-        (target_prob * size_entropy_by_target)
-        .masked_fill(
-            ~can_act,
-            0.0,
-        )
-        .sum(dim=-1)
-    )
-    launch_probability = torch.sigmoid(params.continue_logits.float())
     return (
         torch.where(source_active, launch_entropy, torch.zeros_like(launch_entropy)),
         torch.where(
             source_active,
-            launch_probability * target_entropy,
+            target_entropy,
             torch.zeros_like(target_entropy),
         ),
         torch.where(
             source_active,
-            launch_probability * size_entropy,
+            size_entropy,
             torch.zeros_like(size_entropy),
         ),
     )

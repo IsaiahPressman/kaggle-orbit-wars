@@ -227,11 +227,13 @@ target logits for every `(source, target)` pair and masks those logits with the
 4-D discrete `can_act` tensor. Fully masked source rows are sanitized to finite
 zero logits and are suppressed by the launch/source mask.
 
-After sampling a target from the masked softmax, the actor gathers the selected
-target value vector, adds it to the source residual stream, and applies a
-feedforward residual block. This is intentionally close to a standard
-attention block, except the value path uses the sampled target row instead of a
-softmax-weighted average.
+After sampling or replaying a target from the masked softmax, the actor gathers
+only the selected target value vector, adds it to the source residual stream,
+and applies a feedforward residual block. This is intentionally close to a
+standard attention block, except the value path uses the selected target row
+instead of a softmax-weighted average. The launch/stop decision and selected
+target-conditioned size decision use separate source projections so the
+source-only continue gate is not coupled to the pair-conditioned size head.
 
 For each source, the discrete actor emits:
 
@@ -240,13 +242,22 @@ For each source, the discrete actor emits:
 - mixture parameters for a truncated discretized logistic fleet-size policy
 
 The fleet-size mixture maps raw means through a sigmoid into the current
-`1..max_launch` budget range. Raw scale outputs are passed through a sigmoid
-and log-interpolated between `scale_min` and
-`max(scale_max_abs_floor, scale_max_frac * max_launch)`. This keeps very small
-scales available for near-deterministic counts while still allowing broad
-fractional exploration for large ship budgets. PPO replay uses the marginal
-mixture log-probability of the integer ship count, not the sampled component
-log-probability.
+`min_fleet_size..max_launch` budget range. Raw scale outputs are passed through
+a sigmoid and log-interpolated between `scale_min` and
+`max(scale_max_abs_floor, scale_max_frac * support_width)`, where
+`support_width = max_launch - min_fleet_size + 1`. This keeps very small scales
+available for near-deterministic counts while still allowing broad fractional
+exploration for large ship budgets. Stochastic sampling selects a mixture
+component and samples the truncated discretized logistic with inverse-CDF
+sampling, avoiding full ship-support enumeration in the rollout hot path. PPO
+replay uses the marginal mixture log-probability of the integer ship count, not
+the sampled component log-probability. The discrete-target entropy bonus is an
+exploration heuristic rather than the exact joint-action entropy: it sums
+launch entropy, target entropy, and a target-conditioned size entropy without
+weighting target and size entropy by launch probability. To avoid materializing
+all source-target size parameters, the size entropy term uses the current
+policy's argmax target as a proxy; replayed action targets are used only for
+action log-probability, so no-launch placeholder targets do not affect entropy.
 
 ## Log-Prob Replay
 
