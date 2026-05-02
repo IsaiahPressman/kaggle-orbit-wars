@@ -67,7 +67,11 @@ PPO run directories save `config.yaml` alongside checkpoints. Checkpoints save
 model, optimizer, scheduler, and environment-step metadata. They do not save the
 Rust environment state or current observation, so they are not exact resume
 snapshots. Periodic checkpoint names use grouped zero-padded environment-step
-labels such as `checkpoint_00_022_000_000.pt`.
+labels such as `checkpoint_00_022_000_000.pt`. At each periodic checkpoint, the
+current model is evaluated against the last-best model snapshot and logs
+`eval/win_rate_against_last_best` plus terminal environment metrics under
+`eval/`. When the current model reaches at least 70% eval win rate, the
+last-best snapshot is replaced and also saved as `checkpoint_last_best.pt`.
 
 Training logs terminal environment metrics under `train/` when episodes finish
 during a rollout, including game length, per-player win rates, launch density,
