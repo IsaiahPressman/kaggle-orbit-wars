@@ -3,6 +3,8 @@
 This document describes the currently available RL observation and action specs.
 The Python config API uses pydantic discriminator fields so future specs can add
 different options without changing the outer `VectorizedEnv` constructor shape.
+`EnvConfig.n_envs` defaults to `2` and must be even so built-in checkpoint
+evaluation can split evaluation games across 2-player and 4-player batches.
 
 ```python
 from owl.rl import ActionPureConfig, ObsV1Config, VectorizedEnv

@@ -144,15 +144,6 @@ def test_validate_args_rejects_non_positive_runtime_hours() -> None:
         run_ppo._validate_args(Namespace(max_env_steps=None, max_runtime_hours=0.0))
 
 
-def test_validate_checkpoint_eval_config_requires_even_train_env_count() -> None:
-    cfg = _config_with_envs(10)
-
-    run_ppo._validate_checkpoint_eval_config(cfg)
-
-    with pytest.raises(ValueError, match=r"env\.n_envs must be even"):
-        run_ppo._validate_checkpoint_eval_config(_config_with_envs(9))
-
-
 def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

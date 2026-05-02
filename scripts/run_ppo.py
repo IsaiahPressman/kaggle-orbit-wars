@@ -316,11 +316,6 @@ def _format_checkpoint_step(env_steps: int) -> str:
     return f"{digits[:2]}_{digits[2:5]}_{digits[5:8]}_{digits[8:11]}"
 
 
-def _validate_checkpoint_eval_config(cfg: FullConfig) -> None:
-    if cfg.env.n_envs % 2 != 0:
-        raise ValueError("env.n_envs must be even for checkpoint evaluation")
-
-
 def _evaluate_against_last_best(
     *,
     current_model: BaseModelAPI,
@@ -328,7 +323,6 @@ def _evaluate_against_last_best(
     cfg: FullConfig,
     device: torch.device,
 ) -> dict[str, float]:
-    _validate_checkpoint_eval_config(cfg)
     started_at = time.perf_counter()
     eval_steps = 0
     current_was_training = current_model.training

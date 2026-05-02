@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal, SupportsFloat, SupportsInt, cast
 
 import numpy as np
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from owl.config import BaseConfig
 from owl.rs import RlVecEnv as _RustRlVecEnv
@@ -97,11 +97,18 @@ OUTER_PLAYER_SLOTS = 4
 
 
 class EnvConfig(BaseConfig):
-    n_envs: int = Field(default=1, ge=1)
+    n_envs: int = Field(default=2, ge=1)
     obs_spec: ObsConfig = Field(default_factory=ObsV1Config)
     action_spec: ActionConfig = Field(default_factory=ActionPureConfig)
     two_player_weight: float = Field(default=0.5, ge=0.0, le=1.0)
     pin_memory: bool = True
+
+    @field_validator("n_envs")
+    @classmethod
+    def _validate_even_env_count(cls, n_envs: int) -> int:
+        if n_envs % 2 != 0:
+            raise ValueError("n_envs must be even")
+        return n_envs
 
 
 class ObsBatch(BaseModel):
