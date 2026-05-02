@@ -45,6 +45,12 @@ pub(super) struct ActionEntitySlot {
 
 pub(super) type ActionEntitySlots = [Option<ActionEntitySlot>; ACTION_ENTITY_SLOTS];
 
+#[derive(Debug)]
+pub(super) struct DecodedDiscreteTargetActions {
+    pub(super) actions: Vec<PlayerAction>,
+    pub(super) comet_launch_failures: u32,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn decode_pure_actions(
     state: &State,
@@ -140,8 +146,9 @@ pub(super) fn decode_discrete_target_actions(
     ships: &[i64],
     max_per_planet_launches: usize,
     min_fleet_size: i64,
-) -> Result<Vec<PlayerAction>, String> {
+) -> Result<DecodedDiscreteTargetActions, String> {
     let mut actions = vec![Vec::new(); state.config.player_count];
+    let mut comet_launch_failures = 0_u32;
     for outer_player in 0..OUTER_PLAYER_SLOTS {
         let player_offset = outer_player * ACTION_ENTITY_SLOTS * max_per_planet_launches;
         let Some(internal_player) = player_map
@@ -213,14 +220,20 @@ pub(super) fn decode_discrete_target_actions(
                         source.id, source.owner
                     ));
                 }
-                spent_ships += ship_count;
-                if spent_ships > i64::from(source.ships) {
+                if spent_ships + ship_count > i64::from(source.ships) {
                     return Err(format!(
-                        "planet {} has {} ships, cannot launch {spent_ships}",
-                        source.id, source.ships
+                        "planet {} has {} ships, cannot launch {}",
+                        source.id,
+                        source.ships,
+                        spent_ships + ship_count
                     ));
                 }
-                let angle = target_angle(state, source, target_planet, ship_count as i32);
+                let Some(angle) = target_angle(state, source, target_planet, ship_count as i32)
+                else {
+                    comet_launch_failures += 1;
+                    continue;
+                };
+                spent_ships += ship_count;
                 player_actions.push(LaunchAction {
                     from_planet_id: source.id,
                     angle,
@@ -229,7 +242,10 @@ pub(super) fn decode_discrete_target_actions(
             }
         }
     }
-    Ok(actions)
+    Ok(DecodedDiscreteTargetActions {
+        actions,
+        comet_launch_failures,
+    })
 }
 
 pub(super) fn encode_action_spec(
@@ -325,14 +341,12 @@ struct TargetCandidate {
     time: f64,
 }
 
-fn target_angle(state: &State, source: &Planet, target: &Planet, ships: i32) -> f64 {
+fn target_angle(state: &State, source: &Planet, target: &Planet, ships: i32) -> Option<f64> {
     let speed = fleet_speed(ships, state.config.ship_speed);
     if state.comet_planet_ids.contains(&target.id) {
-        let candidates = comet_target_candidates(state, source, target, speed);
-        return choose_candidate(state, source, target, candidates).map_or_else(
-            || angle_between(source.position(), target.position()),
-            |candidate| candidate.angle,
-        );
+        let candidates = comet_target_candidates(state, source, target, speed)?;
+        return choose_candidate(state, source, target, candidates)
+            .map(|candidate| candidate.angle);
     }
 
     if is_orbiting(
@@ -342,16 +356,20 @@ fn target_angle(state: &State, source: &Planet, target: &Planet, ships: i32) -> 
             .map_or(target.position(), Planet::position),
         target.radius,
     ) {
-        return orbiting_target_candidate(state, source, target, speed).map_or_else(
-            || angle_between(source.position(), target.position()),
-            |candidate| candidate.angle,
+        return Some(
+            orbiting_target_candidate(state, source, target, speed).map_or_else(
+                || angle_between(source.position(), target.position()),
+                |candidate| candidate.angle,
+            ),
         );
     }
 
     let candidates = static_target_candidates(source, target, speed);
-    choose_candidate(state, source, target, candidates).map_or_else(
-        || angle_between(source.position(), target.position()),
-        |candidate| candidate.angle,
+    Some(
+        choose_candidate(state, source, target, candidates).map_or_else(
+            || angle_between(source.position(), target.position()),
+            |candidate| candidate.angle,
+        ),
     )
 }
 
@@ -490,54 +508,22 @@ fn comet_target_candidates(
     source: &Planet,
     target: &Planet,
     speed: f64,
-) -> Vec<TargetCandidate> {
-    let Some((group, path_offset)) = state.comets.iter().find_map(|group| {
+) -> Option<Vec<TargetCandidate>> {
+    let (group, path_offset) = state.comets.iter().find_map(|group| {
         group
             .planet_ids
             .iter()
             .position(|planet_id| *planet_id == target.id)
             .map(|path_offset| (group, path_offset))
-    }) else {
-        return static_target_candidates(source, target, speed);
-    };
-    let Some(path) = group.paths.get(path_offset) else {
-        return static_target_candidates(source, target, speed);
-    };
+    })?;
+    let path = group.paths.get(path_offset)?;
     let path_start = group.path_index.max(0) as usize;
     if path_start >= path.len() {
-        return static_target_candidates(source, target, speed);
+        return None;
     }
     let remaining = &path[path_start..];
-    let mut candidates =
-        piecewise_linear_target_candidates(source, target.radius, speed, remaining);
-    if candidates.is_empty() {
-        if let Some(best) = remaining
-            .iter()
-            .enumerate()
-            .min_by(|(left_index, left), (right_index, right)| {
-                let left_time = *left_index as f64;
-                let right_time = *right_index as f64;
-                let left_angle = angle_between(source.position(), **left);
-                let right_angle = angle_between(source.position(), **right);
-                let left_gap =
-                    (distance(launch_start(source, left_angle), **left) - speed * left_time).abs();
-                let right_gap = (distance(launch_start(source, right_angle), **right)
-                    - speed * right_time)
-                    .abs();
-                left_gap.total_cmp(&right_gap)
-            })
-            .map(|(index, point)| (*point, index as f64))
-        {
-            let angle = angle_between(source.position(), best.0);
-            let start = launch_start(source, angle);
-            candidates.push(TargetCandidate {
-                angle,
-                end: point_along(start, angle, speed * best.1),
-                time: best.1,
-            });
-        }
-    }
-    candidates
+    let candidates = piecewise_linear_target_candidates(source, target.radius, speed, remaining);
+    (!candidates.is_empty()).then_some(candidates)
 }
 
 fn piecewise_linear_target_candidates(
@@ -1007,7 +993,7 @@ mod tests {
         )
         .expect("valid discrete target should decode");
 
-        step(&mut state, &decoded);
+        step(&mut state, &decoded.actions);
 
         assert!(run_until_planet_changes(&mut state, 2, 100));
         assert_eq!(state.planets.get(1).expect("blocker").ships, 100);
@@ -1038,7 +1024,7 @@ mod tests {
         )
         .expect("valid orbiting target should decode");
 
-        step(&mut state, &decoded);
+        step(&mut state, &decoded.actions);
 
         assert!(run_until_planet_changes(&mut state, 1, 100));
     }
@@ -1141,7 +1127,7 @@ mod tests {
             )
             .expect("valid orbiting target action should decode");
 
-            step(&mut sim_state, &decoded);
+            step(&mut sim_state, &decoded.actions);
             assert!(
                 run_until_planet_changes(&mut sim_state, 1, 100),
                 "decoded action should hit target ({target_x}, {target_y})",
@@ -1207,9 +1193,45 @@ mod tests {
         )
         .expect("valid comet target should decode");
 
-        step(&mut state, &decoded);
+        step(&mut state, &decoded.actions);
 
         assert!(run_until_planet_changes(&mut state, 10, 20));
+    }
+
+    #[test]
+    fn discrete_comet_target_without_intercept_is_no_op() {
+        let mut state = state_from_planets(vec![
+            planet(0, 0, 10.0, 80.0, 2.0, 500),
+            planet(10, -1, 90.0, 80.0, 1.0, 20),
+        ]);
+        state.comet_planet_ids = vec![10];
+        state.comets = vec![CometGroup {
+            planet_ids: vec![10],
+            paths: vec![vec![Point::new(90.0, 80.0), Point::new(94.0, 80.0)]],
+            path_index: 0,
+        }];
+        let entities = action_entity_slots(&state);
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+        let mut targets = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        targets[0] = MAX_PLANETS as i64;
+        ships[0] = 1;
+
+        let decoded = decode_discrete_target_actions(
+            &state,
+            &PlayerMap::identity(),
+            &entities,
+            &launch,
+            &targets,
+            &ships,
+            1,
+            1,
+        )
+        .expect("unreachable comet target should decode as a no-op");
+
+        assert_eq!(decoded.comet_launch_failures, 1);
+        assert!(decoded.actions.iter().all(Vec::is_empty));
     }
 
     #[test]

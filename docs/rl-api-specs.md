@@ -320,8 +320,8 @@ or planet obstruction before emitting the launch angle. For comets, decoding
 solves analytic centerline intercepts against each stored linear path segment,
 then applies the existing sun and static-planet blocker preference over the
 resulting candidates. If no comet intercept exists within the known future path,
-decoding fires toward the closest reachable future path point as a best-effort
-fallback.
+the submitted launch is treated as a no-op and counted in
+`comet-launch-failures`.
 
 `episode_metrics` is a `dict[str, list[float]]` populated only for sub-envs that
 terminated during this step. Empty steps return `{}`. Each list contains one
@@ -338,6 +338,7 @@ Terminal episode metrics:
 | `terminal_ship_count` | Total ships on planets and in active fleets at terminal. |
 | `planets_captured` | Total planet captures over the episode, counting repeat captures. |
 | `asteroids_captured` | Total comet/asteroid planet captures over the episode, counting repeat captures. |
+| `comet-launch-failures` | Submitted discrete-target comet launches skipped because no intercept exists before the comet leaves its known path. Python training logs this as `train/comet-launch-failures`. |
 | `launches_per_turn` | Mean launches per player per turn. |
 | `max_fleet_size` | Largest fleet launched during the episode. |
 | `fleet_size_std` | Population standard deviation of launched fleet sizes during the episode. |

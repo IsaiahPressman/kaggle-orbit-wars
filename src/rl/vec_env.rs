@@ -582,12 +582,13 @@ impl PyRlVecEnv {
                         min_fleet_size,
                     )
                     .map_err(|err| format!("env {env_index}: {err}"))?;
+                    episode_stats.record_comet_launch_failures(decoded.comet_launch_failures);
                     let terminal = step_one_env(
                         state,
                         player_map,
                         player_finished,
                         episode_stats,
-                        &decoded,
+                        &decoded.actions,
                         reward_chunk,
                         done_chunk,
                         max_fleets,
@@ -721,6 +722,7 @@ struct EpisodeStats {
     ships_per_launch_sum: i64,
     ships_per_launch_squared_sum: i64,
     launch_count: u32,
+    comet_launch_failures: u32,
     turn_count: u32,
     max_fleet_size: i32,
     planets_captured: u32,
@@ -817,6 +819,10 @@ impl EpisodeStats {
         self.asteroids_captured += asteroids_captured;
     }
 
+    fn record_comet_launch_failures(&mut self, comet_launch_failures: u32) {
+        self.comet_launch_failures += comet_launch_failures;
+    }
+
     fn terminal_metrics(
         &self,
         state: &State,
@@ -841,6 +847,10 @@ impl EpisodeStats {
             ("planets_captured", f64::from(self.planets_captured)),
             ("asteroids_captured", f64::from(self.asteroids_captured)),
             ("launches_per_game", f64::from(self.launch_count)),
+            (
+                "comet-launch-failures",
+                f64::from(self.comet_launch_failures),
+            ),
             (
                 "launches_per_turn",
                 mean_or_zero(
@@ -1363,6 +1373,7 @@ mod tests {
         assert_eq!(metrics["full_length_rate"], vec![1.0]);
         assert_eq!(metrics["terminal_ship_count"], vec![44.0]);
         assert_eq!(metrics["launches_per_game"], vec![0.0]);
+        assert_eq!(metrics["comet-launch-failures"], vec![0.0]);
         assert_eq!(metrics["win_rate_player_0"], vec![1.0]);
         assert_eq!(metrics["win_rate_player_3"], vec![1.0]);
         assert_eq!(metrics["total_planet_occupancy_rate_4p"], vec![1.0]);
@@ -1423,6 +1434,7 @@ mod tests {
         let mut episode_stats = EpisodeStats::default();
 
         episode_stats.record_turn(&state, &actions);
+        episode_stats.record_comet_launch_failures(3);
         let metrics = episode_stats.terminal_metrics(
             &state,
             &player_map,
@@ -1437,6 +1449,7 @@ mod tests {
 
         assert_eq!(collected["mean_ships_per_launch"], vec![4.0]);
         assert_eq!(collected["launches_per_game"], vec![2.0]);
+        assert_eq!(collected["comet-launch-failures"], vec![3.0]);
         assert_eq!(collected["launches_per_turn"], vec![0.5]);
         assert_eq!(collected["max_fleet_size"], vec![5.0]);
         assert_eq!(collected["fleet_size_std"], vec![1.0]);
