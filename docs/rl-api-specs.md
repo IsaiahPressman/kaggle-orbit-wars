@@ -3,6 +3,8 @@
 This document describes the currently available RL observation and action specs.
 The Python config API uses pydantic discriminator fields so future specs can add
 different options without changing the outer `VectorizedEnv` constructor shape.
+`EnvConfig.n_envs` defaults to `2` and must be even so built-in checkpoint
+evaluation can split evaluation games across 2-player and 4-player batches.
 
 ```python
 from owl.rl import ActionPureConfig, ObsV1Config, VectorizedEnv
@@ -323,7 +325,7 @@ solves analytic centerline intercepts against each stored linear path segment,
 then applies the existing sun and static-planet blocker preference over the
 resulting candidates. If no comet intercept exists within the known future path,
 the submitted launch is treated as a no-op and counted in
-`comet-launch-failures`.
+`comet_launch_failures_per_game`.
 
 `episode_metrics` is a `dict[str, list[float]]` populated only for sub-envs that
 terminated during this step. Empty steps return `{}`. Each list contains one
@@ -335,24 +337,25 @@ Terminal episode metrics:
 | Key | Meaning |
 | --- | --- |
 | `max_entities_exceeded_per_game` | Count of post-step turns where active fleets exceeded `max_fleets`. |
-| `mean_game_length` | Terminal game step count. |
+| `game_length_mean` | Terminal game step count. |
 | `full_length_rate` | `1.0` when a game reaches the configured episode horizon, otherwise `0.0`. |
 | `terminal_ship_count` | Total ships on planets and in active fleets at terminal. |
-| `planets_captured` | Total planet captures over the episode, counting repeat captures. |
-| `asteroids_captured` | Total comet/asteroid planet captures over the episode, counting repeat captures. |
-| `comet-launch-failures` | Submitted discrete-target comet launches skipped because no intercept exists before the comet leaves its known path. Python training logs this as `train/comet-launch-failures`. |
+| `planets_captured_per_game` | Total planet captures over the episode, counting repeat captures. |
+| `comets_captured_per_game` | Total comet planet captures over the episode, counting repeat captures. |
+| `comet_launch_failures_per_game` | Submitted discrete-target comet launches skipped because no intercept exists before the comet leaves its known path. Python training logs this as `train/comet_launch_failures_per_game`. |
 | `launches_per_turn` | Mean launches per player per turn. |
-| `max_fleet_size` | Largest fleet launched during the episode. |
+| `fleet_size_max` | Largest fleet launched during the episode. |
+| `fleet_size_min` | Smallest fleet launched during the episode, or `0.0` when no fleets launched. |
 | `fleet_size_std` | Population standard deviation of launched fleet sizes during the episode. |
 | `win_rate_player_0`..`win_rate_player_3` | `1.0` for a winning model-visible outer player slot, `0.0` otherwise; inactive outer slots have no value in 2-player games. |
-| `mean_launches_per_planet` | Per-game mean launches per occupied non-comet planet per turn. |
-| `mean_launches_per_launch` | Mean launches from a planet on planet-turns where that planet launched at least once. |
-| `mean_ships_per_launch` | Mean submitted ship count per launch action. |
-| `mean_ships_lost_per_game` | Ships removed by sun or out-of-bounds fleet loss. |
-| `mean_ships_lost_in_sun_per_game` | Ships removed by sun fleet loss. |
-| `mean_ships_lost_out_of_bounds_per_game` | Ships removed by out-of-bounds fleet loss. |
-| `mean_fleets_lost_per_game` | Fleets removed by sun or out-of-bounds loss. |
-| `mean_fleets_lost_in_sun_per_game` | Fleets removed by sun loss. |
-| `mean_fleets_lost_out_of_bounds_per_game` | Fleets removed by out-of-bounds loss. |
+| `launches_per_planet_mean` | Per-game mean launches per occupied non-comet planet per turn. |
+| `launches_per_launch_mean` | Mean launches from a planet on planet-turns where that planet launched at least once. |
+| `ships_per_launch_mean` | Mean submitted ship count per launch action. |
+| `ships_lost_per_game_mean` | Ships removed by sun or out-of-bounds fleet loss. |
+| `ships_lost_in_sun_per_game_mean` | Ships removed by sun fleet loss. |
+| `ships_lost_out_of_bounds_per_game_mean` | Ships removed by out-of-bounds fleet loss. |
+| `fleets_lost_per_game_mean` | Fleets removed by sun or out-of-bounds loss. |
+| `fleets_lost_in_sun_per_game_mean` | Fleets removed by sun loss. |
+| `fleets_lost_out_of_bounds_per_game_mean` | Fleets removed by out-of-bounds loss. |
 | `terminal_planet_occupancy_rate_2p` | Occupied non-comet planet fraction at terminal for 2-player games. |
 | `terminal_planet_occupancy_rate_4p` | Occupied non-comet planet fraction at terminal for 4-player games. |

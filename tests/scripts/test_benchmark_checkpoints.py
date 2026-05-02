@@ -42,22 +42,28 @@ def test_assignment_pattern_assigns_one_model_per_two_player_game() -> None:
 def test_assignment_pattern_assigns_two_models_per_four_player_game() -> None:
     pattern = benchmark_checkpoints._assignment_pattern(player_count=4)
 
+    assert pattern == (0, 1, 1, 0)
     assert pattern.count(0) == 2
     assert pattern.count(1) == 2
 
 
 def test_validate_args_requires_even_game_count() -> None:
-    benchmark_checkpoints._validate_args(Namespace(n_games=10, n_envs=1))
+    benchmark_checkpoints._validate_args(Namespace(n_games=10, n_envs=5))
 
     with pytest.raises(ValueError, match="must be even"):
         benchmark_checkpoints._validate_args(Namespace(n_games=9, n_envs=1))
 
 
-def test_record_terminal_result_counts_winners_by_checkpoint() -> None:
+def test_validate_args_requires_games_per_player_count_divisible_by_envs() -> None:
+    with pytest.raises(ValueError, match="must be divisible by --n-envs"):
+        benchmark_checkpoints._validate_args(Namespace(n_games=10, n_envs=3))
+
+
+def test_record_terminal_result_counts_model_winner_by_game() -> None:
     stats = benchmark_checkpoints.MatchupStats.empty()
     assignment = torch.tensor([0, 0, 1, 1])
     start_mask = torch.tensor([True, True, True, True])
-    returns = torch.tensor([0.0, -1.0, 0.0, -1.0])
+    returns = torch.tensor([1.0, 1.0, -1.0, -1.0])
 
     benchmark_checkpoints._record_terminal_result(
         stats,
@@ -66,8 +72,8 @@ def test_record_terminal_result_counts_winners_by_checkpoint() -> None:
         returns,
     )
 
-    assert stats.player_games == [2, 2]
-    assert stats.wins == [1, 1]
+    assert stats.model_games == [1, 1]
+    assert stats.wins == [1.0, 0.0]
 
 
 def test_record_terminal_result_ignores_inactive_two_player_slots() -> None:
@@ -83,8 +89,8 @@ def test_record_terminal_result_ignores_inactive_two_player_slots() -> None:
         returns,
     )
 
-    assert stats.player_games == [1, 1]
-    assert stats.wins == [1, 0]
+    assert stats.model_games == [1, 1]
+    assert stats.wins == [1.0, 0.0]
 
 
 def test_checkpoint_config_path_requires_checkpoint_parent_config(

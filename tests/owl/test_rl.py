@@ -283,10 +283,17 @@ def test_action_config_validates_launch_bounds() -> None:
         ActionPureConfig(min_fleet_size=0)
 
 
+def test_env_config_requires_even_env_count() -> None:
+    assert EnvConfig().n_envs == 2
+
+    with pytest.raises(ValueError, match="n_envs must be even"):
+        EnvConfig(n_envs=1)
+
+
 def test_discrete_targets_config_and_env_shapes() -> None:
     config = EnvConfig.model_validate(
         {
-            "n_envs": 1,
+            "n_envs": 2,
             "action_spec": {
                 "action_spec": "discrete_targets",
                 "max_per_planet_launches": 2,

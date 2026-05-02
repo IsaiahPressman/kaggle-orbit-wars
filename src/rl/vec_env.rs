@@ -723,8 +723,9 @@ struct EpisodeStats {
     comet_launch_failures: u32,
     turn_count: u32,
     max_fleet_size: i32,
+    min_fleet_size: Option<i32>,
     planets_captured: u32,
-    asteroids_captured: u32,
+    comets_captured: u32,
     max_entities_exceeded_turns: u32,
     fleet_losses: FleetLossStats,
 }
@@ -778,13 +779,18 @@ impl EpisodeStats {
             .sum::<i64>();
         self.launch_count += launch_count;
         self.turn_count += 1;
-        self.max_fleet_size = decoded
-            .iter()
-            .flatten()
-            .map(|action| action.ships)
-            .max()
-            .unwrap_or(0)
-            .max(self.max_fleet_size);
+        let launched_ships = decoded.iter().flatten().map(|action| action.ships);
+        if let Some(turn_max_fleet_size) = launched_ships.clone().max() {
+            self.max_fleet_size = turn_max_fleet_size.max(self.max_fleet_size);
+        }
+        if let Some(turn_min_fleet_size) = launched_ships.min() {
+            self.min_fleet_size = Some(
+                self.min_fleet_size
+                    .map_or(turn_min_fleet_size, |fleet_size| {
+                        fleet_size.min(turn_min_fleet_size)
+                    }),
+            );
+        }
     }
 
     fn record_step_result(
@@ -806,8 +812,8 @@ impl EpisodeStats {
         self.planets_captured += planets_captured;
     }
 
-    fn record_asteroids_captured(&mut self, asteroids_captured: u32) {
-        self.asteroids_captured += asteroids_captured;
+    fn record_comets_captured(&mut self, comets_captured: u32) {
+        self.comets_captured += comets_captured;
     }
 
     fn record_comet_launch_failures(&mut self, comet_launch_failures: u32) {
@@ -832,14 +838,17 @@ impl EpisodeStats {
                 "max_entities_exceeded_per_game",
                 f64::from(self.max_entities_exceeded_turns),
             ),
-            ("mean_game_length", f64::from(state.step)),
+            ("game_length_mean", f64::from(state.step)),
             ("full_length_rate", full_length_value(state)),
             ("terminal_ship_count", terminal_ship_count(state)),
-            ("planets_captured", f64::from(self.planets_captured)),
-            ("asteroids_captured", f64::from(self.asteroids_captured)),
+            (
+                "planets_captured_per_game",
+                f64::from(self.planets_captured),
+            ),
+            ("comets_captured_per_game", f64::from(self.comets_captured)),
             ("launches_per_game", f64::from(self.launch_count)),
             (
-                "comet-launch-failures",
+                "comet_launch_failures_per_game",
                 f64::from(self.comet_launch_failures),
             ),
             (
@@ -849,44 +858,48 @@ impl EpisodeStats {
                     self.turn_count,
                 ),
             ),
-            ("max_fleet_size", f64::from(self.max_fleet_size)),
+            ("fleet_size_max", f64::from(self.max_fleet_size)),
+            (
+                "fleet_size_min",
+                f64::from(self.min_fleet_size.unwrap_or(0)),
+            ),
             ("fleet_size_std", self.fleet_size_std()),
             (
-                "mean_launches_per_planet",
+                "launches_per_planet_mean",
                 mean_or_zero(
                     self.launches_per_occupied_planet_sum,
                     self.occupied_planet_turns,
                 ),
             ),
-            ("mean_ships_lost_per_game", f64::from(ships_lost)),
+            ("ships_lost_per_game_mean", f64::from(ships_lost)),
             (
-                "mean_ships_lost_in_sun_per_game",
+                "ships_lost_in_sun_per_game_mean",
                 f64::from(self.fleet_losses.ships_in_sun),
             ),
             (
-                "mean_ships_lost_out_of_bounds_per_game",
+                "ships_lost_out_of_bounds_per_game_mean",
                 f64::from(self.fleet_losses.ships_out_of_bounds),
             ),
-            ("mean_fleets_lost_per_game", f64::from(fleets_lost)),
+            ("fleets_lost_per_game_mean", f64::from(fleets_lost)),
             (
-                "mean_fleets_lost_in_sun_per_game",
+                "fleets_lost_in_sun_per_game_mean",
                 f64::from(self.fleet_losses.fleets_in_sun),
             ),
             (
-                "mean_fleets_lost_out_of_bounds_per_game",
+                "fleets_lost_out_of_bounds_per_game_mean",
                 f64::from(self.fleet_losses.fleets_out_of_bounds),
             ),
             (occupancy_key, terminal_planet_occupancy_rate(state)),
         ];
         if self.launched_planet_turns > 0 {
             values.push((
-                "mean_launches_per_launch",
+                "launches_per_launch_mean",
                 self.launches_per_launch_sum / f64::from(self.launched_planet_turns),
             ));
         }
         if self.launch_count > 0 {
             values.push((
-                "mean_ships_per_launch",
+                "ships_per_launch_mean",
                 self.ships_per_launch_sum as f64 / f64::from(self.launch_count),
             ));
         }
@@ -1065,7 +1078,7 @@ fn step_one_env(
     let result = step(state, decoded);
     episode_stats.record_step_result(state, result.fleet_losses, max_fleets);
     episode_stats.record_planets_captured(result.planets_captured);
-    episode_stats.record_asteroids_captured(result.asteroids_captured);
+    episode_stats.record_comets_captured(result.comets_captured);
     let should_reset = result_is_terminal(&result.player_results);
     let won_reward = split_won_reward(
         result
@@ -1381,15 +1394,15 @@ mod tests {
 
         assert_eq!(rewards, vec![-0.5; 4]);
         assert_eq!(dones, vec![true; 4]);
-        assert_eq!(metrics["mean_game_length"], vec![499.0]);
+        assert_eq!(metrics["game_length_mean"], vec![499.0]);
         assert_eq!(metrics["full_length_rate"], vec![1.0]);
         assert_eq!(metrics["terminal_ship_count"], vec![44.0]);
         assert_eq!(metrics["launches_per_game"], vec![0.0]);
-        assert_eq!(metrics["comet-launch-failures"], vec![0.0]);
+        assert_eq!(metrics["comet_launch_failures_per_game"], vec![0.0]);
         assert_eq!(metrics["win_rate_player_0"], vec![1.0]);
         assert_eq!(metrics["win_rate_player_3"], vec![1.0]);
         assert_eq!(metrics["terminal_planet_occupancy_rate_4p"], vec![1.0]);
-        assert_eq!(metrics["mean_fleets_lost_per_game"], vec![0.0]);
+        assert_eq!(metrics["fleets_lost_per_game_mean"], vec![0.0]);
     }
 
     #[test]
@@ -1458,7 +1471,7 @@ mod tests {
     }
 
     #[test]
-    fn episode_stats_reports_mean_ships_per_launch() {
+    fn episode_stats_reports_ships_per_launch_mean() {
         let state = state_with_all_players_alive();
         let player_map = PlayerMap::identity();
         let actions = vec![
@@ -1494,15 +1507,16 @@ mod tests {
         );
         let collected = collect_terminal_metrics(vec![Some(metrics)]);
 
-        assert_eq!(collected["mean_ships_per_launch"], vec![4.0]);
+        assert_eq!(collected["ships_per_launch_mean"], vec![4.0]);
         assert_eq!(collected["launches_per_game"], vec![2.0]);
-        assert_eq!(collected["comet-launch-failures"], vec![3.0]);
+        assert_eq!(collected["comet_launch_failures_per_game"], vec![3.0]);
         assert_eq!(collected["launches_per_turn"], vec![0.5]);
-        assert_eq!(collected["max_fleet_size"], vec![5.0]);
+        assert_eq!(collected["fleet_size_max"], vec![5.0]);
+        assert_eq!(collected["fleet_size_min"], vec![3.0]);
         assert_eq!(collected["fleet_size_std"], vec![1.0]);
-        assert_eq!(collected["planets_captured"], vec![0.0]);
-        assert_eq!(collected["asteroids_captured"], vec![0.0]);
-        assert!(!collected.contains_key("mean_fleets_per_launch"));
+        assert_eq!(collected["planets_captured_per_game"], vec![0.0]);
+        assert_eq!(collected["comets_captured_per_game"], vec![0.0]);
+        assert!(!collected.contains_key("fleets_per_launch_mean"));
     }
 
     #[test]

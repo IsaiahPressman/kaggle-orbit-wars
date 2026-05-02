@@ -885,7 +885,13 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     assert output.actions.ships.shape == expected_action_shape
     assert output.log_probs.target is not None
     assert output.log_probs.target.shape == expected_action_shape
-    assert set(output.entropies.components) == {"launch", "target", "size"}
+    assert set(output.entropies.components) == {
+        "launch",
+        "target",
+        "fleet_size_full",
+        "fleet_size_mixture",
+        "fleet_size_logistic",
+    }
     assert torch.allclose(
         output.entropies.components["launch"],
         output.entropies.launch.squeeze(-1),
@@ -896,8 +902,18 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
         output.entropies.target.squeeze(-1),
     )
     assert torch.allclose(
-        output.entropies.components["size"],
+        output.entropies.components["fleet_size_full"],
         output.entropies.angle_and_size.squeeze(-1),
+    )
+    assert output.entropies.components["fleet_size_mixture"].shape == (
+        2,
+        4,
+        ACTION_ENTITY_SLOTS,
+    )
+    assert output.entropies.components["fleet_size_logistic"].shape == (
+        2,
+        4,
+        ACTION_ENTITY_SLOTS,
     )
     launched_target = output.actions.target[..., 0].clamp(0, ACTION_ENTITY_SLOTS - 1)
     target_valid = obs.can_act.gather(-1, launched_target.unsqueeze(-1)).squeeze(-1)
@@ -917,7 +933,13 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
         evaluation.log_probs.per_player_entity,
         output.log_probs.per_player_entity,
     )
-    assert set(evaluation.entropies.components) == {"launch", "target", "size"}
+    assert set(evaluation.entropies.components) == {
+        "launch",
+        "target",
+        "fleet_size_full",
+        "fleet_size_mixture",
+        "fleet_size_logistic",
+    }
     assert torch.allclose(
         evaluation.entropies.components["launch"],
         output.entropies.components["launch"],
@@ -927,8 +949,16 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
         output.entropies.components["target"],
     )
     assert torch.allclose(
-        evaluation.entropies.components["size"],
-        output.entropies.components["size"],
+        evaluation.entropies.components["fleet_size_full"],
+        output.entropies.components["fleet_size_full"],
+    )
+    assert torch.allclose(
+        evaluation.entropies.components["fleet_size_mixture"],
+        output.entropies.components["fleet_size_mixture"],
+    )
+    assert torch.allclose(
+        evaluation.entropies.components["fleet_size_logistic"],
+        output.entropies.components["fleet_size_logistic"],
     )
 
 

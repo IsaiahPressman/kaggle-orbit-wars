@@ -39,7 +39,7 @@ planets leave empty slots.
 
 `StepResult` returns one result per actual player: active, won, or lost. It also
 returns auxiliary counters for fleets and ships removed by the sun or by leaving
-the board, plus the number of planets and comet/asteroid planets captured during
+the board, plus the number of planets and comet planets captured during
 the step. Combat fleets are excluded from those loss counters. This matches the
 actual player count without making 2-player games carry ignored entries. Orbit
 Wars' Python reference leaves nonterminal eliminated players in Kaggle `ACTIVE`

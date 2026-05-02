@@ -48,6 +48,15 @@ def _full_config(*, checkpoint_freq: int | None = None) -> FullConfig:
     )
 
 
+def _config_with_envs(n_envs: int) -> FullConfig:
+    cfg = _full_config()
+    return cfg.model_copy(
+        update={
+            "env": cfg.env.model_copy(update={"n_envs": n_envs}),
+        }
+    )
+
+
 class _FakeLogger:
     def __init__(self) -> None:
         self.closed = False
@@ -69,6 +78,8 @@ class _FakeTrainer:
         self.fail = fail
         self.checkpoints: list[tuple[Path, int]] = []
         self.iterations = 0
+        self.model = torch.nn.Linear(1, 1)
+        self.device = torch.device("cpu")
 
     def train_iteration(self) -> dict[str, float]:
         self.iterations += 1
@@ -95,6 +106,11 @@ def test_next_periodic_checkpoint_step_handles_crossed_cadence() -> None:
         )
         == 2000
     )
+
+
+def test_format_checkpoint_step_zero_pads_grouped_digits() -> None:
+    assert run_ppo._format_checkpoint_step(1_000_000_000) == "01_000_000_000"
+    assert run_ppo._format_checkpoint_step(22_000_000) == "00_022_000_000"
 
 
 def test_should_stop_training_checks_step_and_runtime_limits() -> None:
@@ -128,6 +144,77 @@ def test_validate_args_rejects_non_positive_runtime_hours() -> None:
         run_ppo._validate_args(Namespace(max_env_steps=None, max_runtime_hours=0.0))
 
 
+def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _config_with_envs(4)
+    current_model = torch.nn.Linear(1, 1)
+    last_best_model = torch.nn.Linear(1, 1)
+    current_model.train()
+    last_best_model.eval()
+    seen_eval_sizes: list[tuple[int, int]] = []
+    perf_times = iter([10.0, 14.0])
+
+    def fake_evaluate_player_count(
+        **kwargs: object,
+    ) -> tuple[object, dict[str, list[float]], int]:
+        assert kwargs["current_model"] is current_model
+        assert kwargs["last_best_model"] is last_best_model
+        assert not current_model.training
+        assert not last_best_model.training
+        assert not torch.is_grad_enabled()
+        seen_eval_sizes.append((kwargs["n_games"], kwargs["n_envs"]))
+        stats = run_ppo._EvalStats.empty()
+        stats.add_game_result(run_ppo.MODEL_CURRENT)
+        return (
+            stats,
+            {
+                "game_length_mean": [12.0],
+                "terminal_episodes_2p": [1.0],
+            },
+            6,
+        )
+
+    monkeypatch.setattr(
+        run_ppo,
+        "_evaluate_player_count",
+        fake_evaluate_player_count,
+    )
+    monkeypatch.setattr(run_ppo.time, "perf_counter", lambda: next(perf_times))
+
+    metrics = run_ppo._evaluate_against_last_best(
+        current_model=current_model,
+        last_best_model=last_best_model,
+        cfg=cfg,
+        device=torch.device("cpu"),
+    )
+
+    assert metrics["eval/win_rate_against_last_best"] == pytest.approx(1.0)
+    assert metrics["eval/game_length_mean"] == pytest.approx(12.0)
+    assert metrics["eval/terminal_episodes_2p"] == pytest.approx(2.0)
+    assert metrics["eval/terminal_episodes"] == pytest.approx(2.0)
+    assert metrics["time/eval_seconds"] == pytest.approx(4.0)
+    assert metrics["perf/eval_sps"] == pytest.approx(3.0)
+    assert seen_eval_sizes == [(2, 2), (2, 2)]
+    assert current_model.training
+    assert not last_best_model.training
+
+
+def test_record_eval_terminal_result_counts_team_ties_as_half_win() -> None:
+    stats = run_ppo._EvalStats.empty()
+
+    run_ppo._record_eval_terminal_result(
+        stats,
+        assignment=torch.tensor([0, 1, 1, 0]),
+        start_mask=torch.tensor([True, True, True, True]),
+        returns=torch.tensor([1.0, 1.0, 1.0, 1.0]),
+    )
+
+    assert stats.model_games == [1, 1]
+    assert stats.wins == [0.5, 0.5]
+    assert stats.win_rate(run_ppo.MODEL_CURRENT) == pytest.approx(0.5)
+
+
 def test_create_model_uses_env_owned_specs() -> None:
     obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     action_spec = ActionPureConfig(max_per_planet_launches=2)
@@ -150,10 +237,25 @@ def test_trainable_parameter_count_ignores_frozen_parameters() -> None:
     assert run_ppo._trainable_parameter_count(model) == 10
 
 
-def test_run_training_loop_writes_periodic_checkpoints(tmp_path: Path) -> None:
+def test_run_training_loop_writes_periodic_checkpoints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cfg = _full_config(checkpoint_freq=1000)
     trainer = _FakeTrainer()
     logger = _FakeLogger()
+    eval_calls = 0
+
+    def fake_evaluate_against_last_best(**_kwargs: object) -> dict[str, float]:
+        nonlocal eval_calls
+        eval_calls += 1
+        return {"eval/win_rate_against_last_best": 0.25}
+
+    monkeypatch.setattr(
+        run_ppo,
+        "_evaluate_against_last_best",
+        fake_evaluate_against_last_best,
+    )
 
     env_steps = run_ppo._run_training_loop(
         trainer=trainer,
@@ -166,10 +268,50 @@ def test_run_training_loop_writes_periodic_checkpoints(tmp_path: Path) -> None:
     )
 
     assert env_steps == 1600
-    assert trainer.checkpoints == [(tmp_path / "checkpoint-1600.pt", 1600)]
-    assert [step for _metrics, step in logger.logged] == [800, 1600]
+    assert trainer.checkpoints == [(tmp_path / "checkpoint_00_000_001_600.pt", 1600)]
+    assert [step for _metrics, step in logger.logged] == [800, 1600, 1600]
+    assert logger.logged[-1][0] == {"eval/win_rate_against_last_best": 0.25}
+    assert eval_calls == 1
     assert "model/trainable_parameters" not in logger.logged[0][0]
     assert "trainable_parameters" not in logger.logged[0][0]
+
+
+def test_run_training_loop_saves_last_best_when_eval_clears_threshold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _full_config(checkpoint_freq=1000)
+    trainer = _FakeTrainer()
+    logger = _FakeLogger()
+
+    def fake_evaluate_against_last_best(**_kwargs: object) -> dict[str, float]:
+        return {
+            "eval/win_rate_against_last_best": 0.7,
+            "eval/game_length_mean": 12.0,
+        }
+
+    monkeypatch.setattr(
+        run_ppo,
+        "_evaluate_against_last_best",
+        fake_evaluate_against_last_best,
+    )
+
+    env_steps = run_ppo._run_training_loop(
+        trainer=trainer,
+        logger=logger,
+        run_dir=tmp_path,
+        cfg=cfg,
+        env_steps_per_iteration=1000,
+        max_env_steps=1000,
+        max_runtime_seconds=None,
+    )
+
+    assert env_steps == 1000
+    assert trainer.checkpoints == [
+        (tmp_path / "checkpoint_00_000_001_000.pt", 1000),
+        (tmp_path / "checkpoint_last_best.pt", 1000),
+    ]
+    assert logger.logged[-1][0]["eval/game_length_mean"] == 12.0
 
 
 def test_run_training_session_sets_trainable_parameter_summary(

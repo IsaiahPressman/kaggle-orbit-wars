@@ -53,6 +53,8 @@ Training presets live in `configs/`:
 
 The training entrypoint configures PyTorch for TF32 matmul/conv precision and
 cuDNN benchmarking before constructing the environment, model, and optimizer.
+Training `EnvConfig.n_envs` must be even so periodic checkpoint evaluation can
+split evaluation games across 2-player and 4-player batches.
 PPO supports both `pure` and `discrete_targets` action specs when the
 `StatelessTransformerV1` actor discriminator matches the environment action
 spec. The current discrete-target actor requires `max_per_planet_launches: 1`.
@@ -66,19 +68,25 @@ uv run python scripts/run_ppo.py configs/baseline.yaml runs --log-mode debug --m
 PPO run directories save `config.yaml` alongside checkpoints. Checkpoints save
 model, optimizer, scheduler, and environment-step metadata. They do not save the
 Rust environment state or current observation, so they are not exact resume
-snapshots.
+snapshots. Periodic checkpoint names use grouped zero-padded environment-step
+labels such as `checkpoint_00_022_000_000.pt`. At each periodic checkpoint, the
+current model is evaluated against the last-best model snapshot and logs
+`eval/win_rate_against_last_best` plus terminal environment metrics under
+`eval/`. When the current model reaches at least 70% eval win rate, the
+last-best snapshot is replaced and also saved as `checkpoint_last_best.pt`.
 
 Training logs terminal environment metrics under `train/` when episodes finish
 during a rollout, including game length, per-player win rates, launch density,
 planet occupancy for 2-player and 4-player games, max-entity overflow counts,
 terminal ship counts, planet captures, launch and fleet-size statistics,
-full-length game rate, and fleet/ship losses in the sun or out of bounds.
+full-length game rate, per-batch active player-step totals, and fleet/ship
+losses in the sun or out of bounds.
 Planet occupancy is reported at terminal as
 `train/terminal_planet_occupancy_rate_2p` and
 `train/terminal_planet_occupancy_rate_4p`.
 Policy logs include total entropy plus policy-specific component means such as
-`policy/entropy_launch`, `policy/entropy_target`, `policy/entropy_size`, and
-`policy/entropy_angle_and_size`.
+`policy/launch_entropy`, `policy/target_entropy`,
+`policy/fleet_size_full_entropy`, and `policy/angle_and_size_entropy`.
 
 ## Orbit Wars replay parity
 

@@ -35,7 +35,7 @@ The replay parity test checks each transition against the Python reference for:
 - comet groups: planet ids, full paths, path index
 
 Auxiliary Rust `StepResult` counters for fleets and ships lost in the sun or
-out of bounds, and for planets and comet/asteroid planets captured, are not
+out of bounds, and for planets and comet planets captured, are not
 fields in the Kaggle rows. They are covered by focused Rust unit tests rather
 than replay parity assertions.
 
