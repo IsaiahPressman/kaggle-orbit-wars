@@ -214,6 +214,10 @@ class PureActor(nn.Module):
                 launch=launch_entropy_tensor,
                 angle_and_size=event_entropy_tensor,
                 per_player_entity=per_player_entity_entropy,
+                components={
+                    "launch": launch_entropy_tensor.sum(dim=-1),
+                    "angle_and_size": event_entropy_tensor.sum(dim=-1),
+                },
             ),
         )
 
@@ -354,6 +358,10 @@ class PureActor(nn.Module):
                 launch=launch_entropy_tensor,
                 angle_and_size=event_entropy_tensor,
                 per_player_entity=per_player_entity_entropy,
+                components={
+                    "launch": launch_entropy_tensor.sum(dim=-1),
+                    "angle_and_size": event_entropy_tensor.sum(dim=-1),
+                },
             ),
         )
 

@@ -167,6 +167,11 @@ class DiscreteTargetsActor(nn.Module):
                 target=target_entropy.unsqueeze(-1),
                 angle_and_size=size_entropy.unsqueeze(-1),
                 per_player_entity=per_player_entity_entropy,
+                components={
+                    "launch": launch_entropy,
+                    "target": target_entropy,
+                    "size": size_entropy,
+                },
             ),
         )
 
@@ -248,6 +253,11 @@ class DiscreteTargetsActor(nn.Module):
                 target=target_entropy.unsqueeze(-1),
                 angle_and_size=size_entropy.unsqueeze(-1),
                 per_player_entity=per_player_entity_entropy,
+                components={
+                    "launch": launch_entropy,
+                    "target": target_entropy,
+                    "size": size_entropy,
+                },
             ),
         )
 

@@ -789,6 +789,15 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
         output.entropies.per_player_entity,
         (output.entropies.launch + output.entropies.angle_and_size).sum(dim=-1),
     )
+    assert set(output.entropies.components) == {"launch", "angle_and_size"}
+    assert torch.allclose(
+        output.entropies.components["launch"],
+        output.entropies.launch.sum(dim=-1),
+    )
+    assert torch.allclose(
+        output.entropies.components["angle_and_size"],
+        output.entropies.angle_and_size.sum(dim=-1),
+    )
     assert torch.isfinite(output.entropies.per_player_entity).all()
     assert torch.all(output.entropies.launch >= 0)
     assert torch.all(output.entropies.angle_and_size >= 0)
@@ -819,6 +828,15 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert torch.allclose(
         evaluation.entropies.per_player_entity,
         output.entropies.per_player_entity,
+    )
+    assert set(evaluation.entropies.components) == {"launch", "angle_and_size"}
+    assert torch.allclose(
+        evaluation.entropies.components["launch"],
+        output.entropies.components["launch"],
+    )
+    assert torch.allclose(
+        evaluation.entropies.components["angle_and_size"],
+        output.entropies.components["angle_and_size"],
     )
     assert torch.allclose(evaluation.values, output.values)
     assert torch.allclose(evaluation.winner_probabilities, output.winner_probabilities)
@@ -872,6 +890,20 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     assert output.actions.ships.shape == expected_action_shape
     assert output.log_probs.target is not None
     assert output.log_probs.target.shape == expected_action_shape
+    assert set(output.entropies.components) == {"launch", "target", "size"}
+    assert torch.allclose(
+        output.entropies.components["launch"],
+        output.entropies.launch.squeeze(-1),
+    )
+    assert output.entropies.target is not None
+    assert torch.allclose(
+        output.entropies.components["target"],
+        output.entropies.target.squeeze(-1),
+    )
+    assert torch.allclose(
+        output.entropies.components["size"],
+        output.entropies.angle_and_size.squeeze(-1),
+    )
     launched_target = output.actions.target[..., 0].clamp(0, ACTION_ENTITY_SLOTS - 1)
     target_valid = obs.can_act.gather(-1, launched_target.unsqueeze(-1)).squeeze(-1)
     assert torch.all(target_valid[output.actions.launch[..., 0]])
@@ -889,6 +921,19 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     assert torch.allclose(
         evaluation.log_probs.per_player_entity,
         output.log_probs.per_player_entity,
+    )
+    assert set(evaluation.entropies.components) == {"launch", "target", "size"}
+    assert torch.allclose(
+        evaluation.entropies.components["launch"],
+        output.entropies.components["launch"],
+    )
+    assert torch.allclose(
+        evaluation.entropies.components["target"],
+        output.entropies.components["target"],
+    )
+    assert torch.allclose(
+        evaluation.entropies.components["size"],
+        output.entropies.components["size"],
     )
 
 

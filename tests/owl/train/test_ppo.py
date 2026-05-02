@@ -289,6 +289,7 @@ class TinyOrbitModel(BaseModelAPI):
             launch=launch,
             angle_and_size=angle_and_size,
             per_player_entity=per_player_entity,
+            components={"launch": per_player_entity},
         )
 
 
@@ -513,6 +514,8 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
             "launches_per_game": [3.0, 7.0],
             "comet-launch-failures": [2.0, 4.0],
             "asteroids_captured": [1.0, 3.0],
+            "terminal_planet_occupancy_rate_2p": [0.5, 0.75],
+            "terminal_planet_occupancy_rate_4p": [1.0],
             "win_rate_player_0": [1.0, 0.0],
             "terminal_episodes_2p": [1.0, 1.0],
             "terminal_episodes_4p": [1.0],
@@ -525,6 +528,8 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
     assert metrics["train/launches_per_game"] == 5.0
     assert metrics["train/comet-launch-failures"] == 3.0
     assert metrics["train/asteroids_captured"] == 2.0
+    assert metrics["train/terminal_planet_occupancy_rate_2p"] == 0.625
+    assert metrics["train/terminal_planet_occupancy_rate_4p"] == 1.0
     assert metrics["train/win_rate_player_0"] == 0.5
     assert metrics["train/terminal_episodes_2p"] == 2.0
     assert metrics["train/terminal_episodes_4p"] == 1.0
@@ -716,6 +721,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "loss/value_loss",
         "loss/entropy_loss",
         "policy/entropy",
+        "policy/entropy_launch",
         "policy/approx_kl",
         "policy/clipfrac",
         "policy/ratio_mean",
@@ -743,6 +749,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         not torch.allclose(param, old)
         for param, old in zip(model.parameters(), before, strict=True)
     )
+    assert metrics["policy/entropy_launch"] == pytest.approx(metrics["policy/entropy"])
     assert metrics["optimizer/steps"] == pytest.approx(2.0)
     assert metrics["optimizer/learning_rate"] == pytest.approx(0.05)
 
@@ -1499,7 +1506,12 @@ def test_discrete_target_train_iteration_runs() -> None:
     metrics = trainer.train_iteration()
 
     assert env.last_target is not None
-    for key in ("loss/total_loss", "policy/entropy", "optimizer/grad_norm"):
+    for key in (
+        "loss/total_loss",
+        "policy/entropy",
+        "policy/entropy_launch",
+        "optimizer/grad_norm",
+    ):
         assert metrics[key] == pytest.approx(float(metrics[key]))
 
 
@@ -1541,6 +1553,12 @@ def test_discrete_target_transformer_train_iteration_keeps_parameters_finite() -
     metrics = trainer.train_iteration()
 
     assert torch.isfinite(torch.tensor(list(metrics.values()))).all()
+    assert metrics["policy/entropy"] == pytest.approx(
+        metrics["policy/entropy_launch"]
+        + metrics["policy/entropy_target"]
+        + metrics["policy/entropy_size"]
+    )
+    assert "policy/entropy_angle_and_size" not in metrics
     for parameter in model.parameters():
         assert torch.isfinite(parameter).all()
         if parameter.grad is not None:

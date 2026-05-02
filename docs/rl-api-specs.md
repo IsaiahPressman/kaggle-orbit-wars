@@ -352,5 +352,5 @@ Terminal episode metrics:
 | `mean_fleets_lost_per_game` | Fleets removed by sun or out-of-bounds loss. |
 | `mean_fleets_lost_in_sun_per_game` | Fleets removed by sun loss. |
 | `mean_fleets_lost_out_of_bounds_per_game` | Fleets removed by out-of-bounds loss. |
-| `total_planet_occupancy_rate_2p` | Mean occupied non-comet planet fraction per turn for terminal 2-player games. |
-| `total_planet_occupancy_rate_4p` | Mean occupied non-comet planet fraction per turn for terminal 4-player games. |
+| `terminal_planet_occupancy_rate_2p` | Occupied non-comet planet fraction at terminal for 2-player games. |
+| `terminal_planet_occupancy_rate_4p` | Occupied non-comet planet fraction at terminal for 4-player games. |

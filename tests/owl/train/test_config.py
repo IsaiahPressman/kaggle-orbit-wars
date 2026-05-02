@@ -250,7 +250,7 @@ def test_training_presets_make_baseline_and_pufferish_modes_explicit() -> None:
     pufferish = FullConfig.from_file(_REPO_ROOT / "configs" / "pufferish.yaml")
 
     assert baseline.env.n_envs == 256
-    assert baseline.rl.checkpoint_freq is None
+    assert baseline.rl.checkpoint_freq is not None
     assert baseline.rl.advantage_mode == "gae"
     assert not baseline.rl.recompute_advantages_each_minibatch
     assert baseline.rl.segment_sampling.sampling == "uniform"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -38,6 +38,7 @@ class ModelActionEntropies:
     angle_and_size: torch.Tensor
     per_player_entity: torch.Tensor
     target: torch.Tensor | None = None
+    components: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
 @dataclass

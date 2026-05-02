@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal, Protocol
@@ -116,6 +117,7 @@ class PPOLossMetrics:
     ratio_max: torch.Tensor
     logratio_mean: torch.Tensor
     logratio_abs_max: torch.Tensor
+    entropy_components: dict[str, torch.Tensor] = dataclass_field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -641,6 +643,7 @@ class PPOTrainer:
             output = self.model.evaluate_actions(batch_obs, batch_actions)
         new_logp = _output_logp(output).view_as(batch_old_logp)
         entropy = _output_entropy(output, batch_old_logp)
+        entropy_components = _output_entropy_components(output, batch_old_logp)
         new_values = _output_values(output).view_as(batch_old_values)
 
         metrics = self._ppo_loss(
@@ -654,6 +657,13 @@ class PPOTrainer:
             policy_weight=batch_policy_weight,
             value_weight=batch_value_weight,
             config=self.config,
+        )
+        metrics = replace(
+            metrics,
+            entropy_components={
+                name: weighted_mean(component, batch_policy_weight).detach()
+                for name, component in entropy_components.items()
+            },
         )
         self.optimizer.zero_grad(set_to_none=True)
         metrics.loss.backward()
@@ -1167,6 +1177,34 @@ def _output_entropy(
     return output.entropies.per_player_entity.sum(dim=-1).view_as(like)
 
 
+def _output_entropy_components(
+    output: ModelOutput | ModelEvaluation,
+    like: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    components = output.entropies.components
+    if components:
+        return {
+            name: _sum_entropy_component(component, like)
+            for name, component in components.items()
+        }
+    fallback = {
+        "launch": _sum_entropy_component(output.entropies.launch, like),
+        "angle_and_size": _sum_entropy_component(
+            output.entropies.angle_and_size,
+            like,
+        ),
+    }
+    if output.entropies.target is not None:
+        fallback["target"] = _sum_entropy_component(output.entropies.target, like)
+    return fallback
+
+
+def _sum_entropy_component(tensor: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
+    if tensor.shape == like.shape:
+        return tensor.view_as(like)
+    return tensor.flatten(start_dim=2).sum(dim=-1).view_as(like)
+
+
 def _output_values(output: ModelOutput | ModelEvaluation) -> torch.Tensor:
     return output.values
 
@@ -1289,14 +1327,29 @@ def _mean_loss_metrics(metrics: list[PPOLossMetrics]) -> dict[str, float]:
         ("policy/logratio_mean", "logratio_mean"),
         ("policy/logratio_abs_max", "logratio_abs_max"),
     )
-    return {
-        output_name: float(
+    logged: dict[str, float] = {}
+    for output_name, attr_name in metric_names:
+        logged[output_name] = float(
             torch.stack([getattr(metric, attr_name) for metric in metrics])
             .mean()
             .item()
         )
-        for output_name, attr_name in metric_names
-    }
+    for name in _entropy_component_names(metrics):
+        logged[f"policy/entropy_{name}"] = float(
+            torch.stack([metric.entropy_components[name] for metric in metrics])
+            .mean()
+            .item()
+        )
+    return logged
+
+
+def _entropy_component_names(metrics: list[PPOLossMetrics]) -> tuple[str, ...]:
+    if not metrics:
+        return ()
+    names = set(metrics[0].entropy_components)
+    for metric in metrics[1:]:
+        names &= set(metric.entropy_components)
+    return tuple(sorted(names))
 
 
 def _mean_sampling_metrics(metrics: list[SegmentSamplingMetrics]) -> dict[str, float]:

@@ -423,10 +423,12 @@ fn orbiting_target_candidate(
         if time == 0.0 {
             target.position()
         } else {
+            // Post-reset observations store orbiting planets at the phase from
+            // the previous completed simulator step.
             orbit_position(
                 initial_target.position(),
                 state.angular_velocity,
-                state.step as f64 + time,
+                state.step.saturating_sub(1) as f64 + time,
             )
         }
     };
@@ -847,10 +849,11 @@ mod tests {
             if time == 0.0 {
                 target.position()
             } else {
+                // Match the simulator's observed orbit phase, not the next step.
                 orbit_position(
                     initial_target.position(),
                     state.angular_velocity,
-                    state.step as f64 + time,
+                    state.step.saturating_sub(1) as f64 + time,
                 )
             }
         };
@@ -1133,6 +1136,37 @@ mod tests {
                 "decoded action should hit target ({target_x}, {target_y})",
             );
         }
+    }
+
+    #[test]
+    fn orbiting_target_candidate_uses_observed_generated_reset_phase() {
+        let mut state = state_from_planets(vec![
+            planet(0, 0, 95.0, 67.0, 3.0, 500),
+            planet(1, -1, 50.0, 20.0, 1.0, 100),
+        ]);
+        state.step = 1;
+        state.angular_velocity = 0.05;
+        let source = state.planets.get(0).expect("source");
+        let target = state.planets.get(1).expect("target");
+        let speed = fleet_speed(40, state.config.ship_speed);
+
+        let fast = orbiting_target_candidate(&state, source, target, speed)
+            .expect("fast solver should find an intercept");
+        let dense = dense_orbiting_target_candidate(&state, source, target, speed)
+            .expect("dense solver should find an intercept");
+
+        assert!(
+            (fast.time - dense.time).abs() <= 1e-3,
+            "fast time {} did not match dense time {}",
+            fast.time,
+            dense.time,
+        );
+        assert!(
+            (fast.angle - dense.angle).abs() <= 1e-3,
+            "fast angle {} did not match dense angle {}",
+            fast.angle,
+            dense.angle,
+        );
     }
 
     #[test]

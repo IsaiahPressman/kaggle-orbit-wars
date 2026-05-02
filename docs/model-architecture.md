@@ -206,6 +206,8 @@ It also returns decomposed log-prob and entropy tensors for launch gates and
 target or angle/size events, plus per-player action-entity totals with shape
 `(batch, 4, 44)`. PPO asks the action container for the submitted action-value
 tensor, so the trainer does not branch on action-spec-specific tensor names.
+Entropy outputs also carry policy-specific component names for logging, such as
+`launch`, `target`, `size`, or `angle_and_size`.
 
 The angle/size entropy is an augmented latent-mixture entropy estimate: mixture
 label entropy plus expected component entropy. It is not the exact marginal

@@ -24,7 +24,7 @@ optimizer:
 
 rl:
   horizon: 128
-  checkpoint_freq: null
+  checkpoint_freq: 10_000
   replay_ratio: 1.0
   segment_sampling:
     sampling: uniform

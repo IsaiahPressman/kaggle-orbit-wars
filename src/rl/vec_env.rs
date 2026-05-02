@@ -713,8 +713,6 @@ impl PyRlVecEnv {
 
 #[derive(Clone, Debug, Default)]
 struct EpisodeStats {
-    occupancy_rate_sum: f64,
-    occupancy_rate_turns: u32,
     launches_per_occupied_planet_sum: f64,
     occupied_planet_turns: u32,
     launches_per_launch_sum: f64,
@@ -745,21 +743,14 @@ impl EpisodeStats {
             .iter()
             .copied()
             .collect::<HashSet<_>>();
-        let mut non_comet_planets = 0_usize;
         let mut occupied_planets = 0_usize;
         for planet in state.planets.iter() {
             if comet_ids.contains(&planet.id) {
                 continue;
             }
-            non_comet_planets += 1;
             if planet.owner != -1 {
                 occupied_planets += 1;
             }
-        }
-
-        if non_comet_planets > 0 {
-            self.occupancy_rate_sum += occupied_planets as f64 / non_comet_planets as f64;
-            self.occupancy_rate_turns += 1;
         }
 
         let mut launches_by_planet = HashMap::<u32, u32>::new();
@@ -832,9 +823,9 @@ impl EpisodeStats {
         let fleets_lost = self.fleet_losses.fleets_in_sun + self.fleet_losses.fleets_out_of_bounds;
         let ships_lost = self.fleet_losses.ships_in_sun + self.fleet_losses.ships_out_of_bounds;
         let occupancy_key = if state.config.player_count == 2 {
-            "total_planet_occupancy_rate_2p"
+            "terminal_planet_occupancy_rate_2p"
         } else {
-            "total_planet_occupancy_rate_4p"
+            "terminal_planet_occupancy_rate_4p"
         };
         let mut values = vec![
             (
@@ -885,10 +876,7 @@ impl EpisodeStats {
                 "mean_fleets_lost_out_of_bounds_per_game",
                 f64::from(self.fleet_losses.fleets_out_of_bounds),
             ),
-            (
-                occupancy_key,
-                mean_or_zero(self.occupancy_rate_sum, self.occupancy_rate_turns),
-            ),
+            (occupancy_key, terminal_planet_occupancy_rate(state)),
         ];
         if self.launched_planet_turns > 0 {
             values.push((
@@ -961,6 +949,30 @@ fn terminal_ship_count(state: &State) -> f64 {
         .map(|fleet| i64::from(fleet.ships))
         .sum::<i64>();
     (planet_ships + fleet_ships) as f64
+}
+
+fn terminal_planet_occupancy_rate(state: &State) -> f64 {
+    let comet_ids = state
+        .comet_planet_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut non_comet_planets = 0_usize;
+    let mut occupied_planets = 0_usize;
+    for planet in state.planets.iter() {
+        if comet_ids.contains(&planet.id) {
+            continue;
+        }
+        non_comet_planets += 1;
+        if planet.owner != -1 {
+            occupied_planets += 1;
+        }
+    }
+    if non_comet_planets == 0 {
+        0.0
+    } else {
+        occupied_planets as f64 / non_comet_planets as f64
+    }
 }
 
 fn collect_terminal_metrics(
@@ -1376,8 +1388,43 @@ mod tests {
         assert_eq!(metrics["comet-launch-failures"], vec![0.0]);
         assert_eq!(metrics["win_rate_player_0"], vec![1.0]);
         assert_eq!(metrics["win_rate_player_3"], vec![1.0]);
-        assert_eq!(metrics["total_planet_occupancy_rate_4p"], vec![1.0]);
+        assert_eq!(metrics["terminal_planet_occupancy_rate_4p"], vec![1.0]);
         assert_eq!(metrics["mean_fleets_lost_per_game"], vec![0.0]);
+    }
+
+    #[test]
+    fn terminal_planet_occupancy_rate_counts_only_terminal_non_comet_planets() {
+        let mut state = state_with_all_players_alive();
+        state.planets.push(Planet {
+            id: 4,
+            owner: -1,
+            x: 50.0,
+            y: 50.0,
+            radius: 2.0,
+            ships: 0,
+            production: 1,
+        });
+        state.planets.push(Planet {
+            id: 5,
+            owner: -1,
+            x: 60.0,
+            y: 60.0,
+            radius: 2.0,
+            ships: 0,
+            production: 1,
+        });
+        state.planets.push(Planet {
+            id: 6,
+            owner: 0,
+            x: 70.0,
+            y: 70.0,
+            radius: 2.0,
+            ships: 10,
+            production: 1,
+        });
+        state.comet_planet_ids.push(6);
+
+        assert_eq!(terminal_planet_occupancy_rate(&state), 4.0 / 6.0);
     }
 
     #[test]

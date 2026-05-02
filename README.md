@@ -72,6 +72,12 @@ during a rollout, including game length, per-player win rates, launch density,
 planet occupancy for 2-player and 4-player games, max-entity overflow counts,
 terminal ship counts, planet captures, launch and fleet-size statistics,
 full-length game rate, and fleet/ship losses in the sun or out of bounds.
+Planet occupancy is reported at terminal as
+`train/terminal_planet_occupancy_rate_2p` and
+`train/terminal_planet_occupancy_rate_4p`.
+Policy logs include total entropy plus policy-specific component means such as
+`policy/entropy_launch`, `policy/entropy_target`, `policy/entropy_size`, and
+`policy/entropy_angle_and_size`.
 
 ## Orbit Wars replay parity
 
