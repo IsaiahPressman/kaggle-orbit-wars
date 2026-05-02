@@ -51,8 +51,8 @@ class DiscreteTargetsActor(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        self.n_heads = transformer_config.n_heads
-        self.head_dim = transformer_config.embed_dim // transformer_config.n_heads
+        self.n_heads = 1
+        self.head_dim = transformer_config.embed_dim
         mixtures = config.n_action_mixtures
 
         self.norm1 = nn.LayerNorm(transformer_config.embed_dim)
@@ -103,7 +103,12 @@ class DiscreteTargetsActor(nn.Module):
         else:
             target = Categorical(logits=selection.target_logits.float()).sample()
         target = torch.where(launch, target, torch.zeros_like(target))
-        params = self._size_params(selection, slot_input, max_launch, target)
+        all_size_params = self._all_size_params(selection, slot_input, max_launch)
+        params = policy_params_for_selected_target(
+            selection,
+            all_size_params,
+            target,
+        )
         ships = sample_discretized_logistic_mixture(
             params.size_mix_logits,
             params.size_mu,
@@ -125,7 +130,7 @@ class DiscreteTargetsActor(nn.Module):
         )
         launch_entropy, target_entropy, size_entropy = discrete_action_entropy(
             params,
-            self._all_size_params(selection, slot_input, max_launch),
+            all_size_params,
             max_launch,
             source_active,
             can_act,
@@ -189,10 +194,10 @@ class DiscreteTargetsActor(nn.Module):
             can_act,
             min_fleet_size,
         )
-        params = self._size_params(
+        all_size_params = self._all_size_params(selection, slot_input, max_launch)
+        params = policy_params_for_selected_target(
             selection,
-            slot_input,
-            max_launch,
+            all_size_params,
             target.clamp(0, ACTION_ENTITY_SLOTS - 1),
         )
         launch_log_prob, target_log_prob, size_log_prob = discrete_action_log_probs(
@@ -206,7 +211,7 @@ class DiscreteTargetsActor(nn.Module):
         )
         launch_entropy, target_entropy, size_entropy = discrete_action_entropy(
             params,
-            self._all_size_params(selection, slot_input, max_launch),
+            all_size_params,
             max_launch,
             source_active,
             can_act,
@@ -252,11 +257,10 @@ class DiscreteTargetsActor(nn.Module):
                 f"{expected_shape}, got {tuple(can_act.shape)}"
             )
         x = self.norm1(slot_input)
-        batch, players, slots, _ = x.shape
-        q = self.q(x).view(batch, players, slots, self.n_heads, self.head_dim)
-        k = self.k(x).view(batch, players, slots, self.n_heads, self.head_dim)
-        v = self.v(x).view(batch, players, slots, self.n_heads, self.head_dim)
-        target_logits = torch.einsum("bpshd,bpthd->bpsth", q, k).mean(dim=-1)
+        q = self.q(x)
+        k = self.k(x)
+        v = self.v(x)
+        target_logits = torch.einsum("bpsd,bptd->bpst", q, k)
         target_logits = target_logits / math.sqrt(self.head_dim)
         target_logits = target_logits.masked_fill(~can_act, torch.finfo(x.dtype).min)
         safe_target_logits = torch.where(
@@ -269,27 +273,6 @@ class DiscreteTargetsActor(nn.Module):
             continue_logits=self.continue_head(launch_hidden).squeeze(-1),
             target_logits=safe_target_logits,
             target_values=v,
-        )
-
-    def _size_params(
-        self,
-        selection: DiscreteTargetSelectionParams,
-        slot_input: torch.Tensor,
-        max_launch: torch.Tensor,
-        target_index: torch.Tensor,
-    ) -> DiscreteTargetPolicyParams:
-        selected_v = gather_target_values(selection.target_values, target_index)
-        size_params = self._size_params_from_target_values(
-            slot_input,
-            max_launch,
-            selected_v,
-        )
-        return DiscreteTargetPolicyParams(
-            continue_logits=selection.continue_logits,
-            target_logits=selection.target_logits,
-            size_mix_logits=size_params.size_mix_logits,
-            size_mu=size_params.size_mu,
-            size_scale=size_params.size_scale,
         )
 
     def _all_size_params(
@@ -305,7 +288,6 @@ class DiscreteTargetsActor(nn.Module):
             players,
             source_slots,
             target_slots,
-            self.n_heads,
             self.head_dim,
         )
         return self._size_params_from_target_values(
@@ -320,7 +302,7 @@ class DiscreteTargetsActor(nn.Module):
         max_launch: torch.Tensor,
         target_values: torch.Tensor,
     ) -> DiscreteTargetSizeParams:
-        selected_v = self.out(target_values.flatten(start_dim=-2))
+        selected_v = self.out(target_values)
         enriched = slot_input + selected_v
         enriched = enriched + self.mlp(self.norm2(enriched))
         source_hidden = self.source_proj(enriched)
@@ -347,16 +329,39 @@ class DiscreteTargetsActor(nn.Module):
         )
 
 
-def gather_target_values(
+def policy_params_for_selected_target(
+    selection: DiscreteTargetSelectionParams,
+    all_size_params: DiscreteTargetSizeParams,
+    target_index: torch.Tensor,
+) -> DiscreteTargetPolicyParams:
+    return DiscreteTargetPolicyParams(
+        continue_logits=selection.continue_logits,
+        target_logits=selection.target_logits,
+        size_mix_logits=gather_selected_target_params(
+            all_size_params.size_mix_logits,
+            target_index,
+        ),
+        size_mu=gather_selected_target_params(
+            all_size_params.size_mu,
+            target_index,
+        ),
+        size_scale=gather_selected_target_params(
+            all_size_params.size_scale,
+            target_index,
+        ),
+    )
+
+
+def gather_selected_target_params(
     values: torch.Tensor,
     target_index: torch.Tensor,
 ) -> torch.Tensor:
     gather_index = target_index[..., None, None].expand(
         *target_index.shape,
-        values.shape[-2],
+        1,
         values.shape[-1],
     )
-    return values.gather(dim=2, index=gather_index)
+    return values.gather(dim=3, index=gather_index).squeeze(3)
 
 
 def logsubexp(log_x: torch.Tensor, log_y: torch.Tensor) -> torch.Tensor:

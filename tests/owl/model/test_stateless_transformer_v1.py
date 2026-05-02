@@ -812,6 +812,9 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs() -> None:
         n_heads=4,
     )
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    assert isinstance(model.actor, DiscreteTargetsActor)
+    assert model.actor.n_heads == 1
+    assert model.actor.head_dim == config.embed_dim
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
     obs.max_launch[:, 0, 0] = 8
     obs.max_launch[:, 1, 1] = 4

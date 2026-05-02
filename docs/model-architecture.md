@@ -219,10 +219,11 @@ uses a larger per-planet launch count for this actor.
 
 Instead of the pure actor's minGRU, the discrete-target actor uses one
 feedforward action block per source entity. It projects source slots to query,
-key, and value tensors, computes scaled dot-product target logits for every
-`(source, target)` pair, and masks those logits with the 4-D discrete
-`can_act` tensor. Fully masked source rows are sanitized to finite zero logits
-and are suppressed by the launch/source mask.
+key, and value tensors with a single target-selection head independent of the
+shared transformer trunk's attention head count. It computes scaled dot-product
+target logits for every `(source, target)` pair and masks those logits with the
+4-D discrete `can_act` tensor. Fully masked source rows are sanitized to finite
+zero logits and are suppressed by the launch/source mask.
 
 After sampling a target from the masked softmax, the actor gathers the selected
 target value vector, adds it to the source residual stream, and applies a
