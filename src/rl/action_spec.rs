@@ -11,7 +11,9 @@ use super::{PlayerMap, ACTION_ENTITY_SLOTS, MAX_COMETS, MAX_PLANETS, OUTER_PLAYE
 const TARGET_EPS: f64 = 1e-6;
 const ROOT_EPS: f64 = 1e-7;
 const ROOT_STEP: f64 = 0.25;
-const ORBIT_TARGET_HORIZON: f64 = 200.0;
+const ORBIT_SCAN_SAMPLES_PER_PERIOD: f64 = 64.0;
+const ORBIT_MIN_SCAN_SAMPLES: usize = 16;
+const ORBIT_MAX_SCAN_SAMPLES: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RlActionSpec {
@@ -325,19 +327,28 @@ struct TargetCandidate {
 
 fn target_angle(state: &State, source: &Planet, target: &Planet, ships: i32) -> f64 {
     let speed = fleet_speed(ships, state.config.ship_speed);
-    let candidates = if state.comet_planet_ids.contains(&target.id) {
-        comet_target_candidates(state, source, target, speed)
-    } else if is_orbiting(
+    if state.comet_planet_ids.contains(&target.id) {
+        let candidates = comet_target_candidates(state, source, target, speed);
+        return choose_candidate(state, source, target, candidates).map_or_else(
+            || angle_between(source.position(), target.position()),
+            |candidate| candidate.angle,
+        );
+    }
+
+    if is_orbiting(
         state
             .initial_planets
             .get(target.id)
             .map_or(target.position(), Planet::position),
         target.radius,
     ) {
-        orbiting_target_candidates(state, source, target, speed)
-    } else {
-        static_target_candidates(source, target, speed)
-    };
+        return orbiting_target_candidate(state, source, target, speed).map_or_else(
+            || angle_between(source.position(), target.position()),
+            |candidate| candidate.angle,
+        );
+    }
+
+    let candidates = static_target_candidates(source, target, speed);
     choose_candidate(state, source, target, candidates).map_or_else(
         || angle_between(source.position(), target.position()),
         |candidate| candidate.angle,
@@ -377,15 +388,19 @@ fn static_target_candidates(source: &Planet, target: &Planet, speed: f64) -> Vec
     candidates
 }
 
-fn orbiting_target_candidates(
+fn orbiting_target_candidate(
     state: &State,
     source: &Planet,
     target: &Planet,
     speed: f64,
-) -> Vec<TargetCandidate> {
-    let Some(initial_target) = state.initial_planets.get(target.id) else {
-        return static_target_candidates(source, target, speed);
-    };
+) -> Option<TargetCandidate> {
+    let initial_target = state.initial_planets.get(target.id)?;
+    let source_pos = source.position();
+    let center = Point::new(CENTER, CENTER);
+    let orbit_radius = distance(initial_target.position(), center);
+    if speed <= 0.0 || orbit_radius <= 0.0 {
+        return None;
+    }
     let target_at = |time: f64| {
         if time == 0.0 {
             target.position()
@@ -397,13 +412,77 @@ fn orbiting_target_candidates(
             )
         }
     };
-    moving_target_candidates(
-        source,
-        target.radius,
-        speed,
-        ORBIT_TARGET_HORIZON,
-        target_at,
-    )
+    let source_orbit_distance = distance(source_pos, center);
+    let min_distance = (source_orbit_distance - orbit_radius).abs();
+    let max_distance = source_orbit_distance + orbit_radius;
+    let clearance = source.radius + 0.1 + target.radius;
+    let min_time = ((min_distance - clearance) / speed).max(0.0);
+    let max_time = ((max_distance - clearance) / speed).max(0.0);
+    let impact = |time: f64| distance(target_at(time), source_pos) - clearance - speed * time;
+    let candidate_at = |time: f64| {
+        let target_pos = target_at(time);
+        let angle = angle_between(source_pos, target_pos);
+        TargetCandidate {
+            angle,
+            end: point_along(launch_start(source, angle), angle, speed * time),
+            time,
+        }
+    };
+
+    if max_time <= min_time {
+        return (impact(min_time) <= ROOT_EPS).then(|| candidate_at(min_time));
+    }
+
+    let min_value = impact(min_time);
+    if min_value <= ROOT_EPS {
+        return Some(candidate_at(min_time));
+    }
+
+    let max_value = impact(max_time);
+    if speed > state.angular_velocity.abs() * orbit_radius {
+        if max_value > ROOT_EPS {
+            return None;
+        }
+        return Some(candidate_at(bisect_root(&impact, min_time, max_time)));
+    }
+
+    let sample_count = orbit_scan_sample_count(min_time, max_time, state.angular_velocity);
+    let step = (max_time - min_time) / sample_count as f64;
+    let mut prev_time = min_time;
+    let mut prev_value = min_value;
+    for sample_index in 1..=sample_count {
+        let time = if sample_index == sample_count {
+            max_time
+        } else {
+            min_time + step * sample_index as f64
+        };
+        let value = impact(time);
+        if value <= ROOT_EPS {
+            let root_time = if prev_value.signum() != value.signum() {
+                bisect_root(&impact, prev_time, time)
+            } else {
+                time
+            };
+            return Some(candidate_at(root_time));
+        }
+        prev_time = time;
+        prev_value = value;
+    }
+    None
+}
+
+fn orbit_scan_sample_count(min_time: f64, max_time: f64, angular_velocity: f64) -> usize {
+    let span = max_time - min_time;
+    if span <= 0.0 {
+        return 1;
+    }
+    let samples = if angular_velocity.abs() > f64::EPSILON {
+        let period = std::f64::consts::TAU / angular_velocity.abs();
+        (span / period * ORBIT_SCAN_SAMPLES_PER_PERIOD).ceil() as usize
+    } else {
+        ORBIT_MIN_SCAN_SAMPLES
+    };
+    samples.clamp(ORBIT_MIN_SCAN_SAMPLES, ORBIT_MAX_SCAN_SAMPLES)
 }
 
 fn comet_target_candidates(
@@ -787,6 +866,69 @@ mod tests {
             .is_some_and(|target| target.ships != initial_ships)
     }
 
+    fn dense_orbiting_target_candidate(
+        state: &State,
+        source: &Planet,
+        target: &Planet,
+        speed: f64,
+    ) -> Option<TargetCandidate> {
+        let initial_target = state.initial_planets.get(target.id)?;
+        let source_pos = source.position();
+        let center = Point::new(CENTER, CENTER);
+        let orbit_radius = distance(initial_target.position(), center);
+        let source_orbit_distance = distance(source_pos, center);
+        let min_distance = (source_orbit_distance - orbit_radius).abs();
+        let max_distance = source_orbit_distance + orbit_radius;
+        let clearance = source.radius + 0.1 + target.radius;
+        let min_time = ((min_distance - clearance) / speed).max(0.0);
+        let max_time = ((max_distance - clearance) / speed).max(0.0);
+        let target_at = |time: f64| {
+            if time == 0.0 {
+                target.position()
+            } else {
+                orbit_position(
+                    initial_target.position(),
+                    state.angular_velocity,
+                    state.step as f64 + time,
+                )
+            }
+        };
+        let impact = |time: f64| distance(target_at(time), source_pos) - clearance - speed * time;
+        let candidate_at = |time: f64| {
+            let target_pos = target_at(time);
+            let angle = angle_between(source_pos, target_pos);
+            TargetCandidate {
+                angle,
+                end: point_along(launch_start(source, angle), angle, speed * time),
+                time,
+            }
+        };
+
+        if max_time <= min_time {
+            return (impact(min_time) <= ROOT_EPS).then(|| candidate_at(min_time));
+        }
+        let mut prev_time = min_time;
+        let mut prev_value = impact(prev_time);
+        if prev_value <= ROOT_EPS {
+            return Some(candidate_at(prev_time));
+        }
+        for sample_index in 1..=16_384 {
+            let time = min_time + (max_time - min_time) * f64::from(sample_index) / 16_384.0;
+            let value = impact(time);
+            if value <= ROOT_EPS {
+                let root_time = if prev_value.signum() != value.signum() {
+                    bisect_root(&impact, prev_time, time)
+                } else {
+                    time
+                };
+                return Some(candidate_at(root_time));
+            }
+            prev_time = time;
+            prev_value = value;
+        }
+        None
+    }
+
     #[test]
     fn discrete_targets_mask_uses_source_target_square() {
         let mut state = state_from_planets(vec![
@@ -924,6 +1066,112 @@ mod tests {
         step(&mut state, &decoded);
 
         assert!(run_until_planet_changes(&mut state, 1, 100));
+    }
+
+    #[test]
+    fn orbiting_target_candidate_solves_centerline_intercept() {
+        let state = state_from_planets(vec![
+            planet(0, 0, 97.0, 50.0, 3.0, 500),
+            planet(1, -1, 50.0, 20.0, 3.0, 100),
+        ]);
+        let source = state.planets.get(0).expect("source");
+        let target = state.planets.get(1).expect("target");
+        let speed = fleet_speed(300, state.config.ship_speed);
+
+        let candidate = orbiting_target_candidate(&state, source, target, speed)
+            .expect("orbiting target should have an intercept");
+        let initial_target = state.initial_planets.get(1).expect("initial target");
+        let target_pos = orbit_position(
+            initial_target.position(),
+            state.angular_velocity,
+            state.step as f64 + candidate.time,
+        );
+        let clearance = source.radius + 0.1 + target.radius;
+        let residual = distance(target_pos, source.position()) - clearance - speed * candidate.time;
+
+        assert!(residual.abs() <= 1e-5, "residual {residual}");
+        assert!((candidate.angle - angle_between(source.position(), target_pos)).abs() <= 1e-12);
+    }
+
+    #[test]
+    fn orbiting_target_candidate_falls_back_to_scan_when_target_is_faster() {
+        let mut state = state_from_planets(vec![
+            planet(0, 0, 52.0, 50.0, 1.0, 500),
+            planet(1, -1, 70.0, 50.0, 1.0, 100),
+        ]);
+        state.angular_velocity = 1.0;
+        let source = state.planets.get(0).expect("source");
+        let target = state.planets.get(1).expect("target");
+        let speed = fleet_speed(1, state.config.ship_speed);
+
+        assert!(
+            speed
+                <= state.angular_velocity.abs()
+                    * distance(target.position(), Point::new(CENTER, CENTER))
+        );
+        assert!(orbiting_target_candidate(&state, source, target, speed).is_some());
+    }
+
+    #[test]
+    fn orbiting_target_candidate_matches_dense_solver_and_hits_in_simulator() {
+        for (target_x, target_y, angular_velocity, ships) in [
+            (50.0, 20.0, 0.025, 300),
+            (75.0, 50.0, 0.025, 80),
+            (50.0, 80.0, -0.025, 200),
+        ] {
+            let mut state = state_from_planets(vec![
+                planet(0, 0, 97.0, 50.0, 3.0, 500),
+                planet(1, -1, target_x, target_y, 3.0, 100),
+            ]);
+            state.angular_velocity = angular_velocity;
+            let source = state.planets.get(0).expect("source");
+            let target = state.planets.get(1).expect("target");
+            let speed = fleet_speed(ships, state.config.ship_speed);
+
+            let fast = orbiting_target_candidate(&state, source, target, speed)
+                .expect("fast solver should find an intercept");
+            let dense = dense_orbiting_target_candidate(&state, source, target, speed)
+                .expect("dense solver should find an intercept");
+
+            assert!(
+                (fast.time - dense.time).abs() <= 1e-3,
+                "fast time {} did not match dense time {} for target ({target_x}, {target_y})",
+                fast.time,
+                dense.time,
+            );
+            assert!(
+                (fast.angle - dense.angle).abs() <= 1e-3,
+                "fast angle {} did not match dense angle {} for target ({target_x}, {target_y})",
+                fast.angle,
+                dense.angle,
+            );
+
+            let mut sim_state = state.clone();
+            let entities = action_entity_slots(&sim_state);
+            let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+            let mut targets = vec![0; 4 * ACTION_ENTITY_SLOTS];
+            let mut launched_ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+            launch[0] = true;
+            targets[0] = 1;
+            launched_ships[0] = i64::from(ships);
+            let decoded = decode_discrete_target_actions(
+                &sim_state,
+                &PlayerMap::identity(),
+                &entities,
+                &launch,
+                &targets,
+                &launched_ships,
+                1,
+                1,
+            )
+            .expect("valid orbiting target action should decode");
+
+            step(&mut sim_state, &decoded);
+            assert!(
+                run_until_planet_changes(&mut sim_state, 1, 100),
+                "decoded action should hit target ({target_x}, {target_y})",
+            );
+        }
     }
 
     #[test]

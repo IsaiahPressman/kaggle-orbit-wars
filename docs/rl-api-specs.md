@@ -311,12 +311,16 @@ by the sun or another static planet, it tries both edge paths using
 `target_radius - eps`, then prefers an unobstructed path, then a path that avoids
 the sun, and finally the centerline if every candidate hits the sun.
 
-For orbiting planets, candidate center and edge intercepts are found against the
-analytic orbit curve with bounded scalar root finding; movement is not
-simulated during decoding. For comets, intercepts are found against the known
-future path segments. Moving targets prefer the earliest unobstructed intercept.
-If no comet intercept exists within the known future path, decoding fires toward
-the closest reachable future path point as a best-effort fallback.
+For orbiting non-comet planets, decoding computes a single centerline
+time-of-impact trajectory against the analytic orbit curve. It first uses the
+orbit radius to bound the possible impact interval, then uses monotonic bisection
+when the fleet is faster than the target's tangential speed, otherwise a capped
+coarse scan followed by bisection. This fast orbiting path does not validate sun
+or planet obstruction before emitting the launch angle. For comets, intercepts
+are found against the known future path segments. Comet targets prefer the
+earliest unobstructed intercept. If no comet intercept exists within the known
+future path, decoding fires toward the closest reachable future path point as a
+best-effort fallback.
 
 `episode_metrics` is a `dict[str, list[float]]` populated only for sub-envs that
 terminated during this step. Empty steps return `{}`. Each list contains one

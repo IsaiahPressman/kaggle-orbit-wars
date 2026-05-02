@@ -115,6 +115,12 @@ def parse_args() -> argparse.Namespace:
         help="Rust action slots per source. The benchmark only fills the first slot.",
     )
     parser.add_argument(
+        "--min-fleet-size",
+        type=int,
+        default=5,
+        help="Rust minimum ship count per launched fleet.",
+    )
+    parser.add_argument(
         "--action-spec",
         choices=["pure", "discrete_targets"],
         default="pure",
@@ -155,10 +161,14 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
         obs_spec = ObsV1Config(max_entities=args.max_entities)
 
     action_spec = (
-        ActionPureConfig(max_per_planet_launches=args.max_per_planet_launches)
+        ActionPureConfig(
+            max_per_planet_launches=args.max_per_planet_launches,
+            min_fleet_size=args.min_fleet_size,
+        )
         if args.action_spec == "pure"
         else ActionDiscreteTargetsConfig(
-            max_per_planet_launches=args.max_per_planet_launches
+            max_per_planet_launches=args.max_per_planet_launches,
+            min_fleet_size=args.min_fleet_size,
         )
     )
     env = VectorizedEnv(
@@ -193,7 +203,7 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
         unit="tick",
     ):
         launches += sample_rust_actions(
-            env, rng, args.launch_prob, launch, action_value, ships
+            env, rng, args.launch_prob, args.min_fleet_size, launch, action_value, ships
         )
         env.step(launch, action_value, ships)
 
@@ -208,7 +218,7 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
     ):
         total_started_at = time.perf_counter()
         timed_launches += sample_rust_actions(
-            env, rng, args.launch_prob, launch, action_value, ships
+            env, rng, args.launch_prob, args.min_fleet_size, launch, action_value, ships
         )
         started_at = time.perf_counter()
         env.step(launch, action_value, ships)
@@ -232,6 +242,7 @@ def sample_rust_actions(
     env: VectorizedEnv,
     rng: np.random.Generator,
     launch_prob: float,
+    min_fleet_size: int,
     launch: np.ndarray,
     action_value: np.ndarray,
     ships: np.ndarray,
@@ -246,16 +257,22 @@ def sample_rust_actions(
     else:
         source_can_act = can_act.any(axis=-1)
         selected = source_can_act & (rng.random(source_can_act.shape) < launch_prob)
-        action_value.fill(0)
-        for env_index, player, source in np.argwhere(selected):
-            valid_targets = np.flatnonzero(can_act[env_index, player, source])
-            action_value[env_index, player, source, 0] = int(rng.choice(valid_targets))
+        target_counts = can_act.sum(axis=-1)
+        target_rank = rng.integers(
+            0, np.maximum(target_counts, 1), size=target_counts.shape, dtype=np.int64
+        )
+        target_index = (np.cumsum(can_act, axis=-1) > target_rank[..., None]).argmax(
+            axis=-1
+        )
+        action_value[..., 0] = target_index
 
     launch.fill(False)
     launch[..., 0] = selected
 
-    high = np.maximum(max_launch + 1, 2)
-    sampled_ships = rng.integers(1, high, size=max_launch.shape, dtype=np.int64)
+    high = np.maximum(max_launch + 1, min_fleet_size + 1)
+    sampled_ships = rng.integers(
+        min_fleet_size, high, size=max_launch.shape, dtype=np.int64
+    )
     sampled_ships[~selected] = 0
     ships.fill(0)
     ships[..., 0] = sampled_ships
