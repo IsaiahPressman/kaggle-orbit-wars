@@ -25,13 +25,13 @@ class ActorDiscreteTargetsConfig(BaseConfig):
     max_ship_normalizer: float = Field(default=250.0, gt=0.0)
     entropy_ship_support_cap: int = Field(default=256, ge=1)
     scale_min: float = Field(default=0.25, gt=0.0)
-    min_log_scale: float = -7.0
-    max_log_scale: float = 0.5
+    scale_max_frac: float = Field(default=0.50, gt=0.0)
+    scale_max_abs_floor: float = Field(default=8.0, gt=0.0)
 
     @model_validator(mode="after")
-    def _validate_scale_clamp(self) -> Self:
-        if self.min_log_scale > self.max_log_scale:
-            raise ValueError("min_log_scale must be <= max_log_scale")
+    def _validate_scale_bounds(self) -> Self:
+        if self.scale_min > self.scale_max_abs_floor:
+            raise ValueError("scale_min must be <= scale_max_abs_floor")
         return self
 
 

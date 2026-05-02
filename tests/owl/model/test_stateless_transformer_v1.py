@@ -11,6 +11,10 @@ from owl.model import (
     StatelessTransformerV1,
     StatelessTransformerV1Config,
 )
+from owl.model.actor.discrete_targets import (
+    discretized_logistic_mixture_log_prob,
+    logsubexp,
+)
 from owl.model.stateless_transformer_v1 import (
     ActorDiscreteTargetsConfig,
     ActorPureConfig,
@@ -862,13 +866,14 @@ def test_discrete_targets_actor_rejects_invalid_replay_target() -> None:
     )
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(batch_size=1, obs_spec=obs_spec, action_spec=action_spec)
+    obs.max_launch[0, 0, 0] = action_spec.min_fleet_size
     output = model(obs, deterministic=True)
     output.actions.launch.zero_()
     output.actions.ships.zero_()
     assert output.actions.target is not None
     output.actions.target.zero_()
     output.actions.launch[0, 0, 0, 0] = True
-    output.actions.ships[0, 0, 0, 0] = 1
+    output.actions.ships[0, 0, 0, 0] = action_spec.min_fleet_size
     output.actions.target[0, 0, 0, 0] = 2
 
     with pytest.raises(ValueError, match=r"actions\.target must select a valid target"):
@@ -898,8 +903,8 @@ def test_discrete_targets_size_log_prob_conditions_on_replayed_target() -> None:
         actor.mean_head.weight.zero_()
         actor.mean_head.bias.zero_()
         actor.mean_head.weight[0, 0] = 10.0
-        actor.log_scale_head.weight.zero_()
-        actor.log_scale_head.bias.fill_(-3.0)
+        actor.scale_head.weight.zero_()
+        actor.scale_head.bias.fill_(-3.0)
 
     slot_input = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
     slot_input[0, 0, 1] = torch.tensor([2.0, -2.0, 0.0, 0.0])
@@ -938,6 +943,97 @@ def test_discrete_targets_size_log_prob_conditions_on_replayed_target() -> None:
         target_one_logp.angle_and_size[0, 0, 0],
         target_two_logp.angle_and_size[0, 0, 0],
     )
+
+
+def test_discrete_targets_scale_log_interpolates_budget_bounds() -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(n_action_mixtures=1),
+        embed_dim=4,
+        depth=1,
+        n_heads=1,
+    )
+    actor = DiscreteTargetsActor(config.actor, transformer_config=config)
+    with torch.no_grad():
+        actor.scale_head.weight.zero_()
+
+    slot_input = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    target_values = torch.zeros_like(slot_input)
+    max_launch = torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
+    max_launch[0, 0, 0] = 10
+    max_launch[0, 0, 1] = 100
+
+    with torch.no_grad():
+        actor.scale_head.bias.fill_(0.0)
+    params = actor._size_params_from_target_values(
+        slot_input, max_launch, target_values
+    )
+    assert torch.allclose(
+        params.size_scale[0, 0, 0, 0],
+        torch.tensor(math.sqrt(0.25 * 8.0)),
+    )
+    assert torch.allclose(
+        params.size_scale[0, 0, 1, 0],
+        torch.tensor(math.sqrt(0.25 * 50.0)),
+    )
+
+    with torch.no_grad():
+        actor.scale_head.bias.fill_(-20.0)
+    params = actor._size_params_from_target_values(
+        slot_input, max_launch, target_values
+    )
+    assert torch.allclose(params.size_scale[0, 0, 0, 0], torch.tensor(0.25))
+
+    with torch.no_grad():
+        actor.scale_head.bias.fill_(20.0)
+    params = actor._size_params_from_target_values(
+        slot_input, max_launch, target_values
+    )
+    assert torch.allclose(params.size_scale[0, 0, 0, 0], torch.tensor(8.0))
+    assert torch.allclose(params.size_scale[0, 0, 1, 0], torch.tensor(50.0))
+
+
+def test_logsubexp_clamps_close_float32_inputs_to_finite_value() -> None:
+    log_x = torch.tensor([0.0], dtype=torch.float32, requires_grad=True)
+    log_y = torch.tensor([-1e-8], dtype=torch.float32)
+
+    value = logsubexp(log_x, log_y)
+    value.backward()
+
+    assert torch.isfinite(value).all()
+    assert log_x.grad is not None
+    assert torch.isfinite(log_x.grad).all()
+
+
+def test_discretized_logistic_mixture_uses_float32_for_bfloat16_inputs() -> None:
+    mix_logits = torch.zeros((2, 3), dtype=torch.bfloat16, requires_grad=True)
+    mu = torch.tensor(
+        [[50.0, 55.0, 60.0], [10.0, 12.0, 14.0]],
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    scale = torch.tensor(
+        [[0.25, 2.0, 50.0], [0.5, 1.5, 8.0]],
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    ships = torch.tensor([55, 12], dtype=torch.int64)
+    residual_budget = torch.tensor([100, 20], dtype=torch.int64)
+
+    log_prob = discretized_logistic_mixture_log_prob(
+        ships,
+        residual_budget,
+        mix_logits,
+        mu,
+        scale,
+        min_fleet_size=1,
+    )
+    log_prob.sum().backward()
+
+    assert log_prob.dtype == torch.float32
+    assert torch.isfinite(log_prob).all()
+    for tensor in (mix_logits, mu, scale):
+        assert tensor.grad is not None
+        assert torch.isfinite(tensor.grad).all()
 
 
 def test_discrete_targets_entropy_ignores_invalid_ship_support_gradients() -> None:

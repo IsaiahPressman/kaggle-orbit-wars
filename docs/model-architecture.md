@@ -36,7 +36,7 @@ pure-head fields such as `n_action_mixtures`, `kappa_min`, `kappa_max`,
 `entropy_ship_support_cap`. `ActorDiscreteTargetsConfig` owns
 `n_action_mixtures`, `max_ship_normalizer`, `entropy_ship_support_cap`, and
 the logistic-mixture scale parameters `scale_min=0.25`,
-`min_log_scale=-7.0`, and `max_log_scale=0.5`.
+`scale_max_frac=0.5`, and `scale_max_abs_floor=8.0`.
 
 `FullConfig` validates that `env.action_spec.action_spec` matches
 `model.actor.action_spec`. Direct model construction performs the same check
@@ -238,11 +238,13 @@ For each source, the discrete actor emits:
 - mixture parameters for a truncated discretized logistic fleet-size policy
 
 The fleet-size mixture maps raw means through a sigmoid into the current
-`1..max_launch` budget range. Raw log-scales are clamped by
-`ActorDiscreteTargetsConfig` and multiplied by the residual budget, so scale is
-approximately fractional in the available ship count. PPO replay uses the
-marginal mixture log-probability of the integer ship count, not the sampled
-component log-probability.
+`1..max_launch` budget range. Raw scale outputs are passed through a sigmoid
+and log-interpolated between `scale_min` and
+`max(scale_max_abs_floor, scale_max_frac * max_launch)`. This keeps very small
+scales available for near-deterministic counts while still allowing broad
+fractional exploration for large ship budgets. PPO replay uses the marginal
+mixture log-probability of the integer ship count, not the sampled component
+log-probability.
 
 ## Log-Prob Replay
 

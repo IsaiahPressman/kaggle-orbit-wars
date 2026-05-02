@@ -69,7 +69,7 @@ class DiscreteTargetsActor(nn.Module):
         self.continue_head = nn.Linear(transformer_config.embed_dim, 1)
         self.mix_head = nn.Linear(transformer_config.embed_dim, mixtures)
         self.mean_head = nn.Linear(transformer_config.embed_dim, mixtures)
-        self.log_scale_head = nn.Linear(transformer_config.embed_dim, mixtures)
+        self.scale_head = nn.Linear(transformer_config.embed_dim, mixtures)
 
     def get_input_layers(self) -> tuple[nn.Module, ...]:
         return ()
@@ -79,7 +79,7 @@ class DiscreteTargetsActor(nn.Module):
             self.continue_head,
             self.mix_head,
             self.mean_head,
-            self.log_scale_head,
+            self.scale_head,
         )
 
     def forward(
@@ -309,19 +309,23 @@ class DiscreteTargetsActor(nn.Module):
 
         residual_budget = (
             max_launch.clamp_min(1)
-            .to(dtype=source_hidden.dtype)
+            .to(dtype=torch.float32)
             .view(
                 *max_launch.shape,
                 *((1,) * (source_hidden.ndim - max_launch.ndim)),
             )
         )
-        rho = torch.sigmoid(self.mean_head(source_hidden))
+        rho = torch.sigmoid(self.mean_head(source_hidden).float())
         mu = 1.0 + rho * (residual_budget - 1.0)
-        raw_log_scale = self.log_scale_head(source_hidden).clamp(
-            self.config.min_log_scale,
-            self.config.max_log_scale,
+        scale_upper = torch.maximum(
+            torch.full_like(residual_budget, self.config.scale_max_abs_floor),
+            residual_budget * self.config.scale_max_frac,
         )
-        scale = self.config.scale_min + residual_budget * raw_log_scale.exp()
+        scale = log_interpolate(
+            self.config.scale_min,
+            scale_upper,
+            torch.sigmoid(self.scale_head(source_hidden).float()),
+        )
         return DiscreteTargetSizeParams(
             size_mix_logits=self.mix_head(source_hidden),
             size_mu=mu,
@@ -364,8 +368,21 @@ def gather_selected_target_params(
     return values.gather(dim=3, index=gather_index).squeeze(3)
 
 
+def log_interpolate(
+    low: float,
+    high: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    log_low = math.log(low)
+    high = high.float()
+    weight = weight.float()
+    return (log_low + weight * (high.log() - log_low)).exp()
+
+
 def logsubexp(log_x: torch.Tensor, log_y: torch.Tensor) -> torch.Tensor:
-    return log_x + torch.log1p(-(log_y - log_x).exp().clamp_max(1.0 - 1e-12))
+    eps = torch.finfo(log_x.dtype).eps
+    ratio = (log_y - log_x).exp().clamp_max(1.0 - eps)
+    return log_x + torch.log1p(-ratio)
 
 
 def logistic_cdf_diff_logprob(lo: torch.Tensor, hi: torch.Tensor) -> torch.Tensor:
@@ -389,10 +406,12 @@ def discretized_logistic_mixture_log_prob(
     *,
     min_fleet_size: int,
 ) -> torch.Tensor:
-    dtype = mu.dtype
-    n = ships.to(dtype).unsqueeze(-1)
+    mix_logits = mix_logits.float()
+    mu = mu.float()
+    scale = scale.float()
+    n = ships.to(torch.float32).unsqueeze(-1)
     safe_residual_budget = residual_budget.clamp_min(min_fleet_size)
-    residual = safe_residual_budget.to(dtype).unsqueeze(-1)
+    residual = safe_residual_budget.to(torch.float32).unsqueeze(-1)
 
     valid = (
         (ships >= min_fleet_size)
@@ -408,8 +427,8 @@ def discretized_logistic_mixture_log_prob(
 
     log_bin_mass = logistic_cdf_diff_logprob(lo, hi)
     log_support_mass = logistic_cdf_diff_logprob(support_lo, support_hi)
-    log_w = F.log_softmax(mix_logits.float(), dim=-1)
-    log_comp = log_w + log_bin_mass.float() - log_support_mass.float()
+    log_w = F.log_softmax(mix_logits, dim=-1)
+    log_comp = log_w + log_bin_mass - log_support_mass
     log_comp = torch.where(
         valid.unsqueeze(-1),
         log_comp,
