@@ -10,7 +10,7 @@ use super::{PlayerMap, ACTION_ENTITY_SLOTS, MAX_COMETS, MAX_PLANETS, OUTER_PLAYE
 
 const TARGET_EPS: f64 = 1e-6;
 const ROOT_EPS: f64 = 1e-7;
-const ROOT_STEP: f64 = 0.25;
+const QUADRATIC_EPS: f64 = 1e-12;
 const ORBIT_SCAN_SAMPLES_PER_PERIOD: f64 = 64.0;
 const ORBIT_MIN_SCAN_SAMPLES: usize = 16;
 const ORBIT_MAX_SCAN_SAMPLES: usize = 512;
@@ -508,17 +508,8 @@ fn comet_target_candidates(
         return static_target_candidates(source, target, speed);
     }
     let remaining = &path[path_start..];
-    let horizon = remaining.len().saturating_sub(1) as f64;
-    let target_at = |time: f64| {
-        let lower = time.floor() as usize;
-        if lower >= remaining.len() - 1 {
-            return *remaining.last().expect("remaining path is nonempty");
-        }
-        let fraction = time - lower as f64;
-        lerp(remaining[lower], remaining[lower + 1], fraction)
-    };
     let mut candidates =
-        moving_target_candidates(source, target.radius, speed, horizon.max(0.0), target_at);
+        piecewise_linear_target_candidates(source, target.radius, speed, remaining);
     if candidates.is_empty() {
         if let Some(best) = remaining
             .iter()
@@ -549,100 +540,107 @@ fn comet_target_candidates(
     candidates
 }
 
-fn moving_target_candidates(
+fn piecewise_linear_target_candidates(
     source: &Planet,
     radius: f64,
     speed: f64,
-    horizon: f64,
-    target_at: impl Fn(f64) -> Point,
+    path: &[Point],
 ) -> Vec<TargetCandidate> {
-    if horizon <= 0.0 {
-        return moving_candidates_at_time(source, target_at(0.0), radius, speed, 0.0);
-    }
     let mut candidates = Vec::new();
+    if path.len() < 2 || speed <= 0.0 {
+        return candidates;
+    }
 
-    for branch in [
-        MovingBranch::Center,
-        MovingBranch::LeftEdge,
-        MovingBranch::RightEdge,
-    ] {
-        let roots = find_roots(
-            |time| {
-                moving_candidate_for_branch(source, target_at(time), radius, speed, time, branch)
-                    .map_or(f64::INFINITY, |candidate| candidate.time - time)
-            },
-            0.0,
-            horizon,
-        );
-        for time in roots {
-            if let Some(candidate) =
-                moving_candidate_for_branch(source, target_at(time), radius, speed, time, branch)
-            {
-                candidates.push(candidate);
-            }
+    let source_pos = source.position();
+    let clearance = source.radius + 0.1 + radius;
+    for (segment_index, segment) in path.windows(2).enumerate() {
+        let start = segment[0];
+        let end = segment[1];
+        let segment_time = segment_index as f64;
+        if !segment_distance_band_can_intersect(
+            source_pos,
+            start,
+            end,
+            clearance,
+            speed,
+            segment_time,
+        ) {
+            continue;
+        }
+        for fraction in piecewise_linear_intercept_fractions(
+            source_pos,
+            start,
+            end,
+            clearance,
+            speed,
+            segment_time,
+        ) {
+            let time = segment_time + fraction;
+            let target_pos = lerp(start, end, fraction);
+            let angle = angle_between(source_pos, target_pos);
+            candidates.push(TargetCandidate {
+                angle,
+                end: point_along(launch_start(source, angle), angle, speed * time),
+                time,
+            });
         }
     }
     candidates.sort_by(|left, right| left.time.total_cmp(&right.time));
     candidates
 }
 
-#[derive(Clone, Copy, Debug)]
-enum MovingBranch {
-    Center,
-    LeftEdge,
-    RightEdge,
+fn segment_distance_band_can_intersect(
+    source_pos: Point,
+    start: Point,
+    end: Point,
+    clearance: f64,
+    speed: f64,
+    segment_time: f64,
+) -> bool {
+    let min_distance = point_to_segment_distance(source_pos, start, end);
+    let max_distance = distance(source_pos, start).max(distance(source_pos, end));
+    let min_reachable = clearance + speed * segment_time;
+    let max_reachable = clearance + speed * (segment_time + 1.0);
+    max_distance >= min_reachable && min_distance <= max_reachable
 }
 
-fn moving_candidates_at_time(
-    source: &Planet,
-    target_pos: Point,
-    radius: f64,
+fn piecewise_linear_intercept_fractions(
+    source_pos: Point,
+    start: Point,
+    end: Point,
+    clearance: f64,
     speed: f64,
-    time: f64,
-) -> Vec<TargetCandidate> {
-    [
-        MovingBranch::Center,
-        MovingBranch::LeftEdge,
-        MovingBranch::RightEdge,
-    ]
-    .into_iter()
-    .filter_map(|branch| {
-        moving_candidate_for_branch(source, target_pos, radius, speed, time, branch)
-    })
-    .collect()
+    segment_time: f64,
+) -> Vec<f64> {
+    let offset = Point::new(start.x - source_pos.x, start.y - source_pos.y);
+    let velocity = Point::new(end.x - start.x, end.y - start.y);
+    let reachable_at_start = clearance + speed * segment_time;
+    let q2 = velocity.x * velocity.x + velocity.y * velocity.y - speed * speed;
+    let q1 = 2.0 * (offset.x * velocity.x + offset.y * velocity.y - reachable_at_start * speed);
+    let q0 = offset.x * offset.x + offset.y * offset.y - reachable_at_start * reachable_at_start;
+    let mut roots = Vec::with_capacity(2);
+    if q2.abs() <= QUADRATIC_EPS {
+        if q1.abs() > QUADRATIC_EPS {
+            push_unit_root(&mut roots, -q0 / q1);
+        }
+        return roots;
+    }
+    let discriminant = q1 * q1 - 4.0 * q2 * q0;
+    if discriminant < -QUADRATIC_EPS {
+        return roots;
+    }
+    let sqrt_discriminant = discriminant.max(0.0).sqrt();
+    push_unit_root(&mut roots, (-q1 - sqrt_discriminant) / (2.0 * q2));
+    push_unit_root(&mut roots, (-q1 + sqrt_discriminant) / (2.0 * q2));
+    roots.sort_by(f64::total_cmp);
+    roots.dedup_by(|left, right| (*left - *right).abs() <= ROOT_EPS);
+    roots
 }
 
-fn moving_candidate_for_branch(
-    source: &Planet,
-    target_pos: Point,
-    radius: f64,
-    speed: f64,
-    _target_time: f64,
-    branch: MovingBranch,
-) -> Option<TargetCandidate> {
-    let center_angle = angle_between(source.position(), target_pos);
-    let angle = match branch {
-        MovingBranch::Center => center_angle,
-        MovingBranch::LeftEdge | MovingBranch::RightEdge => {
-            let radius = (radius - TARGET_EPS).max(0.0);
-            if radius == 0.0 {
-                return None;
-            }
-            let source_distance = distance(source.position(), target_pos);
-            if source_distance <= radius {
-                return None;
-            }
-            let half_angle = (radius / source_distance).asin();
-            match branch {
-                MovingBranch::LeftEdge => center_angle + half_angle,
-                MovingBranch::RightEdge => center_angle - half_angle,
-                MovingBranch::Center => unreachable!(),
-            }
-        },
-    };
-    Some(candidate_for_angle(
-        source, target_pos, radius, speed, angle,
-    ))
+fn push_unit_root(roots: &mut Vec<f64>, root: f64) {
+    if (-ROOT_EPS..=1.0 + ROOT_EPS).contains(&root) {
+        roots.push(root.clamp(0.0, 1.0));
+    }
 }
 
 fn choose_candidate(
@@ -728,29 +726,6 @@ fn candidate_for_angle(
         end: point_along(start, angle, hit_distance),
         time: hit_distance / speed,
     }
-}
-
-fn find_roots(f: impl Fn(f64) -> f64, min_time: f64, max_time: f64) -> Vec<f64> {
-    let mut roots = Vec::new();
-    let mut left_time = min_time;
-    let mut left_value = f(left_time);
-    let mut right_time = (left_time + ROOT_STEP).min(max_time);
-    while left_time < max_time {
-        let right_value = f(right_time);
-        if left_value.abs() <= ROOT_EPS {
-            roots.push(left_time);
-        } else if left_value.signum() != right_value.signum() {
-            roots.push(bisect_root(&f, left_time, right_time));
-        }
-        left_time = right_time;
-        left_value = right_value;
-        right_time = (right_time + ROOT_STEP).min(max_time);
-        if right_time == left_time {
-            break;
-        }
-    }
-    roots.dedup_by(|left, right| (*left - *right).abs() <= ROOT_STEP);
-    roots
 }
 
 fn bisect_root(f: &impl Fn(f64) -> f64, mut left: f64, mut right: f64) -> f64 {
@@ -1172,6 +1147,29 @@ mod tests {
                 "decoded action should hit target ({target_x}, {target_y})",
             );
         }
+    }
+
+    #[test]
+    fn piecewise_linear_comet_candidate_solves_segment_intercept() {
+        let source = planet(0, 0, 10.0, 80.0, 2.0, 500);
+        let target_radius = 1.0;
+        let speed = fleet_speed(100, SimConfig::new(4).ship_speed);
+        let path = (0..30)
+            .map(|index| Point::new(35.0 + f64::from(index) * 2.0, 80.0))
+            .collect::<Vec<_>>();
+
+        let candidate = piecewise_linear_target_candidates(&source, target_radius, speed, &path)
+            .into_iter()
+            .next()
+            .expect("linear comet path should have an intercept");
+        let segment = candidate.time.floor() as usize;
+        let fraction = candidate.time - segment as f64;
+        let target_pos = lerp(path[segment], path[segment + 1], fraction);
+        let clearance = source.radius + 0.1 + target_radius;
+        let residual = distance(source.position(), target_pos) - clearance - speed * candidate.time;
+
+        assert!(residual.abs() <= 1e-5, "residual {residual}");
+        assert!((candidate.angle - angle_between(source.position(), target_pos)).abs() <= 1e-12);
     }
 
     #[test]

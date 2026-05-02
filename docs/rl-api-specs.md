@@ -316,11 +316,12 @@ time-of-impact trajectory against the analytic orbit curve. It first uses the
 orbit radius to bound the possible impact interval, then uses monotonic bisection
 when the fleet is faster than the target's tangential speed, otherwise a capped
 coarse scan followed by bisection. This fast orbiting path does not validate sun
-or planet obstruction before emitting the launch angle. For comets, intercepts
-are found against the known future path segments. Comet targets prefer the
-earliest unobstructed intercept. If no comet intercept exists within the known
-future path, decoding fires toward the closest reachable future path point as a
-best-effort fallback.
+or planet obstruction before emitting the launch angle. For comets, decoding
+solves analytic centerline intercepts against each stored linear path segment,
+then applies the existing sun and static-planet blocker preference over the
+resulting candidates. If no comet intercept exists within the known future path,
+decoding fires toward the closest reachable future path point as a best-effort
+fallback.
 
 `episode_metrics` is a `dict[str, list[float]]` populated only for sub-envs that
 terminated during this step. Empty steps return `{}`. Each list contains one

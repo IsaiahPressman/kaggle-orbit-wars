@@ -117,7 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-fleet-size",
         type=int,
-        default=5,
+        default=6,
         help="Rust minimum ship count per launched fleet.",
     )
     parser.add_argument(
