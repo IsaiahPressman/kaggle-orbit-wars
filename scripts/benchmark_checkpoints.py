@@ -29,21 +29,25 @@ class LoadedCheckpoint:
 
 @dataclass
 class MatchupStats:
-    player_games: list[int]
-    wins: list[int]
+    model_games: list[int]
+    wins: list[float]
 
     @classmethod
     def empty(cls) -> MatchupStats:
-        return cls(player_games=[0, 0], wins=[0, 0])
+        return cls(model_games=[0, 0], wins=[0.0, 0.0])
 
-    def add_player_result(self, model_index: int, *, won: bool) -> None:
-        self.player_games[model_index] += 1
-        if won:
-            self.wins[model_index] += 1
+    def add_game_result(self, winner: int | None) -> None:
+        for model_index in range(2):
+            self.model_games[model_index] += 1
+        if winner is None:
+            for model_index in range(2):
+                self.wins[model_index] += 0.5
+        else:
+            self.wins[winner] += 1.0
 
     def merge(self, other: MatchupStats) -> None:
         for model_index in range(2):
-            self.player_games[model_index] += other.player_games[model_index]
+            self.model_games[model_index] += other.model_games[model_index]
             self.wins[model_index] += other.wins[model_index]
 
 
@@ -302,7 +306,7 @@ def _assignment_pattern(player_count: int) -> tuple[int, ...]:
     if player_count == 2:
         return (MODEL_A, MODEL_B)
     if player_count == 4:
-        return (MODEL_A, MODEL_A, MODEL_B, MODEL_B)
+        return (MODEL_A, MODEL_B, MODEL_B, MODEL_A)
     raise ValueError(f"player_count must be 2 or 4, got {player_count}")
 
 
@@ -315,15 +319,18 @@ def _record_terminal_result(
     active_returns = returns[start_mask]
     if active_returns.numel() == 0:
         raise ValueError("cannot record a terminal result without starting players")
-    max_return = active_returns.max()
+    model_returns = [0.0, 0.0]
     for player in torch.nonzero(start_mask, as_tuple=False).flatten().tolist():
         model_index = int(assignment[player].item())
         if model_index not in (MODEL_A, MODEL_B):
             raise ValueError(f"missing model assignment for player slot {player}")
-        stats.add_player_result(
-            model_index,
-            won=bool(torch.isclose(returns[player], max_return).item()),
-        )
+        model_returns[model_index] += float(returns[player].item())
+    if model_returns[MODEL_A] > model_returns[MODEL_B]:
+        stats.add_game_result(MODEL_A)
+    elif model_returns[MODEL_B] > model_returns[MODEL_A]:
+        stats.add_game_result(MODEL_B)
+    else:
+        stats.add_game_result(None)
 
 
 def _print_results(
@@ -357,17 +364,16 @@ def _env_steps_label(checkpoint: LoadedCheckpoint) -> str:
 
 
 def _print_matrix(stats: MatchupStats) -> None:
-    print("       vs A              vs B")
-    print(f"A      {'-':<16} {_matrix_cell(stats, MODEL_A):<16}")
-    print(f"B      {_matrix_cell(stats, MODEL_B):<16} {'-':<16}")
+    print(f"A winrate: {_matrix_cell(stats, MODEL_A)}")
+    print(f"B winrate: {_matrix_cell(stats, MODEL_B)}")
 
 
 def _matrix_cell(stats: MatchupStats, model_index: int) -> str:
-    games = stats.player_games[model_index]
+    games = stats.model_games[model_index]
     wins = stats.wins[model_index]
     losses = games - wins
     winrate = wins / games if games else 0.0
-    return f"{wins}-{losses} ({winrate:.1%})"
+    return f"{wins:g}-{losses:g} ({winrate:.1%})"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -418,6 +424,9 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--n-games must be even so 2p and 4p games are balanced")
     if args.n_envs <= 0:
         raise ValueError("--n-envs must be positive")
+    per_player_count_games = args.n_games // len(PLAYER_COUNTS)
+    if per_player_count_games % args.n_envs != 0:
+        raise ValueError("(--n-games / 2) must be divisible by --n-envs")
 
 
 if __name__ == "__main__":

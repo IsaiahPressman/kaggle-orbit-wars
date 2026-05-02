@@ -139,7 +139,13 @@ class DiscreteTargetsActor(nn.Module):
             source_active,
             min_fleet_size=min_fleet_size,
         )
-        launch_entropy, target_entropy, size_entropy = discrete_action_entropy(
+        (
+            launch_entropy,
+            target_entropy,
+            size_entropy,
+            size_mixture_entropy,
+            size_logistic_entropy,
+        ) = discrete_action_entropy(
             entropy_params,
             max_launch,
             source_active,
@@ -170,7 +176,9 @@ class DiscreteTargetsActor(nn.Module):
                 components={
                     "launch": launch_entropy,
                     "target": target_entropy,
-                    "size": size_entropy,
+                    "fleet_size_full": size_entropy,
+                    "fleet_size_mixture": size_mixture_entropy,
+                    "fleet_size_logistic": size_logistic_entropy,
                 },
             ),
         )
@@ -231,7 +239,13 @@ class DiscreteTargetsActor(nn.Module):
             source_active,
             min_fleet_size=min_fleet_size,
         )
-        launch_entropy, target_entropy, size_entropy = discrete_action_entropy(
+        (
+            launch_entropy,
+            target_entropy,
+            size_entropy,
+            size_mixture_entropy,
+            size_logistic_entropy,
+        ) = discrete_action_entropy(
             entropy_params,
             max_launch,
             source_active,
@@ -256,7 +270,9 @@ class DiscreteTargetsActor(nn.Module):
                 components={
                     "launch": launch_entropy,
                     "target": target_entropy,
-                    "size": size_entropy,
+                    "fleet_size_full": size_entropy,
+                    "fleet_size_mixture": size_mixture_entropy,
+                    "fleet_size_logistic": size_logistic_entropy,
                 },
             ),
         )
@@ -616,7 +632,7 @@ def discrete_action_entropy(
     *,
     min_fleet_size: int,
     max_ship_support: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     launch_entropy = binary_entropy_from_logits(params.continue_logits.float())
     target_prob = torch.softmax(params.target_logits.float(), dim=-1)
     target_log_prob = F.log_softmax(params.target_logits.float(), dim=-1)
@@ -642,6 +658,12 @@ def discrete_action_entropy(
     size_entropy = -(
         probs * torch.where(valid, log_probs, torch.zeros_like(log_probs))
     ).sum(dim=-1)
+    size_mix_log_prob = F.log_softmax(params.size_mix_logits.float(), dim=-1)
+    size_mix_prob = size_mix_log_prob.exp()
+    size_mixture_entropy = -(size_mix_prob * size_mix_log_prob).sum(dim=-1)
+    size_logistic_entropy = (
+        size_mix_prob * (params.size_scale.float().log() + 2.0)
+    ).sum(dim=-1)
     return (
         torch.where(source_active, launch_entropy, torch.zeros_like(launch_entropy)),
         torch.where(
@@ -653,6 +675,16 @@ def discrete_action_entropy(
             source_active,
             size_entropy,
             torch.zeros_like(size_entropy),
+        ),
+        torch.where(
+            source_active,
+            size_mixture_entropy,
+            torch.zeros_like(size_mixture_entropy),
+        ),
+        torch.where(
+            source_active,
+            size_logistic_entropy,
+            torch.zeros_like(size_logistic_entropy),
         ),
     )
 

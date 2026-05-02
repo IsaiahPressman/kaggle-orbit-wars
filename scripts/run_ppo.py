@@ -95,7 +95,7 @@ def _run_training_session(
             max_runtime_seconds=max_runtime_seconds,
         )
         trainer.write_checkpoint(
-            run_dir / "checkpoint-final.pt",
+            run_dir / "checkpoint_final.pt",
             env_steps=env_steps,
         )
 
@@ -126,7 +126,7 @@ def _run_training_loop(
                 and env_steps >= next_checkpoint_env_steps
             ):
                 trainer.write_checkpoint(
-                    run_dir / f"checkpoint-{env_steps}.pt",
+                    run_dir / f"checkpoint_{_format_checkpoint_step(env_steps)}.pt",
                     env_steps=env_steps,
                 )
                 next_checkpoint_env_steps = _next_periodic_checkpoint_step(
@@ -262,6 +262,13 @@ def _next_periodic_checkpoint_step(
     if checkpoint_freq is None:
         return None
     return (env_steps // checkpoint_freq + 1) * checkpoint_freq
+
+
+def _format_checkpoint_step(env_steps: int) -> str:
+    if env_steps < 0:
+        raise ValueError("env_steps must be non-negative")
+    digits = f"{env_steps:011d}"
+    return f"{digits[:2]}_{digits[2:5]}_{digits[5:8]}_{digits[8:11]}"
 
 
 def _max_runtime_seconds(max_runtime_hours: float | None) -> float | None:

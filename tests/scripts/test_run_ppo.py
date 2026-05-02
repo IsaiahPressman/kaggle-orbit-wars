@@ -97,6 +97,11 @@ def test_next_periodic_checkpoint_step_handles_crossed_cadence() -> None:
     )
 
 
+def test_format_checkpoint_step_zero_pads_grouped_digits() -> None:
+    assert run_ppo._format_checkpoint_step(1_000_000_000) == "01_000_000_000"
+    assert run_ppo._format_checkpoint_step(22_000_000) == "00_022_000_000"
+
+
 def test_should_stop_training_checks_step_and_runtime_limits() -> None:
     assert run_ppo._should_stop_training(
         env_steps=128,
@@ -166,7 +171,7 @@ def test_run_training_loop_writes_periodic_checkpoints(tmp_path: Path) -> None:
     )
 
     assert env_steps == 1600
-    assert trainer.checkpoints == [(tmp_path / "checkpoint-1600.pt", 1600)]
+    assert trainer.checkpoints == [(tmp_path / "checkpoint_00_000_001_600.pt", 1600)]
     assert [step for _metrics, step in logger.logged] == [800, 1600]
     assert "model/trainable_parameters" not in logger.logged[0][0]
     assert "trainable_parameters" not in logger.logged[0][0]

@@ -66,19 +66,21 @@ uv run python scripts/run_ppo.py configs/baseline.yaml runs --log-mode debug --m
 PPO run directories save `config.yaml` alongside checkpoints. Checkpoints save
 model, optimizer, scheduler, and environment-step metadata. They do not save the
 Rust environment state or current observation, so they are not exact resume
-snapshots.
+snapshots. Periodic checkpoint names use grouped zero-padded environment-step
+labels such as `checkpoint_00_022_000_000.pt`.
 
 Training logs terminal environment metrics under `train/` when episodes finish
 during a rollout, including game length, per-player win rates, launch density,
 planet occupancy for 2-player and 4-player games, max-entity overflow counts,
 terminal ship counts, planet captures, launch and fleet-size statistics,
-full-length game rate, and fleet/ship losses in the sun or out of bounds.
+full-length game rate, per-batch active player-step totals, and fleet/ship
+losses in the sun or out of bounds.
 Planet occupancy is reported at terminal as
 `train/terminal_planet_occupancy_rate_2p` and
 `train/terminal_planet_occupancy_rate_4p`.
 Policy logs include total entropy plus policy-specific component means such as
-`policy/entropy_launch`, `policy/entropy_target`, `policy/entropy_size`, and
-`policy/entropy_angle_and_size`.
+`policy/launch_entropy`, `policy/target_entropy`,
+`policy/fleet_size_full_entropy`, and `policy/angle_and_size_entropy`.
 
 ## Orbit Wars replay parity
 

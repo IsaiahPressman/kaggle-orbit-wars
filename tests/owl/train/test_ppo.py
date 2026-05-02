@@ -503,12 +503,12 @@ def test_obs_to_device_clones_cpu_observation_buffers() -> None:
 def test_env_metrics_are_logged_under_train_prefix() -> None:
     metrics = ppo._mean_env_metrics(
         {
-            "mean_game_length": [10.0, 14.0],
+            "game_length_mean": [10.0, 14.0],
             "full_length_rate": [1.0, 0.0],
             "terminal_ship_count": [20.0, 40.0],
             "launches_per_game": [3.0, 7.0],
-            "comet-launch-failures": [2.0, 4.0],
-            "asteroids_captured": [1.0, 3.0],
+            "comet_launch_failures_per_game": [2.0, 4.0],
+            "comets_captured_per_game": [1.0, 3.0],
             "terminal_planet_occupancy_rate_2p": [0.5, 0.75],
             "terminal_planet_occupancy_rate_4p": [1.0],
             "win_rate_player_0": [1.0, 0.0],
@@ -517,12 +517,12 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
         }
     )
 
-    assert metrics["train/mean_game_length"] == 12.0
+    assert metrics["train/game_length_mean"] == 12.0
     assert metrics["train/full_length_rate"] == 0.5
     assert metrics["train/terminal_ship_count"] == 30.0
     assert metrics["train/launches_per_game"] == 5.0
-    assert metrics["train/comet-launch-failures"] == 3.0
-    assert metrics["train/asteroids_captured"] == 2.0
+    assert metrics["train/comet_launch_failures_per_game"] == 3.0
+    assert metrics["train/comets_captured_per_game"] == 2.0
     assert metrics["train/terminal_planet_occupancy_rate_2p"] == 0.625
     assert metrics["train/terminal_planet_occupancy_rate_4p"] == 1.0
     assert metrics["train/win_rate_player_0"] == 0.5
@@ -724,7 +724,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "loss/value_loss",
         "loss/entropy_loss",
         "policy/entropy",
-        "policy/entropy_launch",
+        "policy/launch_entropy",
         "policy/approx_kl",
         "policy/clipfrac",
         "policy/ratio_mean",
@@ -739,6 +739,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "train/policy_active_ratio",
         "train/advantage_mean",
         "train/advantage_std",
+        "train/player_step_total",
         "sampling/priority_mean",
         "sampling/priority_entropy",
         "sampling/sample_duplicate_frac",
@@ -752,7 +753,8 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         not torch.allclose(param, old)
         for param, old in zip(model.parameters(), before, strict=True)
     )
-    assert metrics["policy/entropy_launch"] == pytest.approx(metrics["policy/entropy"])
+    assert metrics["policy/launch_entropy"] == pytest.approx(metrics["policy/entropy"])
+    assert metrics["train/player_step_total"] == pytest.approx(80.0)
     assert metrics["optimizer/steps"] == pytest.approx(2.0)
     assert metrics["optimizer/learning_rate"] == pytest.approx(0.05)
 
@@ -1503,7 +1505,7 @@ def test_discrete_target_train_iteration_runs() -> None:
     for key in (
         "loss/total_loss",
         "policy/entropy",
-        "policy/entropy_launch",
+        "policy/launch_entropy",
         "optimizer/grad_norm",
     ):
         assert metrics[key] == pytest.approx(float(metrics[key]))
@@ -1548,11 +1550,13 @@ def test_discrete_target_transformer_train_iteration_keeps_parameters_finite() -
 
     assert torch.isfinite(torch.tensor(list(metrics.values()))).all()
     assert metrics["policy/entropy"] == pytest.approx(
-        metrics["policy/entropy_launch"]
-        + metrics["policy/entropy_target"]
-        + metrics["policy/entropy_size"]
+        metrics["policy/launch_entropy"]
+        + metrics["policy/target_entropy"]
+        + metrics["policy/fleet_size_full_entropy"]
     )
-    assert "policy/entropy_angle_and_size" not in metrics
+    assert "policy/fleet_size_mixture_entropy" in metrics
+    assert "policy/fleet_size_logistic_entropy" in metrics
+    assert "policy/angle_and_size_entropy" not in metrics
     for parameter in model.parameters():
         assert torch.isfinite(parameter).all()
         if parameter.grad is not None:

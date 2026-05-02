@@ -86,7 +86,7 @@ pub fn step_with_injections(
         player_results,
         fleet_losses,
         planets_captured: captures.planets_captured,
-        asteroids_captured: captures.asteroids_captured,
+        comets_captured: captures.comets_captured,
     }
 }
 
@@ -452,7 +452,7 @@ fn remove_marked_fleets(state: &mut State, combat_lists: &CombatLists) {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct CaptureStats {
     planets_captured: u32,
-    asteroids_captured: u32,
+    comets_captured: u32,
 }
 
 fn resolve_combats(state: &mut State, combat_lists: CombatLists) -> CaptureStats {
@@ -531,7 +531,7 @@ fn resolve_combats(state: &mut State, combat_lists: CombatLists) -> CaptureStats
                 planet.ships = planet.ships.abs();
                 captures.planets_captured += 1;
                 if comet_ids.contains(&planet_id) {
-                    captures.asteroids_captured += 1;
+                    captures.comets_captured += 1;
                 }
             }
         }
@@ -872,11 +872,11 @@ mod tests {
         assert_eq!(state.planets[1].owner, 0);
         assert_eq!(state.planets[1].ships, 15);
         assert_eq!(result.planets_captured, 1);
-        assert_eq!(result.asteroids_captured, 0);
+        assert_eq!(result.comets_captured, 0);
     }
 
     #[test]
-    fn fleet_hitting_comet_planet_counts_asteroid_capture() {
+    fn fleet_hitting_comet_planet_counts_comet_capture() {
         let mut state = base_state(2);
         state.planets[1].x = 25.0;
         state.planets[1].ships = 5;
@@ -896,7 +896,7 @@ mod tests {
 
         assert_eq!(state.planets[1].owner, 0);
         assert_eq!(result.planets_captured, 1);
-        assert_eq!(result.asteroids_captured, 1);
+        assert_eq!(result.comets_captured, 1);
     }
 
     #[test]

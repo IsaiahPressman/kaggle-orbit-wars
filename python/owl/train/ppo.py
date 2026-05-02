@@ -383,6 +383,7 @@ class PPOTrainer:
         metrics["train/advantage_std"] = float(
             masked_std(advantages, policy_mask).item()
         )
+        metrics["train/player_step_total"] = float(value_mask.sum().item())
         metrics.update(_mean_env_metrics(env_metrics))
         elapsed = max(perf_counter() - start, 1e-12)
         rollout_steps = self.config.horizon * self.n_envs
@@ -1331,7 +1332,7 @@ def _mean_loss_metrics(metrics: list[PPOLossMetrics]) -> dict[str, float]:
             .item()
         )
     for name in _entropy_component_names(metrics):
-        logged[f"policy/entropy_{name}"] = float(
+        logged[f"policy/{name}_entropy"] = float(
             torch.stack([metric.entropy_components[name] for metric in metrics])
             .mean()
             .item()

@@ -258,7 +258,7 @@ pub struct StepResult {
     pub player_results: Vec<PlayerResult>,
     pub fleet_losses: FleetLossStats,
     pub planets_captured: u32,
-    pub asteroids_captured: u32,
+    pub comets_captured: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
