@@ -1,5 +1,9 @@
 env:
   n_envs: 2048
+  action_spec:
+    action_spec: discrete_targets
+    max_per_planet_launches: 1
+    min_fleet_size: 6
 
 model: stateless_transformer_5m
 

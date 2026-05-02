@@ -101,6 +101,10 @@ class StatelessTransformerV1Config(BaseConfig):
     force_flash_attn: bool = False
     actor: ActorConfig = Field(default_factory=ActorPureConfig)
 
+    @classmethod
+    def subconfig_dirs(cls) -> set[str]:
+        return {"actor"}
+
     @model_validator(mode="after")
     def _validate_config(self) -> Self:
         if self.embed_dim % self.n_heads != 0:

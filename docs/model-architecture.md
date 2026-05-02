@@ -37,6 +37,8 @@ pure-head fields such as `n_action_mixtures`, `kappa_min`, `kappa_max`,
 `n_action_mixtures`, `max_ship_normalizer`, `entropy_ship_support_cap`, and
 the logistic-mixture scale parameters `scale_min=0.25`,
 `scale_max_frac=0.5`, and `scale_max_abs_floor=8.0`.
+Model YAML files can reference actor presets by name through adjacent
+`configs/model/actor/*.yaml` files, for example `actor: discrete_targets`.
 
 `FullConfig` validates that `env.action_spec.action_spec` matches
 `model.actor.action_spec`. Direct model construction performs the same check

@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 from typing import Any
 
 import owl.model.stateless_transformer_v1 as model_impl
@@ -43,6 +44,8 @@ from owl.rl import (
 )
 from pydantic import TypeAdapter
 from torch import nn
+
+_REPO_ROOT = Path(__file__).parents[3]
 
 
 def _obs_batch(
@@ -141,6 +144,26 @@ def test_model_config_has_discriminator_tag() -> None:
 
     assert config.model_arch == "stateless_transformer_v1"
     assert not config.force_flash_attn
+
+
+def test_model_config_loads_actor_subconfig_reference() -> None:
+    config = StatelessTransformerV1Config.from_file(
+        _REPO_ROOT / "configs" / "model" / "stateless_transformer_tiny.yaml"
+    )
+
+    assert config.actor == ActorDiscreteTargetsConfig()
+
+
+def test_actor_config_presets_match_defaults() -> None:
+    pure = ActorPureConfig.from_file(
+        _REPO_ROOT / "configs" / "model" / "actor" / "pure.yaml"
+    )
+    discrete_targets = ActorDiscreteTargetsConfig.from_file(
+        _REPO_ROOT / "configs" / "model" / "actor" / "discrete_targets.yaml"
+    )
+
+    assert pure == ActorPureConfig()
+    assert discrete_targets == ActorDiscreteTargetsConfig()
 
 
 def test_model_config_requires_actor_action_spec_match() -> None:
