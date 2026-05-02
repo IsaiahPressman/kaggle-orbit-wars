@@ -66,6 +66,10 @@ if [[ -n "$MAX_RUNTIME_HOURS" ]]; then
     train_cmd+=(--max-runtime-hours "$MAX_RUNTIME_HOURS")
 fi
 
+if [[ "$#" -gt 0 ]]; then
+    train_cmd+=("$@")
+fi
+
 CONTAINER_MOUNTS="$OUTPUT_DIR:/runs"
 if [[ -n "$CONFIG_MOUNT_DIR" ]]; then
     CONTAINER_MOUNTS+=",$CONFIG_MOUNT_DIR:$CONFIG_MOUNT_TARGET:ro"

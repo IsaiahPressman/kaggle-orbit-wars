@@ -168,6 +168,14 @@ sbatch --partition=gpu --account=ACCOUNT --time=24:00:00 \
   scripts/slurm/launch-train.sbatch
 ```
 
+Arguments after the batch script path are forwarded to `scripts/run_ppo.py`, so
+use that position for training CLI flags:
+
+```sh
+sbatch --exclude=gpu-node-01 scripts/slurm/launch-train.sbatch \
+  --overrides env.n_envs=1024 rl.horizon=256
+```
+
 For production jobs, point at `configs/baseline.yaml` or another checked-in
 config, and mount any external data or required settings.
 
