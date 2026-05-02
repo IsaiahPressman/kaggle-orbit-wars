@@ -332,6 +332,22 @@ terminated during this step. Empty steps return `{}`. Each list contains one
 value per terminal episode for that metric, so Python training can aggregate
 across the rollout before logging W&B scalars under `train/`.
 
+## Replay Snapshots
+
+`VectorizedEnv.state_snapshot(env_index)` returns a JSON-serializable snapshot
+of one current Rust sub-env. `VectorizedEnv.terminal_snapshot(env_index)` returns
+the terminal snapshot captured during the most recent `step(...)`, or `None` if
+that sub-env did not terminate on that step. Terminal snapshots are captured
+after the terminal transition and before the vectorized env auto-resets the
+sub-env.
+
+Snapshots are intended for replay rendering and debugging, not model input. They
+include raw board-space values: board constants, step/config fields, player
+count, owner IDs remapped into outer player slots, the internal/outer player map,
+outer-slot `player_finished`, action entity slot planet IDs, planets, fleets,
+comet groups, and comet paths. Neutral ownership remains `-1`, and each planet
+or fleet also includes `internal_owner` when the engine-owned ID is needed.
+
 Terminal episode metrics:
 
 | Key | Meaning |

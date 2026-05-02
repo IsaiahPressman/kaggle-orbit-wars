@@ -74,6 +74,10 @@ current model is evaluated against the last-best model snapshot and logs
 `eval/win_rate_against_last_best` plus terminal environment metrics under
 `eval/`. When the current model reaches at least 70% eval win rate, the
 last-best snapshot is replaced and also saved as `checkpoint_last_best.pt`.
+Set `rl.eval_replay_games` to an even positive count to save random eval replay
+samples, split evenly between 2-player and 4-player games, under
+`eval_replays/<checkpoint-name>/` in the run directory. The sampled game
+ordinals are selected up front rather than taking the first games to finish.
 
 Training logs terminal environment metrics under `train/` when episodes finish
 during a rollout, including game length, per-player win rates, launch density,
@@ -87,6 +91,19 @@ Planet occupancy is reported at terminal as
 Policy logs include total entropy plus policy-specific component means such as
 `policy/launch_entropy`, `policy/target_entropy`,
 `policy/fleet_size_full_entropy`, and `policy/angle_and_size_entropy`.
+
+## Replay capture
+
+`scripts/benchmark_checkpoints.py` can save replay JSONL samples with
+`--save-replay-games N`, where `N` must be even and is split evenly across
+2-player and 4-player benchmark games. Files are written under
+`--replay-dir`, defaulting to `replays/benchmark_checkpoints`.
+
+Replay rows contain raw Rust environment snapshots for one completed game:
+board constants, step/config values, outer-slot owner IDs, player maps, action
+entity slots, planets, fleets, comets, rewards, dones, and model assignments.
+The Python replay recorder samples game ordinals randomly before rollout and
+uses Rust terminal snapshots captured before vectorized env auto-reset.
 
 ## Orbit Wars replay parity
 

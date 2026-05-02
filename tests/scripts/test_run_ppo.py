@@ -200,6 +200,49 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
     assert not last_best_model.training
 
 
+def test_evaluate_against_last_best_splits_eval_replay_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _config_with_envs(4)
+    cfg = cfg.model_copy(
+        update={"rl": cfg.rl.model_copy(update={"eval_replay_games": 2})}
+    )
+    seen_replays: list[tuple[int, Path | None]] = []
+
+    def fake_evaluate_player_count(
+        **kwargs: object,
+    ) -> tuple[object, dict[str, list[float]], int]:
+        seen_replays.append(
+            (
+                kwargs["replay_games"],
+                kwargs["replay_output_path"],
+            )
+        )
+        stats = run_ppo._EvalStats.empty()
+        stats.add_game_result(run_ppo.MODEL_CURRENT)
+        return stats, {}, 1
+
+    monkeypatch.setattr(
+        run_ppo,
+        "_evaluate_player_count",
+        fake_evaluate_player_count,
+    )
+
+    run_ppo._evaluate_against_last_best(
+        current_model=torch.nn.Linear(1, 1),
+        last_best_model=torch.nn.Linear(1, 1),
+        cfg=cfg,
+        device=torch.device("cpu"),
+        replay_dir=tmp_path,
+    )
+
+    assert seen_replays == [
+        (1, tmp_path / "eval_2p.jsonl"),
+        (1, tmp_path / "eval_4p.jsonl"),
+    ]
+
+
 def test_record_eval_terminal_result_counts_team_ties_as_half_win() -> None:
     stats = run_ppo._EvalStats.empty()
 

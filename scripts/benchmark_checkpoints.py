@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 from owl.model import ModelActions, StatelessTransformerV1
+from owl.replay import ReplayRecorder
 from owl.rl import ObsBatch, VectorizedEnv
 from owl.rs import assert_release_build
 from owl.train import FullConfig, configure_torch
@@ -85,6 +87,9 @@ def main() -> None:
             device=device,
             deterministic=args.deterministic,
             no_progress=args.no_progress,
+            replay_games=args.save_replay_games // len(PLAYER_COUNTS),
+            replay_output_path=_benchmark_replay_path(args, player_count),
+            replay_rng=random.Random(),
         )
         for player_count in PLAYER_COUNTS
     ]
@@ -102,6 +107,9 @@ def run_benchmark(
     device: torch.device,
     deterministic: bool,
     no_progress: bool,
+    replay_games: int,
+    replay_output_path: Path | None,
+    replay_rng: random.Random,
 ) -> BenchmarkResult:
     cfg = checkpoint_a.config
     env = VectorizedEnv(
@@ -115,6 +123,27 @@ def run_benchmark(
     assignments = torch.full((n_envs, 4), -1, dtype=torch.int64)
     start_masks = obs.still_playing.clone()
     returns = torch.zeros((n_envs, 4), dtype=torch.float32)
+    recorder = (
+        ReplayRecorder(
+            output_path=replay_output_path,
+            source="benchmark_checkpoints",
+            player_count=player_count,
+            total_games=n_games,
+            sample_games=replay_games,
+            metadata={
+                "checkpoint_a": str(checkpoint_a.path),
+                "checkpoint_b": str(checkpoint_b.path),
+                "checkpoint_a_env_steps": checkpoint_a.env_steps,
+                "checkpoint_b_env_steps": checkpoint_b.env_steps,
+                "deterministic": deterministic,
+            },
+            rng=replay_rng,
+        )
+        if replay_output_path is not None and replay_games > 0
+        else None
+    )
+    current_game_ordinals: list[int | None] = [None] * n_envs
+    started_games = 0
     for env_index in range(n_envs):
         _assign_episode_models(
             assignments,
@@ -122,6 +151,17 @@ def run_benchmark(
             active_slots=start_masks[env_index],
             player_count=player_count,
         )
+        if started_games < n_games:
+            current_game_ordinals[env_index] = started_games
+            if recorder is not None:
+                recorder.start_episode(
+                    env,
+                    env_index,
+                    game_ordinal=started_games,
+                    assignments=assignments[env_index],
+                    start_mask=start_masks[env_index],
+                )
+            started_games += 1
 
     games = 0
     steps = 0
@@ -151,20 +191,29 @@ def run_benchmark(
                 actions.ships,
             )
             steps += n_envs
-            returns += rewards
             terminal_envs = torch.nonzero(dones.all(dim=1), as_tuple=False).flatten()
+            terminal_env_set = {int(env_index.item()) for env_index in terminal_envs}
+            if recorder is not None:
+                recorder.record_step(
+                    env,
+                    terminal_envs=terminal_env_set,
+                    rewards=rewards,
+                    dones=dones,
+                )
+            returns += rewards
             for env_index_tensor in terminal_envs:
                 if games >= n_games:
                     break
                 env_index = int(env_index_tensor.item())
-                _record_terminal_result(
-                    stats,
-                    assignments[env_index],
-                    start_masks[env_index],
-                    returns[env_index],
-                )
-                games += 1
-                progress.update(1)
+                if current_game_ordinals[env_index] is not None:
+                    _record_terminal_result(
+                        stats,
+                        assignments[env_index],
+                        start_masks[env_index],
+                        returns[env_index],
+                    )
+                    games += 1
+                    progress.update(1)
 
                 returns[env_index].zero_()
                 start_masks[env_index].copy_(obs.still_playing[env_index])
@@ -174,6 +223,19 @@ def run_benchmark(
                     active_slots=start_masks[env_index],
                     player_count=player_count,
                 )
+                if started_games < n_games:
+                    current_game_ordinals[env_index] = started_games
+                    if recorder is not None:
+                        recorder.start_episode(
+                            env,
+                            env_index,
+                            game_ordinal=started_games,
+                            assignments=assignments[env_index],
+                            start_mask=start_masks[env_index],
+                        )
+                    started_games += 1
+                else:
+                    current_game_ordinals[env_index] = None
     finally:
         progress.close()
 
@@ -184,6 +246,14 @@ def run_benchmark(
         elapsed_seconds=time.perf_counter() - started_at,
         stats=stats,
     )
+
+
+def _benchmark_replay_path(args: argparse.Namespace, player_count: int) -> Path | None:
+    if args.save_replay_games == 0:
+        return None
+    checkpoint_a = args.checkpoint_a.stem
+    checkpoint_b = args.checkpoint_b.stem
+    return args.replay_dir / f"{checkpoint_a}_vs_{checkpoint_b}_{player_count}p.jsonl"
 
 
 def _load_checkpoint(path: Path, *, device: torch.device) -> LoadedCheckpoint:
@@ -412,6 +482,21 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable progress bars.",
     )
+    parser.add_argument(
+        "--save-replay-games",
+        type=int,
+        default=0,
+        help=(
+            "Random completed games to save as replay JSONL, split evenly "
+            "across 2p and 4p."
+        ),
+    )
+    parser.add_argument(
+        "--replay-dir",
+        type=Path,
+        default=Path("replays/benchmark_checkpoints"),
+        help="Directory for benchmark replay JSONL files.",
+    )
     args = parser.parse_args()
     _validate_args(args)
     return args
@@ -424,7 +509,19 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--n-games must be even so 2p and 4p games are balanced")
     if args.n_envs <= 0:
         raise ValueError("--n-envs must be positive")
+    if args.save_replay_games < 0:
+        raise ValueError("--save-replay-games must be non-negative")
+    if args.save_replay_games % len(PLAYER_COUNTS) != 0:
+        raise ValueError(
+            "--save-replay-games must be even so 2p and 4p replays are balanced"
+        )
+    if args.save_replay_games > args.n_games:
+        raise ValueError("--save-replay-games must be <= --n-games")
     per_player_count_games = args.n_games // len(PLAYER_COUNTS)
+    if args.save_replay_games // len(PLAYER_COUNTS) > per_player_count_games:
+        raise ValueError(
+            "--save-replay-games requests more games than one player count runs"
+        )
     if per_player_count_games % args.n_envs != 0:
         raise ValueError("(--n-games / 2) must be divisible by --n-envs")
 

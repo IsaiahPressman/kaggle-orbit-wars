@@ -3,10 +3,13 @@ use std::collections::{HashMap, HashSet};
 use numpy::{PyReadonlyArrayDyn, PyReadwriteArrayDyn, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
 use rayon::prelude::*;
 
 use crate::rules_engine::env::{reset, step, PlayerAction};
-use crate::rules_engine::state::{FleetLossStats, PlayerResult, ResetConfig, State};
+use crate::rules_engine::state::{
+    FleetLossStats, PlayerResult, ResetConfig, State, BOARD_SIZE, CENTER, SUN_RADIUS,
+};
 
 use super::action_spec::{
     action_entity_slots, decode_discrete_target_actions, decode_pure_actions, ActionEntitySlots,
@@ -44,6 +47,8 @@ pub struct PyRlVecEnv {
     action_slots: Vec<ActionEntitySlots>,
     player_finished: Vec<Vec<bool>>,
     episode_stats: Vec<EpisodeStats>,
+    last_terminal_metrics: Vec<Option<TerminalEpisodeMetrics>>,
+    last_terminal_snapshots: Vec<Option<StateSnapshot>>,
 }
 
 #[pymethods]
@@ -111,6 +116,8 @@ impl PyRlVecEnv {
             action_slots,
             player_finished: vec![vec![false; OUTER_PLAYER_SLOTS]; n_envs],
             episode_stats: vec![EpisodeStats::default(); n_envs],
+            last_terminal_metrics: vec![None; n_envs],
+            last_terminal_snapshots: vec![None; n_envs],
         })
     }
 
@@ -256,8 +263,41 @@ impl PyRlVecEnv {
             })
             .sum();
 
+        self.last_terminal_metrics.fill(None);
+        self.last_terminal_snapshots.fill(None);
         log_ignored_fleets(ignored_fleets);
         Ok(())
+    }
+
+    fn state_snapshot<'py>(&self, py: Python<'py>, env_index: usize) -> PyResult<Py<PyAny>> {
+        let snapshot = self.current_snapshot(env_index)?;
+        snapshot_to_py(py, &snapshot)
+    }
+
+    fn terminal_snapshot<'py>(&self, py: Python<'py>, env_index: usize) -> PyResult<Py<PyAny>> {
+        if env_index >= self.n_envs {
+            return Err(PyValueError::new_err(format!(
+                "env_index must be < {}, got {env_index}",
+                self.n_envs
+            )));
+        }
+        let Some(snapshot) = &self.last_terminal_snapshots[env_index] else {
+            return Ok(py.None());
+        };
+        snapshot_to_py(py, snapshot)
+    }
+
+    fn terminal_metrics<'py>(&self, py: Python<'py>, env_index: usize) -> PyResult<Py<PyAny>> {
+        if env_index >= self.n_envs {
+            return Err(PyValueError::new_err(format!(
+                "env_index must be < {}, got {env_index}",
+                self.n_envs
+            )));
+        }
+        let Some(metrics) = &self.last_terminal_metrics[env_index] else {
+            return Ok(py.None());
+        };
+        terminal_metrics_to_py(py, metrics)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -427,15 +467,22 @@ impl PyRlVecEnv {
                         can_act,
                         max_launch,
                     );
-                    Ok::<_, String>((terminal, ignored_fleets))
+                    Ok::<_, String>(StepOneOutput {
+                        terminal_metrics: terminal.metrics,
+                        terminal_snapshot: terminal.snapshot,
+                        ignored_fleets,
+                    })
                 }
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(PyValueError::new_err)?;
         let mut terminal_metrics = Vec::with_capacity(env_results.len());
         let mut ignored_fleets = 0;
-        for (terminal, ignored) in env_results {
-            terminal_metrics.push(terminal);
+        for (env_index, result) in env_results.into_iter().enumerate() {
+            self.last_terminal_snapshots[env_index] = result.terminal_snapshot;
+            self.last_terminal_metrics[env_index] = result.terminal_metrics.clone();
+            terminal_metrics.push(result.terminal_metrics);
+            let ignored = result.ignored_fleets;
             ignored_fleets += ignored;
         }
         let episode_metrics = collect_terminal_metrics(terminal_metrics);
@@ -611,15 +658,22 @@ impl PyRlVecEnv {
                         can_act,
                         max_launch,
                     );
-                    Ok::<_, String>((terminal, ignored_fleets))
+                    Ok::<_, String>(StepOneOutput {
+                        terminal_metrics: terminal.metrics,
+                        terminal_snapshot: terminal.snapshot,
+                        ignored_fleets,
+                    })
                 }
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(PyValueError::new_err)?;
         let mut terminal_metrics = Vec::with_capacity(env_results.len());
         let mut ignored_fleets = 0;
-        for (terminal, ignored) in env_results {
-            terminal_metrics.push(terminal);
+        for (env_index, result) in env_results.into_iter().enumerate() {
+            self.last_terminal_snapshots[env_index] = result.terminal_snapshot;
+            self.last_terminal_metrics[env_index] = result.terminal_metrics.clone();
+            terminal_metrics.push(result.terminal_metrics);
+            let ignored = result.ignored_fleets;
             ignored_fleets += ignored;
         }
         let episode_metrics = collect_terminal_metrics(terminal_metrics);
@@ -646,6 +700,23 @@ impl PyRlVecEnv {
             },
             (self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
         )
+    }
+}
+
+impl PyRlVecEnv {
+    fn current_snapshot(&self, env_index: usize) -> PyResult<StateSnapshot> {
+        if env_index >= self.n_envs {
+            return Err(PyValueError::new_err(format!(
+                "env_index must be < {}, got {env_index}",
+                self.n_envs
+            )));
+        }
+        Ok(StateSnapshot::from_env(
+            &self.states[env_index],
+            &self.player_maps[env_index],
+            &self.action_slots[env_index],
+            &self.player_finished[env_index],
+        ))
     }
 }
 
@@ -735,6 +806,198 @@ struct TerminalEpisodeMetrics {
     player_count: usize,
     values: Vec<(&'static str, f64)>,
     win_rates: Vec<(usize, f64)>,
+}
+
+#[derive(Clone, Debug)]
+struct StateSnapshot {
+    state: State,
+    player_map: PlayerMap,
+    action_slots: ActionEntitySlots,
+    player_finished: Vec<bool>,
+}
+
+impl StateSnapshot {
+    fn from_env(
+        state: &State,
+        player_map: &PlayerMap,
+        action_slots: &ActionEntitySlots,
+        player_finished: &[bool],
+    ) -> Self {
+        Self {
+            state: state.clone(),
+            player_map: *player_map,
+            action_slots: *action_slots,
+            player_finished: player_finished.to_vec(),
+        }
+    }
+}
+
+fn snapshot_to_py(py: Python<'_>, snapshot: &StateSnapshot) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    dict.set_item("step", snapshot.state.step)?;
+    dict.set_item("episode_steps", snapshot.state.config.episode_steps)?;
+    dict.set_item("ship_speed", snapshot.state.config.ship_speed)?;
+    dict.set_item("comet_speed", snapshot.state.config.comet_speed)?;
+    dict.set_item("angular_velocity", snapshot.state.angular_velocity)?;
+    dict.set_item("player_count", snapshot.state.config.player_count)?;
+    dict.set_item("board_size", BOARD_SIZE)?;
+    dict.set_item("center", CENTER)?;
+    dict.set_item("sun_radius", SUN_RADIUS)?;
+    dict.set_item("owner_space", "outer")?;
+    dict.set_item("player_map", player_map_to_py(py, snapshot)?)?;
+    dict.set_item("player_finished", player_finished_to_py(py, snapshot)?)?;
+    dict.set_item("action_entity_slots", action_slots_to_py(py, snapshot)?)?;
+    dict.set_item("planets", planets_to_py(py, snapshot)?)?;
+    dict.set_item("fleets", fleets_to_py(py, snapshot)?)?;
+    dict.set_item("comets", comets_to_py(py, snapshot)?)?;
+    Ok(dict.into_any().unbind())
+}
+
+fn terminal_metrics_to_py(py: Python<'_>, metrics: &TerminalEpisodeMetrics) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    for (key, value) in &metrics.values {
+        dict.set_item(*key, *value)?;
+    }
+    for (player, win_rate) in &metrics.win_rates {
+        dict.set_item(format!("win_rate_player_{player}"), *win_rate)?;
+    }
+    dict.set_item(format!("terminal_episodes_{}p", metrics.player_count), 1.0)?;
+    Ok(dict.into_any().unbind())
+}
+
+fn player_map_to_py<'py>(
+    py: Python<'py>,
+    snapshot: &StateSnapshot,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    let internal_to_outer = PyList::empty(py);
+    for player in 0..OUTER_PLAYER_SLOTS {
+        internal_to_outer.append(snapshot.player_map.internal_to_outer(player))?;
+    }
+    let outer_to_internal = PyList::empty(py);
+    for player in 0..OUTER_PLAYER_SLOTS {
+        match snapshot.player_map.outer_to_internal(player) {
+            Some(internal) => outer_to_internal.append(internal)?,
+            None => outer_to_internal.append(py.None())?,
+        }
+    }
+    dict.set_item("internal_to_outer", internal_to_outer)?;
+    dict.set_item("outer_to_internal", outer_to_internal)?;
+    Ok(dict)
+}
+
+fn player_finished_to_py<'py>(
+    py: Python<'py>,
+    snapshot: &StateSnapshot,
+) -> PyResult<Bound<'py, PyList>> {
+    let values = PyList::empty(py);
+    for outer_player in 0..OUTER_PLAYER_SLOTS {
+        let finished = snapshot
+            .player_map
+            .outer_to_internal(outer_player)
+            .and_then(|internal| snapshot.player_finished.get(internal))
+            .copied()
+            .unwrap_or(true);
+        values.append(finished)?;
+    }
+    Ok(values)
+}
+
+fn action_slots_to_py<'py>(
+    py: Python<'py>,
+    snapshot: &StateSnapshot,
+) -> PyResult<Bound<'py, PyList>> {
+    let slots = PyList::empty(py);
+    for slot in snapshot.action_slots {
+        match slot {
+            Some(slot) => slots.append(slot.planet_id)?,
+            None => slots.append(py.None())?,
+        }
+    }
+    Ok(slots)
+}
+
+fn planets_to_py<'py>(py: Python<'py>, snapshot: &StateSnapshot) -> PyResult<Bound<'py, PyList>> {
+    let planets = PyList::empty(py);
+    let comet_ids = snapshot
+        .state
+        .comet_planet_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    for planet in snapshot.state.planets.iter() {
+        let item = PyDict::new(py);
+        item.set_item("id", planet.id)?;
+        item.set_item("owner", outer_owner(planet.owner, &snapshot.player_map))?;
+        item.set_item("internal_owner", planet.owner)?;
+        item.set_item("x", planet.x)?;
+        item.set_item("y", planet.y)?;
+        item.set_item("radius", planet.radius)?;
+        item.set_item("ships", planet.ships)?;
+        item.set_item("production", planet.production)?;
+        item.set_item("is_comet", comet_ids.contains(&planet.id))?;
+        planets.append(item)?;
+    }
+    Ok(planets)
+}
+
+fn fleets_to_py<'py>(py: Python<'py>, snapshot: &StateSnapshot) -> PyResult<Bound<'py, PyList>> {
+    let fleets = PyList::empty(py);
+    for fleet in &snapshot.state.fleets {
+        let item = PyDict::new(py);
+        item.set_item("id", fleet.id)?;
+        item.set_item("owner", outer_owner(fleet.owner, &snapshot.player_map))?;
+        item.set_item("internal_owner", fleet.owner)?;
+        item.set_item("x", fleet.x)?;
+        item.set_item("y", fleet.y)?;
+        item.set_item("angle", fleet.angle)?;
+        item.set_item("from_planet_id", fleet.from_planet_id)?;
+        item.set_item("ships", fleet.ships)?;
+        fleets.append(item)?;
+    }
+    Ok(fleets)
+}
+
+fn comets_to_py<'py>(py: Python<'py>, snapshot: &StateSnapshot) -> PyResult<Bound<'py, PyList>> {
+    let comets = PyList::empty(py);
+    for comet in &snapshot.state.comets {
+        let item = PyDict::new(py);
+        item.set_item("planet_ids", &comet.planet_ids)?;
+        item.set_item("path_index", comet.path_index)?;
+        let paths = PyList::empty(py);
+        for path in &comet.paths {
+            let points = PyList::empty(py);
+            for point in path {
+                points.append((point.x, point.y))?;
+            }
+            paths.append(points)?;
+        }
+        item.set_item("paths", paths)?;
+        comets.append(item)?;
+    }
+    Ok(comets)
+}
+
+fn outer_owner(owner: i32, player_map: &PlayerMap) -> i32 {
+    if owner < 0 {
+        return owner;
+    }
+    let player = owner as usize;
+    if player >= OUTER_PLAYER_SLOTS {
+        return owner;
+    }
+    player_map.internal_to_outer(player) as i32
+}
+
+struct StepOneOutput {
+    terminal_metrics: Option<TerminalEpisodeMetrics>,
+    terminal_snapshot: Option<StateSnapshot>,
+    ignored_fleets: usize,
+}
+
+struct TerminalStep {
+    metrics: Option<TerminalEpisodeMetrics>,
+    snapshot: Option<StateSnapshot>,
 }
 
 impl EpisodeStats {
@@ -1073,7 +1336,7 @@ fn step_one_env(
     done_chunk: &mut [bool],
     max_fleets: usize,
     two_player_weight: f64,
-) -> Option<TerminalEpisodeMetrics> {
+) -> TerminalStep {
     episode_stats.record_turn(state, decoded);
     let result = step(state, decoded);
     episode_stats.record_step_result(state, result.fleet_losses, max_fleets);
@@ -1103,14 +1366,23 @@ fn step_one_env(
     if should_reset {
         let terminal_metrics =
             episode_stats.terminal_metrics(state, player_map, &result.player_results);
+        let terminal_action_slots = action_entity_slots(state);
+        let terminal_snapshot =
+            StateSnapshot::from_env(state, player_map, &terminal_action_slots, player_finished);
         let (new_state, new_player_map) = reset_one_env(two_player_weight);
         *state = new_state;
         *player_map = new_player_map;
         player_finished.fill(false);
         *episode_stats = EpisodeStats::default();
-        return Some(terminal_metrics);
+        return TerminalStep {
+            metrics: Some(terminal_metrics),
+            snapshot: Some(terminal_snapshot),
+        };
     }
-    None
+    TerminalStep {
+        metrics: None,
+        snapshot: None,
+    }
 }
 
 fn result_is_terminal(results: &[PlayerResult]) -> bool {
@@ -1299,6 +1571,7 @@ mod tests {
             usize::MAX,
             0.0,
         )
+        .metrics
     }
 
     #[test]

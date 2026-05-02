@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 import torch
@@ -229,6 +231,57 @@ def test_two_player_resets_randomize_active_outer_player_slots() -> None:
 
     assert torch.equal(obs.still_playing.sum(dim=1), torch.full((32,), 2))
     assert torch.all(obs.still_playing.any(dim=0))
+
+
+def test_vectorized_env_state_snapshot_is_json_serializable() -> None:
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=ObsV1Config(),
+        action_spec=ActionPureConfig(),
+        two_player_weight=1.0,
+        pin_memory=False,
+    )
+    obs = env.reset()
+
+    snapshot = env.state_snapshot(0)
+
+    json.dumps(snapshot)
+    assert snapshot["player_count"] == 2
+    assert snapshot["owner_space"] == "outer"
+    assert len(snapshot["player_map"]["internal_to_outer"]) == 4
+    assert len(snapshot["player_finished"]) == 4
+    assert len(snapshot["action_entity_slots"]) == ACTION_ENTITY_SLOTS
+    assert len(snapshot["planets"]) > 0
+    assert sum(obs.still_playing[0].tolist()) == 2
+
+
+def test_vectorized_env_terminal_snapshot_preserves_pre_reset_state() -> None:
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=ObsV1Config(),
+        action_spec=ActionPureConfig(),
+        two_player_weight=1.0,
+        pin_memory=False,
+    )
+    env.reset()
+    shape = (1, 4, ACTION_ENTITY_SLOTS, env.action_spec.max_per_planet_launches)
+    launch = np.zeros(shape, dtype=np.bool_)
+    angle = np.zeros(shape, dtype=np.float32)
+    ships = np.zeros(shape, dtype=np.int64)
+
+    terminal_snapshot = None
+    for _ in range(600):
+        obs, _rewards, dones, _episode_metrics = env.step(launch, angle, ships)
+        if bool(dones.all()):
+            terminal_snapshot = env.terminal_snapshot(0)
+            break
+
+    assert terminal_snapshot is not None
+    terminal_metrics = env.terminal_metrics(0)
+    assert terminal_metrics is not None
+    assert terminal_snapshot["step"] > obs.global_features[0, 0].item()
+    assert terminal_snapshot["player_count"] == 2
+    assert terminal_metrics["terminal_episodes_2p"] == 1.0
 
 
 def test_two_player_sample_marks_unused_player_slots_done() -> None:
