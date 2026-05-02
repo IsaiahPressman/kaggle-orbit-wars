@@ -110,9 +110,7 @@ class ObsBatch(BaseModel):
     planets: torch.Tensor
     fleets: torch.Tensor
     comets: torch.Tensor
-    planet_mask: torch.Tensor
-    fleet_mask: torch.Tensor
-    comet_mask: torch.Tensor
+    entity_mask: torch.Tensor
     still_playing: torch.Tensor
     global_features: torch.Tensor
     can_act: torch.Tensor
@@ -161,9 +159,7 @@ class VectorizedEnv:
         self._planet_obs_np = self.observations.planets.numpy()
         self._fleet_obs_np = self.observations.fleets.numpy()
         self._comet_obs_np = self.observations.comets.numpy()
-        self._planet_mask_np = self.observations.planet_mask.numpy()
-        self._fleet_mask_np = self.observations.fleet_mask.numpy()
-        self._comet_mask_np = self.observations.comet_mask.numpy()
+        self._entity_mask_np = self.observations.entity_mask.numpy()
         self._still_playing_np = self.observations.still_playing.numpy()
         self._global_obs_np = self.observations.global_features.numpy()
         self._can_act_np = self.observations.can_act.numpy()
@@ -176,9 +172,7 @@ class VectorizedEnv:
             self._planet_obs_np,
             self._fleet_obs_np,
             self._comet_obs_np,
-            self._planet_mask_np,
-            self._fleet_mask_np,
-            self._comet_mask_np,
+            self._entity_mask_np,
             self._still_playing_np,
             self._global_obs_np,
             self._can_act_np,
@@ -222,9 +216,7 @@ class VectorizedEnv:
                 self._planet_obs_np,
                 self._fleet_obs_np,
                 self._comet_obs_np,
-                self._planet_mask_np,
-                self._fleet_mask_np,
-                self._comet_mask_np,
+                self._entity_mask_np,
                 self._still_playing_np,
                 self._global_obs_np,
                 self._can_act_np,
@@ -247,9 +239,7 @@ class VectorizedEnv:
                 self._planet_obs_np,
                 self._fleet_obs_np,
                 self._comet_obs_np,
-                self._planet_mask_np,
-                self._fleet_mask_np,
-                self._comet_mask_np,
+                self._entity_mask_np,
                 self._still_playing_np,
                 self._global_obs_np,
                 self._can_act_np,
@@ -293,18 +283,8 @@ class VectorizedEnv:
                 dtype=torch.float32,
                 pin_memory=pin_memory,
             ),
-            planet_mask=torch.zeros(
-                (self.n_envs, self.obs_spec.max_planets),
-                dtype=torch.bool,
-                pin_memory=pin_memory,
-            ),
-            fleet_mask=torch.zeros(
-                (self.n_envs, self.obs_spec.max_fleets),
-                dtype=torch.bool,
-                pin_memory=pin_memory,
-            ),
-            comet_mask=torch.zeros(
-                (self.n_envs, self.obs_spec.max_comets),
+            entity_mask=torch.zeros(
+                (self.n_envs, self.obs_spec.max_entities),
                 dtype=torch.bool,
                 pin_memory=pin_memory,
             ),
@@ -343,8 +323,6 @@ def encode_python_observation(
     np.ndarray,
     np.ndarray,
     np.ndarray,
-    np.ndarray,
-    np.ndarray,
 ]:
     spec = obs_spec or ObsV1Config()
     action = action_spec or ActionPureConfig()
@@ -371,14 +349,12 @@ def encode_python_observation(
         planets,
         fleets,
         comets,
-        planet_mask,
-        fleet_mask,
-        comet_mask,
+        entity_mask,
         global_features,
         source_can_act,
         max_launch,
     ) = encoded
-    target_exists = np.concatenate((planet_mask, comet_mask))
+    target_exists = entity_mask[:ACTION_ENTITY_SLOTS]
     source_target_can_act = source_can_act[:, :, None] & target_exists[None, None, :]
     source_indexes = np.arange(ACTION_ENTITY_SLOTS)
     source_target_can_act[:, source_indexes, source_indexes] = False
@@ -386,9 +362,7 @@ def encode_python_observation(
         planets,
         fleets,
         comets,
-        planet_mask,
-        fleet_mask,
-        comet_mask,
+        entity_mask,
         global_features,
         source_target_can_act,
         max_launch,

@@ -59,9 +59,7 @@ def _obs_batch(
         (batch_size, obs_spec.max_comets, obs_spec.comet_channels),
         dtype=torch.float32,
     )
-    planet_mask = torch.zeros((batch_size, obs_spec.max_planets), dtype=torch.bool)
-    fleet_mask = torch.zeros((batch_size, obs_spec.max_fleets), dtype=torch.bool)
-    comet_mask = torch.zeros((batch_size, obs_spec.max_comets), dtype=torch.bool)
+    entity_mask = torch.zeros((batch_size, obs_spec.max_entities), dtype=torch.bool)
     still_playing = torch.ones((batch_size, 4), dtype=torch.bool)
     global_features = torch.zeros(
         (batch_size, obs_spec.global_channels),
@@ -81,9 +79,9 @@ def _obs_batch(
     planets[:, 0, 13] = 0.08
     planets[:, 1, 1] = 1.0
     planets[:, 1, 13] = 0.04
-    planet_mask[:, :2] = True
+    entity_mask[:, :2] = True
     comets[:, 0, 2] = 1.0
-    comet_mask[:, 0] = True
+    entity_mask[:, MAX_PLANETS] = True
     if isinstance(action_spec, ActionPureConfig):
         can_act[:, 0, 0] = True
         can_act[:, 1, 1] = True
@@ -102,9 +100,7 @@ def _obs_batch(
         planets=planets,
         fleets=fleets,
         comets=comets,
-        planet_mask=planet_mask,
-        fleet_mask=fleet_mask,
-        comet_mask=comet_mask,
+        entity_mask=entity_mask,
         still_playing=still_playing,
         global_features=global_features,
         can_act=can_act,

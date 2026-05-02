@@ -32,7 +32,7 @@ def test_vectorized_env_writes_into_preallocated_torch_buffers() -> None:
 
     env.observations.planets.fill_(-7)
     env.observations.comets.fill_(-3)
-    env.observations.comet_mask.fill_(True)
+    env.observations.entity_mask.fill_(True)
     env.observations.can_act.fill_(True)
     env.observations.max_launch.fill_(123)
     obs = env.reset()
@@ -41,10 +41,10 @@ def test_vectorized_env_writes_into_preallocated_torch_buffers() -> None:
     assert obs.comets.data_ptr() == comet_ptr
     assert np.shares_memory(obs.planets.numpy(), env._planet_obs_np)
     assert torch.any(obs.planets != -7)
-    assert torch.any(obs.planet_mask)
+    assert torch.any(obs.entity_mask[:, :MAX_PLANETS])
     assert torch.all(obs.comets == 0)
-    assert torch.all(~obs.comet_mask)
-    assert torch.all(~obs.fleet_mask)
+    assert torch.all(~obs.entity_mask[:, MAX_PLANETS:ACTION_ENTITY_SLOTS])
+    assert torch.all(~obs.entity_mask[:, ACTION_ENTITY_SLOTS:])
     assert torch.any(obs.can_act)
     assert torch.all(obs.max_launch[~obs.can_act] == 0)
 
@@ -342,9 +342,7 @@ def test_min_fleet_size_controls_action_mask_and_validation() -> None:
         _planets,
         _fleets,
         _comets,
-        _planet_mask,
-        _fleet_mask,
-        _comet_mask,
+        _entity_mask,
         _global_features,
         can_act,
         max_launch,
@@ -386,9 +384,7 @@ def test_python_observation_encoder_writes_discrete_target_mask() -> None:
         _planets,
         _fleets,
         _comets,
-        planet_mask,
-        _fleet_mask,
-        comet_mask,
+        entity_mask,
         _global_features,
         can_act,
         max_launch,
@@ -406,8 +402,8 @@ def test_python_observation_encoder_writes_discrete_target_mask() -> None:
         action_spec=ActionDiscreteTargetsConfig(),
     )
 
-    assert planet_mask[:2].tolist() == [True, True]
-    assert not comet_mask.any()
+    assert entity_mask[:2].tolist() == [True, True]
+    assert not entity_mask[MAX_PLANETS:ACTION_ENTITY_SLOTS].any()
     assert can_act.shape == (4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS)
     assert not can_act[0, 0, 0]
     assert can_act[0, 0, 1]
@@ -420,9 +416,7 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
         planets,
         fleets,
         comets,
-        planet_mask,
-        fleet_mask,
-        comet_mask,
+        entity_mask,
         global_features,
         can_act,
         max_launch,
@@ -442,6 +436,9 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     assert global_features.shape == (GLOBAL_CHANNELS,)
     assert can_act.shape == (4, ACTION_ENTITY_SLOTS)
     assert max_launch.shape == (4, ACTION_ENTITY_SLOTS)
+    planet_mask = entity_mask[:MAX_PLANETS]
+    comet_mask = entity_mask[MAX_PLANETS:ACTION_ENTITY_SLOTS]
+    fleet_mask = entity_mask[ACTION_ENTITY_SLOTS:]
     assert planet_mask[0]
     assert not planet_mask[1]
     assert fleet_mask[0]
@@ -512,9 +509,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
         planets,
         fleets,
         comets,
-        planet_mask,
-        fleet_mask,
-        comet_mask,
+        entity_mask,
         global_features,
         can_act,
         max_launch,
@@ -537,6 +532,9 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
     expected_fleet_mask = np.zeros(spec.max_fleets, dtype=np.bool_)
     expected_fleet_mask[:4] = True
     expected_comet_mask = np.array([True, True, False, False])
+    planet_mask = entity_mask[:MAX_PLANETS]
+    comet_mask = entity_mask[MAX_PLANETS:ACTION_ENTITY_SLOTS]
+    fleet_mask = entity_mask[ACTION_ENTITY_SLOTS:]
     np.testing.assert_array_equal(planet_mask, expected_planet_mask)
     np.testing.assert_array_equal(fleet_mask, expected_fleet_mask)
     np.testing.assert_array_equal(comet_mask, expected_comet_mask)
@@ -751,7 +749,7 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
 ) -> None:
     spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
 
-    _, fleets, _, _, fleet_mask, _, _, _, _ = encode_python_observation(
+    _, fleets, _, entity_mask, _, _, _ = encode_python_observation(
         {
             "planets": [],
             "fleets": [
@@ -761,6 +759,7 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
         },
         spec,
     )
+    fleet_mask = entity_mask[ACTION_ENTITY_SLOTS:]
 
     assert fleet_mask.tolist() == [True]
     assert fleets[0, 1] == 1
@@ -770,21 +769,21 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
 
 def test_python_observation_encoder_writes_comet_future_paths() -> None:
     path = [[0.0, 0.0], [50.0, 50.0], [100.0, 100.0]]
-    planets, _, comets, planet_mask, _, comet_mask, _, can_act, max_launch = (
-        encode_python_observation(
-            {
-                "planets": [[10, 2, 50.0, 50.0, 1.0, 25, 1]],
-                "fleets": [],
-                "comets": [
-                    {
-                        "planet_ids": [10],
-                        "paths": [path],
-                        "path_index": 1,
-                    }
-                ],
-            }
-        )
+    planets, _, comets, entity_mask, _, can_act, max_launch = encode_python_observation(
+        {
+            "planets": [[10, 2, 50.0, 50.0, 1.0, 25, 1]],
+            "fleets": [],
+            "comets": [
+                {
+                    "planet_ids": [10],
+                    "paths": [path],
+                    "path_index": 1,
+                }
+            ],
+        }
     )
+    planet_mask = entity_mask[:MAX_PLANETS]
+    comet_mask = entity_mask[MAX_PLANETS:ACTION_ENTITY_SLOTS]
 
     assert not planet_mask[0]
     assert comet_mask.tolist() == [True, False, False, False]

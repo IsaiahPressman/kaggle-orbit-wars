@@ -26,8 +26,6 @@ type ObsShapes = (
     (usize, usize),
     (usize, usize),
     (usize, usize),
-    (usize, usize),
-    (usize, usize),
     Vec<usize>,
     (usize, usize, usize),
 );
@@ -157,9 +155,7 @@ impl PyRlVecEnv {
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
         comet_obs: PyReadwriteArrayDyn<'_, f32>,
-        planet_mask: PyReadwriteArrayDyn<'_, bool>,
-        fleet_mask: PyReadwriteArrayDyn<'_, bool>,
-        comet_mask: PyReadwriteArrayDyn<'_, bool>,
+        entity_mask: PyReadwriteArrayDyn<'_, bool>,
         still_playing: PyReadwriteArrayDyn<'_, bool>,
         global_obs: PyReadwriteArrayDyn<'_, f32>,
         can_act: PyReadwriteArrayDyn<'_, bool>,
@@ -169,9 +165,7 @@ impl PyRlVecEnv {
             &planet_obs,
             &fleet_obs,
             &comet_obs,
-            &planet_mask,
-            &fleet_mask,
-            &comet_mask,
+            &entity_mask,
             &still_playing,
             &global_obs,
             &can_act,
@@ -181,9 +175,7 @@ impl PyRlVecEnv {
         let mut planet_obs = planet_obs;
         let mut fleet_obs = fleet_obs;
         let mut comet_obs = comet_obs;
-        let mut planet_mask = planet_mask;
-        let mut fleet_mask = fleet_mask;
-        let mut comet_mask = comet_mask;
+        let mut entity_mask = entity_mask;
         let mut still_playing = still_playing;
         let mut global_obs = global_obs;
         let mut can_act = can_act;
@@ -209,9 +201,11 @@ impl PyRlVecEnv {
             .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
             .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
             .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
-            .zip_eq(planet_mask.as_slice_mut()?.par_chunks_mut(MAX_PLANETS))
-            .zip_eq(fleet_mask.as_slice_mut()?.par_chunks_mut(self.max_fleets))
-            .zip_eq(comet_mask.as_slice_mut()?.par_chunks_mut(MAX_COMETS))
+            .zip_eq(
+                entity_mask
+                    .as_slice_mut()?
+                    .par_chunks_mut(self.max_entities),
+            )
             .zip_eq(
                 still_playing
                     .as_slice_mut()?
@@ -229,9 +223,7 @@ impl PyRlVecEnv {
                 let (item, can_act) = item;
                 let (item, global_obs) = item;
                 let (item, still_playing) = item;
-                let (item, comet_mask) = item;
-                let (item, fleet_mask) = item;
-                let (item, planet_mask) = item;
+                let (item, entity_mask) = item;
                 let (item, comet_obs) = item;
                 let (item, fleet_obs) = item;
                 let (item, planet_obs) = item;
@@ -254,9 +246,7 @@ impl PyRlVecEnv {
                         planet_obs,
                         fleet_obs,
                         comet_obs,
-                        planet_mask,
-                        fleet_mask,
-                        comet_mask,
+                        entity_mask,
                         still_playing,
                         global_obs,
                         can_act,
@@ -279,9 +269,7 @@ impl PyRlVecEnv {
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
         comet_obs: PyReadwriteArrayDyn<'_, f32>,
-        planet_mask: PyReadwriteArrayDyn<'_, bool>,
-        fleet_mask: PyReadwriteArrayDyn<'_, bool>,
-        comet_mask: PyReadwriteArrayDyn<'_, bool>,
+        entity_mask: PyReadwriteArrayDyn<'_, bool>,
         still_playing: PyReadwriteArrayDyn<'_, bool>,
         global_obs: PyReadwriteArrayDyn<'_, f32>,
         can_act: PyReadwriteArrayDyn<'_, bool>,
@@ -313,9 +301,7 @@ impl PyRlVecEnv {
             &planet_obs,
             &fleet_obs,
             &comet_obs,
-            &planet_mask,
-            &fleet_mask,
-            &comet_mask,
+            &entity_mask,
             &still_playing,
             &global_obs,
             &can_act,
@@ -327,9 +313,7 @@ impl PyRlVecEnv {
         let mut planet_obs = planet_obs;
         let mut fleet_obs = fleet_obs;
         let mut comet_obs = comet_obs;
-        let mut planet_mask = planet_mask;
-        let mut fleet_mask = fleet_mask;
-        let mut comet_mask = comet_mask;
+        let mut entity_mask = entity_mask;
         let mut still_playing = still_playing;
         let mut global_obs = global_obs;
         let mut can_act = can_act;
@@ -369,9 +353,11 @@ impl PyRlVecEnv {
             .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
             .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
             .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
-            .zip_eq(planet_mask.as_slice_mut()?.par_chunks_mut(MAX_PLANETS))
-            .zip_eq(fleet_mask.as_slice_mut()?.par_chunks_mut(self.max_fleets))
-            .zip_eq(comet_mask.as_slice_mut()?.par_chunks_mut(MAX_COMETS))
+            .zip_eq(
+                entity_mask
+                    .as_slice_mut()?
+                    .par_chunks_mut(self.max_entities),
+            )
             .zip_eq(
                 still_playing
                     .as_slice_mut()?
@@ -390,9 +376,7 @@ impl PyRlVecEnv {
                 let (item, can_act) = item;
                 let (item, global_obs) = item;
                 let (item, still_playing) = item;
-                let (item, comet_mask) = item;
-                let (item, fleet_mask) = item;
-                let (item, planet_mask) = item;
+                let (item, entity_mask) = item;
                 let (item, comet_obs) = item;
                 let (item, fleet_obs) = item;
                 let (item, planet_obs) = item;
@@ -437,9 +421,7 @@ impl PyRlVecEnv {
                         planet_obs,
                         fleet_obs,
                         comet_obs,
-                        planet_mask,
-                        fleet_mask,
-                        comet_mask,
+                        entity_mask,
                         still_playing,
                         global_obs,
                         can_act,
@@ -470,9 +452,7 @@ impl PyRlVecEnv {
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
         comet_obs: PyReadwriteArrayDyn<'_, f32>,
-        planet_mask: PyReadwriteArrayDyn<'_, bool>,
-        fleet_mask: PyReadwriteArrayDyn<'_, bool>,
-        comet_mask: PyReadwriteArrayDyn<'_, bool>,
+        entity_mask: PyReadwriteArrayDyn<'_, bool>,
         still_playing: PyReadwriteArrayDyn<'_, bool>,
         global_obs: PyReadwriteArrayDyn<'_, f32>,
         can_act: PyReadwriteArrayDyn<'_, bool>,
@@ -504,9 +484,7 @@ impl PyRlVecEnv {
             &planet_obs,
             &fleet_obs,
             &comet_obs,
-            &planet_mask,
-            &fleet_mask,
-            &comet_mask,
+            &entity_mask,
             &still_playing,
             &global_obs,
             &can_act,
@@ -518,9 +496,7 @@ impl PyRlVecEnv {
         let mut planet_obs = planet_obs;
         let mut fleet_obs = fleet_obs;
         let mut comet_obs = comet_obs;
-        let mut planet_mask = planet_mask;
-        let mut fleet_mask = fleet_mask;
-        let mut comet_mask = comet_mask;
+        let mut entity_mask = entity_mask;
         let mut still_playing = still_playing;
         let mut global_obs = global_obs;
         let mut can_act = can_act;
@@ -560,9 +536,11 @@ impl PyRlVecEnv {
             .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
             .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
             .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
-            .zip_eq(planet_mask.as_slice_mut()?.par_chunks_mut(MAX_PLANETS))
-            .zip_eq(fleet_mask.as_slice_mut()?.par_chunks_mut(self.max_fleets))
-            .zip_eq(comet_mask.as_slice_mut()?.par_chunks_mut(MAX_COMETS))
+            .zip_eq(
+                entity_mask
+                    .as_slice_mut()?
+                    .par_chunks_mut(self.max_entities),
+            )
             .zip_eq(
                 still_playing
                     .as_slice_mut()?
@@ -581,9 +559,7 @@ impl PyRlVecEnv {
                 let (item, can_act) = item;
                 let (item, global_obs) = item;
                 let (item, still_playing) = item;
-                let (item, comet_mask) = item;
-                let (item, fleet_mask) = item;
-                let (item, planet_mask) = item;
+                let (item, entity_mask) = item;
                 let (item, comet_obs) = item;
                 let (item, fleet_obs) = item;
                 let (item, planet_obs) = item;
@@ -628,9 +604,7 @@ impl PyRlVecEnv {
                         planet_obs,
                         fleet_obs,
                         comet_obs,
-                        planet_mask,
-                        fleet_mask,
-                        comet_mask,
+                        entity_mask,
                         still_playing,
                         global_obs,
                         can_act,
@@ -657,9 +631,7 @@ impl PyRlVecEnv {
             (self.n_envs, MAX_PLANETS, PLANET_CHANNELS),
             (self.n_envs, self.max_fleets, FLEET_CHANNELS),
             (self.n_envs, MAX_COMETS, COMET_CHANNELS),
-            (self.n_envs, MAX_PLANETS),
-            (self.n_envs, self.max_fleets),
-            (self.n_envs, MAX_COMETS),
+            (self.n_envs, self.max_entities),
             (self.n_envs, OUTER_PLAYER_SLOTS),
             (self.n_envs, GLOBAL_CHANNELS),
             match self.action_spec {
@@ -683,9 +655,7 @@ impl PyRlVecEnv {
         planet_obs: &PyReadwriteArrayDyn<'_, f32>,
         fleet_obs: &PyReadwriteArrayDyn<'_, f32>,
         comet_obs: &PyReadwriteArrayDyn<'_, f32>,
-        planet_mask: &PyReadwriteArrayDyn<'_, bool>,
-        fleet_mask: &PyReadwriteArrayDyn<'_, bool>,
-        comet_mask: &PyReadwriteArrayDyn<'_, bool>,
+        entity_mask: &PyReadwriteArrayDyn<'_, bool>,
         still_playing: &PyReadwriteArrayDyn<'_, bool>,
         global_obs: &PyReadwriteArrayDyn<'_, f32>,
         can_act: &PyReadwriteArrayDyn<'_, bool>,
@@ -707,16 +677,10 @@ impl PyRlVecEnv {
             &[self.n_envs, MAX_COMETS, COMET_CHANNELS],
         )?;
         require_shape(
-            "planet_mask",
-            planet_mask.shape(),
-            &[self.n_envs, MAX_PLANETS],
+            "entity_mask",
+            entity_mask.shape(),
+            &[self.n_envs, self.max_entities],
         )?;
-        require_shape(
-            "fleet_mask",
-            fleet_mask.shape(),
-            &[self.n_envs, self.max_fleets],
-        )?;
-        require_shape("comet_mask", comet_mask.shape(), &[self.n_envs, MAX_COMETS])?;
         require_shape(
             "still_playing",
             still_playing.shape(),
@@ -1029,15 +993,15 @@ fn write_one_obs(
     planet_obs: &mut [f32],
     fleet_obs: &mut [f32],
     comet_obs: &mut [f32],
-    planet_mask: &mut [bool],
-    fleet_mask: &mut [bool],
-    comet_mask: &mut [bool],
+    entity_mask: &mut [bool],
     still_playing: &mut [bool],
     global_obs: &mut [f32],
     can_act: &mut [bool],
     max_launch: &mut [i64],
 ) -> usize {
     write_still_playing(state, player_map, player_finished, still_playing);
+    let (planet_mask, tail_mask) = entity_mask.split_at_mut(MAX_PLANETS);
+    let (comet_mask, fleet_mask) = tail_mask.split_at_mut(MAX_COMETS);
     encode_state_with_action_slots(
         action_spec,
         state,

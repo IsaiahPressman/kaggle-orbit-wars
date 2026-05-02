@@ -28,8 +28,6 @@ type EncodedObsV1<'py> = (
     Bound<'py, PyArray2<f32>>,
     Bound<'py, PyArray2<f32>>,
     Bound<'py, PyArray1<bool>>,
-    Bound<'py, PyArray1<bool>>,
-    Bound<'py, PyArray1<bool>>,
     Bound<'py, PyArray1<f32>>,
     Bound<'py, PyArray2<bool>>,
     Bound<'py, PyArray2<i64>>,
@@ -538,12 +536,15 @@ pub fn encode_obs_v1<'py>(
     let mut planet_obs = Array2::<f32>::zeros((MAX_PLANETS, PLANET_CHANNELS));
     let mut fleet_obs = Array2::<f32>::zeros((max_fleets, FLEET_CHANNELS));
     let mut comet_obs = Array2::<f32>::zeros((MAX_COMETS, COMET_CHANNELS));
-    let mut planet_mask = Array1::<bool>::from_elem(MAX_PLANETS, false);
-    let mut fleet_mask = Array1::<bool>::from_elem(max_fleets, false);
-    let mut comet_mask = Array1::<bool>::from_elem(MAX_COMETS, false);
+    let mut entity_mask = Array1::<bool>::from_elem(max_entities, false);
     let mut global_obs = Array1::<f32>::zeros(GLOBAL_CHANNELS);
     let mut can_act = Array2::<bool>::from_elem((OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS), false);
     let mut max_launch = Array2::<i64>::zeros((OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS));
+    let (planet_mask, tail_mask) = entity_mask
+        .as_slice_mut()
+        .expect("newly allocated entity mask is contiguous")
+        .split_at_mut(MAX_PLANETS);
+    let (comet_mask, fleet_mask) = tail_mask.split_at_mut(MAX_COMETS);
 
     let ignored_fleets = encode_state(
         RlActionSpec::Pure,
@@ -559,15 +560,9 @@ pub fn encode_obs_v1<'py>(
         comet_obs
             .as_slice_mut()
             .expect("newly allocated comet array is contiguous"),
-        planet_mask
-            .as_slice_mut()
-            .expect("newly allocated planet mask is contiguous"),
-        fleet_mask
-            .as_slice_mut()
-            .expect("newly allocated fleet mask is contiguous"),
-        comet_mask
-            .as_slice_mut()
-            .expect("newly allocated comet mask is contiguous"),
+        planet_mask,
+        fleet_mask,
+        comet_mask,
         global_obs
             .as_slice_mut()
             .expect("newly allocated global array is contiguous"),
@@ -585,9 +580,7 @@ pub fn encode_obs_v1<'py>(
         planet_obs.into_pyarray(py),
         fleet_obs.into_pyarray(py),
         comet_obs.into_pyarray(py),
-        planet_mask.into_pyarray(py),
-        fleet_mask.into_pyarray(py),
-        comet_mask.into_pyarray(py),
+        entity_mask.into_pyarray(py),
         global_obs.into_pyarray(py),
         can_act.into_pyarray(py),
         max_launch.into_pyarray(py),

@@ -41,9 +41,7 @@ def _obs_batch(*, n_envs: int, obs_spec: ObsV1Config) -> ObsBatch:
             (n_envs, obs_spec.max_comets, obs_spec.comet_channels),
             dtype=torch.float32,
         ),
-        planet_mask=torch.zeros((n_envs, obs_spec.max_planets), dtype=torch.bool),
-        fleet_mask=torch.zeros((n_envs, obs_spec.max_fleets), dtype=torch.bool),
-        comet_mask=torch.zeros((n_envs, obs_spec.max_comets), dtype=torch.bool),
+        entity_mask=torch.zeros((n_envs, obs_spec.max_entities), dtype=torch.bool),
         still_playing=torch.ones((n_envs, 4), dtype=torch.bool),
         global_features=torch.zeros(
             (n_envs, obs_spec.global_channels),
@@ -126,7 +124,7 @@ class TinyOrbitEnv:
             self.episode_length
         )
         obs.still_playing = self._still_playing()
-        obs.planet_mask[:, :2] = True
+        obs.entity_mask[:, :2] = True
         obs.can_act[:, :, 0] = obs.still_playing
         obs.max_launch[:, :, 0] = obs.still_playing.to(torch.int64)
         return obs
@@ -166,7 +164,7 @@ class TinyDiscreteTargetEnv:
     def _obs(self) -> ObsBatch:
         obs = _discrete_obs_batch(n_envs=self.n_envs, obs_spec=self.obs_spec)
         obs.still_playing.fill_(True)
-        obs.planet_mask[:, :2] = True
+        obs.entity_mask[:, :2] = True
         obs.can_act[:, :, 0, 1] = True
         obs.max_launch[:, :, 0] = 3
         return obs
@@ -182,9 +180,7 @@ class ReusingObservationEnv(TinyOrbitEnv):
         obs.planets.zero_()
         obs.fleets.zero_()
         obs.comets.zero_()
-        obs.planet_mask.zero_()
-        obs.fleet_mask.zero_()
-        obs.comet_mask.zero_()
+        obs.entity_mask.zero_()
         obs.still_playing.zero_()
         obs.global_features.zero_()
         obs.can_act.zero_()
@@ -192,7 +188,7 @@ class ReusingObservationEnv(TinyOrbitEnv):
         obs.global_features[:, 0] = self._targets
         obs.global_features[:, 1] = self._steps.to(torch.float32)
         obs.still_playing.copy_(self._still_playing())
-        obs.planet_mask[:, :2] = True
+        obs.entity_mask[:, :2] = True
         obs.can_act[:, :, 0] = obs.still_playing
         obs.max_launch[:, :, 0] = obs.still_playing.to(torch.int64)
         return obs

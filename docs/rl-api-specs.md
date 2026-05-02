@@ -52,16 +52,17 @@ environment returns an `ObsBatch` with these tensors:
 | `planets` | `float32` | `(n_envs, MAX_PLANETS, 16)` |
 | `fleets` | `float32` | `(n_envs, max_fleets, 10)` |
 | `comets` | `float32` | `(n_envs, MAX_COMETS, 88)` |
-| `planet_mask` | `bool` | `(n_envs, MAX_PLANETS)` |
-| `fleet_mask` | `bool` | `(n_envs, max_fleets)` |
-| `comet_mask` | `bool` | `(n_envs, MAX_COMETS)` |
+| `entity_mask` | `bool` | `(n_envs, max_entities)` |
 | `still_playing` | `bool` | `(n_envs, 4)` |
 | `global_features` | `float32` | `(n_envs, 3)` |
 | `can_act` | `bool` | action-spec dependent |
 | `max_launch` | `int64` | `(n_envs, 4, ACTION_ENTITY_SLOTS)` |
 
 All reused buffers are fully overwritten on each observation write. Inactive
-rows are zero-filled and their masks are set to `False`.
+rows are zero-filled and their `entity_mask` slots are set to `False`.
+`entity_mask` is ordered as all planet slots, then comet slots, then fleet
+slots. This matches the model token order and keeps the action entity axis in
+the first `ACTION_ENTITY_SLOTS` positions.
 
 `still_playing` is true for outer player slots that are active in the current
 observation's episode and have not finished. The Rust vectorized environment
@@ -107,7 +108,8 @@ generated planet IDs are unique and contiguous before comet insertion.
 | `14` | normalized log ships |
 | `15` | `1.0` if orbiting, else `0.0` |
 
-`planet_mask[i]` is `True` only for active planet rows.
+`entity_mask[i]` is `True` only for active planet rows for
+`i < MAX_PLANETS`.
 
 ### Fleet Tensor
 
@@ -132,7 +134,7 @@ max_entities exceeded: N fleets ignored
 | `8` | normalized ships |
 | `9` | normalized log ships |
 
-`fleet_mask[i]` is `True` only for active fleet rows.
+`entity_mask[ACTION_ENTITY_SLOTS + i]` is `True` only for active fleet rows.
 
 ### Comet Tensor
 
@@ -158,7 +160,7 @@ the encoder starts at path index `0`. Each path position is normalized with the
 same `[-1, 1]` map transform as planets and fleets. Unused path slots are
 zero-filled.
 
-`comet_mask[i]` is `True` only for active comet rows.
+`entity_mask[MAX_PLANETS + i]` is `True` only for active comet rows.
 
 ### Global Tensor
 

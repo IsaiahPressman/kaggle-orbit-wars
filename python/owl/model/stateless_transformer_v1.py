@@ -219,15 +219,7 @@ class StatelessTransformerV1(BaseModelAPI):
             -1,
         )
 
-        token_mask = torch.cat(
-            (
-                obs.planet_mask,
-                obs.comet_mask,
-                obs.fleet_mask,
-                obs.still_playing,
-            ),
-            dim=1,
-        )
+        token_mask = torch.cat((obs.entity_mask, obs.still_playing), dim=1)
         x = torch.cat((planet_x, comet_x, fleet_x, player_tokens), dim=1)
         packed: PackedSequence | None
         should_use_flash = use_flash_attn(x)

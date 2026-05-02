@@ -184,18 +184,8 @@ class PPORolloutBuffer:
                 dtype=torch.float32,
                 device=device,
             ),
-            planet_mask=torch.zeros(
-                (horizon, n_envs, obs_spec.max_planets),
-                dtype=torch.bool,
-                device=device,
-            ),
-            fleet_mask=torch.zeros(
-                (horizon, n_envs, obs_spec.max_fleets),
-                dtype=torch.bool,
-                device=device,
-            ),
-            comet_mask=torch.zeros(
-                (horizon, n_envs, obs_spec.max_comets),
+            entity_mask=torch.zeros(
+                (horizon, n_envs, obs_spec.max_entities),
                 dtype=torch.bool,
                 device=device,
             ),

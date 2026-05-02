@@ -68,9 +68,9 @@ giving:
 (batch, max_entities + 4, embed_dim)
 ```
 
-The planet, comet, fleet, and `still_playing` masks are concatenated into one
-token mask. Masked tokens are excluded from attention keys and are zeroed in
-the returned hidden states.
+The `entity_mask` uses the same planet, comet, fleet order and is concatenated
+with `still_playing` into one token mask. Masked tokens are excluded from
+attention keys and are zeroed in the returned hidden states.
 
 ## Transformer Trunk
 
