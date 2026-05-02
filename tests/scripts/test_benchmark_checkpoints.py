@@ -4,10 +4,14 @@ import importlib.util
 import re
 import sys
 from argparse import Namespace
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
+from owl.rl import ACTION_ENTITY_SLOTS, ObsBatch
 
 _BENCHMARK_PATH = Path(__file__).parents[2] / "scripts" / "benchmark_checkpoints.py"
 _BENCHMARK_SPEC = importlib.util.spec_from_file_location(
@@ -99,3 +103,72 @@ def test_checkpoint_config_path_rejects_missing_config(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match=re.escape(expected)):
         benchmark_checkpoints._checkpoint_config_path(checkpoint_path)
+
+
+def test_actions_for_assignments_uses_checkpoint_autocast_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeModel:
+        def __init__(self, *, launch_value: bool, ship_value: int) -> None:
+            self.launch_value = launch_value
+            self.ship_value = ship_value
+
+        def __call__(
+            self,
+            obs: ObsBatch,  # noqa: ARG002
+            *,
+            deterministic: bool = False,
+        ) -> SimpleNamespace:
+            shape = (1, 4, ACTION_ENTITY_SLOTS, 1)
+            actions = benchmark_checkpoints.ModelActions(
+                launch=torch.full(shape, self.launch_value, dtype=torch.bool),
+                ships=torch.full(shape, self.ship_value, dtype=torch.int64),
+                angle=torch.zeros(shape, dtype=torch.float32),
+            )
+            assert deterministic
+            return SimpleNamespace(actions=actions)
+
+    seen: list[tuple[str, torch.device]] = []
+
+    @contextmanager
+    def fake_autocast_context(
+        cfg: Namespace,
+        device: torch.device,
+    ) -> Iterator[None]:
+        seen.append((cfg.dtype, device))
+        yield
+
+    monkeypatch.setattr(
+        benchmark_checkpoints,
+        "autocast_context",
+        fake_autocast_context,
+    )
+    obs = ObsBatch(
+        planets=torch.zeros((1, 1, 1)),
+        fleets=torch.zeros((1, 1, 1)),
+        comets=torch.zeros((1, 1, 1)),
+        entity_mask=torch.zeros((1, 1), dtype=torch.bool),
+        still_playing=torch.ones((1, 4), dtype=torch.bool),
+        global_features=torch.zeros((1, 1)),
+        can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
+        max_launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+    )
+    assignments = torch.tensor([[0, 1, 0, 1]])
+
+    actions = benchmark_checkpoints._actions_for_assignments(
+        obs,
+        assignments,
+        model_a=FakeModel(launch_value=True, ship_value=3),
+        model_b=FakeModel(launch_value=False, ship_value=7),
+        config_a=Namespace(dtype="bfloat16"),
+        config_b=Namespace(dtype="float32"),
+        device=torch.device("cpu"),
+        deterministic=True,
+    )
+
+    assert seen == [
+        ("bfloat16", torch.device("cpu")),
+        ("float32", torch.device("cpu")),
+    ]
+    assert actions.launch[0, :, 0, 0].tolist() == [True, False, True, False]
+    assert actions.ships[0, :, 0, 0].tolist() == [3, 7, 3, 7]
