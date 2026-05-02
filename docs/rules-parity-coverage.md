@@ -35,8 +35,9 @@ The replay parity test checks each transition against the Python reference for:
 - comet groups: planet ids, full paths, path index
 
 Auxiliary Rust `StepResult` counters for fleets and ships lost in the sun or
-out of bounds, and for planets captured, are not fields in the Kaggle rows. They
-are covered by focused Rust unit tests rather than replay parity assertions.
+out of bounds, and for planets and comet/asteroid planets captured, are not
+fields in the Kaggle rows. They are covered by focused Rust unit tests rather
+than replay parity assertions.
 
 The current local replay set covers both 2-player and 4-player games, launches,
 production, fleet movement, collisions, captures, comet movement and expiry,
@@ -94,6 +95,12 @@ Kaggle replay actions into typed Rust actions.
 Floating-point parity uses close comparisons rather than bit-for-bit equality.
 Discrete ids, owners, ship counts, production, removals, and player statuses
 must match exactly.
+
+The Rust state stores planets and initial planets in ID-indexed slots. Parity
+comparison iterates live slots in ID order, which matches generated and fixture
+planet ordering because fixture IDs are unique and contiguous for live planets.
+Manual duplicate planet IDs and IDs at/above `MAX_PLANET_ID` are intentionally
+rejected before parity comparison.
 
 Replay and generation fixtures are ignored by Git because full episodes and
 recorded reference streams can be large. A fresh checkout must run

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use numpy::ndarray::{Array1, Array2};
 use numpy::{
@@ -13,7 +13,10 @@ use crate::rules_engine::state::{
 };
 use crate::rules_engine::utils::{fleet_speed, is_orbiting};
 
-use super::action_spec::{action_entity_slots, encode_action_spec, ActionEntitySlots};
+use super::action_spec::{
+    action_entity_slots, encode_action_spec, sorted_comet_planet_ids, ActionEntitySlots,
+    RlActionSpec,
+};
 use super::{
     log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
     DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, MAX_COMETS, MAX_COMET_PATH_LENGTH,
@@ -24,8 +27,6 @@ type EncodedObsV1<'py> = (
     Bound<'py, PyArray2<f32>>,
     Bound<'py, PyArray2<f32>>,
     Bound<'py, PyArray2<f32>>,
-    Bound<'py, PyArray1<bool>>,
-    Bound<'py, PyArray1<bool>>,
     Bound<'py, PyArray1<bool>>,
     Bound<'py, PyArray1<f32>>,
     Bound<'py, PyArray2<bool>>,
@@ -43,6 +44,7 @@ const INTEGER_TOLERANCE: f64 = 1e-9;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_state(
+    action_spec: RlActionSpec,
     state: &State,
     player_map: &PlayerMap,
     max_fleets: usize,
@@ -59,6 +61,7 @@ pub(super) fn encode_state(
 ) -> usize {
     let mut action_slots = [None; ACTION_ENTITY_SLOTS];
     encode_state_with_action_slots(
+        action_spec,
         state,
         player_map,
         max_fleets,
@@ -78,6 +81,7 @@ pub(super) fn encode_state(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_state_with_action_slots(
+    action_spec: RlActionSpec,
     state: &State,
     player_map: &PlayerMap,
     max_fleets: usize,
@@ -163,6 +167,7 @@ pub(super) fn encode_state_with_action_slots(
     encode_global(state, global_obs);
     *action_slots = action_entity_slots(state);
     encode_action_spec(
+        action_spec,
         state,
         player_map,
         action_slots,
@@ -188,51 +193,48 @@ fn encode_comets(
     comet_obs: &mut [f32],
     comet_mask: &mut [bool],
 ) {
-    let planets_by_id = state
-        .planets
-        .iter()
-        .map(|planet| (planet.id, planet))
-        .collect::<HashMap<_, _>>();
-
-    let mut comet_index = 0;
-    for group in &state.comets {
-        for (path_offset, planet_id) in group.planet_ids.iter().enumerate() {
-            if comet_index >= MAX_COMETS {
-                return;
-            }
-            let Some(planet) = planets_by_id.get(planet_id) else {
-                continue;
-            };
-            let Some(path) = group.paths.get(path_offset) else {
-                continue;
-            };
-
-            comet_mask[comet_index] = true;
-            let row_start = comet_index * COMET_CHANNELS;
-            let row = &mut comet_obs[row_start..row_start + COMET_CHANNELS];
-
-            let owner_index = player_map.owner_channel(planet.owner);
-            row[owner_index] = 1.0;
-            row[OWNER_CHANNELS_WITH_NEUTRAL] = normalize_ships(planet.ships);
-            row[OWNER_CHANNELS_WITH_NEUTRAL + 1] = normalize_log_ships(planet.ships);
-
-            let path_start = group.path_index.max(0) as usize;
-            let remaining_steps = path.len().saturating_sub(path_start);
-            row[OWNER_CHANNELS_WITH_NEUTRAL + 2] =
-                remaining_steps as f32 / MAX_COMET_PATH_LENGTH as f32;
-            let path_values_start = OWNER_CHANNELS_WITH_NEUTRAL + 3;
-            for (future_index, point) in path
+    for (comet_index, planet_id) in sorted_comet_planet_ids(state).into_iter().enumerate() {
+        let Some(planet) = state.planets.get(planet_id) else {
+            continue;
+        };
+        let Some((path, path_index)) = state.comets.iter().find_map(|group| {
+            group
+                .planet_ids
                 .iter()
-                .skip(path_start)
-                .take(MAX_COMET_PATH_LENGTH)
-                .enumerate()
-            {
-                let value_start = path_values_start + future_index * 2;
-                row[value_start] = normalize_position(point.x);
-                row[value_start + 1] = normalize_position(point.y);
-            }
+                .position(|candidate_id| *candidate_id == planet_id)
+                .and_then(|path_offset| {
+                    group
+                        .paths
+                        .get(path_offset)
+                        .map(|path| (path, group.path_index))
+                })
+        }) else {
+            continue;
+        };
 
-            comet_index += 1;
+        comet_mask[comet_index] = true;
+        let row_start = comet_index * COMET_CHANNELS;
+        let row = &mut comet_obs[row_start..row_start + COMET_CHANNELS];
+
+        let owner_index = player_map.owner_channel(planet.owner);
+        row[owner_index] = 1.0;
+        row[OWNER_CHANNELS_WITH_NEUTRAL] = normalize_ships(planet.ships);
+        row[OWNER_CHANNELS_WITH_NEUTRAL + 1] = normalize_log_ships(planet.ships);
+
+        let path_start = path_index.max(0) as usize;
+        let remaining_steps = path.len().saturating_sub(path_start);
+        row[OWNER_CHANNELS_WITH_NEUTRAL + 2] =
+            remaining_steps as f32 / MAX_COMET_PATH_LENGTH as f32;
+        let path_values_start = OWNER_CHANNELS_WITH_NEUTRAL + 3;
+        for (future_index, point) in path
+            .iter()
+            .skip(path_start)
+            .take(MAX_COMET_PATH_LENGTH)
+            .enumerate()
+        {
+            let value_start = path_values_start + future_index * 2;
+            row[value_start] = normalize_position(point.x);
+            row[value_start + 1] = normalize_position(point.y);
         }
     }
 }
@@ -372,8 +374,8 @@ fn state_from_arrays(
         config,
         step,
         angular_velocity,
-        initial_planets: planets.clone(),
-        planets,
+        initial_planets: planets.clone().into(),
+        planets: planets.into(),
         fleets,
         next_fleet_id: 0,
         comets,
@@ -534,14 +536,18 @@ pub fn encode_obs_v1<'py>(
     let mut planet_obs = Array2::<f32>::zeros((MAX_PLANETS, PLANET_CHANNELS));
     let mut fleet_obs = Array2::<f32>::zeros((max_fleets, FLEET_CHANNELS));
     let mut comet_obs = Array2::<f32>::zeros((MAX_COMETS, COMET_CHANNELS));
-    let mut planet_mask = Array1::<bool>::from_elem(MAX_PLANETS, false);
-    let mut fleet_mask = Array1::<bool>::from_elem(max_fleets, false);
-    let mut comet_mask = Array1::<bool>::from_elem(MAX_COMETS, false);
+    let mut entity_mask = Array1::<bool>::from_elem(max_entities, false);
     let mut global_obs = Array1::<f32>::zeros(GLOBAL_CHANNELS);
     let mut can_act = Array2::<bool>::from_elem((OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS), false);
     let mut max_launch = Array2::<i64>::zeros((OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS));
+    let (planet_mask, tail_mask) = entity_mask
+        .as_slice_mut()
+        .expect("newly allocated entity mask is contiguous")
+        .split_at_mut(MAX_PLANETS);
+    let (comet_mask, fleet_mask) = tail_mask.split_at_mut(MAX_COMETS);
 
     let ignored_fleets = encode_state(
+        RlActionSpec::Pure,
         &state,
         &PlayerMap::identity(),
         max_fleets,
@@ -554,15 +560,9 @@ pub fn encode_obs_v1<'py>(
         comet_obs
             .as_slice_mut()
             .expect("newly allocated comet array is contiguous"),
-        planet_mask
-            .as_slice_mut()
-            .expect("newly allocated planet mask is contiguous"),
-        fleet_mask
-            .as_slice_mut()
-            .expect("newly allocated fleet mask is contiguous"),
-        comet_mask
-            .as_slice_mut()
-            .expect("newly allocated comet mask is contiguous"),
+        planet_mask,
+        fleet_mask,
+        comet_mask,
         global_obs
             .as_slice_mut()
             .expect("newly allocated global array is contiguous"),
@@ -580,9 +580,7 @@ pub fn encode_obs_v1<'py>(
         planet_obs.into_pyarray(py),
         fleet_obs.into_pyarray(py),
         comet_obs.into_pyarray(py),
-        planet_mask.into_pyarray(py),
-        fleet_mask.into_pyarray(py),
-        comet_mask.into_pyarray(py),
+        entity_mask.into_pyarray(py),
         global_obs.into_pyarray(py),
         can_act.into_pyarray(py),
         max_launch.into_pyarray(py),
@@ -633,7 +631,7 @@ mod tests {
             config: SimConfig::new(2),
             step: 0,
             angular_velocity: 0.025,
-            initial_planets: Vec::new(),
+            initial_planets: Vec::new().into(),
             planets: vec![Planet {
                 id: 0,
                 owner: 0,
@@ -642,7 +640,8 @@ mod tests {
                 radius: 2.0,
                 ships: 10,
                 production: 0,
-            }],
+            }]
+            .into(),
             fleets: Vec::new(),
             next_fleet_id: 0,
             comets: Vec::new(),
@@ -659,6 +658,7 @@ mod tests {
         let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
 
         encode_state(
+            RlActionSpec::Pure,
             &state,
             &PlayerMap::identity(),
             0,
@@ -681,7 +681,7 @@ mod tests {
             config: SimConfig::new(2),
             step: 0,
             angular_velocity: 0.025,
-            initial_planets: Vec::new(),
+            initial_planets: Vec::new().into(),
             planets: vec![Planet {
                 id: 0,
                 owner: 1,
@@ -690,7 +690,8 @@ mod tests {
                 radius: 2.0,
                 ships: 10,
                 production: 1,
-            }],
+            }]
+            .into(),
             fleets: vec![Fleet {
                 id: 0,
                 owner: 0,
@@ -716,6 +717,7 @@ mod tests {
         let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
 
         encode_state(
+            RlActionSpec::Pure,
             &state,
             &player_map,
             1,
@@ -743,7 +745,7 @@ mod tests {
             config: SimConfig::new(2),
             step: 0,
             angular_velocity: 0.025,
-            initial_planets: Vec::new(),
+            initial_planets: Vec::new().into(),
             planets: vec![Planet {
                 id: 0,
                 owner: 0,
@@ -752,7 +754,8 @@ mod tests {
                 radius: 2.0,
                 ships: 2,
                 production: 1,
-            }],
+            }]
+            .into(),
             fleets: Vec::new(),
             next_fleet_id: 0,
             comets: Vec::new(),
@@ -769,6 +772,7 @@ mod tests {
         let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
 
         encode_state(
+            RlActionSpec::Pure,
             &state,
             &PlayerMap::identity(),
             0,

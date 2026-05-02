@@ -27,15 +27,22 @@ without changing callers that validate config dictionaries through the union.
 | `n_heads` | `8` | Attention heads; must evenly divide `embed_dim`. |
 | `mlp_ratio` | `4.0` | FFN hidden width multiplier. |
 | `activation` | `"gelu"` | FFN activation: `"gelu"`, `"silu"`, or `"swiglu"`. |
-| `n_action_mixtures` | `4` | Mixture components for launch angle and fleet-size event heads. |
-| `kappa_min` | `1e-3` | Lower bound added to von Mises concentration. |
-| `kappa_max` | `200.0` | Optional cap for von Mises concentration. |
-| `entropy_ship_support_cap` | `256` | Maximum ship-count support enumerated for entropy estimates. |
-| `tau_min` | `1e-3` | Lower bound added to beta-binomial concentration. |
-| `alpha_beta_eps` | `1e-4` | Epsilon added to beta-binomial alpha and beta. |
-| `dir_eps` | `1e-6` | Epsilon for normalizing raw angle direction vectors. |
-| `max_ship_normalizer` | `250.0` | Normalizer for ship-budget actor features. |
 | `force_flash_attn` | `False` | Require packed varlen flash-attn; raise an error instead of falling back when tensors are not flash-compatible. |
+| `actor` | `{"action_spec": "pure"}` | Discriminated actor-head config. Supported actor specs are `"pure"` and `"discrete_targets"`. |
+
+Actor-specific fields live inside the actor config. `ActorPureConfig` owns
+pure-head fields such as `n_action_mixtures`, `kappa_min`, `kappa_max`,
+`tau_min`, `alpha_beta_eps`, `dir_eps`, `max_ship_normalizer`, and
+`entropy_ship_support_cap`. `ActorDiscreteTargetsConfig` owns
+`n_action_mixtures`, `max_ship_normalizer`, `entropy_ship_support_cap`, and
+the logistic-mixture scale parameters `scale_min=0.25`,
+`scale_max_frac=0.5`, and `scale_max_abs_floor=8.0`.
+Model YAML files can reference actor presets by name through adjacent
+`configs/model/actor/*.yaml` files, for example `actor: discrete_targets`.
+
+`FullConfig` validates that `env.action_spec.action_spec` matches
+`model.actor.action_spec`. Direct model construction performs the same check
+against the supplied environment action spec.
 
 Observation and action specs are owned by `EnvConfig`. `StatelessTransformerV1`
 receives `env.obs_spec` and `env.action_spec` when it is instantiated, so model
@@ -63,9 +70,9 @@ giving:
 (batch, max_entities + 4, embed_dim)
 ```
 
-The planet, comet, fleet, and `still_playing` masks are concatenated into one
-token mask. Masked tokens are excluded from attention keys and are zeroed in
-the returned hidden states.
+The `entity_mask` uses the same planet, comet, fleet order and is concatenated
+with `still_playing` into one token mask. Masked tokens are excluded from
+attention keys and are zeroed in the returned hidden states.
 
 ## Transformer Trunk
 
@@ -128,11 +135,20 @@ The actor uses hidden states for the action entity slots:
 40..43 -> comet tokens
 ```
 
-For each `(batch, player, action_entity)` position, the actor combines:
+Both actor heads start from the same shared transformer trunk. For each
+`(batch, player, action_entity)` position, the actor combines:
 
 - source entity hidden state
 - player hidden token
 - normalized `max_launch`
+
+The final action head is selected by `config.actor.action_spec`. The concrete
+heads live under `python/owl/model/actor/`: `PureActor` for raw angles and
+`DiscreteTargetsActor` for target slots.
+
+### Pure Actor
+
+The pure actor supports `ActionPureConfig`.
 
 The repeated launch slots are generated autoregressively with a 2-layer minGRU
 stack. Each recurrent step adds a learned launch-slot embedding so the actor has
@@ -178,21 +194,59 @@ shifted beta-binomial size distribution emits ships in
 `min_fleet_size..remaining`, and the accumulated sampled ships are capped by
 `max_launch`.
 
-The model returns decomposed action tensors:
+The model returns decomposed action tensors. The `launch` tensor always keeps
+the final launch-slot dimension expected by the Rust API:
 
 - `launch`: bool, `(batch, 4, 44, max_per_planet_launches)`
-- `angle`: float32, `(batch, 4, 44, max_per_planet_launches)`
 - `ships`: int64, `(batch, 4, 44, max_per_planet_launches)`
+- `angle`: float32, same shape, pure actor only
+- `target`: int64, same shape, discrete-target actor only
 
 It also returns decomposed log-prob and entropy tensors for launch gates and
-angle/size events, plus per-player action-entity totals with shape
-`(batch, 4, 44)`.
+target or angle/size events, plus per-player action-entity totals with shape
+`(batch, 4, 44)`. PPO asks the action container for the submitted action-value
+tensor, so the trainer does not branch on action-spec-specific tensor names.
 
 The angle/size entropy is an augmented latent-mixture entropy estimate: mixture
 label entropy plus expected component entropy. It is not the exact marginal
 entropy of the emitted action when mixture components overlap. Ship-count
 entropy enumerates support only up to `entropy_ship_support_cap`; residual ship
 budgets above that cap use truncated support.
+
+### Discrete Targets Actor
+
+The discrete-target actor supports `ActionDiscreteTargetsConfig` with
+`max_per_planet_launches=1`. Model construction fails fast if the environment
+uses a larger per-planet launch count for this actor.
+
+Instead of the pure actor's minGRU, the discrete-target actor uses one
+feedforward action block per source entity. It projects source slots to query,
+key, and value tensors with a single target-selection head independent of the
+shared transformer trunk's attention head count. It computes scaled dot-product
+target logits for every `(source, target)` pair and masks those logits with the
+4-D discrete `can_act` tensor. Fully masked source rows are sanitized to finite
+zero logits and are suppressed by the launch/source mask.
+
+After sampling a target from the masked softmax, the actor gathers the selected
+target value vector, adds it to the source residual stream, and applies a
+feedforward residual block. This is intentionally close to a standard
+attention block, except the value path uses the sampled target row instead of a
+softmax-weighted average.
+
+For each source, the discrete actor emits:
+
+- Bernoulli launch/stop logits
+- masked categorical target logits over the 44 action entity slots
+- mixture parameters for a truncated discretized logistic fleet-size policy
+
+The fleet-size mixture maps raw means through a sigmoid into the current
+`1..max_launch` budget range. Raw scale outputs are passed through a sigmoid
+and log-interpolated between `scale_min` and
+`max(scale_max_abs_floor, scale_max_frac * max_launch)`. This keeps very small
+scales available for near-deterministic counts while still allowing broad
+fractional exploration for large ship budgets. PPO replay uses the marginal
+mixture log-probability of the integer ship count, not the sampled component
+log-probability.
 
 ## Log-Prob Replay
 

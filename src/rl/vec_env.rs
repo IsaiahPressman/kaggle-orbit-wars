@@ -8,7 +8,10 @@ use rayon::prelude::*;
 use crate::rules_engine::env::{reset, step, PlayerAction};
 use crate::rules_engine::state::{FleetLossStats, PlayerResult, ResetConfig, State};
 
-use super::action_spec::{action_entity_slots, decode_pure_actions, ActionEntitySlots};
+use super::action_spec::{
+    action_entity_slots, decode_discrete_target_actions, decode_pure_actions, ActionEntitySlots,
+    RlActionSpec,
+};
 use super::obs_spec::encode_state_with_action_slots;
 use super::{
     log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
@@ -23,9 +26,7 @@ type ObsShapes = (
     (usize, usize),
     (usize, usize),
     (usize, usize),
-    (usize, usize),
-    (usize, usize),
-    (usize, usize, usize),
+    Vec<usize>,
     (usize, usize, usize),
 );
 
@@ -35,6 +36,7 @@ pub struct PyRlVecEnv {
     two_player_weight: f64,
     max_entities: usize,
     max_fleets: usize,
+    action_spec: RlActionSpec,
     max_per_planet_launches: usize,
     min_fleet_size: i64,
     states: Vec<State>,
@@ -68,11 +70,11 @@ impl PyRlVecEnv {
                 "unsupported obs_spec {obs_spec:?}; expected \"obs_v1\""
             )));
         }
-        if action_spec != "pure" {
+        let Some(action_spec) = RlActionSpec::parse(action_spec) else {
             return Err(PyValueError::new_err(format!(
-                "unsupported action_spec {action_spec:?}; expected \"pure\""
+                "unsupported action_spec {action_spec:?}; expected \"pure\" or \"discrete_targets\""
             )));
-        }
+        };
         if max_entities <= MAX_PLANETS + MAX_COMETS {
             return Err(PyValueError::new_err(format!(
                 "max_entities must be greater than MAX_PLANETS + MAX_COMETS ({})",
@@ -101,6 +103,7 @@ impl PyRlVecEnv {
             two_player_weight,
             max_entities,
             max_fleets: max_entities - (MAX_PLANETS + MAX_COMETS),
+            action_spec,
             max_per_planet_launches,
             min_fleet_size,
             states,
@@ -152,42 +155,109 @@ impl PyRlVecEnv {
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
         comet_obs: PyReadwriteArrayDyn<'_, f32>,
-        planet_mask: PyReadwriteArrayDyn<'_, bool>,
-        fleet_mask: PyReadwriteArrayDyn<'_, bool>,
-        comet_mask: PyReadwriteArrayDyn<'_, bool>,
+        entity_mask: PyReadwriteArrayDyn<'_, bool>,
         still_playing: PyReadwriteArrayDyn<'_, bool>,
         global_obs: PyReadwriteArrayDyn<'_, f32>,
         can_act: PyReadwriteArrayDyn<'_, bool>,
         max_launch: PyReadwriteArrayDyn<'_, i64>,
     ) -> PyResult<()> {
-        self.states
+        self.require_obs_shapes(
+            &planet_obs,
+            &fleet_obs,
+            &comet_obs,
+            &entity_mask,
+            &still_playing,
+            &global_obs,
+            &can_act,
+            &max_launch,
+        )?;
+
+        let mut planet_obs = planet_obs;
+        let mut fleet_obs = fleet_obs;
+        let mut comet_obs = comet_obs;
+        let mut entity_mask = entity_mask;
+        let mut still_playing = still_playing;
+        let mut global_obs = global_obs;
+        let mut can_act = can_act;
+        let mut max_launch = max_launch;
+
+        let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
+        let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
+        let comets_per_env = MAX_COMETS * COMET_CHANNELS;
+        let action_masks_per_env = self.action_spec.can_act_len();
+        let two_player_weight = self.two_player_weight;
+        let max_fleets = self.max_fleets;
+        let min_fleet_size = self.min_fleet_size;
+        let action_spec = self.action_spec;
+        let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
+
+        let ignored_fleets: usize = self
+            .states
             .par_iter_mut()
             .zip_eq(self.player_maps.par_iter_mut())
             .zip_eq(self.action_slots.par_iter_mut())
             .zip_eq(self.player_finished.par_iter_mut())
             .zip_eq(self.episode_stats.par_iter_mut())
-            .for_each(
-                |((((state, player_map), action_slots), player_finished), episode_stats)| {
-                    let (new_state, new_player_map) = reset_one_env(self.two_player_weight);
+            .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
+            .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
+            .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
+            .zip_eq(
+                entity_mask
+                    .as_slice_mut()?
+                    .par_chunks_mut(self.max_entities),
+            )
+            .zip_eq(
+                still_playing
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS),
+            )
+            .zip_eq(global_obs.as_slice_mut()?.par_chunks_mut(GLOBAL_CHANNELS))
+            .zip_eq(can_act.as_slice_mut()?.par_chunks_mut(action_masks_per_env))
+            .zip_eq(
+                max_launch
+                    .as_slice_mut()?
+                    .par_chunks_mut(max_launch_per_env),
+            )
+            .map(|item| {
+                let (item, max_launch) = item;
+                let (item, can_act) = item;
+                let (item, global_obs) = item;
+                let (item, still_playing) = item;
+                let (item, entity_mask) = item;
+                let (item, comet_obs) = item;
+                let (item, fleet_obs) = item;
+                let (item, planet_obs) = item;
+                let ((((state, player_map), action_slots), player_finished), episode_stats) = item;
+
+                {
+                    let (new_state, new_player_map) = reset_one_env(two_player_weight);
                     *state = new_state;
                     *player_map = new_player_map;
-                    *action_slots = action_entity_slots(state);
                     player_finished.fill(false);
                     *episode_stats = EpisodeStats::default();
-                },
-            );
-        self.write_obs(
-            planet_obs,
-            fleet_obs,
-            comet_obs,
-            planet_mask,
-            fleet_mask,
-            comet_mask,
-            still_playing,
-            global_obs,
-            can_act,
-            max_launch,
-        )
+                    write_one_obs(
+                        state,
+                        player_map,
+                        action_slots,
+                        player_finished,
+                        action_spec,
+                        max_fleets,
+                        min_fleet_size,
+                        planet_obs,
+                        fleet_obs,
+                        comet_obs,
+                        entity_mask,
+                        still_playing,
+                        global_obs,
+                        can_act,
+                        max_launch,
+                    )
+                }
+            })
+            .sum();
+
+        log_ignored_fleets(ignored_fleets);
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -199,9 +269,7 @@ impl PyRlVecEnv {
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
         comet_obs: PyReadwriteArrayDyn<'_, f32>,
-        planet_mask: PyReadwriteArrayDyn<'_, bool>,
-        fleet_mask: PyReadwriteArrayDyn<'_, bool>,
-        comet_mask: PyReadwriteArrayDyn<'_, bool>,
+        entity_mask: PyReadwriteArrayDyn<'_, bool>,
         still_playing: PyReadwriteArrayDyn<'_, bool>,
         global_obs: PyReadwriteArrayDyn<'_, f32>,
         can_act: PyReadwriteArrayDyn<'_, bool>,
@@ -209,6 +277,11 @@ impl PyRlVecEnv {
         rewards: PyReadwriteArrayDyn<'_, f32>,
         dones: PyReadwriteArrayDyn<'_, bool>,
     ) -> PyResult<HashMap<String, Vec<f64>>> {
+        if self.action_spec != RlActionSpec::Pure {
+            return Err(PyValueError::new_err(
+                "step with angle actions requires action_spec \"pure\"",
+            ));
+        }
         let action_shape = [
             self.n_envs,
             OUTER_PLAYER_SLOTS,
@@ -224,9 +297,28 @@ impl PyRlVecEnv {
             &[self.n_envs, OUTER_PLAYER_SLOTS],
         )?;
         require_shape("dones", dones.shape(), &[self.n_envs, OUTER_PLAYER_SLOTS])?;
+        self.require_obs_shapes(
+            &planet_obs,
+            &fleet_obs,
+            &comet_obs,
+            &entity_mask,
+            &still_playing,
+            &global_obs,
+            &can_act,
+            &max_launch,
+        )?;
 
         let mut rewards = rewards;
         let mut dones = dones;
+        let mut planet_obs = planet_obs;
+        let mut fleet_obs = fleet_obs;
+        let mut comet_obs = comet_obs;
+        let mut entity_mask = entity_mask;
+        let mut still_playing = still_playing;
+        let mut global_obs = global_obs;
+        let mut can_act = can_act;
+        let mut max_launch = max_launch;
+
         let reward_chunks = rewards.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
         let done_chunks = dones.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
         let actions_per_env =
@@ -235,84 +327,303 @@ impl PyRlVecEnv {
         let angle_chunks = angle.as_slice()?.par_chunks(actions_per_env);
         let ship_chunks = ships.as_slice()?.par_chunks(actions_per_env);
 
-        let decoded = self
+        let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
+        let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
+        let comets_per_env = MAX_COMETS * COMET_CHANNELS;
+        let action_masks_per_env = self.action_spec.can_act_len();
+        let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
+        let max_per_planet_launches = self.max_per_planet_launches;
+        let min_fleet_size = self.min_fleet_size;
+        let max_fleets = self.max_fleets;
+        let two_player_weight = self.two_player_weight;
+        let action_spec = self.action_spec;
+
+        let env_results = self
             .states
-            .par_iter()
-            .zip_eq(self.player_maps.par_iter())
-            .zip_eq(self.action_slots.par_iter())
+            .par_iter_mut()
+            .zip_eq(self.player_maps.par_iter_mut())
+            .zip_eq(self.action_slots.par_iter_mut())
+            .zip_eq(self.player_finished.par_iter_mut())
+            .zip_eq(self.episode_stats.par_iter_mut())
             .zip_eq(launch_chunks)
             .zip_eq(angle_chunks)
             .zip_eq(ship_chunks)
+            .zip_eq(reward_chunks)
+            .zip_eq(done_chunks)
+            .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
+            .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
+            .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
+            .zip_eq(
+                entity_mask
+                    .as_slice_mut()?
+                    .par_chunks_mut(self.max_entities),
+            )
+            .zip_eq(
+                still_playing
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS),
+            )
+            .zip_eq(global_obs.as_slice_mut()?.par_chunks_mut(GLOBAL_CHANNELS))
+            .zip_eq(can_act.as_slice_mut()?.par_chunks_mut(action_masks_per_env))
+            .zip_eq(
+                max_launch
+                    .as_slice_mut()?
+                    .par_chunks_mut(max_launch_per_env),
+            )
             .enumerate()
-            .map(
-                |(
-                    env_index,
-                    (
-                        ((((state, player_map), action_slots), launch_chunk), angle_chunk),
-                        ship_chunk,
-                    ),
-                )| {
-                    decode_pure_actions(
+            .map(|(env_index, item)| {
+                let (item, max_launch) = item;
+                let (item, can_act) = item;
+                let (item, global_obs) = item;
+                let (item, still_playing) = item;
+                let (item, entity_mask) = item;
+                let (item, comet_obs) = item;
+                let (item, fleet_obs) = item;
+                let (item, planet_obs) = item;
+                let (item, done_chunk) = item;
+                let (item, reward_chunk) = item;
+                let (item, ship_chunk) = item;
+                let (item, angle_chunk) = item;
+                let (item, launch_chunk) = item;
+                let ((((state, player_map), action_slots), player_finished), episode_stats) = item;
+
+                {
+                    let decoded = decode_pure_actions(
                         state,
                         player_map,
                         action_slots,
                         launch_chunk,
                         angle_chunk,
                         ship_chunk,
-                        self.max_per_planet_launches,
-                        self.min_fleet_size,
+                        max_per_planet_launches,
+                        min_fleet_size,
                     )
-                    .map_err(|err| format!("env {env_index}: {err}"))
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(PyValueError::new_err)?;
-
-        let terminal_metrics = self
-            .states
-            .par_iter_mut()
-            .zip_eq(self.player_maps.par_iter_mut())
-            .zip_eq(self.player_finished.par_iter_mut())
-            .zip_eq(self.episode_stats.par_iter_mut())
-            .zip_eq(decoded.par_iter())
-            .zip_eq(reward_chunks)
-            .zip_eq(done_chunks)
-            .map(
-                |(
-                    (
-                        ((((state, player_map), player_finished), episode_stats), decoded),
-                        reward_chunk,
-                    ),
-                    done_chunk,
-                )| {
-                    step_one_env(
+                    .map_err(|err| format!("env {env_index}: {err}"))?;
+                    let terminal = step_one_env(
                         state,
                         player_map,
                         player_finished,
                         episode_stats,
-                        decoded,
+                        &decoded,
                         reward_chunk,
                         done_chunk,
-                        self.max_fleets,
-                        self.two_player_weight,
-                    )
-                },
-            )
-            .collect::<Vec<_>>();
+                        max_fleets,
+                        two_player_weight,
+                    );
+                    let ignored_fleets = write_one_obs(
+                        state,
+                        player_map,
+                        action_slots,
+                        player_finished,
+                        action_spec,
+                        max_fleets,
+                        min_fleet_size,
+                        planet_obs,
+                        fleet_obs,
+                        comet_obs,
+                        entity_mask,
+                        still_playing,
+                        global_obs,
+                        can_act,
+                        max_launch,
+                    );
+                    Ok::<_, String>((terminal, ignored_fleets))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(PyValueError::new_err)?;
+        let mut terminal_metrics = Vec::with_capacity(env_results.len());
+        let mut ignored_fleets = 0;
+        for (terminal, ignored) in env_results {
+            terminal_metrics.push(terminal);
+            ignored_fleets += ignored;
+        }
         let episode_metrics = collect_terminal_metrics(terminal_metrics);
+        log_ignored_fleets(ignored_fleets);
+        Ok(episode_metrics)
+    }
 
-        self.write_obs(
-            planet_obs,
-            fleet_obs,
-            comet_obs,
-            planet_mask,
-            fleet_mask,
-            comet_mask,
-            still_playing,
-            global_obs,
-            can_act,
-            max_launch,
+    #[allow(clippy::too_many_arguments)]
+    fn step_discrete_targets(
+        &mut self,
+        launch: PyReadonlyArrayDyn<'_, bool>,
+        target: PyReadonlyArrayDyn<'_, i64>,
+        ships: PyReadonlyArrayDyn<'_, i64>,
+        planet_obs: PyReadwriteArrayDyn<'_, f32>,
+        fleet_obs: PyReadwriteArrayDyn<'_, f32>,
+        comet_obs: PyReadwriteArrayDyn<'_, f32>,
+        entity_mask: PyReadwriteArrayDyn<'_, bool>,
+        still_playing: PyReadwriteArrayDyn<'_, bool>,
+        global_obs: PyReadwriteArrayDyn<'_, f32>,
+        can_act: PyReadwriteArrayDyn<'_, bool>,
+        max_launch: PyReadwriteArrayDyn<'_, i64>,
+        rewards: PyReadwriteArrayDyn<'_, f32>,
+        dones: PyReadwriteArrayDyn<'_, bool>,
+    ) -> PyResult<HashMap<String, Vec<f64>>> {
+        if self.action_spec != RlActionSpec::DiscreteTargets {
+            return Err(PyValueError::new_err(
+                "step_discrete_targets requires action_spec \"discrete_targets\"",
+            ));
+        }
+        let action_shape = [
+            self.n_envs,
+            OUTER_PLAYER_SLOTS,
+            ACTION_ENTITY_SLOTS,
+            self.max_per_planet_launches,
+        ];
+        require_shape("launch", launch.shape(), &action_shape)?;
+        require_shape("target", target.shape(), &action_shape)?;
+        require_shape("ships", ships.shape(), &action_shape)?;
+        require_shape(
+            "rewards",
+            rewards.shape(),
+            &[self.n_envs, OUTER_PLAYER_SLOTS],
         )?;
+        require_shape("dones", dones.shape(), &[self.n_envs, OUTER_PLAYER_SLOTS])?;
+        self.require_obs_shapes(
+            &planet_obs,
+            &fleet_obs,
+            &comet_obs,
+            &entity_mask,
+            &still_playing,
+            &global_obs,
+            &can_act,
+            &max_launch,
+        )?;
+
+        let mut rewards = rewards;
+        let mut dones = dones;
+        let mut planet_obs = planet_obs;
+        let mut fleet_obs = fleet_obs;
+        let mut comet_obs = comet_obs;
+        let mut entity_mask = entity_mask;
+        let mut still_playing = still_playing;
+        let mut global_obs = global_obs;
+        let mut can_act = can_act;
+        let mut max_launch = max_launch;
+
+        let reward_chunks = rewards.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
+        let done_chunks = dones.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
+        let actions_per_env =
+            OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS * self.max_per_planet_launches;
+        let launch_chunks = launch.as_slice()?.par_chunks(actions_per_env);
+        let target_chunks = target.as_slice()?.par_chunks(actions_per_env);
+        let ship_chunks = ships.as_slice()?.par_chunks(actions_per_env);
+
+        let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
+        let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
+        let comets_per_env = MAX_COMETS * COMET_CHANNELS;
+        let action_masks_per_env = self.action_spec.can_act_len();
+        let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
+        let max_per_planet_launches = self.max_per_planet_launches;
+        let min_fleet_size = self.min_fleet_size;
+        let max_fleets = self.max_fleets;
+        let two_player_weight = self.two_player_weight;
+        let action_spec = self.action_spec;
+
+        let env_results = self
+            .states
+            .par_iter_mut()
+            .zip_eq(self.player_maps.par_iter_mut())
+            .zip_eq(self.action_slots.par_iter_mut())
+            .zip_eq(self.player_finished.par_iter_mut())
+            .zip_eq(self.episode_stats.par_iter_mut())
+            .zip_eq(launch_chunks)
+            .zip_eq(target_chunks)
+            .zip_eq(ship_chunks)
+            .zip_eq(reward_chunks)
+            .zip_eq(done_chunks)
+            .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
+            .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
+            .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
+            .zip_eq(
+                entity_mask
+                    .as_slice_mut()?
+                    .par_chunks_mut(self.max_entities),
+            )
+            .zip_eq(
+                still_playing
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS),
+            )
+            .zip_eq(global_obs.as_slice_mut()?.par_chunks_mut(GLOBAL_CHANNELS))
+            .zip_eq(can_act.as_slice_mut()?.par_chunks_mut(action_masks_per_env))
+            .zip_eq(
+                max_launch
+                    .as_slice_mut()?
+                    .par_chunks_mut(max_launch_per_env),
+            )
+            .enumerate()
+            .map(|(env_index, item)| {
+                let (item, max_launch) = item;
+                let (item, can_act) = item;
+                let (item, global_obs) = item;
+                let (item, still_playing) = item;
+                let (item, entity_mask) = item;
+                let (item, comet_obs) = item;
+                let (item, fleet_obs) = item;
+                let (item, planet_obs) = item;
+                let (item, done_chunk) = item;
+                let (item, reward_chunk) = item;
+                let (item, ship_chunk) = item;
+                let (item, target_chunk) = item;
+                let (item, launch_chunk) = item;
+                let ((((state, player_map), action_slots), player_finished), episode_stats) = item;
+
+                {
+                    let decoded = decode_discrete_target_actions(
+                        state,
+                        player_map,
+                        action_slots,
+                        launch_chunk,
+                        target_chunk,
+                        ship_chunk,
+                        max_per_planet_launches,
+                        min_fleet_size,
+                    )
+                    .map_err(|err| format!("env {env_index}: {err}"))?;
+                    episode_stats.record_comet_launch_failures(decoded.comet_launch_failures);
+                    let terminal = step_one_env(
+                        state,
+                        player_map,
+                        player_finished,
+                        episode_stats,
+                        &decoded.actions,
+                        reward_chunk,
+                        done_chunk,
+                        max_fleets,
+                        two_player_weight,
+                    );
+                    let ignored_fleets = write_one_obs(
+                        state,
+                        player_map,
+                        action_slots,
+                        player_finished,
+                        action_spec,
+                        max_fleets,
+                        min_fleet_size,
+                        planet_obs,
+                        fleet_obs,
+                        comet_obs,
+                        entity_mask,
+                        still_playing,
+                        global_obs,
+                        can_act,
+                        max_launch,
+                    );
+                    Ok::<_, String>((terminal, ignored_fleets))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(PyValueError::new_err)?;
+        let mut terminal_metrics = Vec::with_capacity(env_results.len());
+        let mut ignored_fleets = 0;
+        for (terminal, ignored) in env_results {
+            terminal_metrics.push(terminal);
+            ignored_fleets += ignored;
+        }
+        let episode_metrics = collect_terminal_metrics(terminal_metrics);
+        log_ignored_fleets(ignored_fleets);
         Ok(episode_metrics)
     }
 
@@ -321,12 +632,18 @@ impl PyRlVecEnv {
             (self.n_envs, MAX_PLANETS, PLANET_CHANNELS),
             (self.n_envs, self.max_fleets, FLEET_CHANNELS),
             (self.n_envs, MAX_COMETS, COMET_CHANNELS),
-            (self.n_envs, MAX_PLANETS),
-            (self.n_envs, self.max_fleets),
-            (self.n_envs, MAX_COMETS),
+            (self.n_envs, self.max_entities),
             (self.n_envs, OUTER_PLAYER_SLOTS),
             (self.n_envs, GLOBAL_CHANNELS),
-            (self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
+            match self.action_spec {
+                RlActionSpec::Pure => vec![self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS],
+                RlActionSpec::DiscreteTargets => vec![
+                    self.n_envs,
+                    OUTER_PLAYER_SLOTS,
+                    ACTION_ENTITY_SLOTS,
+                    ACTION_ENTITY_SLOTS,
+                ],
+            },
             (self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
         )
     }
@@ -334,18 +651,16 @@ impl PyRlVecEnv {
 
 impl PyRlVecEnv {
     #[allow(clippy::too_many_arguments)]
-    fn write_obs(
-        &mut self,
-        planet_obs: PyReadwriteArrayDyn<'_, f32>,
-        fleet_obs: PyReadwriteArrayDyn<'_, f32>,
-        comet_obs: PyReadwriteArrayDyn<'_, f32>,
-        planet_mask: PyReadwriteArrayDyn<'_, bool>,
-        fleet_mask: PyReadwriteArrayDyn<'_, bool>,
-        comet_mask: PyReadwriteArrayDyn<'_, bool>,
-        still_playing: PyReadwriteArrayDyn<'_, bool>,
-        global_obs: PyReadwriteArrayDyn<'_, f32>,
-        can_act: PyReadwriteArrayDyn<'_, bool>,
-        max_launch: PyReadwriteArrayDyn<'_, i64>,
+    fn require_obs_shapes(
+        &self,
+        planet_obs: &PyReadwriteArrayDyn<'_, f32>,
+        fleet_obs: &PyReadwriteArrayDyn<'_, f32>,
+        comet_obs: &PyReadwriteArrayDyn<'_, f32>,
+        entity_mask: &PyReadwriteArrayDyn<'_, bool>,
+        still_playing: &PyReadwriteArrayDyn<'_, bool>,
+        global_obs: &PyReadwriteArrayDyn<'_, f32>,
+        can_act: &PyReadwriteArrayDyn<'_, bool>,
+        max_launch: &PyReadwriteArrayDyn<'_, i64>,
     ) -> PyResult<()> {
         require_shape(
             "planet_obs",
@@ -363,16 +678,10 @@ impl PyRlVecEnv {
             &[self.n_envs, MAX_COMETS, COMET_CHANNELS],
         )?;
         require_shape(
-            "planet_mask",
-            planet_mask.shape(),
-            &[self.n_envs, MAX_PLANETS],
+            "entity_mask",
+            entity_mask.shape(),
+            &[self.n_envs, self.max_entities],
         )?;
-        require_shape(
-            "fleet_mask",
-            fleet_mask.shape(),
-            &[self.n_envs, self.max_fleets],
-        )?;
-        require_shape("comet_mask", comet_mask.shape(), &[self.n_envs, MAX_COMETS])?;
         require_shape(
             "still_playing",
             still_playing.shape(),
@@ -383,131 +692,21 @@ impl PyRlVecEnv {
             global_obs.shape(),
             &[self.n_envs, GLOBAL_CHANNELS],
         )?;
-        require_shape(
-            "can_act",
-            can_act.shape(),
-            &[self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS],
-        )?;
+        let can_act_shape = match self.action_spec {
+            RlActionSpec::Pure => vec![self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS],
+            RlActionSpec::DiscreteTargets => vec![
+                self.n_envs,
+                OUTER_PLAYER_SLOTS,
+                ACTION_ENTITY_SLOTS,
+                ACTION_ENTITY_SLOTS,
+            ],
+        };
+        require_shape("can_act", can_act.shape(), &can_act_shape)?;
         require_shape(
             "max_launch",
             max_launch.shape(),
             &[self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS],
         )?;
-
-        let mut planet_obs = planet_obs;
-        let mut fleet_obs = fleet_obs;
-        let mut comet_obs = comet_obs;
-        let mut planet_mask = planet_mask;
-        let mut fleet_mask = fleet_mask;
-        let mut comet_mask = comet_mask;
-        let mut still_playing = still_playing;
-        let mut global_obs = global_obs;
-        let mut can_act = can_act;
-        let mut max_launch = max_launch;
-
-        let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
-        let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
-        let comets_per_env = MAX_COMETS * COMET_CHANNELS;
-        let planet_masks_per_env = MAX_PLANETS;
-        let fleet_masks_per_env = self.max_fleets;
-        let comet_masks_per_env = MAX_COMETS;
-        let still_playing_per_env = OUTER_PLAYER_SLOTS;
-        let globals_per_env = GLOBAL_CHANNELS;
-        let action_masks_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
-
-        let ignored_fleets: usize = self
-            .states
-            .par_iter()
-            .zip_eq(self.player_maps.par_iter())
-            .zip_eq(self.action_slots.par_iter_mut())
-            .zip_eq(self.player_finished.par_iter())
-            .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
-            .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
-            .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
-            .zip_eq(
-                planet_mask
-                    .as_slice_mut()?
-                    .par_chunks_mut(planet_masks_per_env),
-            )
-            .zip_eq(
-                fleet_mask
-                    .as_slice_mut()?
-                    .par_chunks_mut(fleet_masks_per_env),
-            )
-            .zip_eq(
-                comet_mask
-                    .as_slice_mut()?
-                    .par_chunks_mut(comet_masks_per_env),
-            )
-            .zip_eq(
-                still_playing
-                    .as_slice_mut()?
-                    .par_chunks_mut(still_playing_per_env),
-            )
-            .zip_eq(global_obs.as_slice_mut()?.par_chunks_mut(globals_per_env))
-            .zip_eq(can_act.as_slice_mut()?.par_chunks_mut(action_masks_per_env))
-            .zip_eq(
-                max_launch
-                    .as_slice_mut()?
-                    .par_chunks_mut(action_masks_per_env),
-            )
-            .map(
-                |(
-                    (
-                        (
-                            (
-                                (
-                                    (
-                                        (
-                                            (
-                                                (
-                                                    (
-                                                        (
-                                                            ((state, player_map), action_slots),
-                                                            player_finished,
-                                                        ),
-                                                        planet_obs,
-                                                    ),
-                                                    fleet_obs,
-                                                ),
-                                                comet_obs,
-                                            ),
-                                            planet_mask,
-                                        ),
-                                        fleet_mask,
-                                    ),
-                                    comet_mask,
-                                ),
-                                still_playing,
-                            ),
-                            global_obs,
-                        ),
-                        can_act,
-                    ),
-                    max_launch,
-                )| {
-                    write_still_playing(state, player_map, player_finished, still_playing);
-                    encode_state_with_action_slots(
-                        state,
-                        player_map,
-                        self.max_fleets,
-                        planet_obs,
-                        fleet_obs,
-                        comet_obs,
-                        planet_mask,
-                        fleet_mask,
-                        comet_mask,
-                        global_obs,
-                        can_act,
-                        max_launch,
-                        action_slots,
-                        self.min_fleet_size,
-                    )
-                },
-            )
-            .sum();
-
-        log_ignored_fleets(ignored_fleets);
         Ok(())
     }
 }
@@ -523,9 +722,11 @@ struct EpisodeStats {
     ships_per_launch_sum: i64,
     ships_per_launch_squared_sum: i64,
     launch_count: u32,
+    comet_launch_failures: u32,
     turn_count: u32,
     max_fleet_size: i32,
     planets_captured: u32,
+    asteroids_captured: u32,
     max_entities_exceeded_turns: u32,
     fleet_losses: FleetLossStats,
 }
@@ -546,7 +747,7 @@ impl EpisodeStats {
             .collect::<HashSet<_>>();
         let mut non_comet_planets = 0_usize;
         let mut occupied_planets = 0_usize;
-        for planet in &state.planets {
+        for planet in state.planets.iter() {
             if comet_ids.contains(&planet.id) {
                 continue;
             }
@@ -614,6 +815,14 @@ impl EpisodeStats {
         self.planets_captured += planets_captured;
     }
 
+    fn record_asteroids_captured(&mut self, asteroids_captured: u32) {
+        self.asteroids_captured += asteroids_captured;
+    }
+
+    fn record_comet_launch_failures(&mut self, comet_launch_failures: u32) {
+        self.comet_launch_failures += comet_launch_failures;
+    }
+
     fn terminal_metrics(
         &self,
         state: &State,
@@ -636,6 +845,12 @@ impl EpisodeStats {
             ("full_length_rate", full_length_value(state)),
             ("terminal_ship_count", terminal_ship_count(state)),
             ("planets_captured", f64::from(self.planets_captured)),
+            ("asteroids_captured", f64::from(self.asteroids_captured)),
+            ("launches_per_game", f64::from(self.launch_count)),
+            (
+                "comet-launch-failures",
+                f64::from(self.comet_launch_failures),
+            ),
             (
                 "launches_per_turn",
                 mean_or_zero(
@@ -783,6 +998,46 @@ fn write_still_playing(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn write_one_obs(
+    state: &State,
+    player_map: &PlayerMap,
+    action_slots: &mut ActionEntitySlots,
+    player_finished: &[bool],
+    action_spec: RlActionSpec,
+    max_fleets: usize,
+    min_fleet_size: i64,
+    planet_obs: &mut [f32],
+    fleet_obs: &mut [f32],
+    comet_obs: &mut [f32],
+    entity_mask: &mut [bool],
+    still_playing: &mut [bool],
+    global_obs: &mut [f32],
+    can_act: &mut [bool],
+    max_launch: &mut [i64],
+) -> usize {
+    write_still_playing(state, player_map, player_finished, still_playing);
+    let (planet_mask, tail_mask) = entity_mask.split_at_mut(MAX_PLANETS);
+    let (comet_mask, fleet_mask) = tail_mask.split_at_mut(MAX_COMETS);
+    encode_state_with_action_slots(
+        action_spec,
+        state,
+        player_map,
+        max_fleets,
+        planet_obs,
+        fleet_obs,
+        comet_obs,
+        planet_mask,
+        fleet_mask,
+        comet_mask,
+        global_obs,
+        can_act,
+        max_launch,
+        action_slots,
+        min_fleet_size,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn step_one_env(
     state: &mut State,
     player_map: &mut PlayerMap,
@@ -798,6 +1053,7 @@ fn step_one_env(
     let result = step(state, decoded);
     episode_stats.record_step_result(state, result.fleet_losses, max_fleets);
     episode_stats.record_planets_captured(result.planets_captured);
+    episode_stats.record_asteroids_captured(result.asteroids_captured);
     let should_reset = result_is_terminal(&result.player_results);
     let won_reward = split_won_reward(
         result
@@ -914,8 +1170,8 @@ mod tests {
             config: SimConfig::new(4),
             step: 0,
             angular_velocity: 0.025,
-            initial_planets: planets.clone(),
-            planets,
+            initial_planets: planets.clone().into(),
+            planets: planets.into(),
             fleets: Vec::new(),
             next_fleet_id: 0,
             comets: Vec::new(),
@@ -966,8 +1222,8 @@ mod tests {
             config: SimConfig::new(4),
             step: 0,
             angular_velocity: 0.025,
-            initial_planets: planets.clone(),
-            planets,
+            initial_planets: planets.clone().into(),
+            planets: planets.into(),
             fleets: Vec::new(),
             next_fleet_id: 0,
             comets: Vec::new(),
@@ -989,8 +1245,8 @@ mod tests {
             config: SimConfig::new(4),
             step: 0,
             angular_velocity: 0.025,
-            initial_planets: planets.clone(),
-            planets,
+            initial_planets: planets.clone().into(),
+            planets: planets.into(),
             fleets: Vec::new(),
             next_fleet_id: 0,
             comets: Vec::new(),
@@ -1116,6 +1372,8 @@ mod tests {
         assert_eq!(metrics["mean_game_length"], vec![499.0]);
         assert_eq!(metrics["full_length_rate"], vec![1.0]);
         assert_eq!(metrics["terminal_ship_count"], vec![44.0]);
+        assert_eq!(metrics["launches_per_game"], vec![0.0]);
+        assert_eq!(metrics["comet-launch-failures"], vec![0.0]);
         assert_eq!(metrics["win_rate_player_0"], vec![1.0]);
         assert_eq!(metrics["win_rate_player_3"], vec![1.0]);
         assert_eq!(metrics["total_planet_occupancy_rate_4p"], vec![1.0]);
@@ -1176,6 +1434,7 @@ mod tests {
         let mut episode_stats = EpisodeStats::default();
 
         episode_stats.record_turn(&state, &actions);
+        episode_stats.record_comet_launch_failures(3);
         let metrics = episode_stats.terminal_metrics(
             &state,
             &player_map,
@@ -1189,10 +1448,13 @@ mod tests {
         let collected = collect_terminal_metrics(vec![Some(metrics)]);
 
         assert_eq!(collected["mean_ships_per_launch"], vec![4.0]);
+        assert_eq!(collected["launches_per_game"], vec![2.0]);
+        assert_eq!(collected["comet-launch-failures"], vec![3.0]);
         assert_eq!(collected["launches_per_turn"], vec![0.5]);
         assert_eq!(collected["max_fleet_size"], vec![5.0]);
         assert_eq!(collected["fleet_size_std"], vec![1.0]);
         assert_eq!(collected["planets_captured"], vec![0.0]);
+        assert_eq!(collected["asteroids_captured"], vec![0.0]);
         assert!(!collected.contains_key("mean_fleets_per_launch"));
     }
 

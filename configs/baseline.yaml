@@ -4,9 +4,9 @@ env:
     obs_spec: obs_v1
     max_entities: 1024
   action_spec:
-    action_spec: pure
-    max_per_planet_launches: 2
-    min_fleet_size: 5
+    action_spec: discrete_targets
+    max_per_planet_launches: 1
+    min_fleet_size: 6
   two_player_weight: 0.5
   pin_memory: true
 

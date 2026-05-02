@@ -16,6 +16,7 @@ from typing import Any, Literal, cast
 import numpy as np
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
+    ActionDiscreteTargetsConfig,
     ActionPureConfig,
     ObsV1Config,
     VectorizedEnv,
@@ -33,11 +34,16 @@ class BenchmarkResult:
     n_envs: int
     env_steps: int
     elapsed_seconds: float
+    total_elapsed_seconds: float
     launches: int
 
     @property
     def steps_per_second(self) -> float:
         return self.env_steps / self.elapsed_seconds
+
+    @property
+    def end_to_end_steps_per_second(self) -> float:
+        return self.env_steps / self.total_elapsed_seconds
 
     @property
     def launches_per_env_step(self) -> float:
@@ -47,8 +53,8 @@ class BenchmarkResult:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Benchmark the Rust vectorized Orbit Wars env against the Kaggle "
-            "Python environment with random valid launches."
+            "Benchmark only env.step() time for the Rust vectorized Orbit Wars "
+            "env and the Kaggle Python environment with random valid launches."
         )
     )
     parser.add_argument(
@@ -109,6 +115,21 @@ def parse_args() -> argparse.Namespace:
         help="Rust action slots per source. The benchmark only fills the first slot.",
     )
     parser.add_argument(
+        "--min-fleet-size",
+        type=int,
+        default=6,
+        help="Rust minimum ship count per launched fleet.",
+    )
+    parser.add_argument(
+        "--action-spec",
+        choices=["pure", "discrete_targets"],
+        default="pure",
+        help=(
+            "Rust action spec to benchmark. Kaggle always uses its native "
+            "angle actions."
+        ),
+    )
+    parser.add_argument(
         "--verbose-kaggle-import",
         action="store_true",
         help="Do not suppress Kaggle registry import noise.",
@@ -139,12 +160,21 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
     if args.max_entities is not None:
         obs_spec = ObsV1Config(max_entities=args.max_entities)
 
+    action_spec = (
+        ActionPureConfig(
+            max_per_planet_launches=args.max_per_planet_launches,
+            min_fleet_size=args.min_fleet_size,
+        )
+        if args.action_spec == "pure"
+        else ActionDiscreteTargetsConfig(
+            max_per_planet_launches=args.max_per_planet_launches,
+            min_fleet_size=args.min_fleet_size,
+        )
+    )
     env = VectorizedEnv(
         n_envs=args.n_envs,
         obs_spec=obs_spec,
-        action_spec=ActionPureConfig(
-            max_per_planet_launches=args.max_per_planet_launches
-        ),
+        action_spec=action_spec,
         two_player_weight=1.0 if args.players == 2 else 0.0,
         pin_memory=False,
     )
@@ -158,7 +188,10 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
         args.max_per_planet_launches,
     )
     launch = np.zeros(action_shape, dtype=np.bool_)
-    angle = np.zeros(action_shape, dtype=np.float32)
+    action_value = np.zeros(
+        action_shape,
+        dtype=np.float32 if args.action_spec == "pure" else np.int64,
+    )
     ships = np.zeros(action_shape, dtype=np.int64)
 
     launches = 0
@@ -170,23 +203,27 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
         unit="tick",
     ):
         launches += sample_rust_actions(
-            env, rng, args.launch_prob, launch, angle, ships
+            env, rng, args.launch_prob, args.min_fleet_size, launch, action_value, ships
         )
-        env.step(launch, angle, ships)
+        env.step(launch, action_value, ships)
 
     timed_launches = 0
-    started_at = time.perf_counter()
+    elapsed = 0.0
+    total_elapsed = 0.0
     for _ in trange(
         args.steps,
         desc="rust timed",
         disable=args.no_progress,
         unit="tick",
     ):
+        total_started_at = time.perf_counter()
         timed_launches += sample_rust_actions(
-            env, rng, args.launch_prob, launch, angle, ships
+            env, rng, args.launch_prob, args.min_fleet_size, launch, action_value, ships
         )
-        env.step(launch, angle, ships)
-    elapsed = time.perf_counter() - started_at
+        started_at = time.perf_counter()
+        env.step(launch, action_value, ships)
+        elapsed += time.perf_counter() - started_at
+        total_elapsed += time.perf_counter() - total_started_at
 
     if launches + timed_launches == 0:
         raise RuntimeError("Rust benchmark sampled only no-op actions")
@@ -196,6 +233,7 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
         n_envs=args.n_envs,
         env_steps=args.n_envs * args.steps,
         elapsed_seconds=elapsed,
+        total_elapsed_seconds=total_elapsed,
         launches=timed_launches,
     )
 
@@ -204,20 +242,37 @@ def sample_rust_actions(
     env: VectorizedEnv,
     rng: np.random.Generator,
     launch_prob: float,
+    min_fleet_size: int,
     launch: np.ndarray,
-    angle: np.ndarray,
+    action_value: np.ndarray,
     ships: np.ndarray,
 ) -> int:
     can_act = env.observations.can_act.numpy()
     max_launch = env.observations.max_launch.numpy()
-    selected = can_act & (rng.random(can_act.shape) < launch_prob)
+    if can_act.ndim == 3:
+        selected = can_act & (rng.random(can_act.shape) < launch_prob)
+        action_value[..., 0] = rng.uniform(0.0, math.tau, size=can_act.shape).astype(
+            np.float32
+        )
+    else:
+        source_can_act = can_act.any(axis=-1)
+        selected = source_can_act & (rng.random(source_can_act.shape) < launch_prob)
+        target_counts = can_act.sum(axis=-1)
+        target_rank = rng.integers(
+            0, np.maximum(target_counts, 1), size=target_counts.shape, dtype=np.int64
+        )
+        target_index = (np.cumsum(can_act, axis=-1) > target_rank[..., None]).argmax(
+            axis=-1
+        )
+        action_value[..., 0] = target_index
 
     launch.fill(False)
     launch[..., 0] = selected
-    angle[..., 0] = rng.uniform(0.0, math.tau, size=can_act.shape).astype(np.float32)
 
-    high = np.maximum(max_launch + 1, 2)
-    sampled_ships = rng.integers(1, high, size=can_act.shape, dtype=np.int64)
+    high = np.maximum(max_launch + 1, min_fleet_size + 1)
+    sampled_ships = rng.integers(
+        min_fleet_size, high, size=max_launch.shape, dtype=np.int64
+    )
     sampled_ships[~selected] = 0
     ships.fill(0)
     ships[..., 0] = sampled_ships
@@ -250,15 +305,24 @@ def benchmark_kaggle(args: argparse.Namespace) -> BenchmarkResult:
         launches += step_kaggle_envs(envs, rng, args.players, args.launch_prob)
 
     timed_launches = 0
-    started_at = time.perf_counter()
+    elapsed = 0.0
+    total_elapsed = 0.0
     for _ in trange(
         args.steps,
         desc="kaggle timed",
         disable=args.no_progress,
         unit="tick",
     ):
-        timed_launches += step_kaggle_envs(envs, rng, args.players, args.launch_prob)
-    elapsed = time.perf_counter() - started_at
+        total_started_at = time.perf_counter()
+        action_batches = sample_kaggle_env_actions(
+            envs, rng, args.players, args.launch_prob
+        )
+        for env, actions, action_count in action_batches:
+            timed_launches += action_count
+            started_at = time.perf_counter()
+            env.step(actions)
+            elapsed += time.perf_counter() - started_at
+        total_elapsed += time.perf_counter() - total_started_at
 
     if launches + timed_launches == 0:
         raise RuntimeError("Kaggle benchmark sampled only no-op actions")
@@ -268,6 +332,7 @@ def benchmark_kaggle(args: argparse.Namespace) -> BenchmarkResult:
         n_envs=KAGGLE_N_ENVS,
         env_steps=KAGGLE_N_ENVS * args.steps,
         elapsed_seconds=elapsed,
+        total_elapsed_seconds=total_elapsed,
         launches=timed_launches,
     )
 
@@ -297,13 +362,27 @@ def step_kaggle_envs(
     launch_prob: float,
 ) -> int:
     launches = 0
+    for env, actions, action_count in sample_kaggle_env_actions(
+        envs, rng, players, launch_prob
+    ):
+        launches += action_count
+        env.step(actions)
+    return launches
+
+
+def sample_kaggle_env_actions(
+    envs: list[Any],
+    rng: np.random.Generator,
+    players: int,
+    launch_prob: float,
+) -> list[tuple[Any, list[list[list[int | float]]], int]]:
+    action_batches = []
     for env in envs:
         if env.done:
             env.reset(players)
         actions, action_count = sample_kaggle_actions(env, rng, launch_prob)
-        launches += action_count
-        env.step(actions)
-    return launches
+        action_batches.append((env, actions, action_count))
+    return action_batches
 
 
 def sample_kaggle_actions(
@@ -357,12 +436,14 @@ def validate_args(args: argparse.Namespace) -> None:
 def print_results(results: list[BenchmarkResult]) -> None:
     print(
         f"{'implementation':<18} {'n_envs':>8} {'env_steps':>10} "
-        f"{'seconds':>10} {'steps/sec':>12} {'launches/step':>14}"
+        f"{'step sec':>10} {'env sps':>12} {'total sps':>12} "
+        f"{'launches/step':>14}"
     )
     for result in results:
         print(
             f"{result.name:<18} {result.n_envs:>8} {result.env_steps:>10} "
             f"{result.elapsed_seconds:>10.3f} {result.steps_per_second:>12.0f} "
+            f"{result.end_to_end_steps_per_second:>12.0f} "
             f"{result.launches_per_env_step:>14.3f}"
         )
 
@@ -388,16 +469,22 @@ def print_results(results: list[BenchmarkResult]) -> None:
 
     if summaries:
         print(
-            f"\n{'implementation':<18} {'runs':>6} {'mean sps':>12} "
-            f"{'std sps':>12} {'min sps':>12} {'max sps':>12}"
+            f"\n{'implementation':<18} {'runs':>6} {'mean step':>12} "
+            f"{'std step':>12} {'mean total':>12} {'std total':>12}"
         )
         for name, steps_per_second in summaries:
-            std = statistics.stdev(steps_per_second)
+            name_results = [result for result in results if result.name == name]
+            end_to_end_steps_per_second = [
+                result.end_to_end_steps_per_second for result in name_results
+            ]
+            step_std = statistics.stdev(steps_per_second)
+            total_std = statistics.stdev(end_to_end_steps_per_second)
             print(
                 f"{name:<18} {len(steps_per_second):>6} "
                 f"{statistics.mean(steps_per_second):>12.0f} "
-                f"{std:>12.0f} {min(steps_per_second):>12.0f} "
-                f"{max(steps_per_second):>12.0f}"
+                f"{step_std:>12.0f} "
+                f"{statistics.mean(end_to_end_steps_per_second):>12.0f} "
+                f"{total_std:>12.0f}"
             )
 
 

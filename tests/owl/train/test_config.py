@@ -149,8 +149,7 @@ def test_full_config_accepts_single_launch_training_actions() -> None:
     assert config.env.action_spec.max_per_planet_launches == 1
 
 
-@pytest.mark.parametrize("field_name", ["obs_spec", "action_spec"])
-def test_full_config_rejects_model_owned_env_specs(field_name: str) -> None:
+def test_full_config_rejects_model_owned_obs_spec() -> None:
     with pytest.raises(
         ValueError,
         match=r"Extra inputs are not permitted",
@@ -166,7 +165,7 @@ def test_full_config_rejects_model_owned_env_specs(field_name: str) -> None:
                 },
                 "model": {
                     "model_arch": "stateless_transformer_v1",
-                    field_name: {},
+                    "obs_spec": {},
                     "embed_dim": 32,
                     "depth": 1,
                     "n_heads": 4,
@@ -180,6 +179,37 @@ def test_full_config_rejects_model_owned_env_specs(field_name: str) -> None:
                 },
             }
         )
+
+
+def test_full_config_accepts_discrete_target_model_action_spec() -> None:
+    config = FullConfig.model_validate(
+        {
+            "env": {
+                "n_envs": 2,
+                "action_spec": {
+                    "action_spec": "discrete_targets",
+                    "max_per_planet_launches": 1,
+                },
+            },
+            "model": {
+                "model_arch": "stateless_transformer_v1",
+                "actor": {"action_spec": "discrete_targets"},
+                "embed_dim": 32,
+                "depth": 1,
+                "n_heads": 4,
+            },
+            "optimizer": {
+                "optimizer": "adamw",
+                "learning_rate": 0.001,
+            },
+            "rl": {
+                "horizon": 4,
+            },
+        }
+    )
+
+    assert config.env.action_spec.action_spec == "discrete_targets"
+    assert config.model.actor.action_spec == "discrete_targets"
 
 
 def test_full_config_rejects_rl_env_count() -> None:

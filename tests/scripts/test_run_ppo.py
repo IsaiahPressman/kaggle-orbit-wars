@@ -143,7 +143,7 @@ def test_create_model_uses_env_owned_specs() -> None:
     assert model.obs_spec == obs_spec
     assert model.action_spec == action_spec
     assert model.fleet_proj.in_features == obs_spec.fleet_channels
-    assert model.launch_slot_tokens.num_embeddings == 2
+    assert model.actor.launch_slot_tokens.num_embeddings == 2
 
 
 def test_trainable_parameter_count_ignores_frozen_parameters() -> None:

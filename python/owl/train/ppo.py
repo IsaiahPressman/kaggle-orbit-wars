@@ -13,6 +13,7 @@ from owl.model import BaseModelAPI, ModelActions, ModelEvaluation, ModelOutput
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     OUTER_PLAYER_SLOTS,
+    ActionConfig,
     ActionPureConfig,
     ObsBatch,
     ObsV1Config,
@@ -147,7 +148,7 @@ class PPORolloutBuffer:
         horizon: int,
         n_envs: int,
         obs_spec: ObsV1Config,
-        action_spec: ActionPureConfig,
+        action_spec: ActionConfig,
         device: torch.device,
     ) -> None:
         if horizon <= 0:
@@ -156,6 +157,17 @@ class PPORolloutBuffer:
             raise ValueError("n_envs must be positive")
         self.horizon = horizon
         self.n_envs = n_envs
+        can_act_shape = (
+            (horizon, n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS)
+            if isinstance(action_spec, ActionPureConfig)
+            else (
+                horizon,
+                n_envs,
+                OUTER_PLAYER_SLOTS,
+                ACTION_ENTITY_SLOTS,
+                ACTION_ENTITY_SLOTS,
+            )
+        )
         self.obs = ObsBatch(
             planets=torch.zeros(
                 (horizon, n_envs, obs_spec.max_planets, obs_spec.planet_channels),
@@ -172,18 +184,8 @@ class PPORolloutBuffer:
                 dtype=torch.float32,
                 device=device,
             ),
-            planet_mask=torch.zeros(
-                (horizon, n_envs, obs_spec.max_planets),
-                dtype=torch.bool,
-                device=device,
-            ),
-            fleet_mask=torch.zeros(
-                (horizon, n_envs, obs_spec.max_fleets),
-                dtype=torch.bool,
-                device=device,
-            ),
-            comet_mask=torch.zeros(
-                (horizon, n_envs, obs_spec.max_comets),
+            entity_mask=torch.zeros(
+                (horizon, n_envs, obs_spec.max_entities),
                 dtype=torch.bool,
                 device=device,
             ),
@@ -198,7 +200,7 @@ class PPORolloutBuffer:
                 device=device,
             ),
             can_act=torch.zeros(
-                (horizon, n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
+                can_act_shape,
                 dtype=torch.bool,
                 device=device,
             ),
@@ -217,8 +219,17 @@ class PPORolloutBuffer:
         )
         self.actions = ModelActions(
             launch=torch.zeros(action_shape, dtype=torch.bool, device=device),
-            angle=torch.zeros(action_shape, dtype=torch.float32, device=device),
             ships=torch.zeros(action_shape, dtype=torch.int64, device=device),
+            angle=(
+                torch.zeros(action_shape, dtype=torch.float32, device=device)
+                if isinstance(action_spec, ActionPureConfig)
+                else None
+            ),
+            target=(
+                None
+                if isinstance(action_spec, ActionPureConfig)
+                else torch.zeros(action_shape, dtype=torch.int64, device=device)
+            ),
         )
         self.logp = torch.zeros(
             (horizon, n_envs, OUTER_PLAYER_SLOTS),
@@ -286,6 +297,9 @@ class PPOTrainer:
     ) -> None:
         self.env = env
         self.model = model
+        model_action_spec = getattr(model, "action_spec", None)
+        if model_action_spec != env.action_spec:
+            raise ValueError("model and env action_spec must match")
         self._compute_gae = _compile_compute_gae(config.compile_mode)
         self._sample_segments = _compile_sample_segments(config.compile_mode)
         self._ppo_loss = _compile_ppo_loss(config.compile_mode)
@@ -574,8 +588,8 @@ class PPOTrainer:
 
     def _current_bootstrap_values(self) -> torch.Tensor:
         with torch.no_grad(), autocast_context(self.config, self.device):
-            output = self.model(self._obs)
-        return _output_values(output).detach()
+            values = self.model.compute_value(self._obs)
+        return values.detach()
 
     def _current_segment_logp_values(
         self,
@@ -588,7 +602,7 @@ class PPOTrainer:
             )
         return (
             _output_logp(output).detach().view_as(segments.logp),
-            _output_values(output).detach().view_as(segments.values),
+            _output_values(output).detach().view_as(segments.values).clone(),
         )
 
     def _update_minibatch(
@@ -967,7 +981,13 @@ def _copy_actions_time_step(
     src: ModelActions,
 ) -> None:
     for field in _ACTION_FIELDS:
-        getattr(dst, field)[step].copy_(getattr(src, field))
+        dst_tensor = getattr(dst, field)
+        src_tensor = getattr(src, field)
+        if dst_tensor is None:
+            continue
+        if src_tensor is None:
+            raise ValueError(f"actions.{field} is required")
+        dst_tensor[step].copy_(src_tensor)
 
 
 def _obs_segment_major(obs: ObsBatch) -> ObsBatch:
@@ -981,10 +1001,10 @@ def _obs_segment_major(obs: ObsBatch) -> ObsBatch:
 
 def _actions_segment_major(actions: ModelActions) -> ModelActions:
     return ModelActions(
-        **{
-            field: getattr(actions, field).transpose(0, 1).contiguous()
-            for field in _ACTION_FIELDS
-        }
+        launch=actions.launch.transpose(0, 1).contiguous(),
+        ships=actions.ships.transpose(0, 1).contiguous(),
+        angle=_optional_actions_segment_major(actions.angle),
+        target=_optional_actions_segment_major(actions.target),
     )
 
 
@@ -994,7 +1014,10 @@ def _obs_index(obs: ObsBatch, idx: torch.Tensor) -> ObsBatch:
 
 def _actions_index(actions: ModelActions, idx: torch.Tensor) -> ModelActions:
     return ModelActions(
-        **{field: getattr(actions, field)[idx] for field in _ACTION_FIELDS}
+        launch=actions.launch[idx],
+        ships=actions.ships[idx],
+        angle=_optional_actions_index(actions.angle, idx),
+        target=_optional_actions_index(actions.target, idx),
     )
 
 
@@ -1038,10 +1061,10 @@ def _actions_to_cpu(
     non_blocking: bool = False,
 ) -> ModelActions:
     return ModelActions(
-        **{
-            field: getattr(actions, field).to("cpu", non_blocking=non_blocking)
-            for field in _ACTION_FIELDS
-        }
+        launch=actions.launch.to("cpu", non_blocking=non_blocking),
+        ships=actions.ships.to("cpu", non_blocking=non_blocking),
+        angle=_optional_actions_to_cpu(actions.angle, non_blocking=non_blocking),
+        target=_optional_actions_to_cpu(actions.target, non_blocking=non_blocking),
     )
 
 
@@ -1057,10 +1080,10 @@ def _flatten_obs_time(obs: ObsBatch) -> ObsBatch:
 
 def _flatten_actions_time(actions: ModelActions) -> ModelActions:
     return ModelActions(
-        **{
-            field: _flatten_tensor_time(getattr(actions, field))
-            for field in _ACTION_FIELDS
-        }
+        launch=_flatten_tensor_time(actions.launch),
+        ships=_flatten_tensor_time(actions.ships),
+        angle=_optional_flatten_tensor_time(actions.angle),
+        target=_optional_flatten_tensor_time(actions.target),
     )
 
 
@@ -1069,7 +1092,7 @@ def _step_env(
     actions: ModelActions,
 ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
     cpu_actions = _actions_to_cpu(actions)
-    result = env.step(cpu_actions.launch, cpu_actions.angle, cpu_actions.ships)
+    result = env.step(cpu_actions.launch, cpu_actions.action_value(), cpu_actions.ships)
     if len(result) == 3:
         obs, rewards, dones = result
         return obs, rewards, dones, {}
@@ -1149,7 +1172,39 @@ def _output_values(output: ModelOutput | ModelEvaluation) -> torch.Tensor:
 
 
 def _policy_mask(obs: ObsBatch) -> torch.Tensor:
-    return obs.still_playing & obs.can_act.any(dim=-1)
+    can_act = obs.can_act.flatten(start_dim=3).any(dim=-1)
+    return obs.still_playing & can_act
+
+
+def _optional_actions_segment_major(tensor: torch.Tensor | None) -> torch.Tensor | None:
+    if tensor is None:
+        return None
+    return tensor.transpose(0, 1).contiguous()
+
+
+def _optional_actions_index(
+    tensor: torch.Tensor | None,
+    idx: torch.Tensor,
+) -> torch.Tensor | None:
+    if tensor is None:
+        return None
+    return tensor[idx]
+
+
+def _optional_actions_to_cpu(
+    tensor: torch.Tensor | None,
+    *,
+    non_blocking: bool,
+) -> torch.Tensor | None:
+    if tensor is None:
+        return None
+    return tensor.to("cpu", non_blocking=non_blocking)
+
+
+def _optional_flatten_tensor_time(tensor: torch.Tensor | None) -> torch.Tensor | None:
+    if tensor is None:
+        return None
+    return _flatten_tensor_time(tensor)
 
 
 def _uses_uniform_single_pass_sampling(config: PPOConfig) -> bool:

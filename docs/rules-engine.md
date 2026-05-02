@@ -32,12 +32,16 @@ pub fn step(state: &mut State, actions: &[PlayerAction]) -> StepResult;
 
 `State` owns planets, fleets, comet metadata, the current step, the player
 count, generation constants, and ids needed for deterministic progression.
+Planets and initial planets are stored in ID-indexed slots (`PlanetVector`,
+backed by `Vec<Option<Planet>>`) so direct ID lookup is the normal path.
+Planet IDs must be unique and less than `MAX_PLANET_ID = 100`; removed comet
+planets leave empty slots.
 
 `StepResult` returns one result per actual player: active, won, or lost. It also
 returns auxiliary counters for fleets and ships removed by the sun or by leaving
-the board, plus the number of planets captured during the step. Combat fleets
-are excluded from those loss counters. This matches the actual player count
-without making 2-player games carry ignored entries. Orbit
+the board, plus the number of planets and comet/asteroid planets captured during
+the step. Combat fleets are excluded from those loss counters. This matches the
+actual player count without making 2-player games carry ignored entries. Orbit
 Wars' Python reference leaves nonterminal eliminated players in Kaggle `ACTIVE`
 status until global termination; this simulator intentionally marks those
 players `Lost` immediately so the RL adapter can emit early loss/done signals
@@ -157,6 +161,8 @@ The current downloaded reference episodes are:
   both before launches and immediately after movement.
 - Planet movement uses `initial_planets` as the orbital anchor, not last turn's
   position.
+- Manual states with duplicate planet IDs or planet IDs at/above
+  `MAX_PLANET_ID` panic during state construction.
 - Four-player home assignment chooses among any symmetric group, using the
   reference RNG stream after planet generation.
 - Combat is queued during fleet movement and sweep, then resolved after all

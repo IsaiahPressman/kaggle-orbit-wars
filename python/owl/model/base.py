@@ -12,8 +12,16 @@ from owl.rl import ObsBatch
 @dataclass
 class ModelActions:
     launch: torch.Tensor
-    angle: torch.Tensor
     ships: torch.Tensor
+    angle: torch.Tensor | None = None
+    target: torch.Tensor | None = None
+
+    def action_value(self) -> torch.Tensor:
+        if self.angle is not None and self.target is None:
+            return self.angle
+        if self.target is not None and self.angle is None:
+            return self.target
+        raise ValueError("exactly one of actions.angle or actions.target must be set")
 
 
 @dataclass
@@ -21,6 +29,7 @@ class ModelActionLogProbs:
     launch: torch.Tensor
     angle_and_size: torch.Tensor
     per_player_entity: torch.Tensor
+    target: torch.Tensor | None = None
 
 
 @dataclass
@@ -28,6 +37,7 @@ class ModelActionEntropies:
     launch: torch.Tensor
     angle_and_size: torch.Tensor
     per_player_entity: torch.Tensor
+    target: torch.Tensor | None = None
 
 
 @dataclass
@@ -62,6 +72,9 @@ class BaseModelAPI(nn.Module, ABC):
         obs: ObsBatch,
         actions: ModelActions,
     ) -> ModelEvaluation: ...
+
+    def compute_value(self, obs: ObsBatch) -> torch.Tensor:
+        return self(obs, deterministic=True).values
 
     @abstractmethod
     def get_input_layers(self) -> tuple[nn.Module, ...]: ...
