@@ -878,6 +878,29 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs() -> None:
     )
 
 
+def test_discrete_targets_actor_masks_target_logits_under_bfloat16_autocast() -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    actor = DiscreteTargetsActor(config.actor, transformer_config=config)
+    slot_input = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    can_act = torch.zeros(
+        (1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
+        dtype=torch.bool,
+    )
+    can_act[0, 0, 0, 1] = True
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        selection = actor._selection_params(slot_input, can_act)
+
+    assert selection.target_logits.dtype == torch.bfloat16
+    assert selection.target_logits[0, 0, 0, 0] == torch.finfo(torch.bfloat16).min
+    assert selection.target_logits[0, 0, 1].eq(0).all()
+
+
 def test_discrete_targets_actor_rejects_invalid_replay_target() -> None:
     obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)

@@ -12,6 +12,7 @@ import torch
 import yaml
 from owl.model import ModelConfig, StatelessTransformerV1
 from owl.rl import ActionConfig, ObsConfig, VectorizedEnv
+from owl.rs import assert_release_build
 from owl.train import FullConfig, PPOTrainer, configure_torch
 from owl.train.logging import LogMode, create_logger
 from owl.train.optimizer import (
@@ -23,6 +24,7 @@ from tqdm import tqdm
 
 def main() -> None:
     args = _parse_args()
+    assert_release_build()
     configure_torch()
     overrides = _parse_cli_overrides(args.overrides)
     cfg = FullConfig.from_file(args.config, overrides=overrides)

@@ -262,7 +262,10 @@ class DiscreteTargetsActor(nn.Module):
         v = self.v(x)
         target_logits = torch.einsum("bpsd,bptd->bpst", q, k)
         target_logits = target_logits / math.sqrt(self.head_dim)
-        target_logits = target_logits.masked_fill(~can_act, torch.finfo(x.dtype).min)
+        target_logits = target_logits.masked_fill(
+            ~can_act,
+            torch.finfo(target_logits.dtype).min,
+        )
         safe_target_logits = torch.where(
             can_act.any(dim=-1, keepdim=True),
             target_logits,
