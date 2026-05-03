@@ -107,3 +107,7 @@ recorded reference streams can be large. A fresh checkout must run
 `scripts/regenerate_test_fixtures.sh` or restore fixtures from cache before
 running required parity. Use `REQUIRE_PARITY_FIXTURES=0 just rs-test` only when
 intentionally skipping fixture-backed parity.
+
+RL-only terminal metrics such as `ships_lost_in_combat_per_game` are derived
+from simulator step results and are covered by focused Rust/Python metric tests,
+not by replay fixture parity assertions.

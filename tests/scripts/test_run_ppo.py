@@ -4,10 +4,18 @@ import importlib.util
 import time
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
-from owl.rl import MAX_COMETS, MAX_PLANETS, ActionPureConfig, ObsV1Config
+from owl.rl import (
+    ACTION_ENTITY_SLOTS,
+    MAX_COMETS,
+    MAX_PLANETS,
+    ActionPureConfig,
+    ObsBatch,
+    ObsV1Config,
+)
 from owl.train import FullConfig, PPOTrainer
 from owl.train.logging import LogMode
 
@@ -256,6 +264,51 @@ def test_record_eval_terminal_result_counts_team_ties_as_half_win() -> None:
     assert stats.model_games == [1, 1]
     assert stats.wins == [0.5, 0.5]
     assert stats.win_rate(run_ppo.MODEL_CURRENT) == pytest.approx(0.5)
+
+
+def test_eval_actions_for_assignments_uses_deterministic_model_outputs() -> None:
+    class FakeModel:
+        def __init__(self, *, launch_value: bool, ship_value: int) -> None:
+            self.launch_value = launch_value
+            self.ship_value = ship_value
+
+        def __call__(
+            self,
+            obs: ObsBatch,  # noqa: ARG002
+            *,
+            deterministic: bool = False,
+        ) -> SimpleNamespace:
+            assert deterministic
+            shape = (1, 4, ACTION_ENTITY_SLOTS, 1)
+            actions = run_ppo.ModelActions(
+                launch=torch.full(shape, self.launch_value, dtype=torch.bool),
+                ships=torch.full(shape, self.ship_value, dtype=torch.int64),
+                angle=torch.zeros(shape, dtype=torch.float32),
+            )
+            return SimpleNamespace(actions=actions)
+
+    obs = ObsBatch(
+        planets=torch.zeros((1, 1, 1)),
+        fleets=torch.zeros((1, 1, 1)),
+        comets=torch.zeros((1, 1, 1)),
+        entity_mask=torch.zeros((1, 1), dtype=torch.bool),
+        still_playing=torch.ones((1, 4), dtype=torch.bool),
+        global_features=torch.zeros((1, 1)),
+        can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
+        max_launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+    )
+
+    actions = run_ppo._eval_actions_for_assignments(
+        obs,
+        torch.tensor([[0, 1, 0, 1]]),
+        current_model=FakeModel(launch_value=True, ship_value=3),
+        last_best_model=FakeModel(launch_value=False, ship_value=7),
+        config=Namespace(dtype="float32"),
+        device=torch.device("cpu"),
+    )
+
+    assert actions.launch[0, :, 0, 0].tolist() == [True, False, True, False]
+    assert actions.ships[0, :, 0, 0].tolist() == [3, 7, 3, 7]
 
 
 def test_create_model_uses_env_owned_specs() -> None:

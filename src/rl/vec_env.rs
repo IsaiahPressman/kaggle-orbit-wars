@@ -797,6 +797,7 @@ struct EpisodeStats {
     min_fleet_size: Option<i32>,
     planets_captured: u32,
     comets_captured: u32,
+    ships_lost_in_combat: i64,
     max_entities_exceeded_turns: u32,
     fleet_losses: FleetLossStats,
 }
@@ -1079,6 +1080,10 @@ impl EpisodeStats {
         self.comets_captured += comets_captured;
     }
 
+    fn record_ships_lost_in_combat(&mut self, ships_lost_in_combat: i64) {
+        self.ships_lost_in_combat += ships_lost_in_combat;
+    }
+
     fn record_comet_launch_failures(&mut self, comet_launch_failures: u32) {
         self.comet_launch_failures += comet_launch_failures;
     }
@@ -1133,6 +1138,10 @@ impl EpisodeStats {
                     self.launches_per_occupied_planet_sum,
                     self.occupied_planet_turns,
                 ),
+            ),
+            (
+                "ships_lost_in_combat_per_game",
+                self.ships_lost_in_combat as f64,
             ),
             ("ships_lost_per_game_mean", f64::from(ships_lost)),
             (
@@ -1342,6 +1351,7 @@ fn step_one_env(
     episode_stats.record_step_result(state, result.fleet_losses, max_fleets);
     episode_stats.record_planets_captured(result.planets_captured);
     episode_stats.record_comets_captured(result.comets_captured);
+    episode_stats.record_ships_lost_in_combat(result.ships_lost_in_combat);
     let should_reset = result_is_terminal(&result.player_results);
     let won_reward = split_won_reward(
         result
@@ -1768,6 +1778,7 @@ mod tests {
 
         episode_stats.record_turn(&state, &actions);
         episode_stats.record_comet_launch_failures(3);
+        episode_stats.record_ships_lost_in_combat(11);
         let metrics = episode_stats.terminal_metrics(
             &state,
             &player_map,
@@ -1783,6 +1794,7 @@ mod tests {
         assert_eq!(collected["ships_per_launch_mean"], vec![4.0]);
         assert_eq!(collected["launches_per_game"], vec![2.0]);
         assert_eq!(collected["comet_launch_failures_per_game"], vec![3.0]);
+        assert_eq!(collected["ships_lost_in_combat_per_game"], vec![11.0]);
         assert_eq!(collected["launches_per_turn"], vec![0.5]);
         assert_eq!(collected["fleet_size_max"], vec![5.0]);
         assert_eq!(collected["fleet_size_min"], vec![3.0]);

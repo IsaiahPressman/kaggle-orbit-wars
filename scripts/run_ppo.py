@@ -605,8 +605,8 @@ def _eval_actions_for_assignments(
 ) -> ModelActions:
     device_obs = _obs_to_device(obs, device)
     with autocast_context(config, device):
-        current_output = current_model(device_obs)
-        last_best_output = last_best_model(device_obs)
+        current_output = current_model(device_obs, deterministic=True)
+        last_best_output = last_best_model(device_obs, deterministic=True)
     use_current = assignments.to(device=device).eq(MODEL_CURRENT)
     return _select_actions(
         current_output.actions, last_best_output.actions, use_current

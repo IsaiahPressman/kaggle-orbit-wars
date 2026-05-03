@@ -87,6 +87,7 @@ pub fn step_with_injections(
         fleet_losses,
         planets_captured: captures.planets_captured,
         comets_captured: captures.comets_captured,
+        ships_lost_in_combat: captures.ships_lost_in_combat,
     }
 }
 
@@ -453,6 +454,7 @@ fn remove_marked_fleets(state: &mut State, combat_lists: &CombatLists) {
 struct CaptureStats {
     planets_captured: u32,
     comets_captured: u32,
+    ships_lost_in_combat: i64,
 }
 
 fn resolve_combats(state: &mut State, combat_lists: CombatLists) -> CaptureStats {
@@ -484,6 +486,10 @@ fn resolve_combats(state: &mut State, combat_lists: CombatLists) -> CaptureStats
             player_ships[owner] += fleet.ships;
             player_present[owner] = true;
         }
+        let incoming_ships = player_ships
+            .iter()
+            .map(|ships| i64::from(*ships))
+            .sum::<i64>();
 
         let mut top_player: Option<(i32, i32)> = None;
         let mut second_player: Option<(i32, i32)> = None;
@@ -517,6 +523,7 @@ fn resolve_combats(state: &mut State, combat_lists: CombatLists) -> CaptureStats
         } else {
             top
         };
+        captures.ships_lost_in_combat += incoming_ships - i64::from(survivor_ships);
 
         if survivor_ships <= 0 {
             continue;
@@ -525,6 +532,7 @@ fn resolve_combats(state: &mut State, combat_lists: CombatLists) -> CaptureStats
         if planet.owner == survivor_owner {
             planet.ships += survivor_ships;
         } else {
+            captures.ships_lost_in_combat += i64::from(planet.ships.min(survivor_ships)) * 2;
             planet.ships -= survivor_ships;
             if planet.ships < 0 {
                 planet.owner = survivor_owner;
@@ -873,6 +881,7 @@ mod tests {
         assert_eq!(state.planets[1].ships, 15);
         assert_eq!(result.planets_captured, 1);
         assert_eq!(result.comets_captured, 0);
+        assert_eq!(result.ships_lost_in_combat, 10);
     }
 
     #[test]
@@ -1033,11 +1042,12 @@ mod tests {
         state.planets[1].x = 28.0;
         state.planets[1].ships = 7;
 
-        step(&mut state, &[vec![], vec![]]);
+        let result = step(&mut state, &[vec![], vec![]]);
 
         assert!(state.fleets.is_empty());
         assert_eq!(state.planets[1].owner, -1);
         assert_eq!(state.planets[1].ships, 7);
+        assert_eq!(result.ships_lost_in_combat, 20);
     }
 
     #[test]
@@ -1075,11 +1085,12 @@ mod tests {
         state.planets[1].x = 28.0;
         state.planets[1].ships = 7;
 
-        step(&mut state, &[vec![], vec![], vec![], vec![]]);
+        let result = step(&mut state, &[vec![], vec![], vec![], vec![]]);
 
         assert!(state.fleets.is_empty());
         assert_eq!(state.planets[1].owner, -1);
         assert_eq!(state.planets[1].ships, 7);
+        assert_eq!(result.ships_lost_in_combat, 29);
     }
 
     #[test]
@@ -1117,11 +1128,12 @@ mod tests {
         state.planets[1].x = 28.0;
         state.planets[1].ships = 3;
 
-        step(&mut state, &[vec![], vec![], vec![], vec![]]);
+        let result = step(&mut state, &[vec![], vec![], vec![], vec![]]);
 
         assert!(state.fleets.is_empty());
         assert_eq!(state.planets[1].owner, 2);
         assert_eq!(state.planets[1].ships, 4);
+        assert_eq!(result.ships_lost_in_combat, 21);
     }
 
     #[test]
@@ -1140,11 +1152,12 @@ mod tests {
         state.planets[1].x = 25.0;
         state.planets[1].ships = 8;
 
-        step(&mut state, &[vec![], vec![]]);
+        let result = step(&mut state, &[vec![], vec![]]);
 
         assert!(state.fleets.is_empty());
         assert_eq!(state.planets[1].owner, 0);
         assert_eq!(state.planets[1].ships, 16);
+        assert_eq!(result.ships_lost_in_combat, 0);
     }
 
     #[test]

@@ -367,6 +367,7 @@ Terminal episode metrics:
 | `launches_per_planet_mean` | Per-game mean launches per occupied non-comet planet per turn. |
 | `launches_per_launch_mean` | Mean launches from a planet on planet-turns where that planet launched at least once. |
 | `ships_per_launch_mean` | Mean submitted ship count per launch action. |
+| `ships_lost_in_combat_per_game` | Ships destroyed during fleet-vs-fleet and fleet-vs-planet combat resolution. |
 | `ships_lost_per_game_mean` | Ships removed by sun or out-of-bounds fleet loss. |
 | `ships_lost_in_sun_per_game_mean` | Ships removed by sun fleet loss. |
 | `ships_lost_out_of_bounds_per_game_mean` | Ships removed by out-of-bounds fleet loss. |

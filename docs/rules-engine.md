@@ -166,7 +166,9 @@ The current downloaded reference episodes are:
 - Four-player home assignment chooses among any symmetric group, using the
   reference RNG stream after planet generation.
 - Combat is queued during fleet movement and sweep, then resolved after all
-  movement.
+  movement. `StepResult.ships_lost_in_combat` counts ships destroyed by
+  fleet-vs-fleet and fleet-vs-planet combat resolution; sun and out-of-bounds
+  losses remain in `FleetLossStats`.
 - Fleet movement queues planet collisions before checking out-of-bounds or sun
   removal, matching the reference behavior for fast fleets that cross multiple
   collision/removal zones in one step.

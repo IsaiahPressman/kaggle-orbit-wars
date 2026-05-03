@@ -2,12 +2,7 @@ from pathlib import Path
 
 
 def test_orbit_wars_replay_viewer_uses_kaggle_renderer_style() -> None:
-    viewer = (
-        Path(__file__).parents[2]
-        / "tools"
-        / "replay_viewer"
-        / "orbit_wars_replay_viewer.html"
-    )
+    viewer = Path(__file__).parents[2] / "tools" / "orbit_wars_replay_viewer.html"
     html = viewer.read_text(encoding="utf-8")
 
     assert 'const PLAYER_COLORS = ["#0072B2", "#E69F00", "#009E73", "#F0E442"]' in html
