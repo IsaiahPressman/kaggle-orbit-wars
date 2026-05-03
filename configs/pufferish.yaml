@@ -24,7 +24,6 @@ rl:
   vtrace_c_clip: 1.0
   recompute_advantages_each_minibatch: true
   normalize_advantages: true
-  eval_replay_games: 8
   dtype: bfloat16
   segment_sampling:
     sampling: advantage_priority

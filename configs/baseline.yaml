@@ -46,6 +46,5 @@ rl:
   recompute_advantages_each_minibatch: false
   normalize_advantages: false
   debug_validate_ppo_loss_inputs: false
-  eval_replay_games: 8
   compile_mode: default
   dtype: bfloat16
