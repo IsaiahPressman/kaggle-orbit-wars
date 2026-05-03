@@ -98,6 +98,8 @@ Policy logs include total entropy plus policy-specific component means such as
 `--save-replay-games N`, where `N` must be even and is split evenly across
 2-player and 4-player benchmark games. Files are written under
 `--replay-dir`, defaulting to `replays/benchmark_checkpoints`.
+Open `tools/replay_viewer/orbit_wars_replay_viewer.html` in a browser and choose
+a saved `.jsonl` file to play back a sampled game.
 
 Replay rows contain raw Rust environment snapshots for one completed game:
 board constants, step/config values, outer-slot owner IDs, player maps, action
