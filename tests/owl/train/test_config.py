@@ -20,11 +20,14 @@ def test_ppo_config_validates_with_pydantic() -> None:
     assert config.segment_sampling.segments_per_minibatch == 2
     assert config.gamma == pytest.approx(0.9)
     assert config.checkpoint_freq is None
+    assert config.eval_replay_games == 0
 
     with pytest.raises(ValueError, match="greater than or equal to 0"):
         PPOConfig(gamma=-0.1)
     with pytest.raises(ValueError, match="greater than or equal to 1000"):
         PPOConfig(checkpoint_freq=999)
+    with pytest.raises(ValueError, match="eval_replay_games must be even"):
+        PPOConfig(eval_replay_games=1)
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         PPOConfig(segments_per_minibatch=2)
 

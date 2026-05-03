@@ -187,6 +187,15 @@ class VectorizedEnv:
         )
         return self.observations
 
+    def state_snapshot(self, env_index: int) -> dict[str, Any]:
+        return self._rust.state_snapshot(env_index)
+
+    def terminal_snapshot(self, env_index: int) -> dict[str, Any] | None:
+        return self._rust.terminal_snapshot(env_index)
+
+    def terminal_metrics(self, env_index: int) -> dict[str, float] | None:
+        return self._rust.terminal_metrics(env_index)
+
     def step(
         self,
         launch: np.ndarray | torch.Tensor,

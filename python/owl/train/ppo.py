@@ -7,7 +7,7 @@ from time import perf_counter
 from typing import Any, Literal, Protocol
 
 import torch
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from owl.config import BaseConfig
 from owl.model import BaseModelAPI, ModelActions, ModelEvaluation, ModelOutput
@@ -83,8 +83,16 @@ class PPOConfig(BaseConfig):
     recompute_advantages_each_minibatch: bool = True
     normalize_advantages: bool = False
     debug_validate_ppo_loss_inputs: bool = False
+    eval_replay_games: int = Field(default=0, ge=0)
     compile_mode: CompileMode | None = None
     dtype: TrainingDType = "float32"
+
+    @field_validator("eval_replay_games")
+    @classmethod
+    def _validate_even_eval_replay_games(cls, value: int) -> int:
+        if value % 2 != 0:
+            raise ValueError("eval_replay_games must be even")
+        return value
 
 
 class PPOLossFn(Protocol):

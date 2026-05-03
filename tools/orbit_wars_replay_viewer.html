@@ -1,0 +1,821 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orbit Wars Replay Viewer</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0a0a14;
+        --panel: #1a1a2e;
+        --panel-active: #1a2a3e;
+        --line: #333;
+        --line-active: #4a9eff;
+        --text: #e0e0e0;
+        --muted: #888;
+        --accent: #8ac4ff;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+
+      body {
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        min-width: 320px;
+      }
+
+      .topbar,
+      .timeline {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 8px 12px;
+        background: var(--bg);
+        border-color: var(--line);
+        flex-wrap: wrap;
+      }
+
+      .topbar {
+        border-bottom: 1px solid var(--line);
+      }
+
+      .timeline {
+        border-top: 1px solid var(--line);
+      }
+
+      .renderer-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        background-color: var(--bg);
+        overflow: hidden;
+        padding: 12px;
+        color: var(--text);
+        container-type: inline-size;
+      }
+
+      .header {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        width: 100%;
+        padding: 8px 0;
+        font-size: 1.1rem;
+        font-weight: 600;
+        flex-shrink: 0;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+
+      .player-card {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 12px;
+        background-color: var(--panel);
+        border: 1px solid var(--line);
+        font-weight: 700;
+        color: var(--text);
+        transition:
+          scale 300ms,
+          background-color 300ms,
+          border-color 300ms;
+      }
+
+      .player-card.active {
+        background-color: var(--panel-active);
+        border-color: var(--line-active);
+        scale: 1.06;
+      }
+
+      .color-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .ship-count {
+        font-size: 0.8rem;
+        font-weight: 400;
+        color: #aaa;
+        margin-left: 4px;
+      }
+
+      .controls-bar {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 4px 0;
+        flex-shrink: 0;
+        flex-wrap: wrap;
+      }
+
+      .ctrl-group {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      .ctrl-label {
+        font-size: 0.75rem;
+        color: var(--muted);
+        margin-right: 2px;
+      }
+
+      button,
+      select,
+      input[type="file"]::file-selector-button {
+        font: inherit;
+        font-size: 0.78rem;
+        font-weight: 600;
+        padding: 4px 9px;
+        background-color: var(--panel);
+        color: #ccc;
+        border: 1px solid #444;
+        cursor: pointer;
+      }
+
+      select {
+        max-width: min(460px, 90vw);
+      }
+
+      button:hover,
+      select:hover,
+      input[type="file"]::file-selector-button:hover {
+        background-color: #252540;
+        border-color: #666;
+      }
+
+      button.active {
+        background-color: var(--panel-active);
+        border-color: var(--line-active);
+        color: var(--accent);
+      }
+
+      button.icon {
+        width: 32px;
+        height: 30px;
+        padding: 0;
+        display: inline-grid;
+        place-items: center;
+        font-size: 0.95rem;
+      }
+
+      input[type="file"] {
+        width: 235px;
+        color: #ccc;
+        font-size: 0.78rem;
+      }
+
+      input[type="range"] {
+        width: min(700px, 62vw);
+        accent-color: var(--line-active);
+      }
+
+      .canvas-wrapper {
+        position: relative;
+        flex: 1 1 0;
+        width: 100%;
+        min-height: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        container-type: size;
+      }
+
+      canvas {
+        display: block;
+        width: min(100cqw, 100cqh);
+        height: min(100cqw, 100cqh);
+      }
+
+      .game-over-overlay {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+      }
+
+      .game-over-modal {
+        background-color: #12122a;
+        border: 1px solid var(--line-active);
+        padding: 16px 32px;
+        text-align: center;
+        box-shadow: 0 0 20px rgba(74, 158, 255, 0.3);
+        color: var(--text);
+      }
+
+      .game-over-modal h2 {
+        margin: 0 0 8px;
+        font-size: 1.3rem;
+        color: #fff;
+      }
+
+      .result-text {
+        font-weight: 700;
+        font-size: 1.1rem;
+        color: var(--accent);
+      }
+
+      .status {
+        min-width: 168px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      @media (max-width: 760px) {
+        .header {
+          gap: 8px;
+          font-size: 0.9rem;
+        }
+
+        .player-card {
+          padding: 3px 8px;
+        }
+
+        input[type="range"] {
+          width: 78vw;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="topbar">
+      <input id="fileInput" type="file" accept=".jsonl,.json,application/json" />
+      <select id="episodeSelect" class="hidden" aria-label="Episode"></select>
+      <div class="status" id="fileStatus">No replay loaded</div>
+    </div>
+
+    <main class="renderer-container">
+      <div class="header" id="header"></div>
+      <div class="controls-bar">
+        <button id="fleetBtn" class="active" type="button">Fleet #</button>
+        <button id="productionBtn" class="active" type="button">Production</button>
+        <span class="ctrl-group">
+          <span class="ctrl-label">Text:</span>
+          <button class="text-size" data-size="small" type="button">Small</button>
+          <button class="text-size active" data-size="medium" type="button">Medium</button>
+          <button class="text-size" data-size="large" type="button">Large</button>
+        </span>
+      </div>
+      <div class="canvas-wrapper" id="canvasWrapper">
+        <canvas id="board"></canvas>
+      </div>
+    </main>
+
+    <div class="timeline">
+      <button id="backBtn" class="icon" type="button" title="Previous frame">◀</button>
+      <button id="playBtn" class="icon" type="button" title="Play or pause">▶</button>
+      <button id="nextBtn" class="icon" type="button" title="Next frame">▶</button>
+      <input id="stepSlider" type="range" min="0" max="0" value="0" />
+      <select id="speedSelect" aria-label="Speed">
+        <option value="0.25">0.25x</option>
+        <option value="0.5">0.5x</option>
+        <option value="1" selected>1x</option>
+        <option value="2">2x</option>
+        <option value="4">4x</option>
+      </select>
+      <div class="status" id="frameStatus">Frame 0 / 0</div>
+    </div>
+
+    <script>
+      const BOARD_SIZE = 100;
+      const CENTER = 50;
+      const SUN_RADIUS = 10;
+      const PLAYER_COLORS = ["#0072B2", "#E69F00", "#009E73", "#F0E442"];
+      const NEUTRAL_COLOR = "#666666";
+      const TEXT_SIZES = { small: 0.7, medium: 1.0, large: 1.4 };
+
+      const fileInput = document.getElementById("fileInput");
+      const episodeSelect = document.getElementById("episodeSelect");
+      const fileStatus = document.getElementById("fileStatus");
+      const header = document.getElementById("header");
+      const canvasWrapper = document.getElementById("canvasWrapper");
+      const canvas = document.getElementById("board");
+      const stepSlider = document.getElementById("stepSlider");
+      const frameStatus = document.getElementById("frameStatus");
+      const speedSelect = document.getElementById("speedSelect");
+      const playBtn = document.getElementById("playBtn");
+      const backBtn = document.getElementById("backBtn");
+      const nextBtn = document.getElementById("nextBtn");
+      const fleetBtn = document.getElementById("fleetBtn");
+      const productionBtn = document.getElementById("productionBtn");
+
+      let episodes = [];
+      let episode = null;
+      let frameIndex = 0;
+      let playing = false;
+      let timer = null;
+      let settings = {
+        showFleetNumbers: true,
+        showProductionDots: true,
+        textSize: "medium",
+      };
+
+      function playerColor(owner) {
+        if (owner < 0 || owner >= PLAYER_COLORS.length) return NEUTRAL_COLOR;
+        return PLAYER_COLORS[owner];
+      }
+
+      function asPlanet(planet) {
+        if (Array.isArray(planet)) {
+          return {
+            id: planet[0],
+            owner: planet[1],
+            x: planet[2],
+            y: planet[3],
+            radius: planet[4],
+            ships: planet[5],
+            production: planet[6],
+            is_comet: false,
+          };
+        }
+        return planet;
+      }
+
+      function asFleet(fleet) {
+        if (Array.isArray(fleet)) {
+          return {
+            id: fleet[0],
+            owner: fleet[1],
+            x: fleet[2],
+            y: fleet[3],
+            angle: fleet[4],
+            from_planet_id: fleet[5],
+            ships: fleet[6],
+          };
+        }
+        return fleet;
+      }
+
+      function parseReplayText(text) {
+        const trimmed = text.trim();
+        if (!trimmed) return [];
+        if (trimmed.startsWith("[")) return JSON.parse(trimmed);
+        if (trimmed.startsWith("{") && !trimmed.includes("\n")) return [JSON.parse(trimmed)];
+        return trimmed
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line));
+      }
+
+      function episodeLabel(row, index) {
+        const source = row.source || "replay";
+        const playerCount = row.player_count || "?";
+        const ordinal = row.game_ordinal ?? index;
+        const frames = row.frames?.length || 0;
+        return `${index + 1}. ${source} ${playerCount}p game ${ordinal} (${frames} frames)`;
+      }
+
+      function loadEpisode(index) {
+        episode = episodes[index] || null;
+        frameIndex = 0;
+        stepSlider.max = Math.max(0, (episode?.frames?.length || 1) - 1);
+        stepSlider.value = "0";
+        render();
+      }
+
+      function frame() {
+        return episode?.frames?.[frameIndex] || null;
+      }
+
+      function currentPlanets() {
+        return (frame()?.planets || []).map(asPlanet);
+      }
+
+      function currentFleets() {
+        return (frame()?.fleets || []).map(asFleet);
+      }
+
+      function previousPlanetMap() {
+        const prev = episode?.frames?.[frameIndex - 1];
+        const map = new Map();
+        if (!prev) return map;
+        for (const planet of prev.planets || []) {
+          const parsed = asPlanet(planet);
+          map.set(parsed.id, parsed);
+        }
+        return map;
+      }
+
+      function activeOuterSlots(row, currentFrame) {
+        const startMask = row?.start_mask || currentFrame?.player_finished?.map((v) => !v) || [];
+        const slots = [];
+        for (let i = 0; i < Math.max(4, startMask.length); i++) {
+          if (startMask[i]) slots.push(i);
+        }
+        return slots;
+      }
+
+      function modelLabel(modelIndex, source) {
+        if (modelIndex === 0) return source === "run_ppo_eval" ? "Current" : "A";
+        if (modelIndex === 1) return source === "run_ppo_eval" ? "Last best" : "B";
+        return "Model";
+      }
+
+      function playerName(row, slot) {
+        const assignment = row?.model_assignments?.[slot];
+        const label = modelLabel(assignment, row?.source);
+        return `${label} P${slot}`;
+      }
+
+      function scores(planets, fleets) {
+        const values = [0, 0, 0, 0];
+        for (const planet of planets) {
+          if (planet.owner >= 0 && planet.owner < values.length) {
+            values[planet.owner] += Math.floor(planet.ships);
+          }
+        }
+        for (const fleet of fleets) {
+          if (fleet.owner >= 0 && fleet.owner < values.length) {
+            values[fleet.owner] += Math.floor(fleet.ships);
+          }
+        }
+        return values;
+      }
+
+      function activePlayers(planets, fleets) {
+        const values = new Set();
+        for (const planet of planets) if (planet.owner >= 0) values.add(planet.owner);
+        for (const fleet of fleets) if (fleet.owner >= 0) values.add(fleet.owner);
+        return values;
+      }
+
+      function renderHeader(planets, fleets) {
+        const currentFrame = frame();
+        if (!episode || !currentFrame) {
+          header.innerHTML = "";
+          return;
+        }
+        const values = scores(planets, fleets);
+        const active = activePlayers(planets, fleets);
+        const slots = activeOuterSlots(episode, currentFrame);
+        const parts = [];
+        for (let i = 0; i < slots.length; i++) {
+          const slot = slots[i];
+          const activeClass = active.has(slot) ? " active" : "";
+          parts.push(
+            `<span class="player-card${activeClass}">` +
+              `<span class="color-dot" style="background-color:${playerColor(slot)}"></span>` +
+              `${playerName(episode, slot)}` +
+              `<span class="ship-count">${values[slot] || 0}</span>` +
+              `</span>`,
+          );
+          if (i < slots.length - 1) parts.push(`<span style="color:#666;">vs</span>`);
+        }
+        header.innerHTML = parts.join("");
+      }
+
+      function render() {
+        const currentFrame = frame();
+        const planets = currentPlanets();
+        const fleets = currentFleets();
+        renderHeader(planets, fleets);
+        drawBoard(currentFrame, planets, fleets);
+
+        const frameCount = episode?.frames?.length || 0;
+        stepSlider.max = Math.max(0, frameCount - 1);
+        stepSlider.value = String(frameIndex);
+        const step = currentFrame?.step ?? 0;
+        frameStatus.textContent = frameCount
+          ? `Frame ${frameIndex + 1} / ${frameCount} · Step ${step}`
+          : "Frame 0 / 0";
+      }
+
+      function drawBoard(currentFrame, planets, fleets) {
+        const dpr = window.devicePixelRatio || 1;
+        const cssSize = Math.max(100, Math.floor(canvas.getBoundingClientRect().width));
+        canvas.width = Math.round(cssSize * dpr);
+        canvas.height = Math.round(cssSize * dpr);
+        const c = canvas.getContext("2d");
+        if (!c) return;
+        c.scale(dpr, dpr);
+
+        const w = cssSize;
+        const scale = w / BOARD_SIZE;
+        c.fillStyle = "#000000";
+        c.fillRect(0, 0, w, w);
+
+        if (!currentFrame) {
+          c.fillStyle = "#888";
+          c.font = `bold ${Math.max(12, scale * 2)}px Inter, sans-serif`;
+          c.textAlign = "center";
+          c.textBaseline = "middle";
+          c.fillText("Open a replay JSONL", w / 2, w / 2);
+          return;
+        }
+
+        drawSun(c, scale, w);
+        drawCometTrails(c, currentFrame, scale);
+        drawPlanets(c, planets, previousPlanetMap(), scale);
+        drawFleets(c, fleets, scale);
+        drawPlanetLabels(c, planets, previousPlanetMap(), scale);
+        drawFleetLabels(c, fleets, scale);
+        drawStep(c, currentFrame, scale);
+
+        canvasWrapper.querySelector(".game-over-overlay")?.remove();
+        if (currentFrame.terminal) drawGameOver(planets, fleets);
+      }
+
+      function drawSun(c, scale, w) {
+        const sunX = CENTER * scale;
+        const sunY = CENTER * scale;
+        const sunR = SUN_RADIUS * scale;
+        const glow = c.createRadialGradient(sunX, sunY, sunR * 0.5, sunX, sunY, sunR * 2.5);
+        glow.addColorStop(0, "rgba(255, 200, 50, 0.6)");
+        glow.addColorStop(0.5, "rgba(255, 150, 20, 0.2)");
+        glow.addColorStop(1, "rgba(255, 100, 0, 0)");
+        c.fillStyle = glow;
+        c.fillRect(0, 0, w, w);
+
+        c.beginPath();
+        c.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+        c.fillStyle = "#FFB800";
+        c.fill();
+        c.strokeStyle = "#FFD700";
+        c.lineWidth = 1;
+        c.stroke();
+      }
+
+      function drawCometTrails(c, currentFrame, scale) {
+        for (const group of currentFrame.comets || []) {
+          const idx = group.path_index;
+          for (const path of group.paths || []) {
+            const tailLen = Math.min(idx + 1, path.length, 5);
+            if (tailLen < 2) continue;
+            for (let t = 1; t < tailLen; t++) {
+              const pi = idx - t;
+              if (pi < 0 || !path[pi] || !path[pi + 1]) break;
+              const alpha = 0.4 * (1 - t / tailLen);
+              c.beginPath();
+              c.moveTo(path[pi + 1][0] * scale, path[pi + 1][1] * scale);
+              c.lineTo(path[pi][0] * scale, path[pi][1] * scale);
+              c.strokeStyle = `rgba(200, 220, 255, ${alpha})`;
+              c.lineWidth = ((2.5 - (1.5 * t) / tailLen) * scale) / 5;
+              c.lineCap = "round";
+              c.stroke();
+            }
+          }
+        }
+      }
+
+      function drawPlanets(c, planets, prevPlanetMap, scale) {
+        for (const planet of planets) {
+          const px = planet.x * scale;
+          const py = planet.y * scale;
+          const pr = planet.radius * scale;
+          const color = playerColor(planet.owner);
+          const prev = prevPlanetMap.get(planet.id);
+          const ownerChanged = prev && prev.owner !== planet.owner;
+
+          c.beginPath();
+          c.arc(px, py, pr, 0, Math.PI * 2);
+          c.fillStyle = color;
+          c.globalAlpha = planet.owner >= 0 ? 0.85 : 0.5;
+          c.fill();
+          c.globalAlpha = 1;
+
+          c.beginPath();
+          c.arc(px, py, pr, 0, Math.PI * 2);
+          c.strokeStyle = planet.is_comet ? "#88ccff" : "#555";
+          c.lineWidth = planet.is_comet ? 2 : 1;
+          c.stroke();
+
+          if (ownerChanged) {
+            c.beginPath();
+            c.arc(px, py, pr + 3, 0, Math.PI * 2);
+            c.strokeStyle = color;
+            c.lineWidth = 2;
+            c.stroke();
+          }
+
+          if (settings.showProductionDots && planet.owner >= 0 && planet.production > 0) {
+            const dotR = Math.max(1, scale * 0.3);
+            for (let d = 0; d < planet.production; d++) {
+              const dotAngle = (d / planet.production) * Math.PI * 2 - Math.PI / 2;
+              const dotDist = pr + dotR + 2;
+              c.beginPath();
+              c.arc(px + Math.cos(dotAngle) * dotDist, py + Math.sin(dotAngle) * dotDist, dotR, 0, Math.PI * 2);
+              c.fillStyle = "#aaa";
+              c.fill();
+            }
+          }
+        }
+      }
+
+      function drawFleets(c, fleets, scale) {
+        for (const fleet of fleets) {
+          const fx = fleet.x * scale;
+          const fy = fleet.y * scale;
+          const color = playerColor(fleet.owner);
+          const sz = (0.4 + (2.0 * Math.log(Math.max(1, fleet.ships))) / Math.log(1000)) * scale;
+
+          c.save();
+          c.translate(fx, fy);
+          c.rotate(fleet.angle);
+          c.beginPath();
+          c.moveTo(sz, 0);
+          c.lineTo(-sz, -sz * 0.6);
+          c.lineTo(-sz * 0.3, 0);
+          c.lineTo(-sz, sz * 0.6);
+          c.closePath();
+          c.fillStyle = color;
+          c.globalAlpha = 0.85;
+          c.fill();
+          c.globalAlpha = 1;
+          c.strokeStyle = "#222";
+          c.lineWidth = 0.5;
+          c.stroke();
+
+          c.strokeStyle = "rgba(255, 255, 255, 0.55)";
+          c.lineWidth = sz * 0.15;
+          c.lineCap = "round";
+          if (fleet.owner === 1 || fleet.owner === 3) {
+            c.beginPath();
+            c.moveTo(sz * 0.8, 0);
+            c.lineTo(-sz * 0.2, 0);
+            c.stroke();
+          }
+          if (fleet.owner === 2 || fleet.owner === 3) {
+            c.beginPath();
+            c.moveTo(sz * 0.6, -sz * 0.15);
+            c.lineTo(-sz * 0.7, -sz * 0.45);
+            c.stroke();
+            c.beginPath();
+            c.moveTo(sz * 0.6, sz * 0.15);
+            c.lineTo(-sz * 0.7, sz * 0.45);
+            c.stroke();
+          }
+          c.restore();
+        }
+      }
+
+      function drawPlanetLabels(c, planets, prevPlanetMap, scale) {
+        const textScale = TEXT_SIZES[settings.textSize] || 1.0;
+        const planetFontSize = Math.max(8, scale * 1.8 * textScale);
+        const deltaFontSize = Math.max(6, scale * 1.2 * textScale);
+        c.textAlign = "center";
+        c.textBaseline = "middle";
+        for (const planet of planets) {
+          const px = planet.x * scale;
+          const py = planet.y * scale;
+          const shipText = String(Math.floor(planet.ships));
+          c.font = `bold ${planetFontSize}px Inter, sans-serif`;
+          c.fillStyle = "#000000";
+          c.fillText(shipText, px + 0.5, py + 0.5);
+          c.fillStyle = "#ffffff";
+          c.fillText(shipText, px, py);
+
+          if (settings.showProductionDots) {
+            const prev = prevPlanetMap.get(planet.id);
+            if (!prev) continue;
+            const delta = Math.floor(planet.ships) - Math.floor(prev.ships);
+            if (delta === 0) continue;
+            c.font = `bold ${deltaFontSize}px Inter, sans-serif`;
+            c.fillStyle = delta > 0 ? "#009E73" : "#D55E00";
+            c.fillText(delta > 0 ? `+${delta}` : `${delta}`, px, py - planet.radius * scale - deltaFontSize);
+          }
+        }
+      }
+
+      function drawFleetLabels(c, fleets, scale) {
+        if (!settings.showFleetNumbers) return;
+        const textScale = TEXT_SIZES[settings.textSize] || 1.0;
+        const fleetFontSize = Math.max(6, scale * 1.2 * textScale);
+        c.font = `${fleetFontSize}px Inter, sans-serif`;
+        c.textAlign = "center";
+        c.textBaseline = "middle";
+        for (const fleet of fleets) {
+          const fx = fleet.x * scale;
+          const fy = fleet.y * scale;
+          const labelOffset = fleet.y >= 50 ? -scale * 2.5 : scale * 2.5;
+          c.fillStyle = playerColor(fleet.owner);
+          c.fillText(String(Math.floor(fleet.ships)), fx, fy + labelOffset);
+        }
+      }
+
+      function drawStep(c, currentFrame, scale) {
+        const textScale = TEXT_SIZES[settings.textSize] || 1.0;
+        const stepFontSize = Math.max(8, scale * 1.5 * textScale);
+        c.font = `${stepFontSize}px Inter, sans-serif`;
+        c.textAlign = "left";
+        c.textBaseline = "top";
+        c.fillStyle = "#888";
+        c.fillText(`Step ${currentFrame.step || 0}`, 6, 6);
+      }
+
+      function drawGameOver(planets, fleets) {
+        const values = scores(planets, fleets);
+        const slots = activeOuterSlots(episode, frame());
+        const maxScore = Math.max(...slots.map((slot) => values[slot] || 0));
+        const winners = slots.filter((slot) => (values[slot] || 0) === maxScore);
+        const winnerText = winners.length > 1 ? "Draw!" : `${playerName(episode, winners[0])} wins!`;
+        const scoreText = slots.map((slot) => `${playerName(episode, slot)}: ${values[slot] || 0}`).join(" — ");
+        const overlay = document.createElement("div");
+        overlay.className = "game-over-overlay";
+        overlay.innerHTML = `
+          <div class="game-over-modal">
+            <h2>Game Over</h2>
+            <div class="result-text">${winnerText}</div>
+            <div style="margin-top:8px;font-size:0.85rem;color:#888;">${scoreText}</div>
+          </div>
+        `;
+        canvasWrapper.appendChild(overlay);
+      }
+
+      function setPlaying(value) {
+        playing = value;
+        playBtn.textContent = playing ? "Ⅱ" : "▶";
+        if (timer) window.clearInterval(timer);
+        timer = null;
+        if (!playing) return;
+        const fps = Number(speedSelect.value) || 1;
+        timer = window.setInterval(() => {
+          if (!episode?.frames?.length) return setPlaying(false);
+          if (frameIndex >= episode.frames.length - 1) return setPlaying(false);
+          frameIndex += 1;
+          render();
+        }, Math.max(30, 180 / fps));
+      }
+
+      fileInput.addEventListener("change", async () => {
+        const file = fileInput.files?.[0];
+        if (!file) return;
+        episodes = parseReplayText(await file.text());
+        episodeSelect.innerHTML = episodes
+          .map((row, index) => `<option value="${index}">${episodeLabel(row, index)}</option>`)
+          .join("");
+        episodeSelect.classList.toggle("hidden", episodes.length <= 1);
+        fileStatus.textContent = `${episodes.length} game${episodes.length === 1 ? "" : "s"}`;
+        loadEpisode(0);
+      });
+
+      episodeSelect.addEventListener("change", () => loadEpisode(Number(episodeSelect.value)));
+      stepSlider.addEventListener("input", () => {
+        frameIndex = Number(stepSlider.value);
+        render();
+      });
+      speedSelect.addEventListener("change", () => {
+        if (playing) setPlaying(true);
+      });
+      playBtn.addEventListener("click", () => setPlaying(!playing));
+      backBtn.addEventListener("click", () => {
+        frameIndex = Math.max(0, frameIndex - 1);
+        render();
+      });
+      nextBtn.addEventListener("click", () => {
+        frameIndex = Math.min((episode?.frames?.length || 1) - 1, frameIndex + 1);
+        render();
+      });
+      fleetBtn.addEventListener("click", () => {
+        settings.showFleetNumbers = !settings.showFleetNumbers;
+        fleetBtn.classList.toggle("active", settings.showFleetNumbers);
+        render();
+      });
+      productionBtn.addEventListener("click", () => {
+        settings.showProductionDots = !settings.showProductionDots;
+        productionBtn.classList.toggle("active", settings.showProductionDots);
+        render();
+      });
+      for (const button of document.querySelectorAll(".text-size")) {
+        button.addEventListener("click", () => {
+          settings.textSize = button.dataset.size;
+          document.querySelectorAll(".text-size").forEach((item) => item.classList.remove("active"));
+          button.classList.add("active");
+          render();
+        });
+      }
+      window.addEventListener("resize", render);
+      render();
+    </script>
+  </body>
+</html>

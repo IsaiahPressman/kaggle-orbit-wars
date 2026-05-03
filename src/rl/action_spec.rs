@@ -40,7 +40,7 @@ impl RlActionSpec {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ActionEntitySlot {
-    planet_id: u32,
+    pub(super) planet_id: u32,
 }
 
 pub(super) type ActionEntitySlots = [Option<ActionEntitySlot>; ACTION_ENTITY_SLOTS];
