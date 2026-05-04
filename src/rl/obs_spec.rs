@@ -42,6 +42,10 @@ const LOG_SHIP_NORMALIZER: f32 = 4.6051702;
 const MIN_ANGULAR_VELOCITY: f32 = 0.025;
 const ANGULAR_VELOCITY_SPAN: f32 = 0.025;
 const INTEGER_TOLERANCE: f64 = 1e-9;
+const BASE_PLANET_CHANNELS: usize = 15;
+const BASE_FLEET_CHANNELS: usize = 10;
+const CARTESIAN_FOURIER_FREQUENCIES: [f32; 6] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+const RADIAL_FOURIER_FREQUENCIES: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_state(
@@ -150,6 +154,9 @@ pub(super) fn encode_state_with_action_slots(
         row[12] = (planet.radius / 3.0) as f32;
         row[13] = normalize_ships(planet.ships);
         row[14] = normalize_log_ships(planet.ships);
+        let position_x = row[OWNER_CHANNELS_WITH_NEUTRAL];
+        let position_y = row[OWNER_CHANNELS_WITH_NEUTRAL + 1];
+        encode_spatial_features(&mut row[BASE_PLANET_CHANNELS..], position_x, position_y);
         orbiting_planet_obs[planet_index] = is_orbiting(planet.position(), planet.radius);
     }
 
@@ -162,10 +169,26 @@ pub(super) fn encode_state_with_action_slots(
         row[OWNER_CHANNELS] = normalize_position(fleet.x);
         row[OWNER_CHANNELS + 1] = normalize_position(fleet.y);
         let speed = fleet_speed(fleet.ships, state.config.ship_speed);
-        row[OWNER_CHANNELS + 2] = (fleet.angle.cos() * speed / state.config.ship_speed) as f32;
-        row[OWNER_CHANNELS + 3] = (fleet.angle.sin() * speed / state.config.ship_speed) as f32;
+        let velocity_x = (fleet.angle.cos() * speed / state.config.ship_speed) as f32;
+        let velocity_y = (fleet.angle.sin() * speed / state.config.ship_speed) as f32;
+        row[OWNER_CHANNELS + 2] = velocity_x;
+        row[OWNER_CHANNELS + 3] = velocity_y;
         row[OWNER_CHANNELS + 4] = normalize_ships(fleet.ships);
         row[OWNER_CHANNELS + 5] = normalize_log_ships(fleet.ships);
+        let position_x = row[OWNER_CHANNELS];
+        let position_y = row[OWNER_CHANNELS + 1];
+        encode_spatial_features(
+            &mut row[BASE_FLEET_CHANNELS..BASE_FLEET_CHANNELS + spatial_feature_count()],
+            position_x,
+            position_y,
+        );
+        encode_fleet_motion_features(
+            &mut row[BASE_FLEET_CHANNELS + spatial_feature_count()..],
+            position_x,
+            position_y,
+            velocity_x,
+            velocity_y,
+        );
     }
 
     encode_comets(state, player_map, comet_obs, comet_mask);
@@ -190,6 +213,67 @@ fn normalize_angular_velocity(angular_velocity: f64) -> f32 {
 
 fn normalize_position(value: f64) -> f32 {
     ((value / BOARD_SIZE) * 2.0 - 1.0) as f32
+}
+
+fn spatial_feature_count() -> usize {
+    CARTESIAN_FOURIER_FREQUENCIES.len() * 4 + 4 + 3 * 2 + RADIAL_FOURIER_FREQUENCIES.len() * 2
+}
+
+fn encode_spatial_features(row: &mut [f32], x: f32, y: f32) {
+    assert_eq!(row.len(), spatial_feature_count());
+
+    let mut index = 0;
+    for frequency in CARTESIAN_FOURIER_FREQUENCIES {
+        row[index] = (std::f32::consts::PI * frequency * x).sin();
+        row[index + 1] = (std::f32::consts::PI * frequency * x).cos();
+        row[index + 2] = (std::f32::consts::PI * frequency * y).sin();
+        row[index + 3] = (std::f32::consts::PI * frequency * y).cos();
+        index += 4;
+    }
+
+    let radius = x.hypot(y);
+    let theta = y.atan2(x);
+    row[index] = radius;
+    row[index + 1] = radius.ln_1p();
+    row[index + 2] = theta.sin();
+    row[index + 3] = theta.cos();
+    index += 4;
+
+    for harmonic in 2..=4 {
+        let harmonic_theta = theta * harmonic as f32;
+        row[index] = harmonic_theta.sin();
+        row[index + 1] = harmonic_theta.cos();
+        index += 2;
+    }
+
+    for frequency in RADIAL_FOURIER_FREQUENCIES {
+        row[index] = (std::f32::consts::PI * frequency * radius).sin();
+        row[index + 1] = (std::f32::consts::PI * frequency * radius).cos();
+        index += 2;
+    }
+
+    assert_eq!(index, row.len());
+}
+
+fn encode_fleet_motion_features(row: &mut [f32], x: f32, y: f32, velocity_x: f32, velocity_y: f32) {
+    assert_eq!(row.len(), 5);
+    row.fill(0.0);
+
+    let speed = velocity_x.hypot(velocity_y);
+    if speed > 0.0 {
+        row[1] = velocity_x / speed;
+        row[2] = velocity_y / speed;
+    }
+    row[0] = speed;
+
+    let radius = x.hypot(y);
+    if radius == 0.0 {
+        return;
+    }
+    let radial_x = x / radius;
+    let radial_y = y / radius;
+    row[3] = velocity_x * radial_x + velocity_y * radial_y;
+    row[4] = velocity_x * -radial_y + velocity_y * radial_x;
 }
 
 fn encode_comets(
@@ -602,10 +686,51 @@ mod tests {
     use super::*;
     use crate::rules_engine::state::{Fleet, Planet, SimConfig, State};
 
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 1e-6,
+            "expected {actual} to be within 1e-6 of {expected}"
+        );
+    }
+
     #[test]
     fn angular_velocity_normalization_maps_generated_range_to_zero_one() {
         assert_eq!(normalize_angular_velocity(0.025), 0.0);
         assert_eq!(normalize_angular_velocity(0.05), 1.0);
+    }
+
+    #[test]
+    fn spatial_feature_count_matches_public_channel_widths() {
+        assert_eq!(
+            BASE_PLANET_CHANNELS + spatial_feature_count(),
+            PLANET_CHANNELS
+        );
+        assert_eq!(
+            BASE_FLEET_CHANNELS + spatial_feature_count() + 5,
+            FLEET_CHANNELS
+        );
+    }
+
+    #[test]
+    fn fleet_motion_features_zero_radial_basis_at_sun_center() {
+        let mut row = [1.0; 5];
+
+        encode_fleet_motion_features(&mut row, 0.0, 0.0, 0.3, 0.4);
+
+        assert_close(row[0], 0.5);
+        assert_close(row[1], 0.6);
+        assert_close(row[2], 0.8);
+        assert_eq!(row[3], 0.0);
+        assert_eq!(row[4], 0.0);
+    }
+
+    #[test]
+    fn fleet_motion_features_zero_heading_for_stationary_fleet() {
+        let mut row = [1.0; 5];
+
+        encode_fleet_motion_features(&mut row, 1.0, 0.0, 0.0, 0.0);
+
+        assert_eq!(row, [0.0, 0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]

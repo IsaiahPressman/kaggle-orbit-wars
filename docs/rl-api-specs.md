@@ -51,9 +51,9 @@ environment returns an `ObsBatch` with these tensors:
 
 | Tensor | dtype | Shape |
 | --- | --- | --- |
-| `planets` | `float32` | `(n_envs, MAX_PLANETS, 15)` |
+| `planets` | `float32` | `(n_envs, MAX_PLANETS, 57)` |
 | `orbiting_planets` | `bool` | `(n_envs, MAX_PLANETS)` |
-| `fleets` | `float32` | `(n_envs, max_fleets, 10)` |
+| `fleets` | `float32` | `(n_envs, max_fleets, 57)` |
 | `comets` | `float32` | `(n_envs, MAX_COMETS, 88)` |
 | `entity_mask` | `bool` | `(n_envs, max_entities)` |
 | `still_playing` | `bool` | `(n_envs, 4)` |
@@ -90,10 +90,13 @@ auto-reset, `still_playing` describes the returned reset observation, while
   currently map the expected range `[0.025, 0.05]` to `[0, 1]`. The value is
   not clamped.
 - `steps_until_next_comet_spawn` is divided by `100`.
+- Appended spatial channels use the already-normalized `x` and `y` values.
+  Cartesian Fourier features use frequencies `[1, 2, 4, 8, 16, 32]`. Radial
+  Fourier features use frequencies `[1, 2, 4, 8]`.
 
 ### Planet Tensor
 
-Shape per env: `(MAX_PLANETS, 15)`.
+Shape per env: `(MAX_PLANETS, 57)`.
 
 Only non-comet planets are included. If more than `MAX_PLANETS` non-comet
 planets exist, the encoder panics. Generated games currently produce up to
@@ -111,6 +114,13 @@ generated planet IDs are unique and contiguous before comet insertion.
 | `12` | normalized radius |
 | `13` | normalized ships |
 | `14` | normalized log ships |
+| `15..39` | Cartesian Fourier position features for normalized `(x, y)` |
+| `39` | sun-centered radius `r = sqrt(x^2 + y^2)` |
+| `40` | `log1p(r)` |
+| `41` | `sin(theta)` for `theta = atan2(y, x)` |
+| `42` | `cos(theta)` |
+| `43..49` | angular harmonics `sin(k theta), cos(k theta)` for `k = 2..4` |
+| `49..57` | radial Fourier features `sin(pi f r), cos(pi f r)` |
 
 ### Orbiting Planet Tensor
 
@@ -124,7 +134,7 @@ row is orbiting, else `False`. Inactive rows are `False`.
 
 ### Fleet Tensor
 
-Shape per env: `(max_fleets, 10)`.
+Shape per env: `(max_fleets, 57)`.
 
 When all active fleets fit in `max_fleets`, fleets are emitted in simulator
 fleet order. If there are more active fleets than `max_fleets`, fleets are
@@ -144,12 +154,26 @@ max_entities exceeded: N fleets ignored
 | `7` | normalized `vy`, divided by `shipSpeed` |
 | `8` | normalized ships |
 | `9` | normalized log ships |
+| `10..34` | Cartesian Fourier position features for normalized `(x, y)` |
+| `34` | sun-centered radius `r = sqrt(x^2 + y^2)` |
+| `35` | `log1p(r)` |
+| `36` | `sin(theta)` for `theta = atan2(y, x)` |
+| `37` | `cos(theta)` |
+| `38..44` | angular harmonics `sin(k theta), cos(k theta)` for `k = 2..4` |
+| `44..52` | radial Fourier features `sin(pi f r), cos(pi f r)` |
+| `52` | normalized speed `sqrt(vx^2 + vy^2)` |
+| `53` | heading `x` component, or `0` for zero-speed fleets |
+| `54` | heading `y` component, or `0` for zero-speed fleets |
+| `55` | radial velocity in the sun-centered radial basis |
+| `56` | tangential velocity in the counterclockwise tangent basis |
 
 `entity_mask[ACTION_ENTITY_SLOTS + i]` is `True` only for active fleet rows.
 
 ### Comet Tensor
 
 Shape per env: `(MAX_COMETS, 88)`.
+
+Comet channels are unchanged by the planet/fleet spatial feature expansion.
 
 Comets are encoded separately from normal planets. Active comet planet IDs are
 sorted in ascending ID order, deduplicated, and emitted up to `MAX_COMETS`.
