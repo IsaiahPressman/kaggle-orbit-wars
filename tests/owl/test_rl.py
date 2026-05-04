@@ -42,6 +42,10 @@ def test_vectorized_env_writes_into_preallocated_torch_buffers() -> None:
     assert obs.planets.data_ptr() == planet_ptr
     assert obs.comets.data_ptr() == comet_ptr
     assert np.shares_memory(obs.planets.numpy(), env._planet_obs_np)
+    assert np.shares_memory(
+        obs.orbiting_planets.numpy(),
+        env._orbiting_planet_obs_np,
+    )
     assert torch.any(obs.planets != -7)
     assert torch.any(obs.entity_mask[:, :MAX_PLANETS])
     assert torch.all(obs.comets == 0)
@@ -94,6 +98,7 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     assert rewards.data_ptr() == reward_ptr
     assert dones.data_ptr() == done_ptr
     assert obs.planets.shape == (2, MAX_PLANETS, PLANET_CHANNELS)
+    assert obs.orbiting_planets.shape == (2, MAX_PLANETS)
     assert obs.fleets.shape == (2, env.obs_spec.max_fleets, FLEET_CHANNELS)
     assert obs.comets.shape == (2, MAX_COMETS, COMET_CHANNELS)
     assert obs.global_features.shape == (2, GLOBAL_CHANNELS)
@@ -400,6 +405,7 @@ def test_min_fleet_size_controls_action_mask_and_validation() -> None:
     action_spec = ActionPureConfig(min_fleet_size=3)
     (
         _planets,
+        _orbiting_planets,
         _fleets,
         _comets,
         _entity_mask,
@@ -442,6 +448,7 @@ def test_min_fleet_size_controls_action_mask_and_validation() -> None:
 def test_python_observation_encoder_writes_discrete_target_mask() -> None:
     (
         _planets,
+        _orbiting_planets,
         _fleets,
         _comets,
         entity_mask,
@@ -474,6 +481,7 @@ def test_python_observation_encoder_writes_discrete_target_mask() -> None:
 def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     (
         planets,
+        orbiting_planets,
         fleets,
         comets,
         entity_mask,
@@ -491,11 +499,15 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     )
 
     assert planets.shape == (MAX_PLANETS, PLANET_CHANNELS)
+    assert orbiting_planets.shape == (MAX_PLANETS,)
     assert fleets.shape == (ObsV1Config().max_fleets, FLEET_CHANNELS)
     assert comets.shape == (MAX_COMETS, COMET_CHANNELS)
     assert global_features.shape == (GLOBAL_CHANNELS,)
     assert can_act.shape == (4, ACTION_ENTITY_SLOTS)
     assert max_launch.shape == (4, ACTION_ENTITY_SLOTS)
+    assert PLANET_CHANNELS == 61
+    assert FLEET_CHANNELS == 57
+    assert COMET_CHANNELS == 286
     planet_mask = entity_mask[:MAX_PLANETS]
     comet_mask = entity_mask[MAX_PLANETS:ACTION_ENTITY_SLOTS]
     fleet_mask = entity_mask[ACTION_ENTITY_SLOTS:]
@@ -567,6 +579,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
 
     (
         planets,
+        orbiting_planets,
         fleets,
         comets,
         entity_mask,
@@ -598,6 +611,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
     np.testing.assert_array_equal(planet_mask, expected_planet_mask)
     np.testing.assert_array_equal(fleet_mask, expected_fleet_mask)
     np.testing.assert_array_equal(comet_mask, expected_comet_mask)
+    assert orbiting_planets.shape == (MAX_PLANETS,)
 
     def normalized_position(value: float) -> float:
         return value / 50.0 - 1.0
@@ -608,7 +622,143 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
     def normalized_fleet_speed(ships: int) -> float:
         return (1.0 + 5.0 * (np.log(ships) / np.log(1000)) ** 1.5) / 6.0
 
-    expected_planets = np.array(
+    def spatial_features(x: float, y: float) -> np.ndarray:
+        values: list[float] = []
+        for frequency in [1.0, 2.0, 4.0, 8.0, 16.0, 32.0]:
+            values.extend(
+                [
+                    np.sin(np.pi * frequency * x),
+                    np.cos(np.pi * frequency * x),
+                    np.sin(np.pi * frequency * y),
+                    np.cos(np.pi * frequency * y),
+                ]
+            )
+
+        radius = np.hypot(x, y)
+        theta = np.arctan2(y, x)
+        values.extend([radius, np.log1p(radius), np.sin(theta), np.cos(theta)])
+
+        for harmonic in [2.0, 3.0, 4.0]:
+            values.extend(
+                [
+                    np.sin(harmonic * theta),
+                    np.cos(harmonic * theta),
+                ]
+            )
+
+        for frequency in [1.0, 2.0, 4.0, 8.0]:
+            values.extend(
+                [
+                    np.sin(np.pi * frequency * radius),
+                    np.cos(np.pi * frequency * radius),
+                ]
+            )
+
+        return np.asarray(values, dtype=np.float32)
+
+    def fleet_motion_features(
+        x: float, y: float, velocity_x: float, velocity_y: float
+    ) -> np.ndarray:
+        speed = np.hypot(velocity_x, velocity_y)
+        heading_x = velocity_x / speed if speed > 0.0 else 0.0
+        heading_y = velocity_y / speed if speed > 0.0 else 0.0
+        radius = np.hypot(x, y)
+        radial_velocity = 0.0
+        tangential_velocity = 0.0
+        if radius > 0.0:
+            radial_x = x / radius
+            radial_y = y / radius
+            radial_velocity = velocity_x * radial_x + velocity_y * radial_y
+            tangential_velocity = velocity_x * -radial_y + velocity_y * radial_x
+        return np.asarray(
+            [
+                speed,
+                heading_x,
+                heading_y,
+                radial_velocity,
+                tangential_velocity,
+            ],
+            dtype=np.float32,
+        )
+
+    def planet_orbital_velocity(
+        x: float, y: float, angular_velocity: float, orbiting: bool
+    ) -> np.ndarray:
+        if not orbiting:
+            return np.zeros(2, dtype=np.float32)
+        return np.asarray(
+            [
+                -angular_velocity * y,
+                angular_velocity * x,
+            ],
+            dtype=np.float32,
+        )
+
+    def planet_ship_features(ships: int, owner: int) -> list[float]:
+        if owner == -1:
+            return [
+                ships / 250.0,
+                normalized_log_ships(ships),
+                0.0,
+                0.0,
+            ]
+        return [
+            0.0,
+            0.0,
+            ships / 250.0,
+            normalized_log_ships(ships),
+        ]
+
+    def normalized_point(point: list[float]) -> np.ndarray:
+        return np.asarray(
+            [
+                normalized_position(point[0]),
+                normalized_position(point[1]),
+            ],
+            dtype=np.float32,
+        )
+
+    def fill_comet_path_features(
+        row: np.ndarray, path: list[list[float]], path_start: int
+    ) -> None:
+        current = normalized_point(path[path_start])
+        row[8:10] = current
+        row[10:52] = spatial_features(current[0], current[1])
+
+        velocity = np.zeros(2, dtype=np.float32)
+        if path_start + 1 < len(path):
+            velocity = normalized_point(path[path_start + 1]) - current
+        row[52:54] = velocity
+        row[54:59] = fleet_motion_features(
+            current[0],
+            current[1],
+            velocity[0],
+            velocity[1],
+        )
+
+        offsets = [1, 2, 4, 8, 16]
+        valid_start = 59
+        positions_start = 64
+        spatial_start = 74
+        for selected_index, offset in enumerate(offsets):
+            selected_path_index = path_start + offset
+            if selected_path_index >= len(path):
+                continue
+            position = normalized_point(path[selected_path_index])
+            row[valid_start + selected_index] = 1.0
+            position_start = positions_start + selected_index * 2
+            row[position_start : position_start + 2] = position
+            selected_spatial_start = spatial_start + selected_index * 42
+            row[selected_spatial_start : selected_spatial_start + 42] = (
+                spatial_features(
+                    position[0],
+                    position[1],
+                )
+            )
+
+        row[284:286] = normalized_point(path[-1]) - current
+
+    base_expected_planets = np.array(
         [
             [
                 1.0,
@@ -624,9 +774,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
                 0.0,
                 0.0,
                 2.0 / 3.0,
-                50.0 / 250.0,
-                normalized_log_ships(50),
-                1.0,
+                *planet_ship_features(50, 0),
             ],
             [
                 0.0,
@@ -642,9 +790,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
                 0.0,
                 0.0,
                 1.5 / 3.0,
-                0.0,
-                normalized_log_ships(0),
-                1.0,
+                *planet_ship_features(0, -1),
             ],
             [
                 0.0,
@@ -660,20 +806,40 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
                 0.0,
                 0.0,
                 1.0 / 3.0,
-                10.0 / 250.0,
-                normalized_log_ships(10),
-                0.0,
+                *planet_ship_features(10, 3),
             ],
         ],
         dtype=np.float32,
     )
-    np.testing.assert_allclose(planets[planet_mask], expected_planets, atol=0.0)
+    expected_planets = np.asarray(
+        [
+            np.concatenate(
+                [
+                    row,
+                    spatial_features(row[5], row[6]),
+                    planet_orbital_velocity(row[5], row[6], 0.0375, orbiting),
+                ]
+            )
+            for row, orbiting in zip(
+                base_expected_planets,
+                [True, True, False],
+                strict=True,
+            )
+        ],
+        dtype=np.float32,
+    )
+    expected_orbiting_planets = np.array([True, True, False], dtype=np.bool_)
+    np.testing.assert_allclose(planets[planet_mask], expected_planets, atol=1e-6)
+    np.testing.assert_array_equal(
+        orbiting_planets[planet_mask],
+        expected_orbiting_planets,
+    )
 
     speed_8 = normalized_fleet_speed(8)
     speed_27 = normalized_fleet_speed(27)
     speed_64 = normalized_fleet_speed(64)
     speed_125 = normalized_fleet_speed(125)
-    expected_fleets = np.array(
+    base_expected_fleets = np.array(
         [
             [
                 0.0,
@@ -726,22 +892,50 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
         ],
         dtype=np.float32,
     )
-    np.testing.assert_allclose(fleets[fleet_mask], expected_fleets, atol=0.0)
+    expected_fleets = np.asarray(
+        [
+            np.concatenate(
+                [
+                    row,
+                    spatial_features(row[4], row[5]),
+                    fleet_motion_features(row[4], row[5], row[6], row[7]),
+                ]
+            )
+            for row in base_expected_fleets
+        ],
+        dtype=np.float32,
+    )
+    np.testing.assert_allclose(fleets[fleet_mask], expected_fleets, atol=1e-6)
 
     expected_comets = np.zeros((2, COMET_CHANNELS), dtype=np.float32)
     expected_comets[0, 2] = 1.0
     expected_comets[0, 5] = 125.0 / 250.0
     expected_comets[0, 6] = normalized_log_ships(125)
     expected_comets[0, 7] = 3.0 / MAX_COMET_PATH_LENGTH
-    expected_comets[0, 8:14] = [0.0, 1.0, 1.0, 0.0, -0.5, -0.5]
+    fill_comet_path_features(
+        expected_comets[0],
+        [
+            [0.0, 0.0],
+            [50.0, 100.0],
+            [100.0, 50.0],
+            [25.0, 25.0],
+        ],
+        1,
+    )
     expected_comets[1, 1] = 1.0
     expected_comets[1, 5] = 30.0 / 250.0
     expected_comets[1, 6] = normalized_log_ships(30)
     expected_comets[1, 7] = 2.0 / MAX_COMET_PATH_LENGTH
-    expected_comets[1, 8:12] = [-1.0, 0.0, 0.0, -1.0]
-    np.testing.assert_allclose(comets[comet_mask], expected_comets, atol=0.0)
-    np.testing.assert_array_equal(comets[0, 14:], np.zeros(COMET_CHANNELS - 14))
-    np.testing.assert_array_equal(comets[1, 12:], np.zeros(COMET_CHANNELS - 12))
+    fill_comet_path_features(
+        expected_comets[1],
+        [
+            [100.0, 100.0],
+            [0.0, 50.0],
+            [50.0, 0.0],
+        ],
+        1,
+    )
+    np.testing.assert_allclose(comets[comet_mask], expected_comets, atol=1e-6)
 
     np.testing.assert_allclose(
         global_features,
@@ -809,7 +1003,7 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
 ) -> None:
     spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
 
-    _, fleets, _, entity_mask, _, _, _ = encode_python_observation(
+    _, _, fleets, _, entity_mask, _, _, _ = encode_python_observation(
         {
             "planets": [],
             "fleets": [
@@ -829,7 +1023,16 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
 
 def test_python_observation_encoder_writes_comet_future_paths() -> None:
     path = [[0.0, 0.0], [50.0, 50.0], [100.0, 100.0]]
-    planets, _, comets, entity_mask, _, can_act, max_launch = encode_python_observation(
+    (
+        planets,
+        orbiting_planets,
+        _fleets,
+        comets,
+        entity_mask,
+        _global_features,
+        can_act,
+        max_launch,
+    ) = encode_python_observation(
         {
             "planets": [[10, 2, 50.0, 50.0, 1.0, 25, 1]],
             "fleets": [],
@@ -848,13 +1051,21 @@ def test_python_observation_encoder_writes_comet_future_paths() -> None:
     assert not planet_mask[0]
     assert comet_mask.tolist() == [True, False, False, False]
     assert planets[0].tolist() == [0.0] * PLANET_CHANNELS
+    assert not orbiting_planets[0]
     assert comets[0, 2] == 1.0
     assert comets[0, 5] == pytest.approx(25 / 250)
     assert comets[0, 7] == pytest.approx(2 / MAX_COMET_PATH_LENGTH)
     assert comets[0, 8] == pytest.approx(0.0)
     assert comets[0, 9] == pytest.approx(0.0)
-    assert comets[0, 10] == pytest.approx(1.0)
-    assert comets[0, 11] == pytest.approx(1.0)
-    assert np.all(comets[0, 12 : 8 + MAX_COMET_PATH_LENGTH * 2] == 0.0)
+    assert comets[0, 52] == pytest.approx(1.0)
+    assert comets[0, 53] == pytest.approx(1.0)
+    np.testing.assert_array_equal(
+        comets[0, 59:64],
+        np.array([1.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+    )
+    assert comets[0, 64] == pytest.approx(1.0)
+    assert comets[0, 65] == pytest.approx(1.0)
+    assert comets[0, 284] == pytest.approx(1.0)
+    assert comets[0, 285] == pytest.approx(1.0)
     assert can_act[2, MAX_PLANETS]
     assert max_launch[2, MAX_PLANETS] == 25

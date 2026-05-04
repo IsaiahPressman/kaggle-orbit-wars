@@ -138,6 +138,7 @@ def run_benchmark(
                 "deterministic": deterministic,
             },
             rng=replay_rng,
+            split_files=True,
         )
         if replay_output_path is not None and replay_games > 0
         else None

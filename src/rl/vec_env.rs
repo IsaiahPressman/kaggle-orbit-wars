@@ -24,6 +24,7 @@ use super::{
 
 type ObsShapes = (
     (usize, usize, usize),
+    (usize, usize),
     (usize, usize, usize),
     (usize, usize, usize),
     (usize, usize),
@@ -160,6 +161,7 @@ impl PyRlVecEnv {
     fn reset(
         &mut self,
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
+        orbiting_planet_obs: PyReadwriteArrayDyn<'_, bool>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
         comet_obs: PyReadwriteArrayDyn<'_, f32>,
         entity_mask: PyReadwriteArrayDyn<'_, bool>,
@@ -170,6 +172,7 @@ impl PyRlVecEnv {
     ) -> PyResult<()> {
         self.require_obs_shapes(
             &planet_obs,
+            &orbiting_planet_obs,
             &fleet_obs,
             &comet_obs,
             &entity_mask,
@@ -180,6 +183,7 @@ impl PyRlVecEnv {
         )?;
 
         let mut planet_obs = planet_obs;
+        let mut orbiting_planet_obs = orbiting_planet_obs;
         let mut fleet_obs = fleet_obs;
         let mut comet_obs = comet_obs;
         let mut entity_mask = entity_mask;
@@ -189,6 +193,7 @@ impl PyRlVecEnv {
         let mut max_launch = max_launch;
 
         let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
+        let orbiting_planets_per_env = MAX_PLANETS;
         let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
         let comets_per_env = MAX_COMETS * COMET_CHANNELS;
         let action_masks_per_env = self.action_spec.can_act_len();
@@ -206,6 +211,11 @@ impl PyRlVecEnv {
             .zip_eq(self.player_finished.par_iter_mut())
             .zip_eq(self.episode_stats.par_iter_mut())
             .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
+            .zip_eq(
+                orbiting_planet_obs
+                    .as_slice_mut()?
+                    .par_chunks_mut(orbiting_planets_per_env),
+            )
             .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
             .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
             .zip_eq(
@@ -233,6 +243,7 @@ impl PyRlVecEnv {
                 let (item, entity_mask) = item;
                 let (item, comet_obs) = item;
                 let (item, fleet_obs) = item;
+                let (item, orbiting_planet_obs) = item;
                 let (item, planet_obs) = item;
                 let ((((state, player_map), action_slots), player_finished), episode_stats) = item;
 
@@ -251,6 +262,7 @@ impl PyRlVecEnv {
                         max_fleets,
                         min_fleet_size,
                         planet_obs,
+                        orbiting_planet_obs,
                         fleet_obs,
                         comet_obs,
                         entity_mask,
@@ -307,6 +319,7 @@ impl PyRlVecEnv {
         angle: PyReadonlyArrayDyn<'_, f32>,
         ships: PyReadonlyArrayDyn<'_, i64>,
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
+        orbiting_planet_obs: PyReadwriteArrayDyn<'_, bool>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
         comet_obs: PyReadwriteArrayDyn<'_, f32>,
         entity_mask: PyReadwriteArrayDyn<'_, bool>,
@@ -339,6 +352,7 @@ impl PyRlVecEnv {
         require_shape("dones", dones.shape(), &[self.n_envs, OUTER_PLAYER_SLOTS])?;
         self.require_obs_shapes(
             &planet_obs,
+            &orbiting_planet_obs,
             &fleet_obs,
             &comet_obs,
             &entity_mask,
@@ -351,6 +365,7 @@ impl PyRlVecEnv {
         let mut rewards = rewards;
         let mut dones = dones;
         let mut planet_obs = planet_obs;
+        let mut orbiting_planet_obs = orbiting_planet_obs;
         let mut fleet_obs = fleet_obs;
         let mut comet_obs = comet_obs;
         let mut entity_mask = entity_mask;
@@ -368,6 +383,7 @@ impl PyRlVecEnv {
         let ship_chunks = ships.as_slice()?.par_chunks(actions_per_env);
 
         let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
+        let orbiting_planets_per_env = MAX_PLANETS;
         let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
         let comets_per_env = MAX_COMETS * COMET_CHANNELS;
         let action_masks_per_env = self.action_spec.can_act_len();
@@ -391,6 +407,11 @@ impl PyRlVecEnv {
             .zip_eq(reward_chunks)
             .zip_eq(done_chunks)
             .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
+            .zip_eq(
+                orbiting_planet_obs
+                    .as_slice_mut()?
+                    .par_chunks_mut(orbiting_planets_per_env),
+            )
             .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
             .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
             .zip_eq(
@@ -419,6 +440,7 @@ impl PyRlVecEnv {
                 let (item, entity_mask) = item;
                 let (item, comet_obs) = item;
                 let (item, fleet_obs) = item;
+                let (item, orbiting_planet_obs) = item;
                 let (item, planet_obs) = item;
                 let (item, done_chunk) = item;
                 let (item, reward_chunk) = item;
@@ -459,6 +481,7 @@ impl PyRlVecEnv {
                         max_fleets,
                         min_fleet_size,
                         planet_obs,
+                        orbiting_planet_obs,
                         fleet_obs,
                         comet_obs,
                         entity_mask,
@@ -497,6 +520,7 @@ impl PyRlVecEnv {
         target: PyReadonlyArrayDyn<'_, i64>,
         ships: PyReadonlyArrayDyn<'_, i64>,
         planet_obs: PyReadwriteArrayDyn<'_, f32>,
+        orbiting_planet_obs: PyReadwriteArrayDyn<'_, bool>,
         fleet_obs: PyReadwriteArrayDyn<'_, f32>,
         comet_obs: PyReadwriteArrayDyn<'_, f32>,
         entity_mask: PyReadwriteArrayDyn<'_, bool>,
@@ -529,6 +553,7 @@ impl PyRlVecEnv {
         require_shape("dones", dones.shape(), &[self.n_envs, OUTER_PLAYER_SLOTS])?;
         self.require_obs_shapes(
             &planet_obs,
+            &orbiting_planet_obs,
             &fleet_obs,
             &comet_obs,
             &entity_mask,
@@ -541,6 +566,7 @@ impl PyRlVecEnv {
         let mut rewards = rewards;
         let mut dones = dones;
         let mut planet_obs = planet_obs;
+        let mut orbiting_planet_obs = orbiting_planet_obs;
         let mut fleet_obs = fleet_obs;
         let mut comet_obs = comet_obs;
         let mut entity_mask = entity_mask;
@@ -558,6 +584,7 @@ impl PyRlVecEnv {
         let ship_chunks = ships.as_slice()?.par_chunks(actions_per_env);
 
         let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
+        let orbiting_planets_per_env = MAX_PLANETS;
         let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
         let comets_per_env = MAX_COMETS * COMET_CHANNELS;
         let action_masks_per_env = self.action_spec.can_act_len();
@@ -581,6 +608,11 @@ impl PyRlVecEnv {
             .zip_eq(reward_chunks)
             .zip_eq(done_chunks)
             .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
+            .zip_eq(
+                orbiting_planet_obs
+                    .as_slice_mut()?
+                    .par_chunks_mut(orbiting_planets_per_env),
+            )
             .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
             .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
             .zip_eq(
@@ -609,6 +641,7 @@ impl PyRlVecEnv {
                 let (item, entity_mask) = item;
                 let (item, comet_obs) = item;
                 let (item, fleet_obs) = item;
+                let (item, orbiting_planet_obs) = item;
                 let (item, planet_obs) = item;
                 let (item, done_chunk) = item;
                 let (item, reward_chunk) = item;
@@ -650,6 +683,7 @@ impl PyRlVecEnv {
                         max_fleets,
                         min_fleet_size,
                         planet_obs,
+                        orbiting_planet_obs,
                         fleet_obs,
                         comet_obs,
                         entity_mask,
@@ -684,6 +718,7 @@ impl PyRlVecEnv {
     fn obs_shapes(&self) -> ObsShapes {
         (
             (self.n_envs, MAX_PLANETS, PLANET_CHANNELS),
+            (self.n_envs, MAX_PLANETS),
             (self.n_envs, self.max_fleets, FLEET_CHANNELS),
             (self.n_envs, MAX_COMETS, COMET_CHANNELS),
             (self.n_envs, self.max_entities),
@@ -725,6 +760,7 @@ impl PyRlVecEnv {
     fn require_obs_shapes(
         &self,
         planet_obs: &PyReadwriteArrayDyn<'_, f32>,
+        orbiting_planet_obs: &PyReadwriteArrayDyn<'_, bool>,
         fleet_obs: &PyReadwriteArrayDyn<'_, f32>,
         comet_obs: &PyReadwriteArrayDyn<'_, f32>,
         entity_mask: &PyReadwriteArrayDyn<'_, bool>,
@@ -737,6 +773,11 @@ impl PyRlVecEnv {
             "planet_obs",
             planet_obs.shape(),
             &[self.n_envs, MAX_PLANETS, PLANET_CHANNELS],
+        )?;
+        require_shape(
+            "orbiting_planet_obs",
+            orbiting_planet_obs.shape(),
+            &[self.n_envs, MAX_PLANETS],
         )?;
         require_shape(
             "fleet_obs",
@@ -1095,7 +1136,9 @@ impl EpisodeStats {
         player_results: &[PlayerResult],
     ) -> TerminalEpisodeMetrics {
         let fleets_lost = self.fleet_losses.fleets_in_sun + self.fleet_losses.fleets_out_of_bounds;
-        let ships_lost = self.fleet_losses.ships_in_sun + self.fleet_losses.ships_out_of_bounds;
+        let ships_lost = i64::from(self.fleet_losses.ships_in_sun)
+            + i64::from(self.fleet_losses.ships_out_of_bounds)
+            + self.ships_lost_in_combat;
         let occupancy_key = if state.config.player_count == 2 {
             "terminal_planet_occupancy_rate_2p"
         } else {
@@ -1143,7 +1186,7 @@ impl EpisodeStats {
                 "ships_lost_in_combat_per_game",
                 self.ships_lost_in_combat as f64,
             ),
-            ("ships_lost_per_game_mean", f64::from(ships_lost)),
+            ("ships_lost_per_game_mean", ships_lost as f64),
             (
                 "ships_lost_in_sun_per_game_mean",
                 f64::from(self.fleet_losses.ships_in_sun),
@@ -1304,6 +1347,7 @@ fn write_one_obs(
     max_fleets: usize,
     min_fleet_size: i64,
     planet_obs: &mut [f32],
+    orbiting_planet_obs: &mut [bool],
     fleet_obs: &mut [f32],
     comet_obs: &mut [f32],
     entity_mask: &mut [bool],
@@ -1321,6 +1365,7 @@ fn write_one_obs(
         player_map,
         max_fleets,
         planet_obs,
+        orbiting_planet_obs,
         fleet_obs,
         comet_obs,
         planet_mask,
@@ -1795,6 +1840,7 @@ mod tests {
         assert_eq!(collected["launches_per_game"], vec![2.0]);
         assert_eq!(collected["comet_launch_failures_per_game"], vec![3.0]);
         assert_eq!(collected["ships_lost_in_combat_per_game"], vec![11.0]);
+        assert_eq!(collected["ships_lost_per_game_mean"], vec![11.0]);
         assert_eq!(collected["launches_per_turn"], vec![0.5]);
         assert_eq!(collected["fleet_size_max"], vec![5.0]);
         assert_eq!(collected["fleet_size_min"], vec![3.0]);

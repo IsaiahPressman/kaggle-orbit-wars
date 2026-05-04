@@ -25,6 +25,7 @@ use super::{
 
 type EncodedObsV1<'py> = (
     Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray1<bool>>,
     Bound<'py, PyArray2<f32>>,
     Bound<'py, PyArray2<f32>>,
     Bound<'py, PyArray1<bool>>,
@@ -41,6 +42,13 @@ const LOG_SHIP_NORMALIZER: f32 = 4.6051702;
 const MIN_ANGULAR_VELOCITY: f32 = 0.025;
 const ANGULAR_VELOCITY_SPAN: f32 = 0.025;
 const INTEGER_TOLERANCE: f64 = 1e-9;
+const BASE_PLANET_CHANNELS: usize = 17;
+const BASE_FLEET_CHANNELS: usize = 10;
+const CARTESIAN_FOURIER_FREQUENCIES: [f32; 6] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+const RADIAL_FOURIER_FREQUENCIES: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
+const PLANET_ORBITAL_CHANNELS: usize = 2;
+const COMET_BASE_CHANNELS: usize = OWNER_CHANNELS_WITH_NEUTRAL + 3;
+const COMET_SELECTED_FUTURE_OFFSETS: [usize; 5] = [1, 2, 4, 8, 16];
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_state(
@@ -49,6 +57,7 @@ pub(super) fn encode_state(
     player_map: &PlayerMap,
     max_fleets: usize,
     planet_obs: &mut [f32],
+    orbiting_planet_obs: &mut [bool],
     fleet_obs: &mut [f32],
     comet_obs: &mut [f32],
     planet_mask: &mut [bool],
@@ -66,6 +75,7 @@ pub(super) fn encode_state(
         player_map,
         max_fleets,
         planet_obs,
+        orbiting_planet_obs,
         fleet_obs,
         comet_obs,
         planet_mask,
@@ -86,6 +96,7 @@ pub(super) fn encode_state_with_action_slots(
     player_map: &PlayerMap,
     max_fleets: usize,
     planet_obs: &mut [f32],
+    orbiting_planet_obs: &mut [bool],
     fleet_obs: &mut [f32],
     comet_obs: &mut [f32],
     planet_mask: &mut [bool],
@@ -114,6 +125,7 @@ pub(super) fn encode_state_with_action_slots(
     );
 
     planet_obs.fill(0.0);
+    orbiting_planet_obs.fill(false);
     fleet_obs.fill(0.0);
     comet_obs.fill(0.0);
     planet_mask.fill(false);
@@ -143,9 +155,29 @@ pub(super) fn encode_state_with_action_slots(
         row[OWNER_CHANNELS_WITH_NEUTRAL + 2 + production] = 1.0;
 
         row[12] = (planet.radius / 3.0) as f32;
-        row[13] = normalize_ships(planet.ships);
-        row[14] = normalize_log_ships(planet.ships);
-        row[15] = f32::from(is_orbiting(planet.position(), planet.radius));
+        if planet.owner == -1 {
+            row[13] = normalize_ships(planet.ships);
+            row[14] = normalize_log_ships(planet.ships);
+        } else {
+            row[15] = normalize_ships(planet.ships);
+            row[16] = normalize_log_ships(planet.ships);
+        }
+        let position_x = row[OWNER_CHANNELS_WITH_NEUTRAL];
+        let position_y = row[OWNER_CHANNELS_WITH_NEUTRAL + 1];
+        encode_spatial_features(
+            &mut row[BASE_PLANET_CHANNELS..BASE_PLANET_CHANNELS + spatial_feature_count()],
+            position_x,
+            position_y,
+        );
+        let orbiting = is_orbiting(planet.position(), planet.radius);
+        encode_planet_orbital_velocity(
+            &mut row[BASE_PLANET_CHANNELS + spatial_feature_count()..],
+            position_x,
+            position_y,
+            state.angular_velocity,
+            orbiting,
+        );
+        orbiting_planet_obs[planet_index] = orbiting;
     }
 
     for (fleet_index, fleet) in fleets.iter().take(max_fleets).enumerate() {
@@ -157,10 +189,26 @@ pub(super) fn encode_state_with_action_slots(
         row[OWNER_CHANNELS] = normalize_position(fleet.x);
         row[OWNER_CHANNELS + 1] = normalize_position(fleet.y);
         let speed = fleet_speed(fleet.ships, state.config.ship_speed);
-        row[OWNER_CHANNELS + 2] = (fleet.angle.cos() * speed / state.config.ship_speed) as f32;
-        row[OWNER_CHANNELS + 3] = (fleet.angle.sin() * speed / state.config.ship_speed) as f32;
+        let velocity_x = (fleet.angle.cos() * speed / state.config.ship_speed) as f32;
+        let velocity_y = (fleet.angle.sin() * speed / state.config.ship_speed) as f32;
+        row[OWNER_CHANNELS + 2] = velocity_x;
+        row[OWNER_CHANNELS + 3] = velocity_y;
         row[OWNER_CHANNELS + 4] = normalize_ships(fleet.ships);
         row[OWNER_CHANNELS + 5] = normalize_log_ships(fleet.ships);
+        let position_x = row[OWNER_CHANNELS];
+        let position_y = row[OWNER_CHANNELS + 1];
+        encode_spatial_features(
+            &mut row[BASE_FLEET_CHANNELS..BASE_FLEET_CHANNELS + spatial_feature_count()],
+            position_x,
+            position_y,
+        );
+        encode_fleet_motion_features(
+            &mut row[BASE_FLEET_CHANNELS + spatial_feature_count()..],
+            position_x,
+            position_y,
+            velocity_x,
+            velocity_y,
+        );
     }
 
     encode_comets(state, player_map, comet_obs, comet_mask);
@@ -185,6 +233,84 @@ fn normalize_angular_velocity(angular_velocity: f64) -> f32 {
 
 fn normalize_position(value: f64) -> f32 {
     ((value / BOARD_SIZE) * 2.0 - 1.0) as f32
+}
+
+fn spatial_feature_count() -> usize {
+    CARTESIAN_FOURIER_FREQUENCIES.len() * 4 + 4 + 3 * 2 + RADIAL_FOURIER_FREQUENCIES.len() * 2
+}
+
+fn encode_spatial_features(row: &mut [f32], x: f32, y: f32) {
+    assert_eq!(row.len(), spatial_feature_count());
+
+    let mut index = 0;
+    for frequency in CARTESIAN_FOURIER_FREQUENCIES {
+        row[index] = (std::f32::consts::PI * frequency * x).sin();
+        row[index + 1] = (std::f32::consts::PI * frequency * x).cos();
+        row[index + 2] = (std::f32::consts::PI * frequency * y).sin();
+        row[index + 3] = (std::f32::consts::PI * frequency * y).cos();
+        index += 4;
+    }
+
+    let radius = x.hypot(y);
+    let theta = y.atan2(x);
+    row[index] = radius;
+    row[index + 1] = radius.ln_1p();
+    row[index + 2] = theta.sin();
+    row[index + 3] = theta.cos();
+    index += 4;
+
+    for harmonic in 2..=4 {
+        let harmonic_theta = theta * harmonic as f32;
+        row[index] = harmonic_theta.sin();
+        row[index + 1] = harmonic_theta.cos();
+        index += 2;
+    }
+
+    for frequency in RADIAL_FOURIER_FREQUENCIES {
+        row[index] = (std::f32::consts::PI * frequency * radius).sin();
+        row[index + 1] = (std::f32::consts::PI * frequency * radius).cos();
+        index += 2;
+    }
+
+    assert_eq!(index, row.len());
+}
+
+fn encode_fleet_motion_features(row: &mut [f32], x: f32, y: f32, velocity_x: f32, velocity_y: f32) {
+    assert_eq!(row.len(), 5);
+    row.fill(0.0);
+
+    let speed = velocity_x.hypot(velocity_y);
+    if speed > 0.0 {
+        row[1] = velocity_x / speed;
+        row[2] = velocity_y / speed;
+    }
+    row[0] = speed;
+
+    let radius = x.hypot(y);
+    if radius == 0.0 {
+        return;
+    }
+    let radial_x = x / radius;
+    let radial_y = y / radius;
+    row[3] = velocity_x * radial_x + velocity_y * radial_y;
+    row[4] = velocity_x * -radial_y + velocity_y * radial_x;
+}
+
+fn encode_planet_orbital_velocity(
+    row: &mut [f32],
+    x: f32,
+    y: f32,
+    angular_velocity: f64,
+    orbiting: bool,
+) {
+    assert_eq!(row.len(), PLANET_ORBITAL_CHANNELS);
+    row.fill(0.0);
+    if !orbiting {
+        return;
+    }
+    let angular_velocity = angular_velocity as f32;
+    row[0] = -angular_velocity * y;
+    row[1] = angular_velocity * x;
 }
 
 fn encode_comets(
@@ -225,18 +351,85 @@ fn encode_comets(
         let remaining_steps = path.len().saturating_sub(path_start);
         row[OWNER_CHANNELS_WITH_NEUTRAL + 2] =
             remaining_steps as f32 / MAX_COMET_PATH_LENGTH as f32;
-        let path_values_start = OWNER_CHANNELS_WITH_NEUTRAL + 3;
-        for (future_index, point) in path
-            .iter()
-            .skip(path_start)
-            .take(MAX_COMET_PATH_LENGTH)
-            .enumerate()
-        {
-            let value_start = path_values_start + future_index * 2;
-            row[value_start] = normalize_position(point.x);
-            row[value_start + 1] = normalize_position(point.y);
-        }
+        encode_comet_path_features(&mut row[COMET_BASE_CHANNELS..], path, path_start);
     }
+}
+
+fn encode_comet_path_features(row: &mut [f32], path: &[Point], path_start: usize) {
+    assert_eq!(
+        row.len(),
+        2 + spatial_feature_count()
+            + 2
+            + 5
+            + COMET_SELECTED_FUTURE_OFFSETS.len()
+            + COMET_SELECTED_FUTURE_OFFSETS.len() * 2
+            + COMET_SELECTED_FUTURE_OFFSETS.len() * spatial_feature_count()
+            + 2
+    );
+    row.fill(0.0);
+    let Some(current) = path.get(path_start).map(normalized_point) else {
+        return;
+    };
+
+    row[0] = current.0;
+    row[1] = current.1;
+    let spatial_start = 2;
+    encode_spatial_features(
+        &mut row[spatial_start..spatial_start + spatial_feature_count()],
+        current.0,
+        current.1,
+    );
+
+    let velocity_start = spatial_start + spatial_feature_count();
+    let mut velocity_x = 0.0;
+    let mut velocity_y = 0.0;
+    if let Some(next) = path.get(path_start + 1).map(normalized_point) {
+        velocity_x = next.0 - current.0;
+        velocity_y = next.1 - current.1;
+    }
+    row[velocity_start] = velocity_x;
+    row[velocity_start + 1] = velocity_y;
+    encode_fleet_motion_features(
+        &mut row[velocity_start + 2..velocity_start + 2 + 5],
+        current.0,
+        current.1,
+        velocity_x,
+        velocity_y,
+    );
+
+    let valid_start = velocity_start + 2 + 5;
+    let positions_start = valid_start + COMET_SELECTED_FUTURE_OFFSETS.len();
+    let selected_spatial_start = positions_start + COMET_SELECTED_FUTURE_OFFSETS.len() * 2;
+    for (selected_index, offset) in COMET_SELECTED_FUTURE_OFFSETS.into_iter().enumerate() {
+        let Some(position) = path.get(path_start + offset).map(normalized_point) else {
+            continue;
+        };
+        row[valid_start + selected_index] = 1.0;
+
+        let position_start = positions_start + selected_index * 2;
+        row[position_start] = position.0;
+        row[position_start + 1] = position.1;
+
+        let selected_spatial_row_start =
+            selected_spatial_start + selected_index * spatial_feature_count();
+        encode_spatial_features(
+            &mut row
+                [selected_spatial_row_start..selected_spatial_row_start + spatial_feature_count()],
+            position.0,
+            position.1,
+        );
+    }
+
+    let displacement_start =
+        selected_spatial_start + COMET_SELECTED_FUTURE_OFFSETS.len() * spatial_feature_count();
+    let final_position = normalized_point(path.last().expect("non-empty path has final position"));
+    row[displacement_start] = final_position.0 - current.0;
+    row[displacement_start + 1] = final_position.1 - current.1;
+    assert_eq!(displacement_start + 2, row.len());
+}
+
+fn normalized_point(point: &Point) -> (f32, f32) {
+    (normalize_position(point.x), normalize_position(point.y))
 }
 
 fn encode_global(state: &State, global_obs: &mut [f32]) {
@@ -534,6 +727,7 @@ pub fn encode_obs_v1<'py>(
     )?;
     let max_fleets = max_entities - (MAX_PLANETS + MAX_COMETS);
     let mut planet_obs = Array2::<f32>::zeros((MAX_PLANETS, PLANET_CHANNELS));
+    let mut orbiting_planet_obs = Array1::<bool>::from_elem(MAX_PLANETS, false);
     let mut fleet_obs = Array2::<f32>::zeros((max_fleets, FLEET_CHANNELS));
     let mut comet_obs = Array2::<f32>::zeros((MAX_COMETS, COMET_CHANNELS));
     let mut entity_mask = Array1::<bool>::from_elem(max_entities, false);
@@ -554,6 +748,9 @@ pub fn encode_obs_v1<'py>(
         planet_obs
             .as_slice_mut()
             .expect("newly allocated planet array is contiguous"),
+        orbiting_planet_obs
+            .as_slice_mut()
+            .expect("newly allocated orbiting planet array is contiguous"),
         fleet_obs
             .as_slice_mut()
             .expect("newly allocated fleet array is contiguous"),
@@ -578,6 +775,7 @@ pub fn encode_obs_v1<'py>(
 
     Ok((
         planet_obs.into_pyarray(py),
+        orbiting_planet_obs.into_pyarray(py),
         fleet_obs.into_pyarray(py),
         comet_obs.into_pyarray(py),
         entity_mask.into_pyarray(py),
@@ -592,10 +790,65 @@ mod tests {
     use super::*;
     use crate::rules_engine::state::{Fleet, Planet, SimConfig, State};
 
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 1e-6,
+            "expected {actual} to be within 1e-6 of {expected}"
+        );
+    }
+
     #[test]
     fn angular_velocity_normalization_maps_generated_range_to_zero_one() {
         assert_eq!(normalize_angular_velocity(0.025), 0.0);
         assert_eq!(normalize_angular_velocity(0.05), 1.0);
+    }
+
+    #[test]
+    fn spatial_feature_count_matches_public_channel_widths() {
+        assert_eq!(
+            BASE_PLANET_CHANNELS + spatial_feature_count() + PLANET_ORBITAL_CHANNELS,
+            PLANET_CHANNELS
+        );
+        assert_eq!(
+            BASE_FLEET_CHANNELS + spatial_feature_count() + 5,
+            FLEET_CHANNELS
+        );
+    }
+
+    #[test]
+    fn fleet_motion_features_zero_radial_basis_at_sun_center() {
+        let mut row = [1.0; 5];
+
+        encode_fleet_motion_features(&mut row, 0.0, 0.0, 0.3, 0.4);
+
+        assert_close(row[0], 0.5);
+        assert_close(row[1], 0.6);
+        assert_close(row[2], 0.8);
+        assert_eq!(row[3], 0.0);
+        assert_eq!(row[4], 0.0);
+    }
+
+    #[test]
+    fn fleet_motion_features_zero_heading_for_stationary_fleet() {
+        let mut row = [1.0; 5];
+
+        encode_fleet_motion_features(&mut row, 1.0, 0.0, 0.0, 0.0);
+
+        assert_eq!(row, [0.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn planet_orbital_velocity_uses_normalized_tangent_direction_only_for_orbiting_planets() {
+        let mut row = [1.0; PLANET_ORBITAL_CHANNELS];
+
+        encode_planet_orbital_velocity(&mut row, 0.5, -0.25, 0.04, true);
+
+        assert_close(row[0], 0.01);
+        assert_close(row[1], 0.02);
+
+        encode_planet_orbital_velocity(&mut row, 0.5, -0.25, 0.04, false);
+
+        assert_eq!(row, [0.0, 0.0]);
     }
 
     #[test]
@@ -648,6 +901,7 @@ mod tests {
             comet_planet_ids: Vec::new(),
         };
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
+        let mut orbiting_planet_obs = vec![false; MAX_PLANETS];
         let mut fleet_obs = Vec::new();
         let mut comet_obs = vec![0.0; MAX_COMETS * COMET_CHANNELS];
         let mut planet_mask = vec![false; MAX_PLANETS];
@@ -663,6 +917,7 @@ mod tests {
             &PlayerMap::identity(),
             0,
             &mut planet_obs,
+            &mut orbiting_planet_obs,
             &mut fleet_obs,
             &mut comet_obs,
             &mut planet_mask,
@@ -707,6 +962,7 @@ mod tests {
         };
         let player_map = PlayerMap::from_outer_slots(2, [3, 1, 0, 2]);
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
+        let mut orbiting_planet_obs = vec![false; MAX_PLANETS];
         let mut fleet_obs = vec![0.0; FLEET_CHANNELS];
         let mut comet_obs = vec![0.0; MAX_COMETS * COMET_CHANNELS];
         let mut planet_mask = vec![false; MAX_PLANETS];
@@ -722,6 +978,7 @@ mod tests {
             &player_map,
             1,
             &mut planet_obs,
+            &mut orbiting_planet_obs,
             &mut fleet_obs,
             &mut comet_obs,
             &mut planet_mask,
@@ -762,6 +1019,7 @@ mod tests {
             comet_planet_ids: Vec::new(),
         };
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
+        let mut orbiting_planet_obs = vec![false; MAX_PLANETS];
         let mut fleet_obs = Vec::new();
         let mut comet_obs = vec![0.0; MAX_COMETS * COMET_CHANNELS];
         let mut planet_mask = vec![false; MAX_PLANETS];
@@ -777,6 +1035,7 @@ mod tests {
             &PlayerMap::identity(),
             0,
             &mut planet_obs,
+            &mut orbiting_planet_obs,
             &mut fleet_obs,
             &mut comet_obs,
             &mut planet_mask,

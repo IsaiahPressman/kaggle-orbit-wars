@@ -164,6 +164,7 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context(
     )
     obs = ObsBatch(
         planets=torch.zeros((1, 1, 1)),
+        orbiting_planets=torch.zeros((1, 1), dtype=torch.bool),
         fleets=torch.zeros((1, 1, 1)),
         comets=torch.zeros((1, 1, 1)),
         entity_mask=torch.zeros((1, 1), dtype=torch.bool),

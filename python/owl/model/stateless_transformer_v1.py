@@ -150,7 +150,8 @@ class StatelessTransformerV1(BaseModelAPI):
         self.action_spec = action_spec
 
         dim = self.config.embed_dim
-        self.planet_proj = nn.Linear(self.obs_spec.planet_channels, dim)
+        self.static_planet_proj = nn.Linear(self.obs_spec.planet_channels, dim)
+        self.orbit_planet_proj = nn.Linear(self.obs_spec.planet_channels, dim)
         self.fleet_proj = nn.Linear(self.obs_spec.fleet_channels, dim)
         self.comet_proj = nn.Linear(self.obs_spec.comet_channels, dim)
         self.global_proj = nn.Linear(self.obs_spec.global_channels, dim)
@@ -198,7 +199,8 @@ class StatelessTransformerV1(BaseModelAPI):
 
     def get_input_layers(self) -> tuple[nn.Module, ...]:
         return (
-            self.planet_proj,
+            self.static_planet_proj,
+            self.orbit_planet_proj,
             self.fleet_proj,
             self.comet_proj,
             self.global_proj,
@@ -213,7 +215,15 @@ class StatelessTransformerV1(BaseModelAPI):
 
     def encode_observations(self, obs: ObsBatch) -> tuple[torch.Tensor, torch.Tensor]:
         global_token = self.global_proj(obs.global_features).unsqueeze(1)
-        planet_x = self.planet_proj(obs.planets) + global_token
+        orbiting = obs.orbiting_planets.unsqueeze(-1)
+        planet_x = (
+            torch.where(
+                orbiting,
+                self.orbit_planet_proj(obs.planets),
+                self.static_planet_proj(obs.planets),
+            )
+            + global_token
+        )
         fleet_x = self.fleet_proj(obs.fleets) + global_token
         comet_x = self.comet_proj(obs.comets) + global_token
         player_tokens = self.player_tokens.weight.to(dtype=global_token.dtype)

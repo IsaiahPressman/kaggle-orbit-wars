@@ -33,6 +33,10 @@ def _obs_batch(*, n_envs: int, obs_spec: ObsV1Config) -> ObsBatch:
             (n_envs, obs_spec.max_planets, obs_spec.planet_channels),
             dtype=torch.float32,
         ),
+        orbiting_planets=torch.zeros(
+            (n_envs, obs_spec.max_planets),
+            dtype=torch.bool,
+        ),
         fleets=torch.zeros(
             (n_envs, obs_spec.max_fleets, obs_spec.fleet_channels),
             dtype=torch.float32,
@@ -470,6 +474,11 @@ def test_rollout_buffer_collects_time_major_and_returns_contiguous_segments() ->
         obs_spec.max_planets,
         obs_spec.planet_channels,
     )
+    assert segments.obs.orbiting_planets.shape == (
+        2,
+        3,
+        obs_spec.max_planets,
+    )
     assert segments.actions.launch.shape == (
         2,
         3,
@@ -762,6 +771,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
 
     next_metrics = trainer.train_iteration()
 
+    assert next_metrics["train/player_step_total"] == pytest.approx(160.0)
     assert next_metrics["optimizer/steps"] == pytest.approx(4.0)
 
 

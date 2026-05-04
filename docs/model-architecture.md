@@ -55,11 +55,14 @@ from `docs/rl-api-specs.md`.
 
 Each observation tensor receives one feedforward projection to `embed_dim`:
 
-- planets: `(batch, MAX_PLANETS, 16) -> (batch, MAX_PLANETS, embed_dim)`
-- fleets: `(batch, max_fleets, 10) -> (batch, max_fleets, embed_dim)`
-- comets: `(batch, MAX_COMETS, 88) -> (batch, MAX_COMETS, embed_dim)`
+- static planets: `(batch, MAX_PLANETS, 61) -> (batch, MAX_PLANETS, embed_dim)`
+- orbiting planets: `(batch, MAX_PLANETS, 61) -> (batch, MAX_PLANETS, embed_dim)`
+- fleets: `(batch, max_fleets, 57) -> (batch, max_fleets, embed_dim)`
+- comets: `(batch, MAX_COMETS, 286) -> (batch, MAX_COMETS, embed_dim)`
 - globals: `(batch, 3) -> (batch, 1, embed_dim)`
 
+The boolean `orbiting_planets` mask selects the orbiting-planet projection for
+orbiting rows and the static-planet projection for all other planet rows.
 Planet, comet, and fleet tokens are concatenated on the entity axis in that
 order. This keeps the action-origin hidden states contiguous as the first
 `ACTION_ENTITY_SLOTS` tokens. The global projection is added to every entity

@@ -51,9 +51,10 @@ environment returns an `ObsBatch` with these tensors:
 
 | Tensor | dtype | Shape |
 | --- | --- | --- |
-| `planets` | `float32` | `(n_envs, MAX_PLANETS, 16)` |
-| `fleets` | `float32` | `(n_envs, max_fleets, 10)` |
-| `comets` | `float32` | `(n_envs, MAX_COMETS, 88)` |
+| `planets` | `float32` | `(n_envs, MAX_PLANETS, 61)` |
+| `orbiting_planets` | `bool` | `(n_envs, MAX_PLANETS)` |
+| `fleets` | `float32` | `(n_envs, max_fleets, 57)` |
+| `comets` | `float32` | `(n_envs, MAX_COMETS, 286)` |
 | `entity_mask` | `bool` | `(n_envs, max_entities)` |
 | `still_playing` | `bool` | `(n_envs, 4)` |
 | `global_features` | `float32` | `(n_envs, 3)` |
@@ -89,10 +90,13 @@ auto-reset, `still_playing` describes the returned reset observation, while
   currently map the expected range `[0.025, 0.05]` to `[0, 1]`. The value is
   not clamped.
 - `steps_until_next_comet_spawn` is divided by `100`.
+- Appended spatial channels use the already-normalized `x` and `y` values.
+  Cartesian Fourier features use frequencies `[1, 2, 4, 8, 16, 32]`. Radial
+  Fourier features use frequencies `[1, 2, 4, 8]`.
 
 ### Planet Tensor
 
-Shape per env: `(MAX_PLANETS, 16)`.
+Shape per env: `(MAX_PLANETS, 61)`.
 
 Only non-comet planets are included. If more than `MAX_PLANETS` non-comet
 planets exist, the encoder panics. Generated games currently produce up to
@@ -108,16 +112,33 @@ generated planet IDs are unique and contiguous before comet insertion.
 | `6` | normalized `y` |
 | `7..11` | production one-hot for production values `1..5` |
 | `12` | normalized radius |
-| `13` | normalized ships |
-| `14` | normalized log ships |
-| `15` | `1.0` if orbiting, else `0.0` |
+| `13` | neutral normalized ships, else `0` |
+| `14` | neutral normalized log ships, else `0` |
+| `15` | player-owned normalized ships, else `0` |
+| `16` | player-owned normalized log ships, else `0` |
+| `17..41` | Cartesian Fourier position features for normalized `(x, y)` |
+| `41` | sun-centered radius `r = sqrt(x^2 + y^2)` |
+| `42` | `log1p(r)` |
+| `43` | `sin(theta)` for `theta = atan2(y, x)` |
+| `44` | `cos(theta)` |
+| `45..51` | angular harmonics `sin(k theta), cos(k theta)` for `k = 2..4` |
+| `51..59` | radial Fourier features `sin(pi f r), cos(pi f r)` |
+| `59` | orbiting planet `vx = -angular_velocity * y`, else `0` |
+| `60` | orbiting planet `vy = angular_velocity * x`, else `0` |
+
+### Orbiting Planet Tensor
+
+Shape per env: `(MAX_PLANETS,)`.
+
+Rows are aligned with the planet tensor. A row is `True` if the matching planet
+row is orbiting, else `False`. Inactive rows are `False`.
 
 `entity_mask[i]` is `True` only for active planet rows for
 `i < MAX_PLANETS`.
 
 ### Fleet Tensor
 
-Shape per env: `(max_fleets, 10)`.
+Shape per env: `(max_fleets, 57)`.
 
 When all active fleets fit in `max_fleets`, fleets are emitted in simulator
 fleet order. If there are more active fleets than `max_fleets`, fleets are
@@ -137,12 +158,24 @@ max_entities exceeded: N fleets ignored
 | `7` | normalized `vy`, divided by `shipSpeed` |
 | `8` | normalized ships |
 | `9` | normalized log ships |
+| `10..34` | Cartesian Fourier position features for normalized `(x, y)` |
+| `34` | sun-centered radius `r = sqrt(x^2 + y^2)` |
+| `35` | `log1p(r)` |
+| `36` | `sin(theta)` for `theta = atan2(y, x)` |
+| `37` | `cos(theta)` |
+| `38..44` | angular harmonics `sin(k theta), cos(k theta)` for `k = 2..4` |
+| `44..52` | radial Fourier features `sin(pi f r), cos(pi f r)` |
+| `52` | normalized speed `sqrt(vx^2 + vy^2)` |
+| `53` | heading `x` component, or `0` for zero-speed fleets |
+| `54` | heading `y` component, or `0` for zero-speed fleets |
+| `55` | radial velocity in the sun-centered radial basis |
+| `56` | tangential velocity in the counterclockwise tangent basis |
 
 `entity_mask[ACTION_ENTITY_SLOTS + i]` is `True` only for active fleet rows.
 
 ### Comet Tensor
 
-Shape per env: `(MAX_COMETS, 88)`.
+Shape per env: `(MAX_COMETS, 286)`.
 
 Comets are encoded separately from normal planets. Active comet planet IDs are
 sorted in ascending ID order, deduplicated, and emitted up to `MAX_COMETS`.
@@ -155,14 +188,28 @@ This matches the comet portion of the action entity axis.
 | `5` | normalized ships |
 | `6` | normalized log ships |
 | `7` | remaining path steps divided by `MAX_COMET_PATH_LENGTH` |
-| `8..87` | future path positions as `MAX_COMET_PATH_LENGTH` `(x, y)` pairs |
+| `8` | current normalized `x` from the path |
+| `9` | current normalized `y` from the path |
+| `10..52` | current Cartesian Fourier, polar, angular-harmonic, and radial Fourier spatial features |
+| `52` | normalized `vx` from the next path point minus the current path point |
+| `53` | normalized `vy` from the next path point minus the current path point |
+| `54` | speed `sqrt(vx^2 + vy^2)` |
+| `55` | heading `x` component, or `0` if no next path point exists |
+| `56` | heading `y` component, or `0` if no next path point exists |
+| `57` | radial velocity in the sun-centered radial basis |
+| `58` | tangential velocity in the counterclockwise tangent basis |
+| `59..64` | future-valid flags for offsets `[1, 2, 4, 8, 16]`, encoded as `0.0` or `1.0` |
+| `64..74` | selected future normalized `(x, y)` pairs for offsets `[1, 2, 4, 8, 16]` |
+| `74..284` | spatial features for each selected future position |
+| `284` | normalized final path `x` minus current normalized `x` |
+| `285` | normalized final path `y` minus current normalized `y` |
 
-The future path starts at the comet group's current `path_index`. In normal
-post-step observations for an active comet, the first `(x, y)` pair is the
-comet's current position, followed by future positions. If `path_index < 0`,
-the encoder starts at path index `0`. Each path position is normalized with the
-same `[-1, 1]` map transform as planets and fleets. Unused path slots are
-zero-filled.
+The current path point starts at the comet group's current `path_index`. If
+`path_index < 0`, the encoder starts at path index `0`. If a selected future
+offset is outside the remaining known path, its valid flag and feature slots are
+zero-filled. If no next path point exists, comet velocity, speed, heading,
+radial velocity, and tangential velocity are zero-filled. The displacement to
+the final path point uses the path's last known point.
 
 `entity_mask[MAX_PLANETS + i]` is `True` only for active comet rows.
 
@@ -368,7 +415,7 @@ Terminal episode metrics:
 | `launches_per_launch_mean` | Mean launches from a planet on planet-turns where that planet launched at least once. |
 | `ships_per_launch_mean` | Mean submitted ship count per launch action. |
 | `ships_lost_in_combat_per_game` | Ships destroyed during fleet-vs-fleet and fleet-vs-planet combat resolution. |
-| `ships_lost_per_game_mean` | Ships removed by sun or out-of-bounds fleet loss. |
+| `ships_lost_per_game_mean` | Ships removed by combat, sun, or out-of-bounds fleet loss. |
 | `ships_lost_in_sun_per_game_mean` | Ships removed by sun fleet loss. |
 | `ships_lost_out_of_bounds_per_game_mean` | Ships removed by out-of-bounds fleet loss. |
 | `fleets_lost_per_game_mean` | Fleets removed by sun or out-of-bounds loss. |

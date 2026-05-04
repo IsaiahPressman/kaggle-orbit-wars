@@ -266,7 +266,7 @@ def test_record_eval_terminal_result_counts_team_ties_as_half_win() -> None:
     assert stats.win_rate(run_ppo.MODEL_CURRENT) == pytest.approx(0.5)
 
 
-def test_eval_actions_for_assignments_uses_deterministic_model_outputs() -> None:
+def test_eval_actions_for_assignments_uses_stochastic_model_outputs() -> None:
     class FakeModel:
         def __init__(self, *, launch_value: bool, ship_value: int) -> None:
             self.launch_value = launch_value
@@ -278,7 +278,7 @@ def test_eval_actions_for_assignments_uses_deterministic_model_outputs() -> None
             *,
             deterministic: bool = False,
         ) -> SimpleNamespace:
-            assert deterministic
+            assert not deterministic
             shape = (1, 4, ACTION_ENTITY_SLOTS, 1)
             actions = run_ppo.ModelActions(
                 launch=torch.full(shape, self.launch_value, dtype=torch.bool),
@@ -289,6 +289,7 @@ def test_eval_actions_for_assignments_uses_deterministic_model_outputs() -> None
 
     obs = ObsBatch(
         planets=torch.zeros((1, 1, 1)),
+        orbiting_planets=torch.zeros((1, 1), dtype=torch.bool),
         fleets=torch.zeros((1, 1, 1)),
         comets=torch.zeros((1, 1, 1)),
         entity_mask=torch.zeros((1, 1), dtype=torch.bool),
