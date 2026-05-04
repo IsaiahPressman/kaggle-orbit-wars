@@ -42,7 +42,7 @@ const LOG_SHIP_NORMALIZER: f32 = 4.6051702;
 const MIN_ANGULAR_VELOCITY: f32 = 0.025;
 const ANGULAR_VELOCITY_SPAN: f32 = 0.025;
 const INTEGER_TOLERANCE: f64 = 1e-9;
-const BASE_PLANET_CHANNELS: usize = 15;
+const BASE_PLANET_CHANNELS: usize = 17;
 const BASE_FLEET_CHANNELS: usize = 10;
 const CARTESIAN_FOURIER_FREQUENCIES: [f32; 6] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
 const RADIAL_FOURIER_FREQUENCIES: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
@@ -155,8 +155,13 @@ pub(super) fn encode_state_with_action_slots(
         row[OWNER_CHANNELS_WITH_NEUTRAL + 2 + production] = 1.0;
 
         row[12] = (planet.radius / 3.0) as f32;
-        row[13] = normalize_ships(planet.ships);
-        row[14] = normalize_log_ships(planet.ships);
+        if planet.owner == -1 {
+            row[13] = normalize_ships(planet.ships);
+            row[14] = normalize_log_ships(planet.ships);
+        } else {
+            row[15] = normalize_ships(planet.ships);
+            row[16] = normalize_log_ships(planet.ships);
+        }
         let position_x = row[OWNER_CHANNELS_WITH_NEUTRAL];
         let position_y = row[OWNER_CHANNELS_WITH_NEUTRAL + 1];
         encode_spatial_features(

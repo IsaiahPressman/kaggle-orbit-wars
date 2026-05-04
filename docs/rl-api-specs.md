@@ -51,7 +51,7 @@ environment returns an `ObsBatch` with these tensors:
 
 | Tensor | dtype | Shape |
 | --- | --- | --- |
-| `planets` | `float32` | `(n_envs, MAX_PLANETS, 59)` |
+| `planets` | `float32` | `(n_envs, MAX_PLANETS, 61)` |
 | `orbiting_planets` | `bool` | `(n_envs, MAX_PLANETS)` |
 | `fleets` | `float32` | `(n_envs, max_fleets, 57)` |
 | `comets` | `float32` | `(n_envs, MAX_COMETS, 286)` |
@@ -96,7 +96,7 @@ auto-reset, `still_playing` describes the returned reset observation, while
 
 ### Planet Tensor
 
-Shape per env: `(MAX_PLANETS, 59)`.
+Shape per env: `(MAX_PLANETS, 61)`.
 
 Only non-comet planets are included. If more than `MAX_PLANETS` non-comet
 planets exist, the encoder panics. Generated games currently produce up to
@@ -112,17 +112,19 @@ generated planet IDs are unique and contiguous before comet insertion.
 | `6` | normalized `y` |
 | `7..11` | production one-hot for production values `1..5` |
 | `12` | normalized radius |
-| `13` | normalized ships |
-| `14` | normalized log ships |
-| `15..39` | Cartesian Fourier position features for normalized `(x, y)` |
-| `39` | sun-centered radius `r = sqrt(x^2 + y^2)` |
-| `40` | `log1p(r)` |
-| `41` | `sin(theta)` for `theta = atan2(y, x)` |
-| `42` | `cos(theta)` |
-| `43..49` | angular harmonics `sin(k theta), cos(k theta)` for `k = 2..4` |
-| `49..57` | radial Fourier features `sin(pi f r), cos(pi f r)` |
-| `57` | orbiting planet `vx = -angular_velocity * y`, else `0` |
-| `58` | orbiting planet `vy = angular_velocity * x`, else `0` |
+| `13` | neutral normalized ships, else `0` |
+| `14` | neutral normalized log ships, else `0` |
+| `15` | player-owned normalized ships, else `0` |
+| `16` | player-owned normalized log ships, else `0` |
+| `17..41` | Cartesian Fourier position features for normalized `(x, y)` |
+| `41` | sun-centered radius `r = sqrt(x^2 + y^2)` |
+| `42` | `log1p(r)` |
+| `43` | `sin(theta)` for `theta = atan2(y, x)` |
+| `44` | `cos(theta)` |
+| `45..51` | angular harmonics `sin(k theta), cos(k theta)` for `k = 2..4` |
+| `51..59` | radial Fourier features `sin(pi f r), cos(pi f r)` |
+| `59` | orbiting planet `vx = -angular_velocity * y`, else `0` |
+| `60` | orbiting planet `vy = angular_velocity * x`, else `0` |
 
 ### Orbiting Planet Tensor
 

@@ -89,9 +89,9 @@ def _obs_batch(
     max_launch = torch.zeros((batch_size, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
 
     planets[:, 0, 0] = 1.0
-    planets[:, 0, 13] = 0.08
+    planets[:, 0, 15] = 0.08
     planets[:, 1, 1] = 1.0
-    planets[:, 1, 13] = 0.04
+    planets[:, 1, 15] = 0.04
     entity_mask[:, :2] = True
     comets[:, 0, 2] = 1.0
     entity_mask[:, MAX_PLANETS] = True
@@ -164,8 +164,8 @@ def test_model_config_loads_actor_subconfig_reference() -> None:
 @pytest.mark.parametrize(
     ("filename", "expected_params"),
     [
-        ("stateless_transformer_tiny.yaml", 972_046),
-        ("stateless_transformer_5m.yaml", 5_063_182),
+        ("stateless_transformer_tiny.yaml", 972_558),
+        ("stateless_transformer_5m.yaml", 5_064_206),
     ],
 )
 def test_model_config_file_parameter_count(

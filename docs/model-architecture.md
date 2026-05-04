@@ -55,8 +55,8 @@ from `docs/rl-api-specs.md`.
 
 Each observation tensor receives one feedforward projection to `embed_dim`:
 
-- static planets: `(batch, MAX_PLANETS, 59) -> (batch, MAX_PLANETS, embed_dim)`
-- orbiting planets: `(batch, MAX_PLANETS, 59) -> (batch, MAX_PLANETS, embed_dim)`
+- static planets: `(batch, MAX_PLANETS, 61) -> (batch, MAX_PLANETS, embed_dim)`
+- orbiting planets: `(batch, MAX_PLANETS, 61) -> (batch, MAX_PLANETS, embed_dim)`
 - fleets: `(batch, max_fleets, 57) -> (batch, max_fleets, embed_dim)`
 - comets: `(batch, MAX_COMETS, 286) -> (batch, MAX_COMETS, embed_dim)`
 - globals: `(batch, 3) -> (batch, 1, embed_dim)`

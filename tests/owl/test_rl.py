@@ -505,7 +505,7 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     assert global_features.shape == (GLOBAL_CHANNELS,)
     assert can_act.shape == (4, ACTION_ENTITY_SLOTS)
     assert max_launch.shape == (4, ACTION_ENTITY_SLOTS)
-    assert PLANET_CHANNELS == 59
+    assert PLANET_CHANNELS == 61
     assert FLEET_CHANNELS == 57
     assert COMET_CHANNELS == 286
     planet_mask = entity_mask[:MAX_PLANETS]
@@ -694,6 +694,21 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
             dtype=np.float32,
         )
 
+    def planet_ship_features(ships: int, owner: int) -> list[float]:
+        if owner == -1:
+            return [
+                ships / 250.0,
+                normalized_log_ships(ships),
+                0.0,
+                0.0,
+            ]
+        return [
+            0.0,
+            0.0,
+            ships / 250.0,
+            normalized_log_ships(ships),
+        ]
+
     def normalized_point(point: list[float]) -> np.ndarray:
         return np.asarray(
             [
@@ -759,8 +774,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
                 0.0,
                 0.0,
                 2.0 / 3.0,
-                50.0 / 250.0,
-                normalized_log_ships(50),
+                *planet_ship_features(50, 0),
             ],
             [
                 0.0,
@@ -776,8 +790,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
                 0.0,
                 0.0,
                 1.5 / 3.0,
-                0.0,
-                normalized_log_ships(0),
+                *planet_ship_features(0, -1),
             ],
             [
                 0.0,
@@ -793,8 +806,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
                 0.0,
                 0.0,
                 1.0 / 3.0,
-                10.0 / 250.0,
-                normalized_log_ships(10),
+                *planet_ship_features(10, 3),
             ],
         ],
         dtype=np.float32,
