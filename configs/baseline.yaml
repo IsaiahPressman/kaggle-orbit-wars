@@ -2,7 +2,7 @@ env:
   n_envs: 256
   obs_spec:
     obs_spec: obs_v1
-    max_entities: 1024
+    max_entities: 512
   action_spec:
     action_spec: discrete_targets
     max_per_planet_launches: 1
@@ -10,21 +10,21 @@ env:
   two_player_weight: 0.5
   pin_memory: true
 
-model: stateless_transformer_5m
+model: stateless_transformer_20m
 
 optimizer:
   optimizer: muon
-  adamw_lr: 0.0003
+  adamw_lr: 0.0002
   adamw_eps: 1.0e-05
   weight_decay: 0.0
-  muon_lr: 0.01
-  muon_weight_decay: 0.1
+  muon_lr: 0.005
+  muon_weight_decay: 0.05
   muon_momentum: 0.95
   lr_schedule: null
 
 rl:
   horizon: 128
-  checkpoint_freq: 30_000_000
+  checkpoint_freq: 20_000_000
   replay_ratio: 1.0
   segment_sampling:
     sampling: uniform
@@ -32,19 +32,19 @@ rl:
     prio_alpha: 0.0
     prio_beta: 0.2
     prio_eps: 1.0e-06
-  gamma: 0.995
-  gae_lambda: 0.95
+  gamma: 0.999
+  gae_lambda: 0.9
   clip_coef: 0.2
   vf_clip_coef: 0.2
   vf_coef: 2.0
-  ent_coef: 1e-4
+  ent_coef: 2e-5
   max_grad_norm: 1.0
-  target_kl: null
+  target_kl: 0.03
   advantage_mode: gae
   vtrace_rho_clip: 1.0
   vtrace_c_clip: 1.0
   recompute_advantages_each_minibatch: false
-  normalize_advantages: false
+  normalize_advantages: true
   debug_validate_ppo_loss_inputs: false
   eval_replay_games: 8
   compile_mode: default

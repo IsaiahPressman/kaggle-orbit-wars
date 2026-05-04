@@ -37,7 +37,9 @@ type EncodedObsV1<'py> = (
 const OWNER_CHANNELS_WITH_NEUTRAL: usize = 5;
 const OWNER_CHANNELS: usize = 4;
 const PRODUCTION_CHANNELS: usize = 5;
-const SHIP_NORMALIZER: f32 = 250.0;
+const NEUTRAL_SHIP_NORMALIZER: f32 = 100.0;
+const SHIP_NORMALIZER: f32 = 500.0;
+// ln(100) ~= 4.6051702
 const LOG_SHIP_NORMALIZER: f32 = 4.6051702;
 const MIN_ANGULAR_VELOCITY: f32 = 0.025;
 const ANGULAR_VELOCITY_SPAN: f32 = 0.025;
@@ -156,7 +158,7 @@ pub(super) fn encode_state_with_action_slots(
 
         row[12] = (planet.radius / 3.0) as f32;
         if planet.owner == -1 {
-            row[13] = normalize_ships(planet.ships);
+            row[13] = normalize_neutral_ships(planet.ships);
             row[14] = normalize_log_ships(planet.ships);
         } else {
             row[15] = normalize_ships(planet.ships);
@@ -444,6 +446,10 @@ fn steps_until_next_comet_spawn(step: u32) -> u32 {
         .copied()
         .find(|spawn_step| *spawn_step > step)
         .map_or(0, |spawn_step| spawn_step - step)
+}
+
+fn normalize_neutral_ships(ships: i32) -> f32 {
+    ships as f32 / NEUTRAL_SHIP_NORMALIZER
 }
 
 fn normalize_ships(ships: i32) -> f32 {

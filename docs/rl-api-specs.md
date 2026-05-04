@@ -83,7 +83,8 @@ auto-reset, `still_playing` describes the returned reset observation, while
 - Positions use `x_norm = (x / BOARD_SIZE) * 2 - 1`, with `BOARD_SIZE = 100`.
   The four map corners are `(-1, -1)`, `(1, -1)`, `(-1, 1)`, and `(1, 1)`.
 - Radius uses `radius / 3`.
-- Ships use `ships / 250`.
+- Neutral planet linear ships use `ships / 100`. Player-owned planet, fleet,
+  and comet linear ships use `ships / 500`.
 - Log ships use `ln(max(ships, 0) + 1) / ln(100)`. Planets can reach zero
   ships after combat, so this avoids `ln(0)`.
 - Angular velocity uses `(angular_velocity - 0.025) / 0.025`. Generated games
@@ -418,8 +419,10 @@ Terminal episode metrics:
 | `ships_lost_per_game_mean` | Ships removed by combat, sun, or out-of-bounds fleet loss. |
 | `ships_lost_in_sun_per_game_mean` | Ships removed by sun fleet loss. |
 | `ships_lost_out_of_bounds_per_game_mean` | Ships removed by out-of-bounds fleet loss. |
+| `ships_lost_to_sun_or_oob_rate` | `(ships_lost_in_sun_per_game_mean + ships_lost_out_of_bounds_per_game_mean) / ships_lost_per_game_mean`. Omitted when no ships were lost. |
 | `fleets_lost_per_game_mean` | Fleets removed by sun or out-of-bounds loss. |
 | `fleets_lost_in_sun_per_game_mean` | Fleets removed by sun loss. |
 | `fleets_lost_out_of_bounds_per_game_mean` | Fleets removed by out-of-bounds loss. |
+| `fleets_lost_to_sun_or_oob_rate` | `(fleets_lost_in_sun_per_game_mean + fleets_lost_out_of_bounds_per_game_mean) / fleets_lost_per_game_mean`. Omitted when no fleets were lost. |
 | `terminal_planet_occupancy_rate_2p` | Occupied non-comet planet fraction at terminal for 2-player games. |
 | `terminal_planet_occupancy_rate_4p` | Occupied non-comet planet fraction at terminal for 4-player games. |

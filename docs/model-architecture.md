@@ -32,13 +32,14 @@ without changing callers that validate config dictionaries through the union.
 
 Actor-specific fields live inside the actor config. `ActorPureConfig` owns
 pure-head fields such as `n_action_mixtures`, `kappa_min`, `kappa_max`,
-`tau_min`, `alpha_beta_eps`, `dir_eps`, `max_ship_normalizer`, and
+`tau_min`, `alpha_beta_eps`, `dir_eps`, `max_ship_normalizer=500.0`, and
 `entropy_ship_support_cap`. `ActorDiscreteTargetsConfig` owns
-`n_action_mixtures`, `max_ship_normalizer`, `entropy_ship_support_cap`, and
-the logistic-mixture scale parameters `scale_min=0.25`,
+`n_action_mixtures`, `max_ship_normalizer=500.0`, `entropy_ship_support_cap`,
+and the logistic-mixture scale parameters `scale_min=0.10`,
 `scale_max_frac=0.5`, and `scale_max_abs_floor=8.0`.
 Model YAML files can reference actor presets by name through adjacent
-`configs/model/actor/*.yaml` files, for example `actor: discrete_targets`.
+`configs/model/actor/*.yaml` files, for example `actor: discrete_targets`, or
+can inline an actor config to override preset fields such as mixture count.
 
 `FullConfig` validates that `env.action_spec.action_spec` matches
 `model.actor.action_spec`. Direct model construction performs the same check
@@ -108,14 +109,18 @@ Linear layers use orthogonal initialization with zero biases. Input projections
 use unit gain, hidden projections use ReLU-style gain, and transformer residual
 output projections are scaled by `1 / sqrt(2 * depth)`.
 
-Actor output heads use small `0.01` gain with zero biases, matching the normal
-RL policy-layer initialization. The critic head uses unit gain.
+Actor and critic output heads are two-layer MLP projections with hidden width
+`embed_dim`, the configured activation in the middle, and output-specific final
+widths. Only the second linear layer in each output MLP is treated as an output
+layer for optimizer grouping and final-head initialization. Actor final output
+layers use small `0.01` gain with zero biases, matching the normal RL
+policy-layer initialization. The critic final output layer uses unit gain.
 
 ## Critic
 
-The critic reads the final four player tokens. A linear head produces one logit
-per player, then applies a masked softmax using `obs.still_playing` with shape
-`(batch, 4)`.
+The critic reads the final four player tokens. A two-layer MLP head produces one
+logit per player, then applies a masked softmax using `obs.still_playing` with
+shape `(batch, 4)`.
 
 The resulting winner probabilities are mapped linearly into value targets:
 
@@ -190,6 +195,8 @@ For every slot, the policy emits:
 - mixture logits for angle/size components
 - von Mises angle parameters
 - shifted beta-binomial size parameters
+
+Each emitted parameter group uses its own two-layer MLP output head.
 
 Sampling stops per `(batch, player, entity)` lane when the previous launch is
 false or when the remaining ship budget falls below `min_fleet_size`. The

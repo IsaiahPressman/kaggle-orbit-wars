@@ -4,4 +4,11 @@ depth: 12
 n_heads: 12
 mlp_ratio: 3.0
 force_flash_attn: true
-actor: discrete_targets
+actor:
+  action_spec: discrete_targets
+  n_action_mixtures: 8
+  max_ship_normalizer: 500.0
+  entropy_ship_support_cap: 1024
+  scale_min: 0.10
+  scale_max_frac: 0.5
+  scale_max_abs_floor: 8.0

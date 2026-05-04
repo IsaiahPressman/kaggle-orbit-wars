@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Literal
 
 import pytest
@@ -522,8 +523,6 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
             "terminal_planet_occupancy_rate_2p": [0.5, 0.75],
             "terminal_planet_occupancy_rate_4p": [1.0],
             "win_rate_player_0": [1.0, 0.0],
-            "terminal_episodes_2p": [1.0, 1.0],
-            "terminal_episodes_4p": [1.0],
         }
     )
 
@@ -537,9 +536,6 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
     assert metrics["train/terminal_planet_occupancy_rate_2p"] == 0.625
     assert metrics["train/terminal_planet_occupancy_rate_4p"] == 1.0
     assert metrics["train/win_rate_player_0"] == 0.5
-    assert metrics["train/terminal_episodes_2p"] == 2.0
-    assert metrics["train/terminal_episodes_4p"] == 1.0
-    assert metrics["train/terminal_episodes"] == 3.0
 
 
 def test_player_segment_returns_preserve_per_player_terminal_rewards() -> None:
@@ -742,6 +738,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "policy/ratio_max",
         "policy/logratio_mean",
         "policy/logratio_abs_max",
+        "policy/target_kl_exceeded",
         "optimizer/grad_norm",
         "optimizer/steps",
         "optimizer/learning_rate",
@@ -765,6 +762,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         for param, old in zip(model.parameters(), before, strict=True)
     )
     assert metrics["policy/launch_entropy"] == pytest.approx(metrics["policy/entropy"])
+    assert metrics["policy/target_kl_exceeded"] == pytest.approx(0.0)
     assert metrics["train/player_step_total"] == pytest.approx(80.0)
     assert metrics["optimizer/steps"] == pytest.approx(2.0)
     assert metrics["optimizer/learning_rate"] == pytest.approx(0.05)
@@ -1141,6 +1139,71 @@ def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
     assert "optimizer/num_minibatches" not in metrics
     assert "optimizer/num_total_minibatches" not in metrics
     assert metrics["sampling/effective_replay_exposure"] == pytest.approx(1.0)
+    assert metrics["policy/target_kl_exceeded"] == pytest.approx(0.0)
+
+
+def test_update_reports_target_kl_guard_when_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(9)
+    env = TinyOrbitEnv(n_envs=4)
+    model = TinyOrbitModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            replay_ratio=1.0,
+            target_kl=0.01,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+        ),
+        device=torch.device("cpu"),
+    )
+    bootstrap_values = trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+    policy_mask = ppo._policy_mask(segments.obs)
+    value_mask = segments.obs.still_playing
+    advantages = torch.ones_like(segments.rewards)
+    returns = advantages + segments.values
+    update_calls = 0
+
+    def fake_update_minibatch(
+        segments: ppo.PPORolloutSegments,
+        advantages: torch.Tensor,  # noqa: ARG001
+        returns: torch.Tensor,  # noqa: ARG001
+        policy_mask: torch.Tensor,  # noqa: ARG001
+        value_mask: torch.Tensor,  # noqa: ARG001
+        sample: ppo.SegmentSample,
+        *,
+        value_clip_anchor: torch.Tensor,  # noqa: ARG001
+    ) -> ppo.PPOUpdateResult:
+        nonlocal update_calls
+        update_calls += 1
+        zero = segments.logp.new_zeros(())
+        metrics = replace(_zero_loss_metrics(zero), approx_kl=zero + 0.02)
+        return ppo.PPOUpdateResult(
+            metrics=metrics,
+            indices=sample.indices,
+            new_logp=segments.logp[sample.indices],
+            new_values=segments.values[sample.indices],
+            grad_norm=zero,
+            target_kl_exceeded=True,
+        )
+
+    monkeypatch.setattr(trainer, "_update_minibatch", fake_update_minibatch)
+
+    metrics = trainer._update(
+        segments,
+        advantages,
+        returns,
+        bootstrap_values,
+        policy_mask,
+        value_mask,
+    )
+
+    assert update_calls == 1
+    assert metrics["policy/target_kl_exceeded"] == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize(

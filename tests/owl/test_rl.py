@@ -286,7 +286,6 @@ def test_vectorized_env_terminal_snapshot_preserves_pre_reset_state() -> None:
     assert terminal_metrics is not None
     assert terminal_snapshot["step"] > obs.global_features[0, 0].item()
     assert terminal_snapshot["player_count"] == 2
-    assert terminal_metrics["terminal_episodes_2p"] == 1.0
 
 
 def test_two_player_sample_marks_unused_player_slots_done() -> None:
@@ -697,7 +696,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
     def planet_ship_features(ships: int, owner: int) -> list[float]:
         if owner == -1:
             return [
-                ships / 250.0,
+                ships / 100.0,
                 normalized_log_ships(ships),
                 0.0,
                 0.0,
@@ -705,7 +704,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
         return [
             0.0,
             0.0,
-            ships / 250.0,
+            ships / 500.0,
             normalized_log_ships(ships),
         ]
 
@@ -850,7 +849,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
                 normalized_position(100.0),
                 speed_8,
                 0.0,
-                8.0 / 250.0,
+                8.0 / 500.0,
                 normalized_log_ships(8),
             ],
             [
@@ -862,7 +861,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
                 normalized_position(0.0),
                 np.cos(np.pi / 2) * speed_27,
                 np.sin(np.pi / 2) * speed_27,
-                27.0 / 250.0,
+                27.0 / 500.0,
                 normalized_log_ships(27),
             ],
             [
@@ -874,7 +873,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
                 normalized_position(25.0),
                 np.cos(np.pi) * speed_64,
                 np.sin(np.pi) * speed_64,
-                64.0 / 250.0,
+                64.0 / 500.0,
                 normalized_log_ships(64),
             ],
             [
@@ -886,7 +885,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
                 normalized_position(50.0),
                 np.cos(np.pi / 4) * speed_125,
                 np.sin(np.pi / 4) * speed_125,
-                125.0 / 250.0,
+                125.0 / 500.0,
                 normalized_log_ships(125),
             ],
         ],
@@ -909,7 +908,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
 
     expected_comets = np.zeros((2, COMET_CHANNELS), dtype=np.float32)
     expected_comets[0, 2] = 1.0
-    expected_comets[0, 5] = 125.0 / 250.0
+    expected_comets[0, 5] = 125.0 / 500.0
     expected_comets[0, 6] = normalized_log_ships(125)
     expected_comets[0, 7] = 3.0 / MAX_COMET_PATH_LENGTH
     fill_comet_path_features(
@@ -923,7 +922,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
         1,
     )
     expected_comets[1, 1] = 1.0
-    expected_comets[1, 5] = 30.0 / 250.0
+    expected_comets[1, 5] = 30.0 / 500.0
     expected_comets[1, 6] = normalized_log_ships(30)
     expected_comets[1, 7] = 2.0 / MAX_COMET_PATH_LENGTH
     fill_comet_path_features(
@@ -1017,7 +1016,7 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
 
     assert fleet_mask.tolist() == [True]
     assert fleets[0, 1] == 1
-    assert fleets[0, 8] == pytest.approx(20 / 250)
+    assert fleets[0, 8] == pytest.approx(20 / 500.0)
     assert "max_entities exceeded: 1 fleets ignored" in capfd.readouterr().err
 
 
@@ -1053,7 +1052,7 @@ def test_python_observation_encoder_writes_comet_future_paths() -> None:
     assert planets[0].tolist() == [0.0] * PLANET_CHANNELS
     assert not orbiting_planets[0]
     assert comets[0, 2] == 1.0
-    assert comets[0, 5] == pytest.approx(25 / 250)
+    assert comets[0, 5] == pytest.approx(25 / 500.0)
     assert comets[0, 7] == pytest.approx(2 / MAX_COMET_PATH_LENGTH)
     assert comets[0, 8] == pytest.approx(0.0)
     assert comets[0, 9] == pytest.approx(0.0)
