@@ -184,6 +184,15 @@ class PPORolloutBuffer:
                 dtype=torch.float32,
                 device=device,
             ),
+            orbiting_planets=torch.zeros(
+                (
+                    horizon,
+                    n_envs,
+                    obs_spec.max_planets,
+                ),
+                dtype=torch.bool,
+                device=device,
+            ),
             fleets=torch.zeros(
                 (horizon, n_envs, obs_spec.max_fleets, obs_spec.fleet_channels),
                 dtype=torch.float32,
@@ -319,6 +328,7 @@ class PPOTrainer:
         self.device = device
         self.n_envs = env.n_envs
         self.optimizer_steps = 0
+        self.player_step_total = 0
         self._non_blocking_env_to_device = device.type == "cuda" and getattr(
             env, "pin_memory_enabled", False
         )
@@ -391,7 +401,8 @@ class PPOTrainer:
         metrics["train/advantage_std"] = float(
             masked_std(advantages, policy_mask).item()
         )
-        metrics["train/player_step_total"] = float(value_mask.sum().item())
+        self.player_step_total += int(value_mask.sum().item())
+        metrics["train/player_step_total"] = float(self.player_step_total)
         metrics.update(_mean_env_metrics(env_metrics))
         elapsed = max(perf_counter() - start, 1e-12)
         rollout_steps = self.config.horizon * self.n_envs
