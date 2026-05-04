@@ -32,13 +32,14 @@ without changing callers that validate config dictionaries through the union.
 
 Actor-specific fields live inside the actor config. `ActorPureConfig` owns
 pure-head fields such as `n_action_mixtures`, `kappa_min`, `kappa_max`,
-`tau_min`, `alpha_beta_eps`, `dir_eps`, `max_ship_normalizer`, and
+`tau_min`, `alpha_beta_eps`, `dir_eps`, `max_ship_normalizer=500.0`, and
 `entropy_ship_support_cap`. `ActorDiscreteTargetsConfig` owns
-`n_action_mixtures`, `max_ship_normalizer`, `entropy_ship_support_cap`, and
-the logistic-mixture scale parameters `scale_min=0.25`,
+`n_action_mixtures`, `max_ship_normalizer=500.0`, `entropy_ship_support_cap`,
+and the logistic-mixture scale parameters `scale_min=0.25`,
 `scale_max_frac=0.5`, and `scale_max_abs_floor=8.0`.
 Model YAML files can reference actor presets by name through adjacent
-`configs/model/actor/*.yaml` files, for example `actor: discrete_targets`.
+`configs/model/actor/*.yaml` files, for example `actor: discrete_targets`, or
+can inline an actor config to override preset fields such as mixture count.
 
 `FullConfig` validates that `env.action_spec.action_spec` matches
 `model.actor.action_spec`. Direct model construction performs the same check

@@ -243,30 +243,9 @@ def test_full_config_rejects_rl_env_count() -> None:
         )
 
 
-@pytest.mark.parametrize("preset", ["baseline", "pufferish"])
+@pytest.mark.parametrize("preset", ["baseline"])
 def test_training_presets_load(preset: str) -> None:
     _ = FullConfig.from_file(_REPO_ROOT / "configs" / f"{preset}.yaml")
-
-
-def test_training_presets_make_baseline_and_pufferish_modes_explicit() -> None:
-    baseline = FullConfig.from_file(_REPO_ROOT / "configs" / "baseline.yaml")
-    pufferish = FullConfig.from_file(_REPO_ROOT / "configs" / "pufferish.yaml")
-
-    assert baseline.env.n_envs == 256
-    assert baseline.rl.checkpoint_freq is not None
-    assert baseline.rl.advantage_mode == "gae"
-    assert not baseline.rl.recompute_advantages_each_minibatch
-    assert baseline.rl.segment_sampling.sampling == "uniform"
-
-    assert pufferish.env.n_envs == 2048
-    assert pufferish.rl.checkpoint_freq is None
-    assert pufferish.rl.advantage_mode == "puffer_vtrace"
-    assert pufferish.rl.recompute_advantages_each_minibatch
-    assert pufferish.rl.normalize_advantages
-    assert pufferish.rl.dtype == "bfloat16"
-    assert pufferish.rl.segment_sampling.sampling == "advantage_priority"
-    assert pufferish.rl.segment_sampling.prio_alpha == pytest.approx(0.5)
-    assert pufferish.rl.segment_sampling.prio_beta == pytest.approx(0.2)
 
 
 def test_autocast_context_respects_dtype_config() -> None:

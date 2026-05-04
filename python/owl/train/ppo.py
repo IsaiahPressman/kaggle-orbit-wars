@@ -135,6 +135,7 @@ class PPOUpdateResult:
     new_logp: torch.Tensor
     new_values: torch.Tensor
     grad_norm: torch.Tensor
+    target_kl_exceeded: bool = False
 
 
 @dataclass(frozen=True)
@@ -492,6 +493,7 @@ class PPOTrainer:
         current_bootstrap_values = bootstrap_values.clone()
         n_minibatches = _num_minibatches_per_update(self.config, self.n_envs)
         sampled_segments = 0
+        target_kl_exceeded = False
         update_samples = _update_samples(
             sampling_advantages=_segment_sampling_advantages(
                 current_advantages,
@@ -551,15 +553,14 @@ class PPOTrainer:
                 current_ratios[update.indices] = torch.exp(
                     update.new_logp - segments.logp[update.indices]
                 )
-            if (
-                self.config.target_kl is not None
-                and update.metrics.approx_kl.item() > self.config.target_kl
-            ):
+            target_kl_exceeded = update.target_kl_exceeded
+            if target_kl_exceeded:
                 break
 
         if not loss_metrics:
             raise RuntimeError("internal error: PPO update produced no minibatches")
         metrics = _mean_loss_metrics(loss_metrics)
+        metrics["policy/target_kl_exceeded"] = float(target_kl_exceeded)
         metrics["optimizer/grad_norm"] = float(torch.stack(grad_norms).mean().item())
         metrics["optimizer/steps"] = float(self.optimizer_steps)
         metrics["optimizer/minibatches_per_update"] = float(n_minibatches)
@@ -681,6 +682,19 @@ class PPOTrainer:
                 for name, component in entropy_components.items()
             },
         )
+        if (
+            self.config.target_kl is not None
+            and metrics.approx_kl.item() > self.config.target_kl
+        ):
+            return PPOUpdateResult(
+                metrics=metrics,
+                indices=idx,
+                new_logp=new_logp.detach(),
+                new_values=new_values.detach(),
+                grad_norm=metrics.loss.detach().new_zeros(()),
+                target_kl_exceeded=True,
+            )
+
         self.optimizer.zero_grad(set_to_none=True)
         metrics.loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -690,6 +704,7 @@ class PPOTrainer:
         self.optimizer_steps += 1
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
+
         return PPOUpdateResult(
             metrics=metrics,
             indices=idx,
