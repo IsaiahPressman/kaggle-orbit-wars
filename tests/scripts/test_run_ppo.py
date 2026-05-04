@@ -178,7 +178,6 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
             stats,
             {
                 "game_length_mean": [12.0],
-                "terminal_episodes_2p": [1.0],
             },
             6,
         )
@@ -199,8 +198,6 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
 
     assert metrics["eval/win_rate_against_last_best"] == pytest.approx(1.0)
     assert metrics["eval/game_length_mean"] == pytest.approx(12.0)
-    assert metrics["eval/terminal_episodes_2p"] == pytest.approx(2.0)
-    assert metrics["eval/terminal_episodes"] == pytest.approx(2.0)
     assert metrics["time/eval_seconds"] == pytest.approx(4.0)
     assert metrics["perf/eval_sps"] == pytest.approx(3.0)
     assert seen_eval_sizes == [(2, 2), (2, 2)]

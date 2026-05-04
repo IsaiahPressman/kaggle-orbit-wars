@@ -1149,18 +1149,10 @@ def _extend_env_metrics(
 
 def _mean_env_metrics(metrics: dict[str, list[float]]) -> dict[str, float]:
     logged: dict[str, float] = {}
-    terminal_episodes = 0.0
     for key, values in metrics.items():
         if not values:
             continue
-        if key.startswith("terminal_episodes_"):
-            value = float(sum(values))
-            terminal_episodes += value
-        else:
-            value = float(sum(values) / len(values))
-        logged[f"train/{key}"] = value
-    if terminal_episodes > 0:
-        logged["train/terminal_episodes"] = terminal_episodes
+        logged[f"train/{key}"] = float(sum(values) / len(values))
     return logged
 
 

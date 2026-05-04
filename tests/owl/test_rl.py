@@ -286,7 +286,6 @@ def test_vectorized_env_terminal_snapshot_preserves_pre_reset_state() -> None:
     assert terminal_metrics is not None
     assert terminal_snapshot["step"] > obs.global_features[0, 0].item()
     assert terminal_snapshot["player_count"] == 2
-    assert terminal_metrics["terminal_episodes_2p"] == 1.0
 
 
 def test_two_player_sample_marks_unused_player_slots_done() -> None:
