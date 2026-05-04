@@ -26,6 +26,8 @@
 - Avoid jumping through hoops for backwards compatibility - don't be afraid of
   refactoring and breaking old APIs in order to improve them.
 - Before creating or recommending a PR, complete `docs/pr-checklist.md` and summarize any residual risks.
+- Merge PRs with a regular merge commit by default. Do not squash-merge unless
+  the user explicitly requests it.
 - For Orbit Wars rules changes, keep `docs/rules-engine.md` and
   `docs/rules-parity-coverage.md` current with implementation state, test
   surface, and known gaps.
