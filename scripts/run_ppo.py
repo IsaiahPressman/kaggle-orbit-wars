@@ -410,6 +410,7 @@ def _evaluate_player_count(
                 "eval_opponent": "last_best",
             },
             rng=random.Random(),
+            split_files=True,
         )
         if replay_output_path is not None and replay_games > 0
         else None
@@ -605,8 +606,8 @@ def _eval_actions_for_assignments(
 ) -> ModelActions:
     device_obs = _obs_to_device(obs, device)
     with autocast_context(config, device):
-        current_output = current_model(device_obs, deterministic=True)
-        last_best_output = last_best_model(device_obs, deterministic=True)
+        current_output = current_model(device_obs, deterministic=False)
+        last_best_output = last_best_model(device_obs, deterministic=False)
     use_current = assignments.to(device=device).eq(MODEL_CURRENT)
     return _select_actions(
         current_output.actions, last_best_output.actions, use_current

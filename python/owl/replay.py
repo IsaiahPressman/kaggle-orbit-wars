@@ -31,6 +31,7 @@ class ReplayRecorder:
         sample_games: int,
         metadata: dict[str, Any],
         rng: random.Random,
+        split_files: bool = False,
     ) -> None:
         if sample_games < 0:
             raise ValueError("sample_games must be non-negative")
@@ -42,11 +43,19 @@ class ReplayRecorder:
         self.player_count = player_count
         self.total_games = total_games
         self.metadata = metadata
+        self.split_files = split_files
         self.sampled_game_ordinals = set(rng.sample(range(total_games), sample_games))
         self._active: dict[int, _ActiveReplay] = {}
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text("", encoding="utf-8")
+        if split_files:
+            output_path.unlink(missing_ok=True)
+            for stale_path in output_path.parent.glob(
+                f"{output_path.stem}_game_*{output_path.suffix}"
+            ):
+                stale_path.unlink()
+        else:
+            output_path.write_text("", encoding="utf-8")
 
     def start_episode(
         self,
@@ -138,7 +147,14 @@ class ReplayRecorder:
             "metadata": self.metadata,
             "frames": replay.frames,
         }
-        with self.output_path.open("a", encoding="utf-8") as replay_file:
+        output_path = self.output_path
+        if self.split_files:
+            output_path = self.output_path.with_name(
+                f"{self.output_path.stem}_game_{replay.game_ordinal:04d}"
+                f"{self.output_path.suffix}"
+            )
+        mode = "w" if self.split_files else "a"
+        with output_path.open(mode, encoding="utf-8") as replay_file:
             replay_file.write(json.dumps(row, separators=(",", ":")))
             replay_file.write("\n")
 
