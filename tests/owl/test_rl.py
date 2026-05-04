@@ -507,7 +507,7 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     assert max_launch.shape == (4, ACTION_ENTITY_SLOTS)
     assert PLANET_CHANNELS == 59
     assert FLEET_CHANNELS == 57
-    assert COMET_CHANNELS == 88
+    assert COMET_CHANNELS == 286
     planet_mask = entity_mask[:MAX_PLANETS]
     comet_mask = entity_mask[MAX_PLANETS:ACTION_ENTITY_SLOTS]
     fleet_mask = entity_mask[ACTION_ENTITY_SLOTS:]
@@ -694,6 +694,55 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
             dtype=np.float32,
         )
 
+    def normalized_point(point: list[float]) -> np.ndarray:
+        return np.asarray(
+            [
+                normalized_position(point[0]),
+                normalized_position(point[1]),
+            ],
+            dtype=np.float32,
+        )
+
+    def fill_comet_path_features(
+        row: np.ndarray, path: list[list[float]], path_start: int
+    ) -> None:
+        current = normalized_point(path[path_start])
+        row[8:10] = current
+        row[10:52] = spatial_features(current[0], current[1])
+
+        velocity = np.zeros(2, dtype=np.float32)
+        if path_start + 1 < len(path):
+            velocity = normalized_point(path[path_start + 1]) - current
+        row[52:54] = velocity
+        row[54:59] = fleet_motion_features(
+            current[0],
+            current[1],
+            velocity[0],
+            velocity[1],
+        )
+
+        offsets = [1, 2, 4, 8, 16]
+        valid_start = 59
+        positions_start = 64
+        spatial_start = 74
+        for selected_index, offset in enumerate(offsets):
+            selected_path_index = path_start + offset
+            if selected_path_index >= len(path):
+                continue
+            position = normalized_point(path[selected_path_index])
+            row[valid_start + selected_index] = 1.0
+            position_start = positions_start + selected_index * 2
+            row[position_start : position_start + 2] = position
+            selected_spatial_start = spatial_start + selected_index * 42
+            row[selected_spatial_start : selected_spatial_start + 42] = (
+                spatial_features(
+                    position[0],
+                    position[1],
+                )
+            )
+
+        row[284:286] = normalized_point(path[-1]) - current
+
     base_expected_planets = np.array(
         [
             [
@@ -851,15 +900,30 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
     expected_comets[0, 5] = 125.0 / 250.0
     expected_comets[0, 6] = normalized_log_ships(125)
     expected_comets[0, 7] = 3.0 / MAX_COMET_PATH_LENGTH
-    expected_comets[0, 8:14] = [0.0, 1.0, 1.0, 0.0, -0.5, -0.5]
+    fill_comet_path_features(
+        expected_comets[0],
+        [
+            [0.0, 0.0],
+            [50.0, 100.0],
+            [100.0, 50.0],
+            [25.0, 25.0],
+        ],
+        1,
+    )
     expected_comets[1, 1] = 1.0
     expected_comets[1, 5] = 30.0 / 250.0
     expected_comets[1, 6] = normalized_log_ships(30)
     expected_comets[1, 7] = 2.0 / MAX_COMET_PATH_LENGTH
-    expected_comets[1, 8:12] = [-1.0, 0.0, 0.0, -1.0]
-    np.testing.assert_allclose(comets[comet_mask], expected_comets, atol=0.0)
-    np.testing.assert_array_equal(comets[0, 14:], np.zeros(COMET_CHANNELS - 14))
-    np.testing.assert_array_equal(comets[1, 12:], np.zeros(COMET_CHANNELS - 12))
+    fill_comet_path_features(
+        expected_comets[1],
+        [
+            [100.0, 100.0],
+            [0.0, 50.0],
+            [50.0, 0.0],
+        ],
+        1,
+    )
+    np.testing.assert_allclose(comets[comet_mask], expected_comets, atol=1e-6)
 
     np.testing.assert_allclose(
         global_features,
@@ -981,8 +1045,15 @@ def test_python_observation_encoder_writes_comet_future_paths() -> None:
     assert comets[0, 7] == pytest.approx(2 / MAX_COMET_PATH_LENGTH)
     assert comets[0, 8] == pytest.approx(0.0)
     assert comets[0, 9] == pytest.approx(0.0)
-    assert comets[0, 10] == pytest.approx(1.0)
-    assert comets[0, 11] == pytest.approx(1.0)
-    assert np.all(comets[0, 12 : 8 + MAX_COMET_PATH_LENGTH * 2] == 0.0)
+    assert comets[0, 52] == pytest.approx(1.0)
+    assert comets[0, 53] == pytest.approx(1.0)
+    np.testing.assert_array_equal(
+        comets[0, 59:64],
+        np.array([1.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+    )
+    assert comets[0, 64] == pytest.approx(1.0)
+    assert comets[0, 65] == pytest.approx(1.0)
+    assert comets[0, 284] == pytest.approx(1.0)
+    assert comets[0, 285] == pytest.approx(1.0)
     assert can_act[2, MAX_PLANETS]
     assert max_launch[2, MAX_PLANETS] == 25

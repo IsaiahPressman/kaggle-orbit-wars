@@ -47,6 +47,8 @@ const BASE_FLEET_CHANNELS: usize = 10;
 const CARTESIAN_FOURIER_FREQUENCIES: [f32; 6] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
 const RADIAL_FOURIER_FREQUENCIES: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
 const PLANET_ORBITAL_CHANNELS: usize = 2;
+const COMET_BASE_CHANNELS: usize = OWNER_CHANNELS_WITH_NEUTRAL + 3;
+const COMET_SELECTED_FUTURE_OFFSETS: [usize; 5] = [1, 2, 4, 8, 16];
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_state(
@@ -344,18 +346,85 @@ fn encode_comets(
         let remaining_steps = path.len().saturating_sub(path_start);
         row[OWNER_CHANNELS_WITH_NEUTRAL + 2] =
             remaining_steps as f32 / MAX_COMET_PATH_LENGTH as f32;
-        let path_values_start = OWNER_CHANNELS_WITH_NEUTRAL + 3;
-        for (future_index, point) in path
-            .iter()
-            .skip(path_start)
-            .take(MAX_COMET_PATH_LENGTH)
-            .enumerate()
-        {
-            let value_start = path_values_start + future_index * 2;
-            row[value_start] = normalize_position(point.x);
-            row[value_start + 1] = normalize_position(point.y);
-        }
+        encode_comet_path_features(&mut row[COMET_BASE_CHANNELS..], path, path_start);
     }
+}
+
+fn encode_comet_path_features(row: &mut [f32], path: &[Point], path_start: usize) {
+    assert_eq!(
+        row.len(),
+        2 + spatial_feature_count()
+            + 2
+            + 5
+            + COMET_SELECTED_FUTURE_OFFSETS.len()
+            + COMET_SELECTED_FUTURE_OFFSETS.len() * 2
+            + COMET_SELECTED_FUTURE_OFFSETS.len() * spatial_feature_count()
+            + 2
+    );
+    row.fill(0.0);
+    let Some(current) = path.get(path_start).map(normalized_point) else {
+        return;
+    };
+
+    row[0] = current.0;
+    row[1] = current.1;
+    let spatial_start = 2;
+    encode_spatial_features(
+        &mut row[spatial_start..spatial_start + spatial_feature_count()],
+        current.0,
+        current.1,
+    );
+
+    let velocity_start = spatial_start + spatial_feature_count();
+    let mut velocity_x = 0.0;
+    let mut velocity_y = 0.0;
+    if let Some(next) = path.get(path_start + 1).map(normalized_point) {
+        velocity_x = next.0 - current.0;
+        velocity_y = next.1 - current.1;
+    }
+    row[velocity_start] = velocity_x;
+    row[velocity_start + 1] = velocity_y;
+    encode_fleet_motion_features(
+        &mut row[velocity_start + 2..velocity_start + 2 + 5],
+        current.0,
+        current.1,
+        velocity_x,
+        velocity_y,
+    );
+
+    let valid_start = velocity_start + 2 + 5;
+    let positions_start = valid_start + COMET_SELECTED_FUTURE_OFFSETS.len();
+    let selected_spatial_start = positions_start + COMET_SELECTED_FUTURE_OFFSETS.len() * 2;
+    for (selected_index, offset) in COMET_SELECTED_FUTURE_OFFSETS.into_iter().enumerate() {
+        let Some(position) = path.get(path_start + offset).map(normalized_point) else {
+            continue;
+        };
+        row[valid_start + selected_index] = 1.0;
+
+        let position_start = positions_start + selected_index * 2;
+        row[position_start] = position.0;
+        row[position_start + 1] = position.1;
+
+        let selected_spatial_row_start =
+            selected_spatial_start + selected_index * spatial_feature_count();
+        encode_spatial_features(
+            &mut row
+                [selected_spatial_row_start..selected_spatial_row_start + spatial_feature_count()],
+            position.0,
+            position.1,
+        );
+    }
+
+    let displacement_start =
+        selected_spatial_start + COMET_SELECTED_FUTURE_OFFSETS.len() * spatial_feature_count();
+    let final_position = normalized_point(path.last().expect("non-empty path has final position"));
+    row[displacement_start] = final_position.0 - current.0;
+    row[displacement_start + 1] = final_position.1 - current.1;
+    assert_eq!(displacement_start + 2, row.len());
+}
+
+fn normalized_point(point: &Point) -> (f32, f32) {
+    (normalize_position(point.x), normalize_position(point.y))
 }
 
 fn encode_global(state: &State, global_obs: &mut [f32]) {

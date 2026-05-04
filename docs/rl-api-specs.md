@@ -54,7 +54,7 @@ environment returns an `ObsBatch` with these tensors:
 | `planets` | `float32` | `(n_envs, MAX_PLANETS, 59)` |
 | `orbiting_planets` | `bool` | `(n_envs, MAX_PLANETS)` |
 | `fleets` | `float32` | `(n_envs, max_fleets, 57)` |
-| `comets` | `float32` | `(n_envs, MAX_COMETS, 88)` |
+| `comets` | `float32` | `(n_envs, MAX_COMETS, 286)` |
 | `entity_mask` | `bool` | `(n_envs, max_entities)` |
 | `still_playing` | `bool` | `(n_envs, 4)` |
 | `global_features` | `float32` | `(n_envs, 3)` |
@@ -173,9 +173,7 @@ max_entities exceeded: N fleets ignored
 
 ### Comet Tensor
 
-Shape per env: `(MAX_COMETS, 88)`.
-
-Comet channels are unchanged by the planet/fleet spatial feature expansion.
+Shape per env: `(MAX_COMETS, 286)`.
 
 Comets are encoded separately from normal planets. Active comet planet IDs are
 sorted in ascending ID order, deduplicated, and emitted up to `MAX_COMETS`.
@@ -188,14 +186,28 @@ This matches the comet portion of the action entity axis.
 | `5` | normalized ships |
 | `6` | normalized log ships |
 | `7` | remaining path steps divided by `MAX_COMET_PATH_LENGTH` |
-| `8..87` | future path positions as `MAX_COMET_PATH_LENGTH` `(x, y)` pairs |
+| `8` | current normalized `x` from the path |
+| `9` | current normalized `y` from the path |
+| `10..52` | current Cartesian Fourier, polar, angular-harmonic, and radial Fourier spatial features |
+| `52` | normalized `vx` from the next path point minus the current path point |
+| `53` | normalized `vy` from the next path point minus the current path point |
+| `54` | speed `sqrt(vx^2 + vy^2)` |
+| `55` | heading `x` component, or `0` if no next path point exists |
+| `56` | heading `y` component, or `0` if no next path point exists |
+| `57` | radial velocity in the sun-centered radial basis |
+| `58` | tangential velocity in the counterclockwise tangent basis |
+| `59..64` | future-valid flags for offsets `[1, 2, 4, 8, 16]`, encoded as `0.0` or `1.0` |
+| `64..74` | selected future normalized `(x, y)` pairs for offsets `[1, 2, 4, 8, 16]` |
+| `74..284` | spatial features for each selected future position |
+| `284` | normalized final path `x` minus current normalized `x` |
+| `285` | normalized final path `y` minus current normalized `y` |
 
-The future path starts at the comet group's current `path_index`. In normal
-post-step observations for an active comet, the first `(x, y)` pair is the
-comet's current position, followed by future positions. If `path_index < 0`,
-the encoder starts at path index `0`. Each path position is normalized with the
-same `[-1, 1]` map transform as planets and fleets. Unused path slots are
-zero-filled.
+The current path point starts at the comet group's current `path_index`. If
+`path_index < 0`, the encoder starts at path index `0`. If a selected future
+offset is outside the remaining known path, its valid flag and feature slots are
+zero-filled. If no next path point exists, comet velocity, speed, heading,
+radial velocity, and tangential velocity are zero-filled. The displacement to
+the final path point uses the path's last known point.
 
 `entity_mask[MAX_PLANETS + i]` is `True` only for active comet rows.
 
