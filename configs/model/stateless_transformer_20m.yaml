@@ -1,0 +1,7 @@
+model_arch: stateless_transformer_v1
+embed_dim: 384
+depth: 12
+n_heads: 12
+mlp_ratio: 3.0
+force_flash_attn: true
+actor: discrete_targets
