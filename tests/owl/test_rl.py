@@ -505,7 +505,7 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     assert global_features.shape == (GLOBAL_CHANNELS,)
     assert can_act.shape == (4, ACTION_ENTITY_SLOTS)
     assert max_launch.shape == (4, ACTION_ENTITY_SLOTS)
-    assert PLANET_CHANNELS == 57
+    assert PLANET_CHANNELS == 59
     assert FLEET_CHANNELS == 57
     assert COMET_CHANNELS == 88
     planet_mask = entity_mask[:MAX_PLANETS]
@@ -681,6 +681,19 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
             dtype=np.float32,
         )
 
+    def planet_orbital_velocity(
+        x: float, y: float, angular_velocity: float, orbiting: bool
+    ) -> np.ndarray:
+        if not orbiting:
+            return np.zeros(2, dtype=np.float32)
+        return np.asarray(
+            [
+                -angular_velocity * y,
+                angular_velocity * x,
+            ],
+            dtype=np.float32,
+        )
+
     base_expected_planets = np.array(
         [
             [
@@ -739,8 +752,18 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
     )
     expected_planets = np.asarray(
         [
-            np.concatenate([row, spatial_features(row[5], row[6])])
-            for row in base_expected_planets
+            np.concatenate(
+                [
+                    row,
+                    spatial_features(row[5], row[6]),
+                    planet_orbital_velocity(row[5], row[6], 0.0375, orbiting),
+                ]
+            )
+            for row, orbiting in zip(
+                base_expected_planets,
+                [True, True, False],
+                strict=True,
+            )
         ],
         dtype=np.float32,
     )

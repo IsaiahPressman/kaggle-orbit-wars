@@ -51,7 +51,7 @@ environment returns an `ObsBatch` with these tensors:
 
 | Tensor | dtype | Shape |
 | --- | --- | --- |
-| `planets` | `float32` | `(n_envs, MAX_PLANETS, 57)` |
+| `planets` | `float32` | `(n_envs, MAX_PLANETS, 59)` |
 | `orbiting_planets` | `bool` | `(n_envs, MAX_PLANETS)` |
 | `fleets` | `float32` | `(n_envs, max_fleets, 57)` |
 | `comets` | `float32` | `(n_envs, MAX_COMETS, 88)` |
@@ -96,7 +96,7 @@ auto-reset, `still_playing` describes the returned reset observation, while
 
 ### Planet Tensor
 
-Shape per env: `(MAX_PLANETS, 57)`.
+Shape per env: `(MAX_PLANETS, 59)`.
 
 Only non-comet planets are included. If more than `MAX_PLANETS` non-comet
 planets exist, the encoder panics. Generated games currently produce up to
@@ -121,6 +121,8 @@ generated planet IDs are unique and contiguous before comet insertion.
 | `42` | `cos(theta)` |
 | `43..49` | angular harmonics `sin(k theta), cos(k theta)` for `k = 2..4` |
 | `49..57` | radial Fourier features `sin(pi f r), cos(pi f r)` |
+| `57` | orbiting planet `vx = -angular_velocity * y`, else `0` |
+| `58` | orbiting planet `vy = angular_velocity * x`, else `0` |
 
 ### Orbiting Planet Tensor
 

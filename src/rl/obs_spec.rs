@@ -46,6 +46,7 @@ const BASE_PLANET_CHANNELS: usize = 15;
 const BASE_FLEET_CHANNELS: usize = 10;
 const CARTESIAN_FOURIER_FREQUENCIES: [f32; 6] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
 const RADIAL_FOURIER_FREQUENCIES: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
+const PLANET_ORBITAL_CHANNELS: usize = 2;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_state(
@@ -156,8 +157,20 @@ pub(super) fn encode_state_with_action_slots(
         row[14] = normalize_log_ships(planet.ships);
         let position_x = row[OWNER_CHANNELS_WITH_NEUTRAL];
         let position_y = row[OWNER_CHANNELS_WITH_NEUTRAL + 1];
-        encode_spatial_features(&mut row[BASE_PLANET_CHANNELS..], position_x, position_y);
-        orbiting_planet_obs[planet_index] = is_orbiting(planet.position(), planet.radius);
+        encode_spatial_features(
+            &mut row[BASE_PLANET_CHANNELS..BASE_PLANET_CHANNELS + spatial_feature_count()],
+            position_x,
+            position_y,
+        );
+        let orbiting = is_orbiting(planet.position(), planet.radius);
+        encode_planet_orbital_velocity(
+            &mut row[BASE_PLANET_CHANNELS + spatial_feature_count()..],
+            position_x,
+            position_y,
+            state.angular_velocity,
+            orbiting,
+        );
+        orbiting_planet_obs[planet_index] = orbiting;
     }
 
     for (fleet_index, fleet) in fleets.iter().take(max_fleets).enumerate() {
@@ -274,6 +287,23 @@ fn encode_fleet_motion_features(row: &mut [f32], x: f32, y: f32, velocity_x: f32
     let radial_y = y / radius;
     row[3] = velocity_x * radial_x + velocity_y * radial_y;
     row[4] = velocity_x * -radial_y + velocity_y * radial_x;
+}
+
+fn encode_planet_orbital_velocity(
+    row: &mut [f32],
+    x: f32,
+    y: f32,
+    angular_velocity: f64,
+    orbiting: bool,
+) {
+    assert_eq!(row.len(), PLANET_ORBITAL_CHANNELS);
+    row.fill(0.0);
+    if !orbiting {
+        return;
+    }
+    let angular_velocity = angular_velocity as f32;
+    row[0] = -angular_velocity * y;
+    row[1] = angular_velocity * x;
 }
 
 fn encode_comets(
@@ -702,7 +732,7 @@ mod tests {
     #[test]
     fn spatial_feature_count_matches_public_channel_widths() {
         assert_eq!(
-            BASE_PLANET_CHANNELS + spatial_feature_count(),
+            BASE_PLANET_CHANNELS + spatial_feature_count() + PLANET_ORBITAL_CHANNELS,
             PLANET_CHANNELS
         );
         assert_eq!(
@@ -731,6 +761,20 @@ mod tests {
         encode_fleet_motion_features(&mut row, 1.0, 0.0, 0.0, 0.0);
 
         assert_eq!(row, [0.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn planet_orbital_velocity_uses_normalized_tangent_direction_only_for_orbiting_planets() {
+        let mut row = [1.0; PLANET_ORBITAL_CHANNELS];
+
+        encode_planet_orbital_velocity(&mut row, 0.5, -0.25, 0.04, true);
+
+        assert_close(row[0], 0.01);
+        assert_close(row[1], 0.02);
+
+        encode_planet_orbital_velocity(&mut row, 0.5, -0.25, 0.04, false);
+
+        assert_eq!(row, [0.0, 0.0]);
     }
 
     #[test]
