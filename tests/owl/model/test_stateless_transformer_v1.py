@@ -60,6 +60,10 @@ def _obs_batch(
         (batch_size, obs_spec.max_planets, obs_spec.planet_channels),
         dtype=torch.float32,
     )
+    orbiting_planets = torch.zeros(
+        (batch_size, obs_spec.max_planets),
+        dtype=torch.bool,
+    )
     fleets = torch.zeros(
         (batch_size, obs_spec.max_fleets, obs_spec.fleet_channels),
         dtype=torch.float32,
@@ -107,6 +111,7 @@ def _obs_batch(
     assert action_spec.max_per_planet_launches >= 1
     return ObsBatch(
         planets=planets,
+        orbiting_planets=orbiting_planets,
         fleets=fleets,
         comets=comets,
         entity_mask=entity_mask,
@@ -510,6 +515,49 @@ def test_force_flash_encoder_rejects_non_flash_inputs(
 
     with pytest.raises(RuntimeError, match="force_flash_attn=True"):
         model.encode_observations(obs)
+
+
+def test_orbiting_planets_select_separate_planet_projection() -> None:
+    class PassBlock(nn.Module):
+        def forward(
+            self,
+            x: torch.Tensor,
+            _token_mask: torch.Tensor | None,
+            _packed: model_impl.PackedSequence | None,
+        ) -> torch.Tensor:
+            return x
+
+    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
+    action_spec = ActionPureConfig()
+    model = _model(
+        StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    model.blocks = nn.ModuleList([PassBlock()])
+    with torch.no_grad():
+        for layer in (
+            model.static_planet_proj,
+            model.orbit_planet_proj,
+            model.fleet_proj,
+            model.comet_proj,
+            model.global_proj,
+        ):
+            layer.weight.zero_()
+            layer.bias.zero_()
+        model.static_planet_proj.weight[:, 0] = torch.arange(16.0)
+        model.orbit_planet_proj.weight[:, 0] = torch.arange(16.0).flip(0)
+
+    obs = _obs_batch(batch_size=1, obs_spec=obs_spec, action_spec=action_spec)
+    obs.planets[:, 0, 0] = 1.0
+    hidden_without_orbiting, _ = model.encode_observations(obs)
+    obs.orbiting_planets[:, 0] = True
+    hidden_with_orbiting, _ = model.encode_observations(obs)
+
+    assert not torch.allclose(
+        hidden_without_orbiting[:, 0],
+        hidden_with_orbiting[:, 0],
+    )
 
 
 def test_flash_encoder_packs_once_before_trunk_and_unpacks_once_after(

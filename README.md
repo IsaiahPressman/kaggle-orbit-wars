@@ -71,7 +71,7 @@ Rust environment state or current observation, so they are not exact resume
 snapshots. Periodic checkpoint names use grouped zero-padded environment-step
 labels such as `checkpoint_00_022_000_000.pt`. At each periodic checkpoint, the
 current model is evaluated against the last-best model snapshot using
-deterministic policy actions and logs
+sampled policy actions and logs
 `eval/win_rate_against_last_best` plus terminal environment metrics under
 `eval/`. When the current model reaches at least 70% eval win rate, the
 last-best snapshot is replaced and also saved as `checkpoint_last_best.pt`.
@@ -79,13 +79,14 @@ Set `rl.eval_replay_games` to an even positive count to save random eval replay
 samples, split evenly between 2-player and 4-player games, under
 `eval_replays/<checkpoint-name>/` in the run directory. The sampled game
 ordinals are selected up front rather than taking the first games to finish.
+Each sampled eval game is written as its own JSONL file.
 
 Training logs terminal environment metrics under `train/` when episodes finish
 during a rollout, including game length, per-player win rates, launch density,
 planet occupancy for 2-player and 4-player games, max-entity overflow counts,
 terminal ship counts, planet captures, launch and fleet-size statistics,
-full-length game rate, per-batch active player-step totals, and fleet/ship
-losses in the sun or out of bounds.
+full-length game rate, cumulative active player-step totals, and fleet/ship
+losses in combat, the sun, or out of bounds.
 Planet occupancy is reported at terminal as
 `train/terminal_planet_occupancy_rate_2p` and
 `train/terminal_planet_occupancy_rate_4p`.
@@ -99,6 +100,7 @@ Policy logs include total entropy plus policy-specific component means such as
 `--save-replay-games N`, where `N` must be even and is split evenly across
 2-player and 4-player benchmark games. Files are written under
 `--replay-dir`, defaulting to `replays/benchmark_checkpoints`.
+Each sampled benchmark game is written as its own JSONL file.
 Open `tools/orbit_wars_replay_viewer.html` in a browser and choose
 a saved `.jsonl` file to play back a sampled game.
 

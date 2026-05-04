@@ -42,6 +42,10 @@ def test_vectorized_env_writes_into_preallocated_torch_buffers() -> None:
     assert obs.planets.data_ptr() == planet_ptr
     assert obs.comets.data_ptr() == comet_ptr
     assert np.shares_memory(obs.planets.numpy(), env._planet_obs_np)
+    assert np.shares_memory(
+        obs.orbiting_planets.numpy(),
+        env._orbiting_planet_obs_np,
+    )
     assert torch.any(obs.planets != -7)
     assert torch.any(obs.entity_mask[:, :MAX_PLANETS])
     assert torch.all(obs.comets == 0)
@@ -94,6 +98,7 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     assert rewards.data_ptr() == reward_ptr
     assert dones.data_ptr() == done_ptr
     assert obs.planets.shape == (2, MAX_PLANETS, PLANET_CHANNELS)
+    assert obs.orbiting_planets.shape == (2, MAX_PLANETS)
     assert obs.fleets.shape == (2, env.obs_spec.max_fleets, FLEET_CHANNELS)
     assert obs.comets.shape == (2, MAX_COMETS, COMET_CHANNELS)
     assert obs.global_features.shape == (2, GLOBAL_CHANNELS)
@@ -400,6 +405,7 @@ def test_min_fleet_size_controls_action_mask_and_validation() -> None:
     action_spec = ActionPureConfig(min_fleet_size=3)
     (
         _planets,
+        _orbiting_planets,
         _fleets,
         _comets,
         _entity_mask,
@@ -442,6 +448,7 @@ def test_min_fleet_size_controls_action_mask_and_validation() -> None:
 def test_python_observation_encoder_writes_discrete_target_mask() -> None:
     (
         _planets,
+        _orbiting_planets,
         _fleets,
         _comets,
         entity_mask,
@@ -474,6 +481,7 @@ def test_python_observation_encoder_writes_discrete_target_mask() -> None:
 def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     (
         planets,
+        orbiting_planets,
         fleets,
         comets,
         entity_mask,
@@ -491,6 +499,7 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     )
 
     assert planets.shape == (MAX_PLANETS, PLANET_CHANNELS)
+    assert orbiting_planets.shape == (MAX_PLANETS,)
     assert fleets.shape == (ObsV1Config().max_fleets, FLEET_CHANNELS)
     assert comets.shape == (MAX_COMETS, COMET_CHANNELS)
     assert global_features.shape == (GLOBAL_CHANNELS,)
@@ -567,6 +576,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
 
     (
         planets,
+        orbiting_planets,
         fleets,
         comets,
         entity_mask,
@@ -598,6 +608,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
     np.testing.assert_array_equal(planet_mask, expected_planet_mask)
     np.testing.assert_array_equal(fleet_mask, expected_fleet_mask)
     np.testing.assert_array_equal(comet_mask, expected_comet_mask)
+    assert orbiting_planets.shape == (MAX_PLANETS,)
 
     def normalized_position(value: float) -> float:
         return value / 50.0 - 1.0
@@ -626,7 +637,6 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
                 2.0 / 3.0,
                 50.0 / 250.0,
                 normalized_log_ships(50),
-                1.0,
             ],
             [
                 0.0,
@@ -644,7 +654,6 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
                 1.5 / 3.0,
                 0.0,
                 normalized_log_ships(0),
-                1.0,
             ],
             [
                 0.0,
@@ -662,12 +671,16 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
                 1.0 / 3.0,
                 10.0 / 250.0,
                 normalized_log_ships(10),
-                0.0,
             ],
         ],
         dtype=np.float32,
     )
+    expected_orbiting_planets = np.array([True, True, False], dtype=np.bool_)
     np.testing.assert_allclose(planets[planet_mask], expected_planets, atol=0.0)
+    np.testing.assert_array_equal(
+        orbiting_planets[planet_mask],
+        expected_orbiting_planets,
+    )
 
     speed_8 = normalized_fleet_speed(8)
     speed_27 = normalized_fleet_speed(27)
@@ -809,7 +822,7 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
 ) -> None:
     spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
 
-    _, fleets, _, entity_mask, _, _, _ = encode_python_observation(
+    _, _, fleets, _, entity_mask, _, _, _ = encode_python_observation(
         {
             "planets": [],
             "fleets": [
@@ -829,7 +842,16 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
 
 def test_python_observation_encoder_writes_comet_future_paths() -> None:
     path = [[0.0, 0.0], [50.0, 50.0], [100.0, 100.0]]
-    planets, _, comets, entity_mask, _, can_act, max_launch = encode_python_observation(
+    (
+        planets,
+        orbiting_planets,
+        _fleets,
+        comets,
+        entity_mask,
+        _global_features,
+        can_act,
+        max_launch,
+    ) = encode_python_observation(
         {
             "planets": [[10, 2, 50.0, 50.0, 1.0, 25, 1]],
             "fleets": [],
@@ -848,6 +870,7 @@ def test_python_observation_encoder_writes_comet_future_paths() -> None:
     assert not planet_mask[0]
     assert comet_mask.tolist() == [True, False, False, False]
     assert planets[0].tolist() == [0.0] * PLANET_CHANNELS
+    assert not orbiting_planets[0]
     assert comets[0, 2] == 1.0
     assert comets[0, 5] == pytest.approx(25 / 250)
     assert comets[0, 7] == pytest.approx(2 / MAX_COMET_PATH_LENGTH)

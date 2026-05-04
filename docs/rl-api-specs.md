@@ -51,7 +51,8 @@ environment returns an `ObsBatch` with these tensors:
 
 | Tensor | dtype | Shape |
 | --- | --- | --- |
-| `planets` | `float32` | `(n_envs, MAX_PLANETS, 16)` |
+| `planets` | `float32` | `(n_envs, MAX_PLANETS, 15)` |
+| `orbiting_planets` | `bool` | `(n_envs, MAX_PLANETS)` |
 | `fleets` | `float32` | `(n_envs, max_fleets, 10)` |
 | `comets` | `float32` | `(n_envs, MAX_COMETS, 88)` |
 | `entity_mask` | `bool` | `(n_envs, max_entities)` |
@@ -92,7 +93,7 @@ auto-reset, `still_playing` describes the returned reset observation, while
 
 ### Planet Tensor
 
-Shape per env: `(MAX_PLANETS, 16)`.
+Shape per env: `(MAX_PLANETS, 15)`.
 
 Only non-comet planets are included. If more than `MAX_PLANETS` non-comet
 planets exist, the encoder panics. Generated games currently produce up to
@@ -110,7 +111,13 @@ generated planet IDs are unique and contiguous before comet insertion.
 | `12` | normalized radius |
 | `13` | normalized ships |
 | `14` | normalized log ships |
-| `15` | `1.0` if orbiting, else `0.0` |
+
+### Orbiting Planet Tensor
+
+Shape per env: `(MAX_PLANETS,)`.
+
+Rows are aligned with the planet tensor. A row is `True` if the matching planet
+row is orbiting, else `False`. Inactive rows are `False`.
 
 `entity_mask[i]` is `True` only for active planet rows for
 `i < MAX_PLANETS`.
@@ -368,7 +375,7 @@ Terminal episode metrics:
 | `launches_per_launch_mean` | Mean launches from a planet on planet-turns where that planet launched at least once. |
 | `ships_per_launch_mean` | Mean submitted ship count per launch action. |
 | `ships_lost_in_combat_per_game` | Ships destroyed during fleet-vs-fleet and fleet-vs-planet combat resolution. |
-| `ships_lost_per_game_mean` | Ships removed by sun or out-of-bounds fleet loss. |
+| `ships_lost_per_game_mean` | Ships removed by combat, sun, or out-of-bounds fleet loss. |
 | `ships_lost_in_sun_per_game_mean` | Ships removed by sun fleet loss. |
 | `ships_lost_out_of_bounds_per_game_mean` | Ships removed by out-of-bounds fleet loss. |
 | `fleets_lost_per_game_mean` | Fleets removed by sun or out-of-bounds loss. |

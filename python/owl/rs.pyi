@@ -22,6 +22,7 @@ class RlVecEnv:
     def reset(
         self,
         planet_obs: np.ndarray,
+        orbiting_planet_obs: np.ndarray,
         fleet_obs: np.ndarray,
         comet_obs: np.ndarray,
         entity_mask: np.ndarray,
@@ -36,6 +37,7 @@ class RlVecEnv:
         angle: np.ndarray,
         ships: np.ndarray,
         planet_obs: np.ndarray,
+        orbiting_planet_obs: np.ndarray,
         fleet_obs: np.ndarray,
         comet_obs: np.ndarray,
         entity_mask: np.ndarray,
@@ -52,6 +54,7 @@ class RlVecEnv:
         target: np.ndarray,
         ships: np.ndarray,
         planet_obs: np.ndarray,
+        orbiting_planet_obs: np.ndarray,
         fleet_obs: np.ndarray,
         comet_obs: np.ndarray,
         entity_mask: np.ndarray,
@@ -66,6 +69,7 @@ class RlVecEnv:
         self,
     ) -> tuple[
         tuple[int, int, int],
+        tuple[int, int],
         tuple[int, int, int],
         tuple[int, int, int],
         tuple[int, int],
@@ -93,6 +97,7 @@ def encode_obs_v1(
     max_entities: int = ...,
     min_fleet_size: int = ...,
 ) -> tuple[
+    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,

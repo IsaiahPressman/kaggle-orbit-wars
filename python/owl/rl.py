@@ -115,6 +115,7 @@ class ObsBatch(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
     planets: torch.Tensor
+    orbiting_planets: torch.Tensor
     fleets: torch.Tensor
     comets: torch.Tensor
     entity_mask: torch.Tensor
@@ -164,6 +165,7 @@ class VectorizedEnv:
         )
 
         self._planet_obs_np = self.observations.planets.numpy()
+        self._orbiting_planet_obs_np = self.observations.orbiting_planets.numpy()
         self._fleet_obs_np = self.observations.fleets.numpy()
         self._comet_obs_np = self.observations.comets.numpy()
         self._entity_mask_np = self.observations.entity_mask.numpy()
@@ -177,6 +179,7 @@ class VectorizedEnv:
     def reset(self) -> ObsBatch:
         self._rust.reset(
             self._planet_obs_np,
+            self._orbiting_planet_obs_np,
             self._fleet_obs_np,
             self._comet_obs_np,
             self._entity_mask_np,
@@ -230,6 +233,7 @@ class VectorizedEnv:
                 angle_array,
                 ship_array,
                 self._planet_obs_np,
+                self._orbiting_planet_obs_np,
                 self._fleet_obs_np,
                 self._comet_obs_np,
                 self._entity_mask_np,
@@ -253,6 +257,7 @@ class VectorizedEnv:
                 target_array,
                 ship_array,
                 self._planet_obs_np,
+                self._orbiting_planet_obs_np,
                 self._fleet_obs_np,
                 self._comet_obs_np,
                 self._entity_mask_np,
@@ -279,6 +284,11 @@ class VectorizedEnv:
                     self.obs_spec.planet_channels,
                 ),
                 dtype=torch.float32,
+                pin_memory=pin_memory,
+            ),
+            orbiting_planets=torch.zeros(
+                (self.n_envs, self.obs_spec.max_planets),
+                dtype=torch.bool,
                 pin_memory=pin_memory,
             ),
             fleets=torch.zeros(
@@ -339,6 +349,7 @@ def encode_python_observation(
     np.ndarray,
     np.ndarray,
     np.ndarray,
+    np.ndarray,
 ]:
     spec = obs_spec or ObsV1Config()
     action = action_spec or ActionPureConfig()
@@ -363,6 +374,7 @@ def encode_python_observation(
 
     (
         planets,
+        orbiting_planets,
         fleets,
         comets,
         entity_mask,
@@ -376,6 +388,7 @@ def encode_python_observation(
     source_target_can_act[:, source_indexes, source_indexes] = False
     return (
         planets,
+        orbiting_planets,
         fleets,
         comets,
         entity_mask,

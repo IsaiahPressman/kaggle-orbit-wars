@@ -25,6 +25,7 @@ use super::{
 
 type EncodedObsV1<'py> = (
     Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray1<bool>>,
     Bound<'py, PyArray2<f32>>,
     Bound<'py, PyArray2<f32>>,
     Bound<'py, PyArray1<bool>>,
@@ -49,6 +50,7 @@ pub(super) fn encode_state(
     player_map: &PlayerMap,
     max_fleets: usize,
     planet_obs: &mut [f32],
+    orbiting_planet_obs: &mut [bool],
     fleet_obs: &mut [f32],
     comet_obs: &mut [f32],
     planet_mask: &mut [bool],
@@ -66,6 +68,7 @@ pub(super) fn encode_state(
         player_map,
         max_fleets,
         planet_obs,
+        orbiting_planet_obs,
         fleet_obs,
         comet_obs,
         planet_mask,
@@ -86,6 +89,7 @@ pub(super) fn encode_state_with_action_slots(
     player_map: &PlayerMap,
     max_fleets: usize,
     planet_obs: &mut [f32],
+    orbiting_planet_obs: &mut [bool],
     fleet_obs: &mut [f32],
     comet_obs: &mut [f32],
     planet_mask: &mut [bool],
@@ -114,6 +118,7 @@ pub(super) fn encode_state_with_action_slots(
     );
 
     planet_obs.fill(0.0);
+    orbiting_planet_obs.fill(false);
     fleet_obs.fill(0.0);
     comet_obs.fill(0.0);
     planet_mask.fill(false);
@@ -145,7 +150,7 @@ pub(super) fn encode_state_with_action_slots(
         row[12] = (planet.radius / 3.0) as f32;
         row[13] = normalize_ships(planet.ships);
         row[14] = normalize_log_ships(planet.ships);
-        row[15] = f32::from(is_orbiting(planet.position(), planet.radius));
+        orbiting_planet_obs[planet_index] = is_orbiting(planet.position(), planet.radius);
     }
 
     for (fleet_index, fleet) in fleets.iter().take(max_fleets).enumerate() {
@@ -534,6 +539,7 @@ pub fn encode_obs_v1<'py>(
     )?;
     let max_fleets = max_entities - (MAX_PLANETS + MAX_COMETS);
     let mut planet_obs = Array2::<f32>::zeros((MAX_PLANETS, PLANET_CHANNELS));
+    let mut orbiting_planet_obs = Array1::<bool>::from_elem(MAX_PLANETS, false);
     let mut fleet_obs = Array2::<f32>::zeros((max_fleets, FLEET_CHANNELS));
     let mut comet_obs = Array2::<f32>::zeros((MAX_COMETS, COMET_CHANNELS));
     let mut entity_mask = Array1::<bool>::from_elem(max_entities, false);
@@ -554,6 +560,9 @@ pub fn encode_obs_v1<'py>(
         planet_obs
             .as_slice_mut()
             .expect("newly allocated planet array is contiguous"),
+        orbiting_planet_obs
+            .as_slice_mut()
+            .expect("newly allocated orbiting planet array is contiguous"),
         fleet_obs
             .as_slice_mut()
             .expect("newly allocated fleet array is contiguous"),
@@ -578,6 +587,7 @@ pub fn encode_obs_v1<'py>(
 
     Ok((
         planet_obs.into_pyarray(py),
+        orbiting_planet_obs.into_pyarray(py),
         fleet_obs.into_pyarray(py),
         comet_obs.into_pyarray(py),
         entity_mask.into_pyarray(py),
@@ -648,6 +658,7 @@ mod tests {
             comet_planet_ids: Vec::new(),
         };
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
+        let mut orbiting_planet_obs = vec![false; MAX_PLANETS];
         let mut fleet_obs = Vec::new();
         let mut comet_obs = vec![0.0; MAX_COMETS * COMET_CHANNELS];
         let mut planet_mask = vec![false; MAX_PLANETS];
@@ -663,6 +674,7 @@ mod tests {
             &PlayerMap::identity(),
             0,
             &mut planet_obs,
+            &mut orbiting_planet_obs,
             &mut fleet_obs,
             &mut comet_obs,
             &mut planet_mask,
@@ -707,6 +719,7 @@ mod tests {
         };
         let player_map = PlayerMap::from_outer_slots(2, [3, 1, 0, 2]);
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
+        let mut orbiting_planet_obs = vec![false; MAX_PLANETS];
         let mut fleet_obs = vec![0.0; FLEET_CHANNELS];
         let mut comet_obs = vec![0.0; MAX_COMETS * COMET_CHANNELS];
         let mut planet_mask = vec![false; MAX_PLANETS];
@@ -722,6 +735,7 @@ mod tests {
             &player_map,
             1,
             &mut planet_obs,
+            &mut orbiting_planet_obs,
             &mut fleet_obs,
             &mut comet_obs,
             &mut planet_mask,
@@ -762,6 +776,7 @@ mod tests {
             comet_planet_ids: Vec::new(),
         };
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
+        let mut orbiting_planet_obs = vec![false; MAX_PLANETS];
         let mut fleet_obs = Vec::new();
         let mut comet_obs = vec![0.0; MAX_COMETS * COMET_CHANNELS];
         let mut planet_mask = vec![false; MAX_PLANETS];
@@ -777,6 +792,7 @@ mod tests {
             &PlayerMap::identity(),
             0,
             &mut planet_obs,
+            &mut orbiting_planet_obs,
             &mut fleet_obs,
             &mut comet_obs,
             &mut planet_mask,
