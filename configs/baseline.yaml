@@ -10,7 +10,7 @@ env:
   two_player_weight: 0.5
   pin_memory: true
 
-model: stateless_transformer_tiny
+model: stateless_transformer_5m
 
 optimizer:
   optimizer: muon
@@ -24,7 +24,7 @@ optimizer:
 
 rl:
   horizon: 128
-  checkpoint_freq: 10_000_000
+  checkpoint_freq: 30_000_000
   replay_ratio: 1.0
   segment_sampling:
     sampling: uniform
