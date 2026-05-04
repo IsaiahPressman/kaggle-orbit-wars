@@ -161,6 +161,29 @@ def test_model_config_loads_actor_subconfig_reference() -> None:
     assert config.actor == ActorDiscreteTargetsConfig()
 
 
+@pytest.mark.parametrize(
+    ("filename", "expected_params"),
+    [
+        ("stateless_transformer_tiny.yaml", 972_046),
+        ("stateless_transformer_5m.yaml", 5_063_182),
+    ],
+)
+def test_model_config_file_parameter_count(
+    filename: str,
+    expected_params: int,
+) -> None:
+    config = StatelessTransformerV1Config.from_file(
+        _REPO_ROOT / "configs" / "model" / filename
+    )
+    model = StatelessTransformerV1(
+        config,
+        obs_spec=ObsV1Config(),
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+
+    assert sum(parameter.numel() for parameter in model.parameters()) == expected_params
+
+
 def test_actor_config_presets_match_defaults() -> None:
     pure = ActorPureConfig.from_file(
         _REPO_ROOT / "configs" / "model" / "actor" / "pure.yaml"
