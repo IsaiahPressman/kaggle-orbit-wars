@@ -46,9 +46,6 @@ Training presets live in `configs/`:
   discrete-target actions, `max_entities=512`, larger rollout/minibatch sizing,
   Muon/AdamW optimizer rates, periodic checkpoints every 20M environment steps,
   `torch.compile` default mode, and bfloat16 autocast.
-- `pufferish.yaml`: enables Puffer-style V-trace recomputation and
-  advantage-prioritized segment sampling without changing the core Python
-  defaults.
 - `model/stateless_transformer_20m.yaml`: larger stateless transformer model
   config used by `baseline.yaml`, with an inline discrete-target actor override
   using eight action mixtures and `max_ship_normalizer=500.0`.

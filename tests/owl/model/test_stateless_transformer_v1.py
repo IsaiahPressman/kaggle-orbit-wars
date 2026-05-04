@@ -27,6 +27,7 @@ from owl.model.stateless_transformer_v1 import (
     FeedForward,
     MinGRUCell,
     MultiHeadSelfAttention,
+    OutputProjectionMLP,
     PolicyParams,
     discrete_action_entropy,
     masked_event_log_prob_from_params,
@@ -164,9 +165,9 @@ def test_model_config_loads_actor_subconfig_reference() -> None:
 @pytest.mark.parametrize(
     ("filename", "expected_params"),
     [
-        ("stateless_transformer_tiny.yaml", 972_558),
-        ("stateless_transformer_5m.yaml", 5_064_206),
-        ("stateless_transformer_20m.yaml", 20_162_330),
+        ("stateless_transformer_tiny.yaml", 1_055_118),
+        ("stateless_transformer_5m.yaml", 5_393_166),
+        ("stateless_transformer_20m.yaml", 20_901_530),
     ],
 )
 def test_model_config_file_parameter_count(
@@ -289,10 +290,12 @@ def test_attention_and_swiglu_use_separate_projection_matrices_for_muon() -> Non
 
     attn = MultiHeadSelfAttention(config)
     mlp = FeedForward(config)
+    output_head = OutputProjectionMLP(config, output_dim=3)
 
     assert attn.q is not attn.k
     assert attn.k is not attn.v
     assert mlp.gate is not mlp.value
+    assert output_head.gate is not output_head.value
 
 
 def test_non_flash_attention_uses_regular_shaped_sdpa(
@@ -737,6 +740,9 @@ def test_model_initialization_sets_stable_rl_priors() -> None:
         torch.tensor([1.0]),
         atol=1e-6,
     )
+    output_layer_ids = {id(layer) for layer in model.get_output_layers()}
+    assert id(model.critic_head.out) in output_layer_ids
+    assert id(model.critic_head.up) not in output_layer_ids
     for head in (
         model.actor.actor_heads.continue_head,
         model.actor.actor_heads.mix_head,
@@ -745,6 +751,8 @@ def test_model_initialization_sets_stable_rl_priors() -> None:
         model.actor.actor_heads.size_frac_head,
         model.actor.actor_heads.size_conc_head,
     ):
+        assert id(head.out) in output_layer_ids
+        assert id(head.up) not in output_layer_ids
         assert torch.allclose(
             head.weight.norm(dim=1),
             torch.full((head.out_features,), 0.01),
@@ -1034,6 +1042,32 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     )
 
 
+def test_discrete_targets_output_layers_include_only_second_head_layers() -> None:
+    config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        actor=ActorDiscreteTargetsConfig(),
+    )
+    model = _model(
+        config,
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+
+    output_layer_ids = {id(layer) for layer in model.get_output_layers()}
+
+    assert id(model.critic_head.out) in output_layer_ids
+    assert id(model.critic_head.up) not in output_layer_ids
+    for head in (
+        model.actor.continue_head,
+        model.actor.mix_head,
+        model.actor.mean_head,
+        model.actor.scale_head,
+    ):
+        assert id(head.out) in output_layer_ids
+        assert id(head.up) not in output_layer_ids
+
+
 def test_discrete_targets_actor_masks_target_logits_under_bfloat16_autocast() -> None:
     config = StatelessTransformerV1Config(
         actor=ActorDiscreteTargetsConfig(),
@@ -1102,6 +1136,8 @@ def test_discrete_targets_size_log_prob_conditions_on_replayed_target() -> None:
             module.bias.zero_()
         for parameter in actor.mlp.parameters():
             parameter.zero_()
+        actor.mean_head.up.weight.copy_(torch.eye(config.embed_dim))
+        actor.mean_head.up.bias.zero_()
         actor.mean_head.weight.zero_()
         actor.mean_head.bias.zero_()
         actor.mean_head.weight[0, 0] = 10.0
@@ -1221,11 +1257,11 @@ def test_discrete_targets_scale_log_interpolates_budget_bounds() -> None:
     )
     assert torch.allclose(
         params.size_scale[0, 0, 0, 0],
-        torch.tensor(math.sqrt(0.25 * 8.0)),
+        torch.tensor(math.sqrt(0.10 * 8.0)),
     )
     assert torch.allclose(
         params.size_scale[0, 0, 1, 0],
-        torch.tensor(math.sqrt(0.25 * 50.0)),
+        torch.tensor(math.sqrt(0.10 * 50.0)),
     )
 
     with torch.no_grad():
@@ -1236,7 +1272,7 @@ def test_discrete_targets_scale_log_interpolates_budget_bounds() -> None:
         target_values,
         min_fleet_size=1,
     )
-    assert torch.allclose(params.size_scale[0, 0, 0, 0], torch.tensor(0.25))
+    assert torch.allclose(params.size_scale[0, 0, 0, 0], torch.tensor(0.10))
 
     with torch.no_grad():
         actor.scale_head.bias.fill_(20.0)
@@ -1280,11 +1316,11 @@ def test_discrete_targets_size_params_respect_min_fleet_size_support() -> None:
     assert torch.allclose(params.size_mu[0, 0, 0, 0], torch.tensor(8.0))
     assert torch.allclose(
         params.size_scale[0, 0, 0, 0],
-        torch.tensor(math.sqrt(0.25 * 8.0)),
+        torch.tensor(math.sqrt(0.10 * 8.0)),
     )
     assert torch.allclose(
         params.size_scale[0, 0, 1, 0],
-        torch.tensor(math.sqrt(0.25 * 47.5)),
+        torch.tensor(math.sqrt(0.10 * 47.5)),
     )
 
 

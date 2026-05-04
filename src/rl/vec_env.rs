@@ -1134,9 +1134,12 @@ impl EpisodeStats {
         player_results: &[PlayerResult],
     ) -> TerminalEpisodeMetrics {
         let fleets_lost = self.fleet_losses.fleets_in_sun + self.fleet_losses.fleets_out_of_bounds;
+        let fleets_lost_to_sun_or_oob = fleets_lost;
         let ships_lost = i64::from(self.fleet_losses.ships_in_sun)
             + i64::from(self.fleet_losses.ships_out_of_bounds)
             + self.ships_lost_in_combat;
+        let ships_lost_to_sun_or_oob =
+            self.fleet_losses.ships_in_sun + self.fleet_losses.ships_out_of_bounds;
         let occupancy_key = if state.config.player_count == 2 {
             "terminal_planet_occupancy_rate_2p"
         } else {
@@ -1193,14 +1196,6 @@ impl EpisodeStats {
                 "ships_lost_out_of_bounds_per_game_mean",
                 f64::from(self.fleet_losses.ships_out_of_bounds),
             ),
-            (
-                "ships_lost_to_sun_or_oob_rate",
-                rate_or_zero(
-                    f64::from(self.fleet_losses.ships_in_sun)
-                        + f64::from(self.fleet_losses.ships_out_of_bounds),
-                    ships_lost as f64,
-                ),
-            ),
             ("fleets_lost_per_game_mean", f64::from(fleets_lost)),
             (
                 "fleets_lost_in_sun_per_game_mean",
@@ -1210,12 +1205,15 @@ impl EpisodeStats {
                 "fleets_lost_out_of_bounds_per_game_mean",
                 f64::from(self.fleet_losses.fleets_out_of_bounds),
             ),
-            (
-                "fleets_lost_to_sun_or_oob_rate",
-                rate_or_zero(f64::from(fleets_lost), f64::from(fleets_lost)),
-            ),
             (occupancy_key, terminal_planet_occupancy_rate(state)),
         ];
+        if let Some(rate) = loss_rate(f64::from(ships_lost_to_sun_or_oob), ships_lost as f64) {
+            values.push(("ships_lost_to_sun_or_oob_rate", rate));
+        }
+        if let Some(rate) = loss_rate(f64::from(fleets_lost_to_sun_or_oob), f64::from(fleets_lost))
+        {
+            values.push(("fleets_lost_to_sun_or_oob_rate", rate));
+        }
         if self.launched_planet_turns > 0 {
             values.push((
                 "launches_per_launch_mean",
@@ -1268,14 +1266,6 @@ fn mean_or_zero(sum: f64, count: u32) -> f64 {
         0.0
     } else {
         sum / f64::from(count)
-    }
-}
-
-fn rate_or_zero(numerator: f64, denominator: f64) -> f64 {
-    if denominator == 0.0 {
-        0.0
-    } else {
-        numerator / denominator
     }
 }
 
@@ -1332,7 +1322,42 @@ fn collect_terminal_metrics(
                 .push(win_rate);
         }
     }
+    if metrics.contains_key("ships_lost_per_game_mean")
+        || metrics.contains_key("fleets_lost_per_game_mean")
+    {
+        add_loss_rate_metrics(&mut metrics);
+    }
     metrics
+}
+
+fn add_loss_rate_metrics(metrics: &mut HashMap<String, Vec<f64>>) {
+    let ships_lost_to_sun_or_oob = metric_sum(metrics, "ships_lost_in_sun_per_game_mean")
+        + metric_sum(metrics, "ships_lost_out_of_bounds_per_game_mean");
+    let ships_lost_total = metric_sum(metrics, "ships_lost_per_game_mean");
+    if let Some(rate) = loss_rate(ships_lost_to_sun_or_oob, ships_lost_total) {
+        metrics.insert("ships_lost_to_sun_or_oob_rate".to_string(), vec![rate]);
+    }
+
+    let fleets_lost_to_sun_or_oob = metric_sum(metrics, "fleets_lost_in_sun_per_game_mean")
+        + metric_sum(metrics, "fleets_lost_out_of_bounds_per_game_mean");
+    let fleets_lost_total = metric_sum(metrics, "fleets_lost_per_game_mean");
+    if let Some(rate) = loss_rate(fleets_lost_to_sun_or_oob, fleets_lost_total) {
+        metrics.insert("fleets_lost_to_sun_or_oob_rate".to_string(), vec![rate]);
+    }
+}
+
+fn metric_sum(metrics: &HashMap<String, Vec<f64>>, key: &str) -> f64 {
+    metrics
+        .get(key)
+        .map(|values| values.iter().sum())
+        .unwrap_or(0.0)
+}
+
+fn loss_rate(numerator: f64, denominator: f64) -> Option<f64> {
+    if denominator <= 0.0 {
+        return None;
+    }
+    Some((numerator / denominator).clamp(0.0, 1.0))
 }
 
 fn write_still_playing(
@@ -1854,21 +1879,62 @@ mod tests {
                 PlayerResult::Lost,
             ],
         );
-        let collected = collect_terminal_metrics(vec![Some(metrics)]);
+        let mut second_episode_stats = EpisodeStats::default();
+        second_episode_stats.record_step_result(
+            &state,
+            FleetLossStats {
+                fleets_in_sun: 1,
+                fleets_out_of_bounds: 0,
+                ships_in_sun: 10,
+                ships_out_of_bounds: 0,
+            },
+            128,
+        );
+        second_episode_stats.record_ships_lost_in_combat(90);
+        let second_metrics = second_episode_stats.terminal_metrics(
+            &state,
+            &player_map,
+            &[
+                PlayerResult::Won,
+                PlayerResult::Lost,
+                PlayerResult::Lost,
+                PlayerResult::Lost,
+            ],
+        );
+        assert_eq!(
+            metrics
+                .values
+                .iter()
+                .find(|(key, _)| *key == "ships_lost_to_sun_or_oob_rate")
+                .map(|(_, value)| *value),
+            Some(9.0 / 20.0)
+        );
+        assert_eq!(
+            metrics
+                .values
+                .iter()
+                .find(|(key, _)| *key == "fleets_lost_to_sun_or_oob_rate")
+                .map(|(_, value)| *value),
+            Some(1.0)
+        );
+        let collected = collect_terminal_metrics(vec![Some(metrics), Some(second_metrics)]);
 
         assert_eq!(collected["ships_per_launch_mean"], vec![4.0]);
-        assert_eq!(collected["launches_per_game"], vec![2.0]);
-        assert_eq!(collected["comet_launch_failures_per_game"], vec![3.0]);
-        assert_eq!(collected["ships_lost_in_combat_per_game"], vec![11.0]);
-        assert_eq!(collected["ships_lost_per_game_mean"], vec![20.0]);
-        assert_eq!(collected["ships_lost_to_sun_or_oob_rate"], vec![0.45]);
+        assert_eq!(collected["launches_per_game"], vec![2.0, 0.0]);
+        assert_eq!(collected["comet_launch_failures_per_game"], vec![3.0, 0.0]);
+        assert_eq!(collected["ships_lost_in_combat_per_game"], vec![11.0, 90.0]);
+        assert_eq!(collected["ships_lost_per_game_mean"], vec![20.0, 100.0]);
+        assert_eq!(
+            collected["ships_lost_to_sun_or_oob_rate"],
+            vec![19.0 / 120.0]
+        );
         assert_eq!(collected["fleets_lost_to_sun_or_oob_rate"], vec![1.0]);
-        assert_eq!(collected["launches_per_turn"], vec![0.5]);
-        assert_eq!(collected["fleet_size_max"], vec![5.0]);
-        assert_eq!(collected["fleet_size_min"], vec![3.0]);
-        assert_eq!(collected["fleet_size_std"], vec![1.0]);
-        assert_eq!(collected["planets_captured_per_game"], vec![0.0]);
-        assert_eq!(collected["comets_captured_per_game"], vec![0.0]);
+        assert_eq!(collected["launches_per_turn"], vec![0.5, 0.0]);
+        assert_eq!(collected["fleet_size_max"], vec![5.0, 0.0]);
+        assert_eq!(collected["fleet_size_min"], vec![3.0, 0.0]);
+        assert_eq!(collected["fleet_size_std"], vec![1.0, 0.0]);
+        assert_eq!(collected["planets_captured_per_game"], vec![0.0, 0.0]);
+        assert_eq!(collected["comets_captured_per_game"], vec![0.0, 0.0]);
         assert!(!collected.contains_key("fleets_per_launch_mean"));
     }
 

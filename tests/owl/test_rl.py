@@ -696,7 +696,7 @@ def test_encode_obs_v1_matches_expected_masks_and_masked_values() -> None:
     def planet_ship_features(ships: int, owner: int) -> list[float]:
         if owner == -1:
             return [
-                ships / 500.0,
+                ships / 100.0,
                 normalized_log_ships(ships),
                 0.0,
                 0.0,

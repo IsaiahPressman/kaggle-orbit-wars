@@ -9,6 +9,6 @@ actor:
   n_action_mixtures: 8
   max_ship_normalizer: 500.0
   entropy_ship_support_cap: 1024
-  scale_min: 0.25
+  scale_min: 0.10
   scale_max_frac: 0.5
   scale_max_abs_floor: 8.0

@@ -11,6 +11,7 @@ from torch.distributions import Categorical
 
 from owl.model.actor.common import (
     FeedForward,
+    OutputProjectionMLP,
     binary_entropy_from_logits,
     sample_launch,
 )
@@ -70,20 +71,20 @@ class DiscreteTargetsActor(nn.Module):
             transformer_config.embed_dim,
             transformer_config.embed_dim,
         )
-        self.continue_head = nn.Linear(transformer_config.embed_dim, 1)
-        self.mix_head = nn.Linear(transformer_config.embed_dim, mixtures)
-        self.mean_head = nn.Linear(transformer_config.embed_dim, mixtures)
-        self.scale_head = nn.Linear(transformer_config.embed_dim, mixtures)
+        self.continue_head = OutputProjectionMLP(transformer_config, 1)
+        self.mix_head = OutputProjectionMLP(transformer_config, mixtures)
+        self.mean_head = OutputProjectionMLP(transformer_config, mixtures)
+        self.scale_head = OutputProjectionMLP(transformer_config, mixtures)
 
     def get_input_layers(self) -> tuple[nn.Module, ...]:
         return ()
 
     def get_output_layers(self) -> tuple[nn.Linear, ...]:
         return (
-            self.continue_head,
-            self.mix_head,
-            self.mean_head,
-            self.scale_head,
+            self.continue_head.out,
+            self.mix_head.out,
+            self.mean_head.out,
+            self.scale_head.out,
         )
 
     def forward(

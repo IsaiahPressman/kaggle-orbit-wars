@@ -36,6 +36,44 @@ class FeedForward(nn.Module):
                 assert_never(self.activation)
 
 
+class OutputProjectionMLP(nn.Module):
+    def __init__(self, config: Any, output_dim: int) -> None:
+        super().__init__()
+        self.activation: Literal["gelu", "silu", "swiglu"] = config.activation
+        match self.activation:
+            case "gelu" | "silu":
+                self.up = nn.Linear(config.embed_dim, config.embed_dim)
+            case "swiglu":
+                self.gate = nn.Linear(config.embed_dim, config.embed_dim)
+                self.value = nn.Linear(config.embed_dim, config.embed_dim)
+            case _:
+                assert_never(self.activation)
+        self.out = nn.Linear(config.embed_dim, output_dim)
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return self.out.weight
+
+    @property
+    def bias(self) -> torch.Tensor | None:
+        return self.out.bias
+
+    @property
+    def out_features(self) -> int:
+        return self.out.out_features
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        match self.activation:
+            case "gelu":
+                return self.out(F.gelu(self.up(x)))
+            case "silu":
+                return self.out(F.silu(self.up(x)))
+            case "swiglu":
+                return self.out(F.silu(self.gate(x)) * self.value(x))
+            case _:
+                assert_never(self.activation)
+
+
 def sample_launch(
     logits: torch.Tensor,
     active: torch.Tensor,

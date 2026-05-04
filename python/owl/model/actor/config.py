@@ -24,7 +24,7 @@ class ActorDiscreteTargetsConfig(BaseConfig):
     n_action_mixtures: int = Field(default=4, ge=1)
     max_ship_normalizer: float = Field(default=500.0, gt=0.0)
     entropy_ship_support_cap: int = Field(default=256, ge=1)
-    scale_min: float = Field(default=0.25, gt=0.0)
+    scale_min: float = Field(default=0.10, gt=0.0)
     scale_max_frac: float = Field(default=0.50, gt=0.0)
     scale_max_abs_floor: float = Field(default=8.0, gt=0.0)
 

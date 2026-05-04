@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributions import Beta, Binomial, Categorical, VonMises
 
-from owl.model.actor.common import binary_entropy_from_logits, sample_launch
+from owl.model.actor.common import (
+    OutputProjectionMLP,
+    binary_entropy_from_logits,
+    sample_launch,
+)
 from owl.model.actor.config import ActorPureConfig
 from owl.model.base import ModelActionEntropies, ModelActionLogProbs, ModelActions
 from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS
@@ -44,6 +49,7 @@ class PureActor(nn.Module):
         *,
         embed_dim: int,
         max_per_planet_launches: int,
+        activation: Literal["gelu", "silu", "swiglu"],
     ) -> None:
         super().__init__()
         self.config = config
@@ -51,19 +57,23 @@ class PureActor(nn.Module):
         self.launch_slot_tokens = nn.Embedding(max_per_planet_launches, embed_dim)
         self.slot_dynamic_proj = nn.Linear(9, embed_dim)
         self.actor_gru = MinGRUStack(embed_dim, embed_dim, n_layers=2)
-        self.actor_heads = LaunchPolicyHeads(config, embed_dim=embed_dim)
+        self.actor_heads = LaunchPolicyHeads(
+            config,
+            embed_dim=embed_dim,
+            activation=activation,
+        )
 
     def get_input_layers(self) -> tuple[nn.Module, ...]:
         return (self.launch_slot_tokens, self.slot_dynamic_proj)
 
     def get_output_layers(self) -> tuple[nn.Linear, ...]:
         return (
-            self.actor_heads.continue_head,
-            self.actor_heads.mix_head,
-            self.actor_heads.dir_head,
-            self.actor_heads.kappa_head,
-            self.actor_heads.size_frac_head,
-            self.actor_heads.size_conc_head,
+            self.actor_heads.continue_head.out,
+            self.actor_heads.mix_head.out,
+            self.actor_heads.dir_head.out,
+            self.actor_heads.kappa_head.out,
+            self.actor_heads.size_frac_head.out,
+            self.actor_heads.size_conc_head.out,
         )
 
     def forward(
@@ -513,16 +523,23 @@ class MinGRUCell(nn.Module):
 
 
 class LaunchPolicyHeads(nn.Module):
-    def __init__(self, config: ActorPureConfig, *, embed_dim: int) -> None:
+    def __init__(
+        self,
+        config: ActorPureConfig,
+        *,
+        embed_dim: int,
+        activation: Literal["gelu", "silu", "swiglu"],
+    ) -> None:
         super().__init__()
         self.config = config
         mixtures = config.n_action_mixtures
-        self.continue_head = nn.Linear(embed_dim, 1)
-        self.mix_head = nn.Linear(embed_dim, mixtures)
-        self.dir_head = nn.Linear(embed_dim, mixtures * 2)
-        self.kappa_head = nn.Linear(embed_dim, mixtures)
-        self.size_frac_head = nn.Linear(embed_dim, mixtures)
-        self.size_conc_head = nn.Linear(embed_dim, mixtures)
+        head_config = _OutputHeadConfig(activation, embed_dim)
+        self.continue_head = OutputProjectionMLP(head_config, 1)
+        self.mix_head = OutputProjectionMLP(head_config, mixtures)
+        self.dir_head = OutputProjectionMLP(head_config, mixtures * 2)
+        self.kappa_head = OutputProjectionMLP(head_config, mixtures)
+        self.size_frac_head = OutputProjectionMLP(head_config, mixtures)
+        self.size_conc_head = OutputProjectionMLP(head_config, mixtures)
 
     def forward(self, x: torch.Tensor) -> PolicyParams:
         mixtures = self.config.n_action_mixtures
@@ -549,6 +566,12 @@ class LaunchPolicyHeads(nn.Module):
             alpha=alpha,
             beta=beta,
         )
+
+
+@dataclass(frozen=True)
+class _OutputHeadConfig:
+    activation: Literal["gelu", "silu", "swiglu"]
+    embed_dim: int
 
 
 def masked_event_log_prob_from_params(

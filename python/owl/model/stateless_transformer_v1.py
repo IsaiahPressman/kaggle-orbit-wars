@@ -20,6 +20,7 @@ from owl.model.actor import (
 )
 from owl.model.actor.common import (
     FeedForward,
+    OutputProjectionMLP,
     binary_entropy_from_logits,
     sample_launch,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "MinGRUCell",
     "ModelConfig",
     "MultiHeadSelfAttention",
+    "OutputProjectionMLP",
     "PackedSequence",
     "PolicyParams",
     "PureActor",
@@ -162,7 +164,7 @@ class StatelessTransformerV1(BaseModelAPI):
         )
         self.final_norm = nn.LayerNorm(dim)
 
-        self.critic_head = nn.Linear(dim, 1)
+        self.critic_head = OutputProjectionMLP(self.config, 1)
         self.action_info_proj = nn.Linear(1, dim)
         self.actor_input_proj = nn.Linear(dim * 3, dim)
         self.actor: PureActor | DiscreteTargetsActor
@@ -171,6 +173,7 @@ class StatelessTransformerV1(BaseModelAPI):
                 cast(ActorPureConfig, self.config.actor),
                 embed_dim=dim,
                 max_per_planet_launches=action_spec.max_per_planet_launches,
+                activation=self.config.activation,
             )
         else:
             self.actor = DiscreteTargetsActor(
@@ -192,7 +195,7 @@ class StatelessTransformerV1(BaseModelAPI):
         for layer in self.get_output_layers():
             gain = (
                 _CRITIC_HEAD_INIT_GAIN
-                if layer is self.critic_head
+                if layer is self.critic_head.out
                 else _ACTOR_HEAD_INIT_GAIN
             )
             _init_linear(layer, gain=gain)
@@ -211,7 +214,7 @@ class StatelessTransformerV1(BaseModelAPI):
         )
 
     def get_output_layers(self) -> tuple[nn.Linear, ...]:
-        return (self.critic_head, *self.actor.get_output_layers())
+        return (self.critic_head.out, *self.actor.get_output_layers())
 
     def encode_observations(self, obs: ObsBatch) -> tuple[torch.Tensor, torch.Tensor]:
         global_token = self.global_proj(obs.global_features).unsqueeze(1)

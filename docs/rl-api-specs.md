@@ -419,10 +419,10 @@ Terminal episode metrics:
 | `ships_lost_per_game_mean` | Ships removed by combat, sun, or out-of-bounds fleet loss. |
 | `ships_lost_in_sun_per_game_mean` | Ships removed by sun fleet loss. |
 | `ships_lost_out_of_bounds_per_game_mean` | Ships removed by out-of-bounds fleet loss. |
-| `ships_lost_to_sun_or_oob_rate` | `(ships_lost_in_sun_per_game_mean + ships_lost_out_of_bounds_per_game_mean) / ships_lost_per_game_mean`, or `0.0` when no ships were lost. |
+| `ships_lost_to_sun_or_oob_rate` | `(ships_lost_in_sun_per_game_mean + ships_lost_out_of_bounds_per_game_mean) / ships_lost_per_game_mean`. Omitted when no ships were lost. |
 | `fleets_lost_per_game_mean` | Fleets removed by sun or out-of-bounds loss. |
 | `fleets_lost_in_sun_per_game_mean` | Fleets removed by sun loss. |
 | `fleets_lost_out_of_bounds_per_game_mean` | Fleets removed by out-of-bounds loss. |
-| `fleets_lost_to_sun_or_oob_rate` | `(fleets_lost_in_sun_per_game_mean + fleets_lost_out_of_bounds_per_game_mean) / fleets_lost_per_game_mean`, or `0.0` when no fleets were lost. |
+| `fleets_lost_to_sun_or_oob_rate` | `(fleets_lost_in_sun_per_game_mean + fleets_lost_out_of_bounds_per_game_mean) / fleets_lost_per_game_mean`. Omitted when no fleets were lost. |
 | `terminal_planet_occupancy_rate_2p` | Occupied non-comet planet fraction at terminal for 2-player games. |
 | `terminal_planet_occupancy_rate_4p` | Occupied non-comet planet fraction at terminal for 4-player games. |
