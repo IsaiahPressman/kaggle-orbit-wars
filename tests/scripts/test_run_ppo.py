@@ -152,6 +152,19 @@ def test_validate_args_rejects_non_positive_runtime_hours() -> None:
         run_ppo._validate_args(Namespace(max_env_steps=None, max_runtime_hours=0.0))
 
 
+def test_validate_args_rejects_missing_resume_checkpoint(tmp_path: Path) -> None:
+    missing_path = tmp_path / "missing.pt"
+
+    with pytest.raises(ValueError, match="--resume-checkpoint does not exist"):
+        run_ppo._validate_args(
+            Namespace(
+                max_env_steps=None,
+                max_runtime_hours=None,
+                resume_checkpoint=missing_path,
+            )
+        )
+
+
 def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -370,6 +383,63 @@ def test_run_training_loop_writes_periodic_checkpoints(
     assert "trainable_parameters" not in logger.logged[0][0]
 
 
+def test_run_training_loop_resumes_checkpoint_cadence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _full_config(checkpoint_freq=1000)
+    trainer = _FakeTrainer()
+    logger = _FakeLogger()
+
+    def fake_evaluate_against_last_best(**_kwargs: object) -> dict[str, float]:
+        return {"eval/win_rate_against_last_best": 0.25}
+
+    monkeypatch.setattr(
+        run_ppo,
+        "_evaluate_against_last_best",
+        fake_evaluate_against_last_best,
+    )
+
+    env_steps = run_ppo._run_training_loop(
+        trainer=trainer,
+        logger=logger,
+        run_dir=tmp_path,
+        cfg=cfg,
+        env_steps_per_iteration=800,
+        max_env_steps=2000,
+        max_runtime_seconds=None,
+        start_env_steps=1200,
+    )
+
+    assert env_steps == 2000
+    assert trainer.checkpoints == [(tmp_path / "checkpoint_00_000_002_000.pt", 2000)]
+    assert [step for _metrics, step in logger.logged] == [2000, 2000]
+
+
+def test_run_training_loop_returns_immediately_when_resume_reached_step_limit(
+    tmp_path: Path,
+) -> None:
+    cfg = _full_config(checkpoint_freq=1000)
+    trainer = _FakeTrainer()
+    logger = _FakeLogger()
+
+    env_steps = run_ppo._run_training_loop(
+        trainer=trainer,
+        logger=logger,
+        run_dir=tmp_path,
+        cfg=cfg,
+        env_steps_per_iteration=800,
+        max_env_steps=1200,
+        max_runtime_seconds=None,
+        start_env_steps=1200,
+    )
+
+    assert env_steps == 1200
+    assert trainer.iterations == 0
+    assert trainer.checkpoints == []
+    assert logger.logged == []
+
+
 def test_run_training_loop_saves_last_best_when_eval_clears_threshold(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -428,6 +498,7 @@ def test_run_training_session_sets_trainable_parameter_summary(
         env_steps_per_iteration=8,
         max_env_steps=8,
         max_runtime_seconds=None,
+        start_env_steps=16,
         trainable_parameters=123,
     )
 
@@ -474,6 +545,7 @@ def test_ppo_trainer_write_checkpoint_includes_training_state(tmp_path: Path) ->
     trainer.model = model
     trainer.optimizer = optimizer
     trainer.lr_scheduler = scheduler
+    trainer.optimizer_steps = 7
     path = tmp_path / "checkpoint.pt"
 
     trainer.write_checkpoint(
@@ -483,6 +555,7 @@ def test_ppo_trainer_write_checkpoint_includes_training_state(tmp_path: Path) ->
 
     checkpoint = torch.load(path, weights_only=False)
     assert checkpoint["env_steps"] == 512
+    assert checkpoint["optimizer_steps"] == 7
     assert checkpoint["model"].keys() == model.state_dict().keys()
     assert "state" in checkpoint["optimizer"]
     assert checkpoint["lr_scheduler"] == scheduler.state_dict()
@@ -491,5 +564,82 @@ def test_ppo_trainer_write_checkpoint_includes_training_state(tmp_path: Path) ->
         "optimizer",
         "lr_scheduler",
         "env_steps",
+        "optimizer_steps",
     }
     assert not (tmp_path / ".checkpoint.pt.tmp").exists()
+
+
+def test_ppo_trainer_load_checkpoint_restores_training_state(tmp_path: Path) -> None:
+    src_model = torch.nn.Linear(2, 1)
+    dst_model = torch.nn.Linear(2, 1)
+    src_optimizer = torch.optim.AdamW(src_model.parameters(), lr=0.001)
+    dst_optimizer = torch.optim.AdamW(dst_model.parameters(), lr=0.001)
+    src_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        src_optimizer,
+        lr_lambda=lambda step: 0.5**step,
+    )
+    dst_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        dst_optimizer,
+        lr_lambda=lambda step: 0.5**step,
+    )
+    for param in src_model.parameters():
+        param.data.fill_(3.0)
+    src_optimizer.zero_grad()
+    src_model(torch.ones(1, 2)).sum().backward()
+    src_optimizer.step()
+    src_scheduler.step()
+    src_trainer = PPOTrainer.__new__(PPOTrainer)
+    src_trainer.model = src_model
+    src_trainer.optimizer = src_optimizer
+    src_trainer.lr_scheduler = src_scheduler
+    src_trainer.optimizer_steps = 11
+    path = tmp_path / "checkpoint.pt"
+    src_trainer.write_checkpoint(path, env_steps=2048)
+
+    dst_trainer = PPOTrainer.__new__(PPOTrainer)
+    dst_trainer.model = dst_model
+    dst_trainer.optimizer = dst_optimizer
+    dst_trainer.lr_scheduler = dst_scheduler
+    dst_trainer.optimizer_steps = 0
+    dst_trainer.device = torch.device("cpu")
+
+    env_steps = dst_trainer.load_checkpoint(path)
+
+    assert env_steps == 2048
+    assert dst_trainer.optimizer_steps == 11
+    for src_param, dst_param in zip(
+        src_model.parameters(),
+        dst_model.parameters(),
+        strict=True,
+    ):
+        assert torch.equal(src_param, dst_param)
+    assert dst_optimizer.state_dict()["state"]
+    assert dst_scheduler.state_dict() == src_scheduler.state_dict()
+
+
+def test_ppo_trainer_load_checkpoint_rejects_scheduler_mismatch(
+    tmp_path: Path,
+) -> None:
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+    trainer = PPOTrainer.__new__(PPOTrainer)
+    trainer.model = model
+    trainer.optimizer = optimizer
+    trainer.lr_scheduler = scheduler
+    trainer.optimizer_steps = 0
+    trainer.device = torch.device("cpu")
+    path = tmp_path / "checkpoint.pt"
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "lr_scheduler": None,
+            "env_steps": 1,
+            "optimizer_steps": 0,
+        },
+        path,
+    )
+
+    with pytest.raises(ValueError, match="missing lr_scheduler state"):
+        trainer.load_checkpoint(path)

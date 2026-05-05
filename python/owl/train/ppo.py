@@ -429,11 +429,52 @@ class PPOTrainer:
                 None if self.lr_scheduler is None else self.lr_scheduler.state_dict()
             ),
             "env_steps": env_steps,
+            "optimizer_steps": self.optimizer_steps,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f".{path.name}.tmp")
         torch.save(checkpoint, tmp_path)
         tmp_path.replace(path)
+
+    def load_checkpoint(self, path: Path) -> int:
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        if not isinstance(checkpoint, dict):
+            raise ValueError("checkpoint must be a dictionary")
+        expected_keys = {
+            "model",
+            "optimizer",
+            "lr_scheduler",
+            "env_steps",
+            "optimizer_steps",
+        }
+        if set(checkpoint) != expected_keys:
+            raise ValueError(
+                f"checkpoint keys must be {sorted(expected_keys)}, "
+                f"got {sorted(checkpoint)}"
+            )
+
+        env_steps = _checkpoint_nonnegative_int(
+            checkpoint["env_steps"],
+            name="env_steps",
+        )
+        optimizer_steps = _checkpoint_nonnegative_int(
+            checkpoint["optimizer_steps"],
+            name="optimizer_steps",
+        )
+        self.model.load_state_dict(checkpoint["model"])
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler_state = checkpoint["lr_scheduler"]
+        if self.lr_scheduler is None:
+            if scheduler_state is not None:
+                raise ValueError(
+                    "checkpoint has lr_scheduler state but trainer does not"
+                )
+        else:
+            if scheduler_state is None:
+                raise ValueError("checkpoint is missing lr_scheduler state")
+            self.lr_scheduler.load_state_dict(scheduler_state)
+        self.optimizer_steps = optimizer_steps
+        return env_steps
 
     def _collect_rollout(self) -> torch.Tensor:
         self.rollout.rewards.zero_()
@@ -1191,6 +1232,14 @@ def _current_learning_rate(
 
 def _torch_optimizer_learning_rate(optimizer: torch.optim.Optimizer) -> float:
     return float(optimizer.param_groups[0]["lr"])
+
+
+def _checkpoint_nonnegative_int(value: object, *, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"checkpoint {name} must be an integer")
+    if value < 0:
+        raise ValueError(f"checkpoint {name} must be non-negative")
+    return value
 
 
 def _output_actions(output: ModelOutput) -> ModelActions:

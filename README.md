@@ -65,10 +65,13 @@ uv run python scripts/run_ppo.py configs/baseline.yaml runs --log-mode debug --m
 ```
 
 PPO run directories save `config.yaml` alongside checkpoints. Checkpoints save
-model, optimizer, scheduler, and environment-step metadata. They do not save the
-Rust environment state or current observation, so they are not exact resume
-snapshots. Periodic checkpoint names use grouped zero-padded environment-step
-labels such as `checkpoint_00_022_000_000.pt`. At each periodic checkpoint, the
+model, optimizer, scheduler, environment-step metadata, and optimizer-step
+metadata. Resume training with `--resume-checkpoint path/to/checkpoint.pt`.
+Checkpoints do not save the Rust environment state or current observation, so
+resumed runs continue from a fresh environment batch rather than acting as exact
+simulator snapshots. Periodic checkpoint names use grouped zero-padded
+environment-step labels such as `checkpoint_00_022_000_000.pt`. At each
+periodic checkpoint, the
 current model is evaluated against the last-best model snapshot using
 sampled policy actions and logs
 `eval/win_rate_against_last_best` plus terminal environment metrics under

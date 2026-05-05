@@ -66,6 +66,11 @@ def main() -> None:
         lr_scheduler=lr_scheduler,
         device=device,
     )
+    start_env_steps = (
+        trainer.load_checkpoint(args.resume_checkpoint)
+        if args.resume_checkpoint is not None
+        else 0
+    )
 
     env_steps_per_iteration = cfg.rl.horizon * env.n_envs
     max_runtime_seconds = _max_runtime_seconds(args.max_runtime_hours)
@@ -77,6 +82,7 @@ def main() -> None:
         env_steps_per_iteration=env_steps_per_iteration,
         max_env_steps=args.max_env_steps,
         max_runtime_seconds=max_runtime_seconds,
+        start_env_steps=start_env_steps,
         trainable_parameters=trainable_parameters,
     )
 
@@ -90,6 +96,7 @@ def _run_training_session(
     env_steps_per_iteration: int,
     max_env_steps: int | None,
     max_runtime_seconds: float | None,
+    start_env_steps: int = 0,
     trainable_parameters: int | None = None,
 ) -> None:
     with closing(create_logger(log_mode, run_dir, cfg)) as logger:
@@ -103,6 +110,7 @@ def _run_training_session(
             env_steps_per_iteration=env_steps_per_iteration,
             max_env_steps=max_env_steps,
             max_runtime_seconds=max_runtime_seconds,
+            start_env_steps=start_env_steps,
         )
         trainer.write_checkpoint(
             run_dir / "checkpoint_final.pt",
@@ -119,18 +127,27 @@ def _run_training_loop(
     env_steps_per_iteration: int,
     max_env_steps: int | None,
     max_runtime_seconds: float | None,
+    start_env_steps: int = 0,
 ) -> int:
-    env_steps = 0
+    env_steps = start_env_steps
     started_at = time.monotonic()
     next_checkpoint_env_steps = _next_periodic_checkpoint_step(
         checkpoint_freq=cfg.rl.checkpoint_freq,
+        env_steps=env_steps,
     )
     last_best_model = (
         _clone_eval_model(trainer.model)
         if next_checkpoint_env_steps is not None
         else None
     )
-    with tqdm(unit="env steps", dynamic_ncols=True) as progress:
+    if _should_stop_training(
+        env_steps=env_steps,
+        started_at=started_at,
+        max_env_steps=max_env_steps,
+        max_runtime_seconds=max_runtime_seconds,
+    ):
+        return env_steps
+    with tqdm(unit="env steps", dynamic_ncols=True, initial=env_steps) as progress:
         while True:
             metrics = trainer.train_iteration()
             env_steps += env_steps_per_iteration
@@ -216,6 +233,12 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Stop after at least this many wall-clock hours",
     )
+    parser.add_argument(
+        "--resume-checkpoint",
+        type=Path,
+        default=None,
+        help="Load model, optimizer, scheduler, and counters from a checkpoint",
+    )
     args = parser.parse_args()
     _validate_args(args)
     return args
@@ -226,6 +249,9 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-env-steps must be positive")
     if args.max_runtime_hours is not None and args.max_runtime_hours <= 0.0:
         raise ValueError("--max-runtime-hours must be positive")
+    resume_checkpoint = getattr(args, "resume_checkpoint", None)
+    if resume_checkpoint is not None and not resume_checkpoint.is_file():
+        raise ValueError(f"--resume-checkpoint does not exist: {resume_checkpoint}")
 
 
 def _parse_cli_overrides(raw_overrides: list[list[str]] | None) -> dict[str, Any]:
