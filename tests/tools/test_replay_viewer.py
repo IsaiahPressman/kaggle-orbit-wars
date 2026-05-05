@@ -11,3 +11,7 @@ def test_orbit_wars_replay_viewer_uses_kaggle_renderer_style() -> None:
     assert "drawFleets" in html
     assert "Fleet #" in html
     assert "Production" in html
+    assert "Ships / turn" in html
+    assert "Production / turn" in html
+    assert "timelineFrameFromPointer" in html
+    assert 'id="timelineChart"' in html
