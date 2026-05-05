@@ -822,7 +822,7 @@ class PPOTrainer:
                 new_values=new_values.detach(),
                 grad_norm=metrics.loss.detach().new_zeros(()),
                 target_kl_exceeded=True,
-        )
+            )
 
         self.optimizer.zero_grad(set_to_none=True)
         backward_loss = (

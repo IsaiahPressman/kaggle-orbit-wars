@@ -230,10 +230,13 @@ def test_distributed_session_rejects_distributed_cpu_launch(
     monkeypatch.setenv("WORLD_SIZE", "2")
     monkeypatch.setattr(distributed_module.torch.cuda, "is_available", lambda: False)
 
-    with pytest.raises(
-        RuntimeError,
-        match="distributed session requires CUDA, but CUDA is not available",
-    ), distributed_session():
+    with (
+        pytest.raises(
+            RuntimeError,
+            match="distributed session requires CUDA, but CUDA is not available",
+        ),
+        distributed_session(),
+    ):
         pass
 
 
