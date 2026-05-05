@@ -163,8 +163,8 @@ Supported test environment variables:
 
 - `ORBIT_WARS_PARITY_FIXTURE_DIR`: directory containing extracted JSONL parity
   fixtures.
-- `REQUIRE_PARITY_FIXTURES=0`: skip replay and generation parity when fixtures
-  are missing. Missing fixtures fail by default.
+- `REQUIRE_PARITY_FIXTURES=0`: skip replay parity, and skip generation parity
+  only when generation fixtures are missing. Missing fixtures fail by default.
 
 When the upstream rules change, keep the test code stable: download replacement
 episodes as JSONL fixtures, move them into the fixture directory if needed,

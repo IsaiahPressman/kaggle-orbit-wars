@@ -93,6 +93,10 @@ impl RandomSource for PanicRandom {
 
 #[test]
 fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
+    if !require_parity_fixtures()? {
+        return Ok(());
+    }
+
     let fixture_dir = fixture_dir();
     let fixture_paths = fixture_paths(&fixture_dir)?;
     if fixture_paths.is_empty() {

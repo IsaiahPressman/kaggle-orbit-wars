@@ -10,8 +10,8 @@ Replay fixtures are generated with `scripts/download_replays.py` and loaded from
 `tests/fixtures/orbit_wars_replays/replay-*.jsonl`.
 
 The parity tests fail by default when required fixtures are missing. Set
-`REQUIRE_PARITY_FIXTURES=0` to skip fixture-backed parity on machines that do not
-have local fixtures.
+`REQUIRE_PARITY_FIXTURES=0` to skip replay parity, and to skip generation parity
+when generation fixtures are missing.
 
 Replay coverage is required for:
 
@@ -72,8 +72,9 @@ replays:
 - launch validation and side effects
 - production order
 - fleet movement and removal
-- fleet collision priority: planet collisions before out-of-bounds or sun removal
-- sun, planet, out-of-bounds, and sweep collisions
+- fleet collision priority: swept planet/comet collisions before out-of-bounds
+  or sun removal
+- sun, planet, out-of-bounds, and simultaneous swept-pair collisions
 - combat resolution, ties, and reinforcement
 - comet spawning before same-step movement
 - comet movement and expiry
@@ -106,7 +107,7 @@ Replay and generation fixtures are ignored by Git because full episodes and
 recorded reference streams can be large. A fresh checkout must run
 `scripts/regenerate_test_fixtures.sh` or restore fixtures from cache before
 running required parity. Use `REQUIRE_PARITY_FIXTURES=0 just rs-test` only when
-intentionally skipping fixture-backed parity.
+intentionally skipping replay parity or missing generation fixtures.
 
 RL-only terminal metrics such as `ships_lost_in_combat_per_game` and
 `fleets_lost_in_combat_per_game` are derived from simulator step results and
