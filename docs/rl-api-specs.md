@@ -11,7 +11,7 @@ from owl.rl import ActionPureConfig, ObsV1Config, VectorizedEnv
 
 env = VectorizedEnv(
     n_envs=128,
-    obs_spec=ObsV1Config(max_entities=1024),
+    obs_spec=ObsV1Config(max_entities=512),
     action_spec=ActionPureConfig(max_per_planet_launches=3),
 )
 ```
@@ -21,7 +21,7 @@ env = VectorizedEnv(
 - `MAX_PLANETS = 40`
 - `MAX_COMETS = 4`
 - `MAX_COMET_PATH_LENGTH = 40`
-- `DEFAULT_MAX_ENTITIES = 1024`
+- `DEFAULT_MAX_ENTITIES = 512`
 - `ACTION_ENTITY_SLOTS = MAX_PLANETS + MAX_COMETS = 44`
 - `OUTER_PLAYER_SLOTS = 4`
 
@@ -31,7 +31,7 @@ env = VectorizedEnv(
 max_fleets = max_entities - (MAX_PLANETS + MAX_COMETS)
 ```
 
-The default `max_entities=1024` gives `max_fleets=980`.
+The default `max_entities=512` gives `max_fleets=468`.
 
 `MAX_PLANETS` matches the current generated-map upper bound:
 `MAX_PLANET_GROUPS * 4 = 10 * 4`. `MAX_COMET_PATH_LENGTH` matches the comet
@@ -43,7 +43,7 @@ the range `5..=40` are rejected.
 Config:
 
 ```python
-{"obs_spec": "obs_v1", "max_entities": 1024}
+{"obs_spec": "obs_v1", "max_entities": 512}
 ```
 
 `ObsV1` writes observations into reusable caller-owned buffers. The vectorized

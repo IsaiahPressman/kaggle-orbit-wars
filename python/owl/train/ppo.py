@@ -407,11 +407,12 @@ class PPOTrainer:
         metrics.update(_mean_env_metrics(env_metrics))
         elapsed = max(perf_counter() - start, 1e-12)
         rollout_steps = self.config.horizon * self.n_envs
+        update_steps = rollout_steps * metrics["sampling/effective_replay_exposure"]
         metrics["time/rollout_seconds"] = float(rollout_elapsed)
         metrics["time/update_seconds"] = float(update_elapsed)
         metrics["time/iteration_seconds"] = float(elapsed)
         metrics["perf/rollout_sps"] = float(rollout_steps / rollout_elapsed)
-        metrics["perf/update_sps"] = float(rollout_steps / update_elapsed)
+        metrics["perf/update_sps"] = float(update_steps / update_elapsed)
         metrics["perf/steps_per_second"] = float(rollout_steps / elapsed)
         return metrics
 

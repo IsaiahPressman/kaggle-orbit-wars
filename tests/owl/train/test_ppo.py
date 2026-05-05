@@ -1206,6 +1206,57 @@ def test_update_reports_target_kl_guard_when_exceeded(
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(1.0)
 
 
+def test_train_iteration_update_sps_uses_actual_segments_when_target_kl_stops_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(9)
+    env = TinyOrbitEnv(n_envs=4)
+    model = TinyOrbitModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            replay_ratio=1.0,
+            target_kl=0.01,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+        ),
+        device=torch.device("cpu"),
+    )
+
+    def fake_update_minibatch(
+        segments: ppo.PPORolloutSegments,
+        advantages: torch.Tensor,  # noqa: ARG001
+        returns: torch.Tensor,  # noqa: ARG001
+        policy_mask: torch.Tensor,  # noqa: ARG001
+        value_mask: torch.Tensor,  # noqa: ARG001
+        sample: ppo.SegmentSample,
+        *,
+        value_clip_anchor: torch.Tensor,  # noqa: ARG001
+    ) -> ppo.PPOUpdateResult:
+        zero = segments.logp.new_zeros(())
+        metrics = replace(_zero_loss_metrics(zero), approx_kl=zero + 0.02)
+        return ppo.PPOUpdateResult(
+            metrics=metrics,
+            indices=sample.indices,
+            new_logp=segments.logp[sample.indices],
+            new_values=segments.values[sample.indices],
+            grad_norm=zero,
+            target_kl_exceeded=True,
+        )
+
+    times = iter([0.0, 0.0, 2.0, 2.0, 3.0, 4.0])
+    monkeypatch.setattr(ppo, "perf_counter", lambda: next(times))
+    monkeypatch.setattr(trainer, "_update_minibatch", fake_update_minibatch)
+
+    metrics = trainer.train_iteration()
+
+    assert metrics["policy/target_kl_exceeded"] == pytest.approx(1.0)
+    assert metrics["sampling/effective_replay_exposure"] == pytest.approx(0.25)
+    assert metrics["perf/update_sps"] == pytest.approx(2.0)
+
+
 @pytest.mark.parametrize(
     "config",
     [
