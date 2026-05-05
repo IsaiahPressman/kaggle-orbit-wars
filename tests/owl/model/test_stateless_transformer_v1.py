@@ -178,6 +178,7 @@ def test_model_config_loads_actor_subconfig_reference() -> None:
         ("stateless_transformer_tiny.yaml", 1_055_118),
         ("stateless_transformer_5m.yaml", 5_393_166),
         ("stateless_transformer_20m.yaml", 20_901_530),
+        ("stateless_transformer_20m_swiglu.yaml", 21_645_722),
     ],
 )
 def test_model_config_file_parameter_count(
