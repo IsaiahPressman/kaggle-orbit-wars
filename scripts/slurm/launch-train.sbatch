@@ -56,7 +56,11 @@ if [[ "$LOG_MODE" == "wandb" && -z "${WANDB_API_KEY:-}" ]]; then
 fi
 
 train_cmd=(
-    uv run python scripts/run_ppo.py
+    uv run torchrun
+    --standalone
+    --nnodes=1
+    --nproc-per-node="${ORBIT_WARS_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-1}}"
+    scripts/run_ppo.py
     "$CONFIG"
     /runs
     --log-mode "$LOG_MODE"

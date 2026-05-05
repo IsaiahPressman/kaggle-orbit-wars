@@ -179,6 +179,28 @@ sbatch --exclude=gpu-node-01 scripts/slurm/launch-train.sbatch \
 For production jobs, point at `configs/baseline.yaml` or another checked-in
 config, and mount any external data or required settings.
 
+### Multi-GPU PPO
+
+The batch launcher runs PPO through `torchrun` with one process per GPU on a
+single node. Override Slurm GPU resources in the normal `sbatch` position:
+
+```sh
+sbatch --gpus-per-node=4 scripts/slurm/launch-train.sbatch
+```
+
+`EnvConfig.n_envs`, `rl.horizon`, and
+`rl.segment_sampling.segments_per_minibatch` are per rank. The effective rollout
+width is:
+
+```text
+world_size * env.n_envs * rl.horizon
+```
+
+Checkpoint frequency, `--max-env-steps`, W&B step values, and logged
+`train/env_steps` are global across ranks. Rank 0 owns W&B, checkpoints,
+last-best evaluation replay files, and the saved `config.yaml`. The saved config
+records `runtime.n_runtime_gpus`; resume launches must use the same GPU count.
+
 ## Interactive debugging
 
 Use the interactive helper to request a Slurm allocation and open a shell inside
