@@ -277,6 +277,11 @@ Fleet-size entropy is estimated with deterministic per-component quantile
 quadrature under the continuous truncated logistic mixture. This accounts for
 component overlap and uses memory proportional to
 `n_action_mixtures * entropy_ship_quantiles`, independent of the ship budget.
+Because this is a continuous-density estimate rather than exact entropy over
+rounded integer ship counts, very narrow scales can produce a negative size
+entropy term; the PPO bonus still encourages broader size distributions, but
+the logged value should be interpreted as an exploration heuristic rather than a
+non-negative discrete entropy.
 
 ## Log-Prob Replay
 
