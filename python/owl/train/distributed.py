@@ -102,6 +102,14 @@ def broadcast_object[T](
     return cast(T, values[0])
 
 
+def all_gather_object[T](value: T, context: DistributedContext) -> list[T]:
+    if not context.initialized:
+        return [value]
+    values: list[object | None] = [None for _ in range(context.world_size)]
+    dist.all_gather_object(values, value)
+    return cast(list[T], values)
+
+
 def all_reduce_sum(
     tensor: torch.Tensor,
     context: DistributedContext,

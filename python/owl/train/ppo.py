@@ -28,6 +28,7 @@ from owl.train.advantages import (
 )
 from owl.train.distributed import (
     DistributedContext,
+    all_gather_object,
     all_reduce_max,
     all_reduce_sum,
     unwrap_model,
@@ -1485,20 +1486,50 @@ def _mean_env_metrics(
     context: DistributedContext | None = None,
     device: torch.device | None = None,
 ) -> dict[str, float]:
+    if context is not None and context.initialized:
+        return _distributed_mean_env_metrics(
+            metrics,
+            context=context,
+            device=device or context.device,
+        )
+
     logged: dict[str, float] = {}
     for key, values in metrics.items():
-        if not values and (context is None or not context.initialized):
+        if not values:
             continue
         local = torch.tensor(
             [sum(values), len(values)],
             dtype=torch.float64,
             device=device,
         )
-        if context is not None and context.initialized:
-            local = all_reduce_sum(local, context)
         if local[1].item() == 0:
             continue
         logged[f"train/{key}"] = float((local[0] / local[1]).item())
+    return logged
+
+
+def _distributed_mean_env_metrics(
+    metrics: dict[str, list[float]],
+    *,
+    context: DistributedContext,
+    device: torch.device,
+) -> dict[str, float]:
+    key_sets = all_gather_object(set(metrics), context)
+    keys = sorted(set().union(*key_sets))
+    if not keys:
+        return {}
+
+    local = torch.tensor(
+        [[sum(metrics.get(key, ())), len(metrics.get(key, ()))] for key in keys],
+        dtype=torch.float64,
+        device=device,
+    )
+    totals = all_reduce_sum(local, context)
+    logged: dict[str, float] = {}
+    for key, total in zip(keys, totals, strict=True):
+        if total[1].item() == 0:
+            continue
+        logged[f"train/{key}"] = float((total[0] / total[1]).item())
     return logged
 
 

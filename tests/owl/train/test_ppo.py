@@ -541,6 +541,57 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
     assert metrics["train/win_rate_player_0"] == 0.5
 
 
+def test_distributed_env_metrics_reduce_matching_global_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=True,
+    )
+
+    def fake_all_gather_object(
+        value: set[str],
+        _context: ppo.DistributedContext,
+    ) -> list[set[str]]:
+        assert value == {"z_metric"}
+        assert _context is context
+        return [{"z_metric"}, {"a_metric", "z_metric"}]
+
+    def fake_all_reduce_sum(
+        tensor: torch.Tensor,
+        _context: ppo.DistributedContext,
+    ) -> torch.Tensor:
+        assert _context is context
+        assert torch.equal(
+            tensor,
+            torch.tensor(
+                [[0.0, 0.0], [6.0, 2.0]],
+                dtype=torch.float64,
+            ),
+        )
+        return torch.tensor(
+            [[10.0, 2.0], [36.0, 5.0]],
+            dtype=torch.float64,
+        )
+
+    monkeypatch.setattr(ppo, "all_gather_object", fake_all_gather_object)
+    monkeypatch.setattr(ppo, "all_reduce_sum", fake_all_reduce_sum)
+
+    metrics = ppo._mean_env_metrics(
+        {"z_metric": [2.0, 4.0]},
+        context=context,
+        device=torch.device("cpu"),
+    )
+
+    assert metrics == {
+        "train/a_metric": 5.0,
+        "train/z_metric": 7.2,
+    }
+
+
 def test_distributed_weighted_mean_uses_global_sum_and_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

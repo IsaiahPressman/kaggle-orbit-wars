@@ -8,6 +8,7 @@ from .config import FullConfig, RuntimeConfig
 from .distributed import (
     DistributedContext,
     DistributedModelAdapter,
+    all_gather_object,
     all_reduce_any,
     all_reduce_max,
     all_reduce_sum,
@@ -81,6 +82,7 @@ __all__ = [
     "SegmentSamplingConfig",
     "SegmentSamplingMetrics",
     "TrainingDType",
+    "all_gather_object",
     "all_reduce_any",
     "all_reduce_max",
     "all_reduce_sum",

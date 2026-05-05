@@ -21,6 +21,7 @@ from owl.rs import assert_release_build
 from owl.train import FullConfig, PPOCheckpointMetadata, PPOTrainer, configure_torch
 from owl.train.distributed import (
     DistributedContext,
+    all_reduce_any,
     broadcast_object,
     distributed_session,
     unwrap_model,
@@ -294,6 +295,7 @@ def _run_training_loop(
         started_at=started_at,
         max_env_steps=max_env_steps,
         max_runtime_seconds=max_runtime_seconds,
+        distributed=distributed,
     ):
         return env_steps
     with tqdm(
@@ -362,6 +364,7 @@ def _run_training_loop(
                 started_at=started_at,
                 max_env_steps=max_env_steps,
                 max_runtime_seconds=max_runtime_seconds,
+                distributed=distributed,
             ):
                 break
     return env_steps
@@ -1071,13 +1074,16 @@ def _should_stop_training(
     started_at: float,
     max_env_steps: int | None,
     max_runtime_seconds: float | None,
+    distributed: DistributedContext | None = None,
 ) -> bool:
-    if max_env_steps is not None and env_steps >= max_env_steps:
-        return True
-    return (
+    should_stop = max_env_steps is not None and env_steps >= max_env_steps
+    should_stop = should_stop or (
         max_runtime_seconds is not None
         and time.monotonic() - started_at >= max_runtime_seconds
     )
+    if distributed is not None and distributed.initialized:
+        return all_reduce_any(should_stop, distributed)
+    return should_stop
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from owl.train import distributed as distributed_module
 from owl.train.distributed import (
     DistributedContext,
     DistributedModelAdapter,
+    all_gather_object,
     all_reduce_any,
     all_reduce_max,
     all_reduce_sum,
@@ -253,6 +254,7 @@ def test_collective_helpers_return_input_without_process_group() -> None:
     assert all_reduce_sum(tensor, context) is tensor
     assert all_reduce_max(tensor, context) is tensor
     assert all_reduce_any(True, context) is True
+    assert all_gather_object({"rank": 0}, context) == [{"rank": 0}]
     assert broadcast_object({"run": "abc"}, context) == {"run": "abc"}
 
 
@@ -276,7 +278,16 @@ def test_collective_helpers_delegate_to_torch_distributed(
         calls.append(("broadcast", src))
         values[0] = "from-main"
 
+    def fake_all_gather_object(values: list[object | None], value: object) -> None:
+        calls.append(("gather", value))
+        values[:] = ["rank-0", "rank-1"]
+
     monkeypatch.setattr(distributed_module.dist, "all_reduce", fake_all_reduce)
+    monkeypatch.setattr(
+        distributed_module.dist,
+        "all_gather_object",
+        fake_all_gather_object,
+    )
     monkeypatch.setattr(
         distributed_module.dist,
         "broadcast_object_list",
@@ -292,11 +303,13 @@ def test_collective_helpers_delegate_to_torch_distributed(
         torch.tensor([3.0]),
     )
     assert all_reduce_any(False, context) is True
+    assert all_gather_object("local", context) == ["rank-0", "rank-1"]
     assert broadcast_object(None, context) == "from-main"
     assert calls == [
         distributed_module.dist.ReduceOp.SUM,
         distributed_module.dist.ReduceOp.MAX,
         distributed_module.dist.ReduceOp.MAX,
+        ("gather", "local"),
         ("broadcast", 0),
     ]
 

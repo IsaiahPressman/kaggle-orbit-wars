@@ -150,6 +150,38 @@ def test_should_stop_training_checks_step_and_runtime_limits() -> None:
     )
 
 
+def test_should_stop_training_reduces_distributed_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = run_ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=1,
+        local_rank=1,
+        world_size=2,
+        initialized=True,
+    )
+    calls: list[bool] = []
+
+    def fake_all_reduce_any(
+        value: bool,
+        _context: run_ppo.DistributedContext,
+    ) -> bool:
+        assert _context is context
+        calls.append(value)
+        return True
+
+    monkeypatch.setattr(run_ppo, "all_reduce_any", fake_all_reduce_any)
+
+    assert run_ppo._should_stop_training(
+        env_steps=1,
+        started_at=time.monotonic(),
+        max_env_steps=10,
+        max_runtime_seconds=10.0,
+        distributed=context,
+    )
+    assert calls == [False]
+
+
 def test_max_runtime_hours_converts_to_seconds() -> None:
     assert run_ppo._max_runtime_seconds(None) is None
     assert run_ppo._max_runtime_seconds(1.5) == 5400.0
