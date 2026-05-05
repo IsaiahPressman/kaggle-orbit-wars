@@ -111,6 +111,8 @@ class StatelessTransformerV1Config(BaseConfig):
     def _validate_config(self) -> Self:
         if self.embed_dim % self.n_heads != 0:
             raise ValueError("n_heads must evenly divide embed_dim")
+        if int(self.embed_dim * self.mlp_ratio) < 1:
+            raise ValueError("embed_dim * mlp_ratio must be at least 1")
         return self
 
 

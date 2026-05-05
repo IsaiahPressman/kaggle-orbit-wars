@@ -37,6 +37,8 @@ pure-head fields such as `n_action_mixtures`, `kappa_min`, `kappa_max`,
 `n_action_mixtures`, `max_ship_normalizer=500.0`, `entropy_ship_quantiles=16`,
 and the logistic-mixture scale parameters `scale_min=0.10`,
 `scale_max_frac=0.5`, and `scale_max_abs_floor=8.0`.
+`kappa_max` may be `None`; when set, `kappa_min` must be less than or equal to
+`kappa_max`.
 Model YAML files can reference actor presets by name through adjacent
 `configs/model/actor/*.yaml` files, for example `actor: discrete_targets`, or
 can inline an actor config to override preset fields such as mixture count.
@@ -87,8 +89,9 @@ The shared trunk is a stack of pre-norm transformer blocks configured by:
 - `mlp_ratio`
 - `embed_dim`
 
-`n_heads` must evenly divide `embed_dim`. The default activation is GELU. LayerNorm
-is used for normalization, and no dropout is applied.
+`n_heads` must evenly divide `embed_dim`, and `int(embed_dim * mlp_ratio)` must
+be at least 1. The default activation is GELU. LayerNorm is used for
+normalization, and no dropout is applied.
 
 CPU execution uses torch scaled-dot-product attention over regular
 `(batch, seq, dim)` tensors with the token mask passed as the attention key

@@ -141,6 +141,16 @@ def test_model_config_requires_heads_to_divide_embed_dim() -> None:
         StatelessTransformerV1Config(embed_dim=30, n_heads=8)
 
 
+def test_model_config_requires_positive_feedforward_width() -> None:
+    with pytest.raises(ValueError, match="embed_dim \\* mlp_ratio must be at least 1"):
+        StatelessTransformerV1Config(embed_dim=1, n_heads=1, mlp_ratio=0.5)
+
+
+def test_actor_pure_config_requires_ordered_kappa_bounds() -> None:
+    with pytest.raises(ValueError, match="kappa_min must be <= kappa_max"):
+        ActorPureConfig(kappa_min=2.0, kappa_max=1.0)
+
+
 def test_model_config_has_discriminator_tag() -> None:
     config = TypeAdapter(ModelConfig).validate_python(
         {
