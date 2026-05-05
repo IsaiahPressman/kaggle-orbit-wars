@@ -1,7 +1,7 @@
 env:
   n_envs: 256
   obs_spec:
-    obs_spec: obs_v1
+    obs_spec: entity_based
     max_entities: 512
   action_spec:
     action_spec: discrete_targets
@@ -20,7 +20,11 @@ optimizer:
   muon_lr: 0.005
   muon_weight_decay: 0.05
   muon_momentum: 0.95
-  lr_schedule: null
+  lr_schedule:
+    schedule: linear_warmup_cosine_decay
+    warmup_steps: 200
+    decay_steps: 100_000
+    lr_min_ratio: 0.1
 
 rl:
   horizon: 128
@@ -29,20 +33,15 @@ rl:
   segment_sampling:
     sampling: uniform
     segments_per_minibatch: 16
-    prio_alpha: 0.0
-    prio_beta: 0.2
-    prio_eps: 1.0e-06
   gamma: 0.999
   gae_lambda: 0.9
   clip_coef: 0.2
-  vf_clip_coef: 0.2
+  vf_clip_coef: null
   vf_coef: 2.0
   ent_coef: 2e-5
   max_grad_norm: 1.0
   target_kl: 0.1
   advantage_mode: gae
-  vtrace_rho_clip: 1.0
-  vtrace_c_clip: 1.0
   recompute_advantages_each_minibatch: false
   normalize_advantages: true
   debug_validate_ppo_loss_inputs: false

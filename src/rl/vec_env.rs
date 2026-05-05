@@ -18,8 +18,8 @@ use super::action_spec::{
 use super::obs_spec::encode_state_with_action_slots;
 use super::{
     log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
-    DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, MAX_COMETS, MAX_PLANETS,
-    OUTER_PLAYER_SLOTS, PLANET_CHANNELS,
+    DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, MAX_COMETS, MAX_LAUNCH_FEATURES,
+    MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS,
 };
 
 type ObsShapes = (
@@ -32,6 +32,7 @@ type ObsShapes = (
     (usize, usize),
     Vec<usize>,
     (usize, usize, usize),
+    (usize, usize, usize, usize),
 );
 
 #[pyclass(name = "RlVecEnv")]
@@ -55,7 +56,7 @@ pub struct PyRlVecEnv {
 #[pymethods]
 impl PyRlVecEnv {
     #[new]
-    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="obs_v1", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=3, min_fleet_size=1))]
+    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="entity_based", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=3, min_fleet_size=1))]
     fn new(
         n_envs: usize,
         two_player_weight: f64,
@@ -71,9 +72,9 @@ impl PyRlVecEnv {
         if !(0.0..=1.0).contains(&two_player_weight) {
             return Err(PyValueError::new_err("two_player_weight must be in [0, 1]"));
         }
-        if obs_spec != "obs_v1" {
+        if obs_spec != "entity_based" {
             return Err(PyValueError::new_err(format!(
-                "unsupported obs_spec {obs_spec:?}; expected \"obs_v1\""
+                "unsupported obs_spec {obs_spec:?}; expected \"entity_based\""
             )));
         }
         let Some(action_spec) = RlActionSpec::parse(action_spec) else {
@@ -169,6 +170,7 @@ impl PyRlVecEnv {
         global_obs: PyReadwriteArrayDyn<'_, f32>,
         can_act: PyReadwriteArrayDyn<'_, bool>,
         max_launch: PyReadwriteArrayDyn<'_, i64>,
+        max_launch_features: PyReadwriteArrayDyn<'_, f32>,
     ) -> PyResult<()> {
         self.require_obs_shapes(
             &planet_obs,
@@ -180,6 +182,7 @@ impl PyRlVecEnv {
             &global_obs,
             &can_act,
             &max_launch,
+            &max_launch_features,
         )?;
 
         let mut planet_obs = planet_obs;
@@ -191,6 +194,7 @@ impl PyRlVecEnv {
         let mut global_obs = global_obs;
         let mut can_act = can_act;
         let mut max_launch = max_launch;
+        let mut max_launch_features = max_launch_features;
 
         let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
         let orbiting_planets_per_env = MAX_PLANETS;
@@ -202,6 +206,7 @@ impl PyRlVecEnv {
         let min_fleet_size = self.min_fleet_size;
         let action_spec = self.action_spec;
         let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
+        let max_launch_features_per_env = max_launch_per_env * MAX_LAUNCH_FEATURES;
 
         let ignored_fleets: usize = self
             .states
@@ -235,7 +240,13 @@ impl PyRlVecEnv {
                     .as_slice_mut()?
                     .par_chunks_mut(max_launch_per_env),
             )
+            .zip_eq(
+                max_launch_features
+                    .as_slice_mut()?
+                    .par_chunks_mut(max_launch_features_per_env),
+            )
             .map(|item| {
+                let (item, max_launch_features) = item;
                 let (item, max_launch) = item;
                 let (item, can_act) = item;
                 let (item, global_obs) = item;
@@ -270,6 +281,7 @@ impl PyRlVecEnv {
                         global_obs,
                         can_act,
                         max_launch,
+                        max_launch_features,
                     )
                 }
             })
@@ -327,6 +339,7 @@ impl PyRlVecEnv {
         global_obs: PyReadwriteArrayDyn<'_, f32>,
         can_act: PyReadwriteArrayDyn<'_, bool>,
         max_launch: PyReadwriteArrayDyn<'_, i64>,
+        max_launch_features: PyReadwriteArrayDyn<'_, f32>,
         rewards: PyReadwriteArrayDyn<'_, f32>,
         dones: PyReadwriteArrayDyn<'_, bool>,
     ) -> PyResult<HashMap<String, Vec<f64>>> {
@@ -360,6 +373,7 @@ impl PyRlVecEnv {
             &global_obs,
             &can_act,
             &max_launch,
+            &max_launch_features,
         )?;
 
         let mut rewards = rewards;
@@ -373,6 +387,7 @@ impl PyRlVecEnv {
         let mut global_obs = global_obs;
         let mut can_act = can_act;
         let mut max_launch = max_launch;
+        let mut max_launch_features = max_launch_features;
 
         let reward_chunks = rewards.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
         let done_chunks = dones.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
@@ -388,6 +403,7 @@ impl PyRlVecEnv {
         let comets_per_env = MAX_COMETS * COMET_CHANNELS;
         let action_masks_per_env = self.action_spec.can_act_len();
         let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
+        let max_launch_features_per_env = max_launch_per_env * MAX_LAUNCH_FEATURES;
         let max_per_planet_launches = self.max_per_planet_launches;
         let min_fleet_size = self.min_fleet_size;
         let max_fleets = self.max_fleets;
@@ -431,8 +447,14 @@ impl PyRlVecEnv {
                     .as_slice_mut()?
                     .par_chunks_mut(max_launch_per_env),
             )
+            .zip_eq(
+                max_launch_features
+                    .as_slice_mut()?
+                    .par_chunks_mut(max_launch_features_per_env),
+            )
             .enumerate()
             .map(|(env_index, item)| {
+                let (item, max_launch_features) = item;
                 let (item, max_launch) = item;
                 let (item, can_act) = item;
                 let (item, global_obs) = item;
@@ -489,6 +511,7 @@ impl PyRlVecEnv {
                         global_obs,
                         can_act,
                         max_launch,
+                        max_launch_features,
                     );
                     Ok::<_, String>(StepOneOutput {
                         terminal_metrics: terminal.metrics,
@@ -528,6 +551,7 @@ impl PyRlVecEnv {
         global_obs: PyReadwriteArrayDyn<'_, f32>,
         can_act: PyReadwriteArrayDyn<'_, bool>,
         max_launch: PyReadwriteArrayDyn<'_, i64>,
+        max_launch_features: PyReadwriteArrayDyn<'_, f32>,
         rewards: PyReadwriteArrayDyn<'_, f32>,
         dones: PyReadwriteArrayDyn<'_, bool>,
     ) -> PyResult<HashMap<String, Vec<f64>>> {
@@ -561,6 +585,7 @@ impl PyRlVecEnv {
             &global_obs,
             &can_act,
             &max_launch,
+            &max_launch_features,
         )?;
 
         let mut rewards = rewards;
@@ -574,6 +599,7 @@ impl PyRlVecEnv {
         let mut global_obs = global_obs;
         let mut can_act = can_act;
         let mut max_launch = max_launch;
+        let mut max_launch_features = max_launch_features;
 
         let reward_chunks = rewards.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
         let done_chunks = dones.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
@@ -589,6 +615,7 @@ impl PyRlVecEnv {
         let comets_per_env = MAX_COMETS * COMET_CHANNELS;
         let action_masks_per_env = self.action_spec.can_act_len();
         let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
+        let max_launch_features_per_env = max_launch_per_env * MAX_LAUNCH_FEATURES;
         let max_per_planet_launches = self.max_per_planet_launches;
         let min_fleet_size = self.min_fleet_size;
         let max_fleets = self.max_fleets;
@@ -632,8 +659,14 @@ impl PyRlVecEnv {
                     .as_slice_mut()?
                     .par_chunks_mut(max_launch_per_env),
             )
+            .zip_eq(
+                max_launch_features
+                    .as_slice_mut()?
+                    .par_chunks_mut(max_launch_features_per_env),
+            )
             .enumerate()
             .map(|(env_index, item)| {
+                let (item, max_launch_features) = item;
                 let (item, max_launch) = item;
                 let (item, can_act) = item;
                 let (item, global_obs) = item;
@@ -691,6 +724,7 @@ impl PyRlVecEnv {
                         global_obs,
                         can_act,
                         max_launch,
+                        max_launch_features,
                     );
                     Ok::<_, String>(StepOneOutput {
                         terminal_metrics: terminal.metrics,
@@ -734,6 +768,12 @@ impl PyRlVecEnv {
                 ],
             },
             (self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
+            (
+                self.n_envs,
+                OUTER_PLAYER_SLOTS,
+                ACTION_ENTITY_SLOTS,
+                MAX_LAUNCH_FEATURES,
+            ),
         )
     }
 }
@@ -768,6 +808,7 @@ impl PyRlVecEnv {
         global_obs: &PyReadwriteArrayDyn<'_, f32>,
         can_act: &PyReadwriteArrayDyn<'_, bool>,
         max_launch: &PyReadwriteArrayDyn<'_, i64>,
+        max_launch_features: &PyReadwriteArrayDyn<'_, f32>,
     ) -> PyResult<()> {
         require_shape(
             "planet_obs",
@@ -818,6 +859,16 @@ impl PyRlVecEnv {
             "max_launch",
             max_launch.shape(),
             &[self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS],
+        )?;
+        require_shape(
+            "max_launch_features",
+            max_launch_features.shape(),
+            &[
+                self.n_envs,
+                OUTER_PLAYER_SLOTS,
+                ACTION_ENTITY_SLOTS,
+                MAX_LAUNCH_FEATURES,
+            ],
         )?;
         Ok(())
     }
@@ -1400,6 +1451,7 @@ fn write_one_obs(
     global_obs: &mut [f32],
     can_act: &mut [bool],
     max_launch: &mut [i64],
+    max_launch_features: &mut [f32],
 ) -> usize {
     write_still_playing(state, player_map, player_finished, still_playing);
     let (planet_mask, tail_mask) = entity_mask.split_at_mut(MAX_PLANETS);
@@ -1419,6 +1471,7 @@ fn write_one_obs(
         global_obs,
         can_act,
         max_launch,
+        max_launch_features,
         action_slots,
         min_fleet_size,
     )

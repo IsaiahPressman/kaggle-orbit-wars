@@ -56,7 +56,7 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
         {
             "env": {
                 "n_envs": 2,
-                "obs_spec": {"obs_spec": "obs_v1", "max_entities": 45},
+                "obs_spec": {"obs_spec": "entity_based", "max_entities": 45},
                 "action_spec": {
                     "action_spec": "pure",
                     "max_per_planet_launches": 2,

@@ -7,11 +7,11 @@ different options without changing the outer `VectorizedEnv` constructor shape.
 evaluation can split evaluation games across 2-player and 4-player batches.
 
 ```python
-from owl.rl import ActionPureConfig, ObsV1Config, VectorizedEnv
+from owl.rl import ActionPureConfig, EntityBasedConfig, VectorizedEnv
 
 env = VectorizedEnv(
     n_envs=128,
-    obs_spec=ObsV1Config(max_entities=512),
+    obs_spec=EntityBasedConfig(max_entities=512),
     action_spec=ActionPureConfig(max_per_planet_launches=3),
 )
 ```
@@ -38,28 +38,29 @@ The default `max_entities=512` gives `max_fleets=468`.
 generator's maximum accepted visible path length; generated comet paths outside
 the range `5..=40` are rejected.
 
-## ObsV1
+## EntityBased
 
 Config:
 
 ```python
-{"obs_spec": "obs_v1", "max_entities": 512}
+{"obs_spec": "entity_based", "max_entities": 512}
 ```
 
-`ObsV1` writes observations into reusable caller-owned buffers. The vectorized
+`EntityBased` writes observations into reusable caller-owned buffers. The vectorized
 environment returns an `ObsBatch` with these tensors:
 
 | Tensor | dtype | Shape |
 | --- | --- | --- |
-| `planets` | `float32` | `(n_envs, MAX_PLANETS, 61)` |
+| `planets` | `float32` | `(n_envs, MAX_PLANETS, 107)` |
 | `orbiting_planets` | `bool` | `(n_envs, MAX_PLANETS)` |
-| `fleets` | `float32` | `(n_envs, max_fleets, 57)` |
-| `comets` | `float32` | `(n_envs, MAX_COMETS, 286)` |
+| `fleets` | `float32` | `(n_envs, max_fleets, 79)` |
+| `comets` | `float32` | `(n_envs, MAX_COMETS, 330)` |
 | `entity_mask` | `bool` | `(n_envs, max_entities)` |
 | `still_playing` | `bool` | `(n_envs, 4)` |
 | `global_features` | `float32` | `(n_envs, 3)` |
 | `can_act` | `bool` | action-spec dependent |
 | `max_launch` | `int64` | `(n_envs, 4, ACTION_ENTITY_SLOTS)` |
+| `max_launch_features` | `float32` | `(n_envs, 4, ACTION_ENTITY_SLOTS, 28)` |
 
 All reused buffers are fully overwritten on each observation write. Inactive
 rows are zero-filled and their `entity_mask` slots are set to `False`.
@@ -85,8 +86,16 @@ auto-reset, `still_playing` describes the returned reset observation, while
 - Radius uses `radius / 3`.
 - Neutral planet linear ships use `ships / 100`. Player-owned planet, fleet,
   and comet linear ships use `ships / 500`.
-- Log ships use `ln(max(ships, 0) + 1) / ln(100)`. Planets can reach zero
-  ships after combat, so this avoids `ln(0)`.
+- Log ships use `ln(ships + 1) / ln(100)`.
+- Ship-count basis channels append linear two-hot, ln-space two-hot, and
+  overflow features. Zero ships are a special-case bucket when the bucket grid
+  includes zero. Neutral planet and comet buckets are
+  `[0, 1, 2, 4, 8, 16, 32, 64, 99]`; owned planet buckets are
+  `[0, 1, 2, 4, ..., 1024]`; owned comet buckets are
+  `[0, 1, 2, 4, ..., 512]`. Fleet buckets omit the zero bucket, start at `1`,
+  then continue with the next power of two strictly above `min_fleet_size`, up
+  to `512`. The two overflow channels are `ships > max_bucket` and
+  `ln(max(ships - max_bucket, 1))`.
 - Angular velocity uses `(angular_velocity - 0.025) / 0.025`. Generated games
   currently map the expected range `[0.025, 0.05]` to `[0, 1]`. The value is
   not clamped.
@@ -97,7 +106,7 @@ auto-reset, `still_playing` describes the returned reset observation, while
 
 ### Planet Tensor
 
-Shape per env: `(MAX_PLANETS, 61)`.
+Shape per env: `(MAX_PLANETS, 107)`.
 
 Only non-comet planets are included. If more than `MAX_PLANETS` non-comet
 planets exist, the encoder panics. Generated games currently produce up to
@@ -117,15 +126,17 @@ generated planet IDs are unique and contiguous before comet insertion.
 | `14` | neutral normalized log ships, else `0` |
 | `15` | player-owned normalized ships, else `0` |
 | `16` | player-owned normalized log ships, else `0` |
-| `17..41` | Cartesian Fourier position features for normalized `(x, y)` |
-| `41` | sun-centered radius `r = sqrt(x^2 + y^2)` |
-| `42` | `log1p(r)` |
-| `43` | `sin(theta)` for `theta = atan2(y, x)` |
-| `44` | `cos(theta)` |
-| `45..51` | angular harmonics `sin(k theta), cos(k theta)` for `k = 2..4` |
-| `51..59` | radial Fourier features `sin(pi f r), cos(pi f r)` |
-| `59` | orbiting planet `vx = -angular_velocity * y`, else `0` |
-| `60` | orbiting planet `vy = angular_velocity * x`, else `0` |
+| `17..37` | neutral planet ship-count basis, else `0` |
+| `37..63` | player-owned planet ship-count basis, else `0` |
+| `63..87` | Cartesian Fourier position features for normalized `(x, y)` |
+| `87` | sun-centered radius `r = sqrt(x^2 + y^2)` |
+| `88` | `log1p(r)` |
+| `89` | `sin(theta)` for `theta = atan2(y, x)` |
+| `90` | `cos(theta)` |
+| `91..97` | angular harmonics `sin(k theta), cos(k theta)` for `k = 2..4` |
+| `97..105` | radial Fourier features `sin(pi f r), cos(pi f r)` |
+| `105` | orbiting planet `vx = -angular_velocity * y`, else `0` |
+| `106` | orbiting planet `vy = angular_velocity * x`, else `0` |
 
 ### Orbiting Planet Tensor
 
@@ -139,7 +150,7 @@ row is orbiting, else `False`. Inactive rows are `False`.
 
 ### Fleet Tensor
 
-Shape per env: `(max_fleets, 57)`.
+Shape per env: `(max_fleets, 79)`.
 
 When all active fleets fit in `max_fleets`, fleets are emitted in simulator
 fleet order. If there are more active fleets than `max_fleets`, fleets are
@@ -159,24 +170,25 @@ max_entities exceeded: N fleets ignored
 | `7` | normalized `vy`, divided by `shipSpeed` |
 | `8` | normalized ships |
 | `9` | normalized log ships |
-| `10..34` | Cartesian Fourier position features for normalized `(x, y)` |
-| `34` | sun-centered radius `r = sqrt(x^2 + y^2)` |
-| `35` | `log1p(r)` |
-| `36` | `sin(theta)` for `theta = atan2(y, x)` |
-| `37` | `cos(theta)` |
-| `38..44` | angular harmonics `sin(k theta), cos(k theta)` for `k = 2..4` |
-| `44..52` | radial Fourier features `sin(pi f r), cos(pi f r)` |
-| `52` | normalized speed `sqrt(vx^2 + vy^2)` |
-| `53` | heading `x` component, or `0` for zero-speed fleets |
-| `54` | heading `y` component, or `0` for zero-speed fleets |
-| `55` | radial velocity in the sun-centered radial basis |
-| `56` | tangential velocity in the counterclockwise tangent basis |
+| `10..32` | fleet ship-count basis |
+| `32..56` | Cartesian Fourier position features for normalized `(x, y)` |
+| `56` | sun-centered radius `r = sqrt(x^2 + y^2)` |
+| `57` | `log1p(r)` |
+| `58` | `sin(theta)` for `theta = atan2(y, x)` |
+| `59` | `cos(theta)` |
+| `60..66` | angular harmonics `sin(k theta), cos(k theta)` for `k = 2..4` |
+| `66..74` | radial Fourier features `sin(pi f r), cos(pi f r)` |
+| `74` | normalized speed `sqrt(vx^2 + vy^2)` |
+| `75` | heading `x` component, or `0` for zero-speed fleets |
+| `76` | heading `y` component, or `0` for zero-speed fleets |
+| `77` | radial velocity in the sun-centered radial basis |
+| `78` | tangential velocity in the counterclockwise tangent basis |
 
 `entity_mask[ACTION_ENTITY_SLOTS + i]` is `True` only for active fleet rows.
 
 ### Comet Tensor
 
-Shape per env: `(MAX_COMETS, 286)`.
+Shape per env: `(MAX_COMETS, 330)`.
 
 Comets are encoded separately from normal planets. Active comet planet IDs are
 sorted in ascending ID order, deduplicated, and emitted up to `MAX_COMETS`.
@@ -188,22 +200,24 @@ This matches the comet portion of the action entity axis.
 | `4` | neutral owner |
 | `5` | normalized ships |
 | `6` | normalized log ships |
-| `7` | remaining path steps divided by `MAX_COMET_PATH_LENGTH` |
-| `8` | current normalized `x` from the path |
-| `9` | current normalized `y` from the path |
-| `10..52` | current Cartesian Fourier, polar, angular-harmonic, and radial Fourier spatial features |
-| `52` | normalized `vx` from the next path point minus the current path point |
-| `53` | normalized `vy` from the next path point minus the current path point |
-| `54` | speed `sqrt(vx^2 + vy^2)` |
-| `55` | heading `x` component, or `0` if no next path point exists |
-| `56` | heading `y` component, or `0` if no next path point exists |
-| `57` | radial velocity in the sun-centered radial basis |
-| `58` | tangential velocity in the counterclockwise tangent basis |
-| `59..64` | future-valid flags for offsets `[1, 2, 4, 8, 16]`, encoded as `0.0` or `1.0` |
-| `64..74` | selected future normalized `(x, y)` pairs for offsets `[1, 2, 4, 8, 16]` |
-| `74..284` | spatial features for each selected future position |
-| `284` | normalized final path `x` minus current normalized `x` |
-| `285` | normalized final path `y` minus current normalized `y` |
+| `7..27` | neutral comet ship-count basis, else `0` |
+| `27..51` | player-owned comet ship-count basis, else `0` |
+| `51` | remaining path steps divided by `MAX_COMET_PATH_LENGTH` |
+| `52` | current normalized `x` from the path |
+| `53` | current normalized `y` from the path |
+| `54..96` | current Cartesian Fourier, polar, angular-harmonic, and radial Fourier spatial features |
+| `96` | normalized `vx` from the next path point minus the current path point |
+| `97` | normalized `vy` from the next path point minus the current path point |
+| `98` | speed `sqrt(vx^2 + vy^2)` |
+| `99` | heading `x` component, or `0` if no next path point exists |
+| `100` | heading `y` component, or `0` if no next path point exists |
+| `101` | radial velocity in the sun-centered radial basis |
+| `102` | tangential velocity in the counterclockwise tangent basis |
+| `103..108` | future-valid flags for offsets `[1, 2, 4, 8, 16]`, encoded as `0.0` or `1.0` |
+| `108..118` | selected future normalized `(x, y)` pairs for offsets `[1, 2, 4, 8, 16]` |
+| `118..328` | spatial features for each selected future position |
+| `328` | normalized final path `x` minus current normalized `x` |
+| `329` | normalized final path `y` minus current normalized `y` |
 
 The current path point starts at the comet group's current `path_index`. If
 `path_index < 0`, the encoder starts at path index `0`. If a selected future
@@ -273,6 +287,7 @@ These are written alongside the observation tensors:
 | --- | --- | --- | --- |
 | `can_act` | `bool` | `(n_envs, 4, 44)` | whether a player can launch from an entity slot |
 | `max_launch` | `int64` | `(n_envs, 4, 44)` | maximum launchable ship count for that slot |
+| `max_launch_features` | `float32` | `(n_envs, 4, 44, 28)` | Rust-encoded features for `max_launch` using the owned-planet ship-count bucket grid |
 
 `can_act[player, entity]` is true when the entity is owned by that outer player
 slot and has at least `min_fleet_size` ships. In 2-player games, two random
@@ -332,6 +347,7 @@ train against this action spec when the model actor config also uses
 | --- | --- | --- | --- |
 | `can_act` | `bool` | `(n_envs, 4, 44, 44)` | whether a player can launch from a source slot to a target slot |
 | `max_launch` | `int64` | `(n_envs, 4, 44)` | maximum launchable ship count for that source slot |
+| `max_launch_features` | `float32` | `(n_envs, 4, 44, 28)` | Rust-encoded features for `max_launch` using the owned-planet ship-count bucket grid |
 
 `can_act[player, source, target]` is true when the source entity is owned by
 that outer player slot, has at least `min_fleet_size` ships, the target slot

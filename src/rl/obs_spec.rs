@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use numpy::ndarray::{Array1, Array2};
+use numpy::ndarray::{Array1, Array2, Array3};
 use numpy::{
-    IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray4,
-    PyUntypedArrayMethods,
+    IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray2,
+    PyReadonlyArray4, PyUntypedArrayMethods,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -20,10 +20,10 @@ use super::action_spec::{
 use super::{
     log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
     DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, MAX_COMETS, MAX_COMET_PATH_LENGTH,
-    MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS,
+    MAX_LAUNCH_FEATURES, MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS,
 };
 
-type EncodedObsV1<'py> = (
+type EncodedEntityBased<'py> = (
     Bound<'py, PyArray2<f32>>,
     Bound<'py, PyArray1<bool>>,
     Bound<'py, PyArray2<f32>>,
@@ -32,6 +32,7 @@ type EncodedObsV1<'py> = (
     Bound<'py, PyArray1<f32>>,
     Bound<'py, PyArray2<bool>>,
     Bound<'py, PyArray2<i64>>,
+    Bound<'py, PyArray3<f32>>,
 );
 
 const OWNER_CHANNELS_WITH_NEUTRAL: usize = 5;
@@ -46,10 +47,20 @@ const ANGULAR_VELOCITY_SPAN: f32 = 0.025;
 const INTEGER_TOLERANCE: f64 = 1e-9;
 const BASE_PLANET_CHANNELS: usize = 17;
 const BASE_FLEET_CHANNELS: usize = 10;
+const MAX_PLANET_SPAWN: i32 = 99;
+const NEUTRAL_SHIP_COUNT_BUCKETS: [i32; 9] = [0, 1, 2, 4, 8, 16, 32, 64, MAX_PLANET_SPAWN];
+const PLANET_SHIP_COUNT_BUCKETS: [i32; 12] = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
+const FLEET_SHIP_COUNT_BUCKET_CAPACITY: usize = 10;
+const FLEET_SHIP_COUNT_MAX_BUCKET: i32 = 512;
+const COMET_SHIP_COUNT_BUCKETS: [i32; 11] = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512];
+const SHIP_COUNT_OVERFLOW_CHANNELS: usize = 2;
 const CARTESIAN_FOURIER_FREQUENCIES: [f32; 6] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
 const RADIAL_FOURIER_FREQUENCIES: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
 const PLANET_ORBITAL_CHANNELS: usize = 2;
-const COMET_BASE_CHANNELS: usize = OWNER_CHANNELS_WITH_NEUTRAL + 3;
+const COMET_BASE_CHANNELS: usize = OWNER_CHANNELS_WITH_NEUTRAL
+    + 3
+    + ship_count_feature_count(NEUTRAL_SHIP_COUNT_BUCKETS.len())
+    + ship_count_feature_count(COMET_SHIP_COUNT_BUCKETS.len());
 const COMET_SELECTED_FUTURE_OFFSETS: [usize; 5] = [1, 2, 4, 8, 16];
 
 #[allow(clippy::too_many_arguments)]
@@ -68,6 +79,7 @@ pub(super) fn encode_state(
     global_obs: &mut [f32],
     can_act: &mut [bool],
     max_launch: &mut [i64],
+    max_launch_features: &mut [f32],
     min_fleet_size: i64,
 ) -> usize {
     let mut action_slots = [None; ACTION_ENTITY_SLOTS];
@@ -86,6 +98,7 @@ pub(super) fn encode_state(
         global_obs,
         can_act,
         max_launch,
+        max_launch_features,
         &mut action_slots,
         min_fleet_size,
     )
@@ -107,6 +120,7 @@ pub(super) fn encode_state_with_action_slots(
     global_obs: &mut [f32],
     can_act: &mut [bool],
     max_launch: &mut [i64],
+    max_launch_features: &mut [f32],
     action_slots: &mut ActionEntitySlots,
     min_fleet_size: i64,
 ) -> usize {
@@ -136,6 +150,7 @@ pub(super) fn encode_state_with_action_slots(
     global_obs.fill(0.0);
     can_act.fill(false);
     max_launch.fill(0);
+    max_launch_features.fill(0.0);
 
     let mut fleets = state.fleets.iter().collect::<Vec<_>>();
     let ignored_fleets = fleets.len().saturating_sub(max_fleets);
@@ -164,16 +179,35 @@ pub(super) fn encode_state_with_action_slots(
             row[15] = normalize_ships(planet.ships);
             row[16] = normalize_log_ships(planet.ships);
         }
+        let neutral_count_start = BASE_PLANET_CHANNELS;
+        let owned_count_start =
+            neutral_count_start + ship_count_feature_count(NEUTRAL_SHIP_COUNT_BUCKETS.len());
+        let count_end =
+            owned_count_start + ship_count_feature_count(PLANET_SHIP_COUNT_BUCKETS.len());
+        if planet.owner == -1 {
+            encode_ship_count_features(
+                &mut row[neutral_count_start..owned_count_start],
+                planet.ships,
+                &NEUTRAL_SHIP_COUNT_BUCKETS,
+            );
+        } else {
+            encode_ship_count_features(
+                &mut row[owned_count_start..count_end],
+                planet.ships,
+                &PLANET_SHIP_COUNT_BUCKETS,
+            );
+        }
         let position_x = row[OWNER_CHANNELS_WITH_NEUTRAL];
         let position_y = row[OWNER_CHANNELS_WITH_NEUTRAL + 1];
+        let spatial_start = count_end;
         encode_spatial_features(
-            &mut row[BASE_PLANET_CHANNELS..BASE_PLANET_CHANNELS + spatial_feature_count()],
+            &mut row[spatial_start..spatial_start + spatial_feature_count()],
             position_x,
             position_y,
         );
         let orbiting = is_orbiting(planet.position(), planet.radius);
         encode_planet_orbital_velocity(
-            &mut row[BASE_PLANET_CHANNELS + spatial_feature_count()..],
+            &mut row[spatial_start + spatial_feature_count()..],
             position_x,
             position_y,
             state.angular_velocity,
@@ -197,15 +231,23 @@ pub(super) fn encode_state_with_action_slots(
         row[OWNER_CHANNELS + 3] = velocity_y;
         row[OWNER_CHANNELS + 4] = normalize_ships(fleet.ships);
         row[OWNER_CHANNELS + 5] = normalize_log_ships(fleet.ships);
+        let count_start = BASE_FLEET_CHANNELS;
+        let count_end = count_start + ship_count_feature_count(FLEET_SHIP_COUNT_BUCKET_CAPACITY);
+        encode_fleet_ship_count_features(
+            &mut row[count_start..count_end],
+            fleet.ships,
+            min_fleet_size,
+        );
         let position_x = row[OWNER_CHANNELS];
         let position_y = row[OWNER_CHANNELS + 1];
+        let spatial_start = count_end;
         encode_spatial_features(
-            &mut row[BASE_FLEET_CHANNELS..BASE_FLEET_CHANNELS + spatial_feature_count()],
+            &mut row[spatial_start..spatial_start + spatial_feature_count()],
             position_x,
             position_y,
         );
         encode_fleet_motion_features(
-            &mut row[BASE_FLEET_CHANNELS + spatial_feature_count()..],
+            &mut row[spatial_start + spatial_feature_count()..],
             position_x,
             position_y,
             velocity_x,
@@ -225,6 +267,7 @@ pub(super) fn encode_state_with_action_slots(
         max_launch,
         min_fleet_size,
     );
+    encode_max_launch_features(max_launch, max_launch_features);
 
     ignored_fleets
 }
@@ -348,11 +391,28 @@ fn encode_comets(
         row[owner_index] = 1.0;
         row[OWNER_CHANNELS_WITH_NEUTRAL] = normalize_ships(planet.ships);
         row[OWNER_CHANNELS_WITH_NEUTRAL + 1] = normalize_log_ships(planet.ships);
+        let neutral_count_start = OWNER_CHANNELS_WITH_NEUTRAL + 2;
+        let owned_count_start =
+            neutral_count_start + ship_count_feature_count(NEUTRAL_SHIP_COUNT_BUCKETS.len());
+        let count_end =
+            owned_count_start + ship_count_feature_count(COMET_SHIP_COUNT_BUCKETS.len());
+        if planet.owner == -1 {
+            encode_ship_count_features(
+                &mut row[neutral_count_start..owned_count_start],
+                planet.ships,
+                &NEUTRAL_SHIP_COUNT_BUCKETS,
+            );
+        } else {
+            encode_ship_count_features(
+                &mut row[owned_count_start..count_end],
+                planet.ships,
+                &COMET_SHIP_COUNT_BUCKETS,
+            );
+        }
 
         let path_start = path_index.max(0) as usize;
         let remaining_steps = path.len().saturating_sub(path_start);
-        row[OWNER_CHANNELS_WITH_NEUTRAL + 2] =
-            remaining_steps as f32 / MAX_COMET_PATH_LENGTH as f32;
+        row[count_end] = remaining_steps as f32 / MAX_COMET_PATH_LENGTH as f32;
         encode_comet_path_features(&mut row[COMET_BASE_CHANNELS..], path, path_start);
     }
 }
@@ -458,6 +518,119 @@ fn normalize_ships(ships: i32) -> f32 {
 
 fn normalize_log_ships(ships: i32) -> f32 {
     ((ships.max(0) as f32) + 1.0).ln() / LOG_SHIP_NORMALIZER
+}
+
+const fn ship_count_feature_count(bucket_count: usize) -> usize {
+    bucket_count * 2 + SHIP_COUNT_OVERFLOW_CHANNELS
+}
+
+fn encode_ship_count_features(row: &mut [f32], ships: i32, buckets: &[i32]) {
+    assert_eq!(row.len(), ship_count_feature_count(buckets.len()));
+    row.fill(0.0);
+
+    let ships = ships.max(0);
+    let max_bucket = *buckets
+        .last()
+        .expect("ship-count bucket grid must not be empty");
+    if ships == 0 {
+        row[0] = 1.0;
+        row[buckets.len()] = 1.0;
+    } else if ships >= max_bucket {
+        row[buckets.len() - 1] = 1.0;
+        row[buckets.len() * 2 - 1] = 1.0;
+    } else {
+        let hi = buckets
+            .partition_point(|bucket| *bucket < ships)
+            .min(buckets.len() - 1);
+        if buckets[hi] == ships {
+            row[hi] = 1.0;
+            row[buckets.len() + hi] = 1.0;
+        } else {
+            let lo = hi - 1;
+            let lo_bucket = buckets[lo] as f32;
+            let hi_bucket = buckets[hi] as f32;
+            let ships_f32 = ships as f32;
+            let linear_hi = (ships_f32 - lo_bucket) / (hi_bucket - lo_bucket);
+            row[lo] = 1.0 - linear_hi;
+            row[hi] = linear_hi;
+
+            let log_lo = lo_bucket.ln();
+            let log_hi = hi_bucket.ln();
+            let log_weight_hi = (ships_f32.ln() - log_lo) / (log_hi - log_lo);
+            row[buckets.len() + lo] = 1.0 - log_weight_hi;
+            row[buckets.len() + hi] = log_weight_hi;
+        }
+    }
+
+    let overflow_start = buckets.len() * 2;
+    if ships > max_bucket {
+        row[overflow_start] = 1.0;
+        row[overflow_start + 1] = ((ships - max_bucket).max(1) as f32).ln();
+    }
+}
+
+fn encode_fleet_ship_count_features(row: &mut [f32], ships: i32, min_fleet_size: i64) {
+    assert_eq!(
+        row.len(),
+        ship_count_feature_count(FLEET_SHIP_COUNT_BUCKET_CAPACITY)
+    );
+    row.fill(0.0);
+
+    let mut buckets = [0; FLEET_SHIP_COUNT_BUCKET_CAPACITY];
+    let bucket_count = fleet_ship_count_buckets(min_fleet_size, &mut buckets);
+    let ships = ships.max(0);
+    if ships == 0 {
+        return;
+    }
+
+    let mut active = [0.0; ship_count_feature_count(FLEET_SHIP_COUNT_BUCKET_CAPACITY)];
+    let active_len = ship_count_feature_count(bucket_count);
+    encode_ship_count_features(&mut active[..active_len], ships, &buckets[..bucket_count]);
+    row[..bucket_count].copy_from_slice(&active[..bucket_count]);
+    row[FLEET_SHIP_COUNT_BUCKET_CAPACITY..FLEET_SHIP_COUNT_BUCKET_CAPACITY + bucket_count]
+        .copy_from_slice(&active[bucket_count..bucket_count * 2]);
+    row[FLEET_SHIP_COUNT_BUCKET_CAPACITY * 2] = active[bucket_count * 2];
+    row[FLEET_SHIP_COUNT_BUCKET_CAPACITY * 2 + 1] = active[bucket_count * 2 + 1];
+}
+
+fn fleet_ship_count_buckets(min_fleet_size: i64, buckets: &mut [i32; 10]) -> usize {
+    buckets[0] = 1;
+    let mut len = 1;
+    let min_fleet_size = min_fleet_size.clamp(1, i64::from(i32::MAX)) as u32;
+    let mut next_bucket = min_fleet_size.next_power_of_two();
+    if next_bucket <= min_fleet_size {
+        next_bucket = next_bucket.saturating_mul(2);
+    }
+    while next_bucket <= FLEET_SHIP_COUNT_MAX_BUCKET as u32 && len < buckets.len() {
+        buckets[len] = next_bucket
+            .try_into()
+            .expect("fleet ship-count bucket fits in i32");
+        len += 1;
+        next_bucket = next_bucket.saturating_mul(2);
+    }
+    len
+}
+
+fn encode_max_launch_features(max_launch: &[i64], max_launch_features: &mut [f32]) {
+    assert_eq!(
+        max_launch_features.len(),
+        max_launch.len() * MAX_LAUNCH_FEATURES
+    );
+    for (ships, row) in max_launch
+        .iter()
+        .zip(max_launch_features.chunks_exact_mut(MAX_LAUNCH_FEATURES))
+    {
+        encode_action_ship_count_features(row, *ships);
+    }
+}
+
+fn encode_action_ship_count_features(row: &mut [f32], ships: i64) {
+    assert_eq!(row.len(), MAX_LAUNCH_FEATURES);
+    row.fill(0.0);
+    let ships = ships.clamp(0, i64::from(i32::MAX)) as i32;
+    row[0] = normalize_ships(ships);
+    row[1] = normalize_log_ships(ships);
+    encode_ship_count_features(&mut row[2..], ships, &PLANET_SHIP_COUNT_BUCKETS);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -671,7 +844,7 @@ fn require_shape_suffix(name: &str, actual: &[usize], expected_last_dim: usize) 
     max_entities=DEFAULT_MAX_ENTITIES,
     min_fleet_size=1
 ))]
-pub fn encode_obs_v1<'py>(
+pub fn encode_entity_based<'py>(
     py: Python<'py>,
     planets: PyReadonlyArray2<'py, f64>,
     fleets: PyReadonlyArray2<'py, f64>,
@@ -684,7 +857,7 @@ pub fn encode_obs_v1<'py>(
     episode_steps: u32,
     max_entities: usize,
     min_fleet_size: i64,
-) -> PyResult<EncodedObsV1<'py>> {
+) -> PyResult<EncodedEntityBased<'py>> {
     if max_entities <= MAX_PLANETS + MAX_COMETS {
         return Err(PyValueError::new_err(format!(
             "max_entities must be greater than MAX_PLANETS + MAX_COMETS ({})",
@@ -740,6 +913,8 @@ pub fn encode_obs_v1<'py>(
     let mut global_obs = Array1::<f32>::zeros(GLOBAL_CHANNELS);
     let mut can_act = Array2::<bool>::from_elem((OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS), false);
     let mut max_launch = Array2::<i64>::zeros((OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS));
+    let mut max_launch_features =
+        Array3::<f32>::zeros((OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS, MAX_LAUNCH_FEATURES));
     let (planet_mask, tail_mask) = entity_mask
         .as_slice_mut()
         .expect("newly allocated entity mask is contiguous")
@@ -775,6 +950,9 @@ pub fn encode_obs_v1<'py>(
         max_launch
             .as_slice_mut()
             .expect("newly allocated max_launch array is contiguous"),
+        max_launch_features
+            .as_slice_mut()
+            .expect("newly allocated max_launch_features array is contiguous"),
         min_fleet_size,
     );
     log_ignored_fleets(ignored_fleets);
@@ -788,6 +966,7 @@ pub fn encode_obs_v1<'py>(
         global_obs.into_pyarray(py),
         can_act.into_pyarray(py),
         max_launch.into_pyarray(py),
+        max_launch_features.into_pyarray(py),
     ))
 }
 
@@ -812,13 +991,80 @@ mod tests {
     #[test]
     fn spatial_feature_count_matches_public_channel_widths() {
         assert_eq!(
-            BASE_PLANET_CHANNELS + spatial_feature_count() + PLANET_ORBITAL_CHANNELS,
+            BASE_PLANET_CHANNELS
+                + ship_count_feature_count(NEUTRAL_SHIP_COUNT_BUCKETS.len())
+                + ship_count_feature_count(PLANET_SHIP_COUNT_BUCKETS.len())
+                + spatial_feature_count()
+                + PLANET_ORBITAL_CHANNELS,
             PLANET_CHANNELS
         );
         assert_eq!(
-            BASE_FLEET_CHANNELS + spatial_feature_count() + 5,
+            BASE_FLEET_CHANNELS
+                + ship_count_feature_count(FLEET_SHIP_COUNT_BUCKET_CAPACITY)
+                + spatial_feature_count()
+                + 5,
             FLEET_CHANNELS
         );
+    }
+
+    #[test]
+    fn ship_count_features_two_hot_linear_and_log_space() {
+        let mut row = [0.0; 26];
+
+        encode_ship_count_features(&mut row, 64, &PLANET_SHIP_COUNT_BUCKETS);
+
+        assert_close(row[7], 1.0);
+        assert_close(row[PLANET_SHIP_COUNT_BUCKETS.len() + 7], 1.0);
+
+        encode_ship_count_features(&mut row, 96, &PLANET_SHIP_COUNT_BUCKETS);
+
+        assert_close(row[7], 0.5);
+        assert_close(row[8], 0.5);
+        let log_hi = (96.0_f32.ln() - 64.0_f32.ln()) / (128.0_f32.ln() - 64.0_f32.ln());
+        assert_close(row[PLANET_SHIP_COUNT_BUCKETS.len() + 7], 1.0 - log_hi);
+        assert_close(row[PLANET_SHIP_COUNT_BUCKETS.len() + 8], log_hi);
+    }
+
+    #[test]
+    fn ship_count_features_use_zero_bucket_and_overflow_channels() {
+        let mut row = [1.0; 26];
+
+        encode_ship_count_features(&mut row, 0, &PLANET_SHIP_COUNT_BUCKETS);
+
+        assert_close(row[0], 1.0);
+        assert_close(row[PLANET_SHIP_COUNT_BUCKETS.len()], 1.0);
+        assert_eq!(row.iter().filter(|value| **value != 0.0).count(), 2);
+
+        encode_ship_count_features(&mut row, 1200, &PLANET_SHIP_COUNT_BUCKETS);
+
+        assert_close(row[PLANET_SHIP_COUNT_BUCKETS.len() - 1], 1.0);
+        assert_close(row[PLANET_SHIP_COUNT_BUCKETS.len() * 2 - 1], 1.0);
+        assert_close(row[PLANET_SHIP_COUNT_BUCKETS.len() * 2], 1.0);
+        assert_close(
+            row[PLANET_SHIP_COUNT_BUCKETS.len() * 2 + 1],
+            (176.0_f32).ln(),
+        );
+    }
+
+    #[test]
+    fn fleet_ship_count_features_start_at_one_then_next_power_above_min_fleet_size() {
+        let mut row = [1.0; 22];
+
+        encode_fleet_ship_count_features(&mut row, 2, 4);
+
+        assert_close(row[0], 6.0 / 7.0);
+        assert_close(row[1], 1.0 / 7.0);
+        assert_close(row[FLEET_SHIP_COUNT_BUCKET_CAPACITY], 2.0 / 3.0);
+        assert_close(row[FLEET_SHIP_COUNT_BUCKET_CAPACITY + 1], 1.0 / 3.0);
+        assert_eq!(row.iter().filter(|value| **value != 0.0).count(), 4);
+
+        encode_fleet_ship_count_features(&mut row, 6, 4);
+
+        assert_close(row[0], 2.0 / 7.0);
+        assert_close(row[1], 5.0 / 7.0);
+        let log_hi = 6.0_f32.ln() / 8.0_f32.ln();
+        assert_close(row[FLEET_SHIP_COUNT_BUCKET_CAPACITY], 1.0 - log_hi);
+        assert_close(row[FLEET_SHIP_COUNT_BUCKET_CAPACITY + 1], log_hi);
     }
 
     #[test]
@@ -916,6 +1162,8 @@ mod tests {
         let mut global_obs = vec![0.0; GLOBAL_CHANNELS];
         let mut can_act = vec![false; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
         let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut max_launch_features =
+            vec![0.0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS * MAX_LAUNCH_FEATURES];
 
         encode_state(
             RlActionSpec::Pure,
@@ -932,6 +1180,7 @@ mod tests {
             &mut global_obs,
             &mut can_act,
             &mut max_launch,
+            &mut max_launch_features,
             1,
         );
     }
@@ -977,6 +1226,8 @@ mod tests {
         let mut global_obs = vec![0.0; GLOBAL_CHANNELS];
         let mut can_act = vec![false; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
         let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut max_launch_features =
+            vec![0.0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS * MAX_LAUNCH_FEATURES];
 
         encode_state(
             RlActionSpec::Pure,
@@ -993,6 +1244,7 @@ mod tests {
             &mut global_obs,
             &mut can_act,
             &mut max_launch,
+            &mut max_launch_features,
             1,
         );
 
@@ -1034,6 +1286,8 @@ mod tests {
         let mut global_obs = vec![0.0; GLOBAL_CHANNELS];
         let mut can_act = vec![false; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
         let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut max_launch_features =
+            vec![0.0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS * MAX_LAUNCH_FEATURES];
 
         encode_state(
             RlActionSpec::Pure,
@@ -1050,6 +1304,7 @@ mod tests {
             &mut global_obs,
             &mut can_act,
             &mut max_launch,
+            &mut max_launch_features,
             3,
         );
 

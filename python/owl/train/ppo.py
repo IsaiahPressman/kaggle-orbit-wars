@@ -16,8 +16,8 @@ from owl.rl import (
     OUTER_PLAYER_SLOTS,
     ActionConfig,
     ActionPureConfig,
+    EntityBasedConfig,
     ObsBatch,
-    ObsV1Config,
     VectorizedEnv,
 )
 from owl.train.advantages import (
@@ -166,7 +166,7 @@ class PPORolloutBuffer:
         *,
         horizon: int,
         n_envs: int,
-        obs_spec: ObsV1Config,
+        obs_spec: EntityBasedConfig,
         action_spec: ActionConfig,
         device: torch.device,
     ) -> None:
@@ -235,6 +235,17 @@ class PPORolloutBuffer:
             max_launch=torch.zeros(
                 (horizon, n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
                 dtype=torch.int64,
+                device=device,
+            ),
+            max_launch_features=torch.zeros(
+                (
+                    horizon,
+                    n_envs,
+                    OUTER_PLAYER_SLOTS,
+                    ACTION_ENTITY_SLOTS,
+                    obs_spec.max_launch_features,
+                ),
+                dtype=torch.float32,
                 device=device,
             ),
         )

@@ -58,10 +58,10 @@ from `docs/rl-api-specs.md`.
 
 Each observation tensor receives one feedforward projection to `embed_dim`:
 
-- static planets: `(batch, MAX_PLANETS, 61) -> (batch, MAX_PLANETS, embed_dim)`
-- orbiting planets: `(batch, MAX_PLANETS, 61) -> (batch, MAX_PLANETS, embed_dim)`
-- fleets: `(batch, max_fleets, 57) -> (batch, max_fleets, embed_dim)`
-- comets: `(batch, MAX_COMETS, 286) -> (batch, MAX_COMETS, embed_dim)`
+- static planets: `(batch, MAX_PLANETS, 107) -> (batch, MAX_PLANETS, embed_dim)`
+- orbiting planets: `(batch, MAX_PLANETS, 107) -> (batch, MAX_PLANETS, embed_dim)`
+- fleets: `(batch, max_fleets, 79) -> (batch, max_fleets, embed_dim)`
+- comets: `(batch, MAX_COMETS, 330) -> (batch, MAX_COMETS, embed_dim)`
 - globals: `(batch, 3) -> (batch, 1, embed_dim)`
 
 The boolean `orbiting_planets` mask selects the orbiting-planet projection for
@@ -151,7 +151,7 @@ Both actor heads start from the same shared transformer trunk. For each
 
 - source entity hidden state
 - player hidden token
-- normalized `max_launch`
+- Rust-provided `max_launch_features` using the planet ship-count bucket grid
 
 The final action head is selected by `config.actor.action_spec`. The concrete
 heads live under `python/owl/model/actor/`: `PureActor` for raw angles and
@@ -188,9 +188,12 @@ implementation uses the straightforward sequential recurrence rather than the
 paper's parallel scan variant.
 
 `ActionPureConfig()` defaults to `max_per_planet_launches=3` and
-`min_fleet_size=1`. PPO model construction uses the environment action spec as
-the source of truth, so the model launch-slot count and minimum launched fleet
-size match the action tensors submitted to the environment.
+`min_fleet_size=1`, but the pure actor currently raises `NotImplementedError`
+for `max_per_planet_launches > 1` because launch-budget ship-count features are
+encoded by Rust for the initial launch budget only. PPO model construction uses
+the environment action spec as the source of truth, so the model launch-slot
+count and minimum launched fleet size match the action tensors submitted to the
+environment.
 
 For every slot, the policy emits:
 

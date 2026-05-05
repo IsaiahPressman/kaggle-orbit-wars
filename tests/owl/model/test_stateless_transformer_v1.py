@@ -29,6 +29,7 @@ from owl.model.stateless_transformer_v1 import (
     MultiHeadSelfAttention,
     OutputProjectionMLP,
     PolicyParams,
+    PureActor,
     discrete_action_entropy,
     masked_event_log_prob_from_params,
     pack_sequence,
@@ -37,13 +38,14 @@ from owl.model.stateless_transformer_v1 import (
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     MAX_COMETS,
+    MAX_LAUNCH_FEATURES,
     MAX_PLANETS,
     OUTER_PLAYER_SLOTS,
     ActionConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
+    EntityBasedConfig,
     ObsBatch,
-    ObsV1Config,
 )
 from pydantic import TypeAdapter
 from torch import nn
@@ -54,7 +56,7 @@ _REPO_ROOT = Path(__file__).parents[3]
 def _obs_batch(
     *,
     batch_size: int,
-    obs_spec: ObsV1Config,
+    obs_spec: EntityBasedConfig,
     action_spec: ActionConfig,
 ) -> ObsBatch:
     planets = torch.zeros(
@@ -108,6 +110,10 @@ def _obs_batch(
     max_launch[:, 0, 0] = 5
     max_launch[:, 1, 1] = 3
     max_launch[:, 2, MAX_PLANETS] = 2
+    max_launch_features = torch.zeros(
+        (batch_size, 4, ACTION_ENTITY_SLOTS, MAX_LAUNCH_FEATURES),
+        dtype=torch.float32,
+    )
 
     assert action_spec.max_per_planet_launches >= 1
     return ObsBatch(
@@ -120,19 +126,20 @@ def _obs_batch(
         global_features=global_features,
         can_act=can_act,
         max_launch=max_launch,
+        max_launch_features=max_launch_features,
     )
 
 
 def _model(
     config: StatelessTransformerV1Config,
     *,
-    obs_spec: ObsV1Config | None = None,
+    obs_spec: EntityBasedConfig | None = None,
     action_spec: ActionConfig | None = None,
 ) -> StatelessTransformerV1:
     return StatelessTransformerV1(
         config,
-        obs_spec=obs_spec or ObsV1Config(),
-        action_spec=action_spec or ActionPureConfig(),
+        obs_spec=obs_spec or EntityBasedConfig(),
+        action_spec=action_spec or ActionPureConfig(max_per_planet_launches=1),
     )
 
 
@@ -175,10 +182,10 @@ def test_model_config_loads_actor_subconfig_reference() -> None:
 @pytest.mark.parametrize(
     ("filename", "expected_params"),
     [
-        ("stateless_transformer_tiny.yaml", 1_055_118),
-        ("stateless_transformer_5m.yaml", 5_393_166),
-        ("stateless_transformer_20m.yaml", 20_901_530),
-        ("stateless_transformer_20m_swiglu.yaml", 21_645_722),
+        ("stateless_transformer_tiny.yaml", 1_078_798),
+        ("stateless_transformer_5m.yaml", 5_440_526),
+        ("stateless_transformer_20m.yaml", 20_972_570),
+        ("stateless_transformer_20m_swiglu.yaml", 21_716_762),
     ],
 )
 def test_model_config_file_parameter_count(
@@ -190,7 +197,7 @@ def test_model_config_file_parameter_count(
     )
     model = StatelessTransformerV1(
         config,
-        obs_spec=ObsV1Config(),
+        obs_spec=EntityBasedConfig(),
         action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
     )
 
@@ -213,7 +220,7 @@ def test_model_config_requires_actor_action_spec_match() -> None:
     with pytest.raises(ValueError, match="actor config must match env action_spec"):
         StatelessTransformerV1(
             StatelessTransformerV1Config(actor={"action_spec": "pure"}),
-            obs_spec=ObsV1Config(),
+            obs_spec=EntityBasedConfig(),
             action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
         )
 
@@ -484,13 +491,13 @@ def test_force_flash_attention_rejects_non_flash_projection(
 def test_non_flash_encoder_does_not_build_or_pack_sequences(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     config = StatelessTransformerV1Config(
         embed_dim=32,
         depth=2,
         n_heads=4,
     )
-    action_spec = ActionPureConfig()
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
 
@@ -528,14 +535,14 @@ def test_non_flash_encoder_does_not_build_or_pack_sequences(
 def test_force_flash_encoder_rejects_non_flash_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     config = StatelessTransformerV1Config(
         embed_dim=32,
         depth=1,
         n_heads=4,
         force_flash_attn=True,
     )
-    action_spec = ActionPureConfig()
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
 
@@ -565,8 +572,8 @@ def test_orbiting_planets_select_separate_planet_projection() -> None:
         ) -> torch.Tensor:
             return x
 
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
-    action_spec = ActionPureConfig()
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 1)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     model = _model(
         StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
         obs_spec=obs_spec,
@@ -601,14 +608,14 @@ def test_orbiting_planets_select_separate_planet_projection() -> None:
 def test_flash_encoder_packs_once_before_trunk_and_unpacks_once_after(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     config = StatelessTransformerV1Config(
         embed_dim=32,
         depth=3,
         n_heads=4,
         force_flash_attn=True,
     )
-    action_spec = ActionPureConfig()
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
     original_pack_tensor = model_impl.pack_tensor
@@ -665,14 +672,14 @@ def test_flash_encoder_packs_once_before_trunk_and_unpacks_once_after(
 def test_autocast_encoder_packs_after_appending_player_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     config = StatelessTransformerV1Config(
         embed_dim=32,
         depth=1,
         n_heads=4,
         force_flash_attn=True,
     )
-    action_spec = ActionPureConfig()
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
     original_pack_sequence = model_impl.pack_sequence
@@ -807,13 +814,13 @@ def test_model_initialization_sets_stable_rl_priors() -> None:
 
 
 def test_observation_encoder_returns_entity_tokens_plus_player_tokens() -> None:
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 3)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 3)
     config = StatelessTransformerV1Config(
         embed_dim=32,
         depth=1,
         n_heads=4,
     )
-    action_spec = ActionPureConfig()
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(
         batch_size=2,
@@ -836,8 +843,8 @@ def test_observation_encoder_returns_entity_tokens_plus_player_tokens() -> None:
 
 def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     torch.manual_seed(0)
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
-    action_spec = ActionPureConfig(max_per_planet_launches=3)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     config = StatelessTransformerV1Config(
         embed_dim=32,
         depth=1,
@@ -852,7 +859,7 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
 
     output = model(obs)
 
-    expected_action_shape = (2, 4, ACTION_ENTITY_SLOTS, 3)
+    expected_action_shape = (2, 4, ACTION_ENTITY_SLOTS, 1)
     assert output.actions.launch.shape == expected_action_shape
     assert output.actions.launch.dtype == torch.bool
     assert output.actions.angle is not None
@@ -893,7 +900,7 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert torch.all(output.winner_probabilities[~obs.still_playing] == 0)
     assert torch.all(output.actions.ships[~output.actions.launch] == 0)
     assert torch.all(output.actions.ships.sum(dim=-1) <= obs.max_launch)
-    assert model.actor.launch_slot_tokens.weight.shape == (3, config.embed_dim)
+    assert model.actor.launch_slot_tokens.weight.shape == (1, config.embed_dim)
     assert model.actor.slot_dynamic_proj.in_features == 9
 
     evaluation = model.evaluate_actions(obs, output.actions)
@@ -932,7 +939,7 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     torch.manual_seed(11)
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     action_spec = ActionDiscreteTargetsConfig(
         max_per_planet_launches=1,
         min_fleet_size=2,
@@ -1103,7 +1110,7 @@ def test_discrete_targets_actor_masks_target_logits_under_bfloat16_autocast() ->
 
 
 def test_discrete_targets_actor_rejects_invalid_replay_target() -> None:
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
     config = StatelessTransformerV1Config(
         actor=ActorDiscreteTargetsConfig(),
@@ -1477,8 +1484,8 @@ def test_discrete_targets_quantile_entropy_accounts_for_component_overlap() -> N
 
 def test_min_fleet_size_masks_and_shifts_ship_distribution() -> None:
     torch.manual_seed(3)
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
-    action_spec = ActionPureConfig(max_per_planet_launches=2, min_fleet_size=3)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=1, min_fleet_size=3)
     config = StatelessTransformerV1Config(
         embed_dim=32,
         depth=1,
@@ -1515,13 +1522,17 @@ def test_min_fleet_size_masks_and_shifts_ship_distribution() -> None:
 
 
 def test_launch_slot_embedding_is_added_to_each_slot_input() -> None:
-    action_spec = ActionPureConfig(max_per_planet_launches=4)
     config = StatelessTransformerV1Config(
         embed_dim=16,
         depth=1,
         n_heads=4,
     )
-    model = _model(config, action_spec=action_spec)
+    actor = PureActor(
+        ActorPureConfig(),
+        embed_dim=config.embed_dim,
+        max_per_planet_launches=4,
+        activation=config.activation,
+    )
     slot_input = torch.zeros((2, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
     active = torch.zeros(slot_input.shape[:-1], dtype=torch.bool)
     remaining = torch.zeros(slot_input.shape[:-1], dtype=torch.int64)
@@ -1531,7 +1542,7 @@ def test_launch_slot_embedding_is_added_to_each_slot_input() -> None:
     last_angle_cos = torch.zeros(slot_input.shape[:-1])
     last_ships = torch.zeros(slot_input.shape[:-1], dtype=torch.int64)
 
-    first_slot = model.actor._slot_gru_input(
+    first_slot = actor._slot_gru_input(
         slot_input,
         0,
         active,
@@ -1543,7 +1554,7 @@ def test_launch_slot_embedding_is_added_to_each_slot_input() -> None:
         last_ships,
         include_dynamic_features=False,
     )
-    second_slot = model.actor._slot_gru_input(
+    second_slot = actor._slot_gru_input(
         slot_input,
         1,
         active,
@@ -1556,20 +1567,23 @@ def test_launch_slot_embedding_is_added_to_each_slot_input() -> None:
         include_dynamic_features=False,
     )
 
-    expected_first_slot = model.actor.launch_slot_tokens.weight[0].view(1, 1, 1, -1)
+    expected_first_slot = actor.launch_slot_tokens.weight[0].view(1, 1, 1, -1)
     assert torch.allclose(first_slot, expected_first_slot.expand_as(first_slot))
     assert not torch.allclose(first_slot, second_slot)
 
 
 def test_slot_dynamic_features_include_relative_budget_and_slot_fraction() -> None:
-    action_spec = ActionPureConfig(max_per_planet_launches=4)
     config = StatelessTransformerV1Config(
         embed_dim=16,
         depth=1,
         n_heads=4,
-        actor=ActorPureConfig(max_ship_normalizer=100.0),
     )
-    model = _model(config, action_spec=action_spec)
+    actor = PureActor(
+        ActorPureConfig(max_ship_normalizer=100.0),
+        embed_dim=config.embed_dim,
+        max_per_planet_launches=4,
+        activation=config.activation,
+    )
     active = torch.tensor([[[True, False]]])
     remaining = torch.tensor([[[6, 0]]])
     initial_max_launch = torch.tensor([[[10, 0]]])
@@ -1578,7 +1592,7 @@ def test_slot_dynamic_features_include_relative_budget_and_slot_fraction() -> No
     last_angle_cos = torch.tensor([[[0.75, 0.5]]])
     last_ships = torch.tensor([[[2, 3]]])
 
-    features = model.actor._slot_dynamic_features(
+    features = actor._slot_dynamic_features(
         2,
         active,
         remaining,
@@ -1623,8 +1637,8 @@ def test_slot_dynamic_features_include_relative_budget_and_slot_fraction() -> No
 
 def test_actor_distribution_outputs_remain_fp32_under_cpu_bf16_autocast() -> None:
     torch.manual_seed(0)
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
-    action_spec = ActionPureConfig(max_per_planet_launches=2)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     config = StatelessTransformerV1Config(
         embed_dim=32,
         depth=1,
@@ -1748,8 +1762,8 @@ def test_masked_action_entropy_includes_latent_mixture_entropy() -> None:
 
 def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
     torch.manual_seed(1)
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
-    action_spec = ActionPureConfig(max_per_planet_launches=3)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     config = StatelessTransformerV1Config(
         embed_dim=32,
         depth=1,
@@ -1774,9 +1788,8 @@ def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
     assert all(torch.isfinite(grad).all() for grad in grads)
 
 
-def test_k_max_is_hard_truncation_and_replays_without_final_stop_probability() -> None:
-    torch.manual_seed(2)
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+def test_pure_actor_rejects_multi_launch_action_spec() -> None:
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     action_spec = ActionPureConfig(max_per_planet_launches=3)
     config = StatelessTransformerV1Config(
         embed_dim=32,
@@ -1784,38 +1797,19 @@ def test_k_max_is_hard_truncation_and_replays_without_final_stop_probability() -
         n_heads=4,
         actor=ActorPureConfig(n_action_mixtures=2),
     )
-    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
-    obs = _obs_batch(batch_size=1, obs_spec=obs_spec, action_spec=action_spec)
-    obs.max_launch[0, 0, 0] = 100
-    with torch.no_grad():
-        model.actor.actor_heads.continue_head.bias.fill_(100.0)
 
-    output = model(obs, deterministic=True)
-
-    assert output.actions.launch[0, 0, 0].all()
-    assert output.actions.ships[0, 0, 0].sum() < obs.max_launch[0, 0, 0]
-
-    evaluation = model.evaluate_actions(obs, output.actions)
-
-    assert torch.allclose(evaluation.log_probs.launch, output.log_probs.launch)
-    assert torch.allclose(
-        evaluation.log_probs.angle_and_size,
-        output.log_probs.angle_and_size,
-    )
-    assert torch.allclose(
-        evaluation.log_probs.per_player_entity,
-        output.log_probs.per_player_entity,
-    )
+    with pytest.raises(NotImplementedError, match="max_per_planet_launches > 1"):
+        _model(config, obs_spec=obs_spec, action_spec=action_spec)
 
 
 def test_evaluate_actions_rejects_invalid_action_dtypes() -> None:
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 1)
     config = StatelessTransformerV1Config(
         embed_dim=32,
         depth=1,
         n_heads=4,
     )
-    action_spec = ActionPureConfig()
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(
         batch_size=1,
@@ -1833,13 +1827,13 @@ def test_evaluate_actions_rejects_invalid_action_dtypes() -> None:
 
 @pytest.mark.parametrize("angle", [math.nan, math.inf])
 def test_evaluate_actions_rejects_nonfinite_launched_angles(angle: float) -> None:
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 1)
     config = StatelessTransformerV1Config(
         embed_dim=32,
         depth=1,
         n_heads=4,
     )
-    action_spec = ActionPureConfig()
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(
         batch_size=1,
@@ -1860,13 +1854,13 @@ def test_evaluate_actions_rejects_nonfinite_launched_angles(angle: float) -> Non
 
 
 def test_critic_requires_still_playing_mask_with_live_player() -> None:
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 1)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 1)
     config = StatelessTransformerV1Config(
         embed_dim=32,
         depth=1,
         n_heads=4,
     )
-    action_spec = ActionPureConfig()
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(
         batch_size=1,

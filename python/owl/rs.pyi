@@ -30,6 +30,7 @@ class RlVecEnv:
         global_obs: np.ndarray,
         can_act: np.ndarray,
         max_launch: np.ndarray,
+        max_launch_features: np.ndarray,
     ) -> None: ...
     def step(
         self,
@@ -45,6 +46,7 @@ class RlVecEnv:
         global_obs: np.ndarray,
         can_act: np.ndarray,
         max_launch: np.ndarray,
+        max_launch_features: np.ndarray,
         rewards: np.ndarray,
         dones: np.ndarray,
     ) -> dict[str, list[float]]: ...
@@ -62,6 +64,7 @@ class RlVecEnv:
         global_obs: np.ndarray,
         can_act: np.ndarray,
         max_launch: np.ndarray,
+        max_launch_features: np.ndarray,
         rewards: np.ndarray,
         dones: np.ndarray,
     ) -> dict[str, list[float]]: ...
@@ -77,14 +80,15 @@ class RlVecEnv:
         tuple[int, int],
         tuple[int, ...],
         tuple[int, int, int],
+        tuple[int, int, int, int],
     ]: ...
     def state_snapshot(self, env_index: int) -> dict[str, object]: ...
     def terminal_snapshot(self, env_index: int) -> dict[str, object] | None: ...
     def terminal_metrics(self, env_index: int) -> dict[str, float] | None: ...
 
 def assert_release_build() -> None: ...
-def rl_obs_constants() -> tuple[int, int, int, int, int, int, int, int, int]: ...
-def encode_obs_v1(
+def rl_obs_constants() -> tuple[int, int, int, int, int, int, int, int, int, int]: ...
+def encode_entity_based(
     planets: np.ndarray,
     fleets: np.ndarray,
     comet_planet_ids: np.ndarray,
@@ -97,6 +101,7 @@ def encode_obs_v1(
     max_entities: int = ...,
     min_fleet_size: int = ...,
 ) -> tuple[
+    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,

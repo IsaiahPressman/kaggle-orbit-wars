@@ -8,7 +8,7 @@ use rand::RngExt;
 
 use crate::rules_engine::state::MAX_PLAYERS;
 
-use obs_spec::encode_obs_v1;
+use obs_spec::encode_entity_based;
 use vec_env::PyRlVecEnv;
 
 pub const MAX_PLANETS: usize = 40;
@@ -17,6 +17,21 @@ pub const MAX_COMET_PATH_LENGTH: usize = 40;
 pub const DEFAULT_MAX_ENTITIES: usize = 512;
 const BASE_PLANET_CHANNELS: usize = 17;
 const BASE_FLEET_CHANNELS: usize = 10;
+const NEUTRAL_SHIP_COUNT_BUCKETS: usize = 9;
+const PLANET_SHIP_COUNT_BUCKETS: usize = 12;
+const FLEET_SHIP_COUNT_BUCKETS: usize = 10;
+const COMET_SHIP_COUNT_BUCKETS: usize = 11;
+const SHIP_COUNT_OVERFLOW_CHANNELS: usize = 2;
+const ACTION_SHIP_COUNT_CHANNELS: usize =
+    2 + PLANET_SHIP_COUNT_BUCKETS * 2 + SHIP_COUNT_OVERFLOW_CHANNELS;
+const NEUTRAL_SHIP_COUNT_CHANNELS: usize =
+    NEUTRAL_SHIP_COUNT_BUCKETS * 2 + SHIP_COUNT_OVERFLOW_CHANNELS;
+const PLANET_SHIP_COUNT_CHANNELS: usize =
+    NEUTRAL_SHIP_COUNT_CHANNELS + PLANET_SHIP_COUNT_BUCKETS * 2 + SHIP_COUNT_OVERFLOW_CHANNELS;
+const FLEET_SHIP_COUNT_CHANNELS: usize =
+    FLEET_SHIP_COUNT_BUCKETS * 2 + SHIP_COUNT_OVERFLOW_CHANNELS;
+const COMET_SHIP_COUNT_CHANNELS: usize =
+    NEUTRAL_SHIP_COUNT_CHANNELS + COMET_SHIP_COUNT_BUCKETS * 2 + SHIP_COUNT_OVERFLOW_CHANNELS;
 const CARTESIAN_FOURIER_FREQUENCY_COUNT: usize = 6;
 const RADIAL_FOURIER_FREQUENCY_COUNT: usize = 4;
 const ANGULAR_HARMONIC_COUNT: usize = 3;
@@ -26,17 +41,19 @@ const SPATIAL_CHANNELS: usize = CARTESIAN_FOURIER_FREQUENCY_COUNT * 4
     + RADIAL_FOURIER_FREQUENCY_COUNT * 2;
 const PLANET_ORBITAL_CHANNELS: usize = 2;
 const FLEET_MOTION_CHANNELS: usize = 5;
-const COMET_BASE_CHANNELS: usize = OWNER_CHANNELS_WITH_NEUTRAL + 3;
+const COMET_BASE_CHANNELS: usize = OWNER_CHANNELS_WITH_NEUTRAL + 3 + COMET_SHIP_COUNT_CHANNELS;
 const COMET_CURRENT_STATE_CHANNELS: usize = 2 + SPATIAL_CHANNELS + 2 + FLEET_MOTION_CHANNELS;
 const COMET_SELECTED_FUTURE_COUNT: usize = 5;
 const COMET_PATH_CHANNELS: usize =
     COMET_SELECTED_FUTURE_COUNT + COMET_SELECTED_FUTURE_COUNT * (2 + SPATIAL_CHANNELS) + 2;
 pub const PLANET_CHANNELS: usize =
-    BASE_PLANET_CHANNELS + SPATIAL_CHANNELS + PLANET_ORBITAL_CHANNELS;
-pub const FLEET_CHANNELS: usize = BASE_FLEET_CHANNELS + SPATIAL_CHANNELS + FLEET_MOTION_CHANNELS;
+    BASE_PLANET_CHANNELS + PLANET_SHIP_COUNT_CHANNELS + SPATIAL_CHANNELS + PLANET_ORBITAL_CHANNELS;
+pub const FLEET_CHANNELS: usize =
+    BASE_FLEET_CHANNELS + FLEET_SHIP_COUNT_CHANNELS + SPATIAL_CHANNELS + FLEET_MOTION_CHANNELS;
 pub const COMET_CHANNELS: usize =
     COMET_BASE_CHANNELS + COMET_CURRENT_STATE_CHANNELS + COMET_PATH_CHANNELS;
 pub const GLOBAL_CHANNELS: usize = 3;
+pub const MAX_LAUNCH_FEATURES: usize = ACTION_SHIP_COUNT_CHANNELS;
 pub const OUTER_PLAYER_SLOTS: usize = MAX_PLAYERS;
 pub const ACTION_ENTITY_SLOTS: usize = MAX_PLANETS + MAX_COMETS;
 
@@ -137,6 +154,7 @@ pub fn rl_obs_constants() -> (
     usize,
     usize,
     usize,
+    usize,
 ) {
     (
         MAX_PLANETS,
@@ -148,12 +166,13 @@ pub fn rl_obs_constants() -> (
         FLEET_CHANNELS,
         COMET_CHANNELS,
         GLOBAL_CHANNELS,
+        MAX_LAUNCH_FEATURES,
     )
 }
 
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRlVecEnv>()?;
     m.add_function(wrap_pyfunction!(rl_obs_constants, m)?)?;
-    m.add_function(wrap_pyfunction!(encode_obs_v1, m)?)?;
+    m.add_function(wrap_pyfunction!(encode_entity_based, m)?)?;
     Ok(())
 }

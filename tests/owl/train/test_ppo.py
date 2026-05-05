@@ -20,15 +20,15 @@ from owl.rl import (
     ACTION_ENTITY_SLOTS,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
+    EntityBasedConfig,
     ObsBatch,
-    ObsV1Config,
     VectorizedEnv,
 )
 from owl.train import ppo
 from torch import nn
 
 
-def _obs_batch(*, n_envs: int, obs_spec: ObsV1Config) -> ObsBatch:
+def _obs_batch(*, n_envs: int, obs_spec: EntityBasedConfig) -> ObsBatch:
     return ObsBatch(
         planets=torch.zeros(
             (n_envs, obs_spec.max_planets, obs_spec.planet_channels),
@@ -54,6 +54,9 @@ def _obs_batch(*, n_envs: int, obs_spec: ObsV1Config) -> ObsBatch:
         ),
         can_act=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
         max_launch=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+        max_launch_features=torch.zeros(
+            (n_envs, 4, ACTION_ENTITY_SLOTS, obs_spec.max_launch_features),
+        ),
     )
 
 
@@ -75,7 +78,7 @@ def _actions(
     )
 
 
-def _discrete_obs_batch(*, n_envs: int, obs_spec: ObsV1Config) -> ObsBatch:
+def _discrete_obs_batch(*, n_envs: int, obs_spec: EntityBasedConfig) -> ObsBatch:
     obs = _obs_batch(n_envs=n_envs, obs_spec=obs_spec)
     obs.can_act = torch.zeros(
         (n_envs, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
@@ -94,7 +97,7 @@ class TinyOrbitEnv:
     ) -> None:
         self.n_envs = n_envs
         self.pin_memory_enabled = False
-        self.obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 2)
+        self.obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
         self.action_spec = ActionPureConfig()
         self.episode_length = episode_length
         self.two_player = two_player
@@ -144,7 +147,7 @@ class TinyDiscreteTargetEnv:
     def __init__(self, *, n_envs: int) -> None:
         self.n_envs = n_envs
         self.pin_memory_enabled = False
-        self.obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 2)
+        self.obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
         self.action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
         self.last_target: torch.Tensor | None = None
 
@@ -442,7 +445,7 @@ def _zero_loss_metrics(zero: torch.Tensor) -> ppo.PPOLossMetrics:
 
 
 def test_rollout_buffer_collects_time_major_and_returns_contiguous_segments() -> None:
-    obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 1)
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 1)
     action_spec = ActionPureConfig()
     buffer = ppo.PPORolloutBuffer(
         horizon=3,
@@ -498,7 +501,7 @@ def test_rollout_buffer_collects_time_major_and_returns_contiguous_segments() ->
 
 
 def test_obs_to_device_clones_cpu_observation_buffers() -> None:
-    obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 1)
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 1)
     obs = _obs_batch(n_envs=2, obs_spec=obs_spec)
     obs.global_features.fill_(1.0)
 
@@ -568,7 +571,7 @@ def test_player_segment_returns_preserve_per_player_terminal_rewards() -> None:
 def test_obs_to_device_uses_explicit_non_blocking_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 1)
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 1)
     obs = _obs_batch(n_envs=2, obs_spec=obs_spec)
     non_blocking_args: list[bool] = []
 
@@ -590,7 +593,7 @@ def test_obs_to_device_uses_explicit_non_blocking_policy(
 def test_obs_to_device_defaults_to_blocking_transfer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 1)
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 1)
     obs = _obs_batch(n_envs=2, obs_spec=obs_spec)
     non_blocking_args: list[bool] = []
 
@@ -1548,7 +1551,7 @@ def test_trainer_overwrites_dones_when_envs_terminate_inside_rollout() -> None:
 
 
 def test_discrete_target_rollout_buffer_and_policy_mask() -> None:
-    obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 2)
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
     action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
     buffer = ppo.PPORolloutBuffer(
         horizon=2,
@@ -1639,7 +1642,7 @@ def test_discrete_target_train_iteration_runs() -> None:
 
 def test_discrete_target_transformer_train_iteration_keeps_parameters_finite() -> None:
     torch.manual_seed(0)
-    obs_spec = ObsV1Config(max_entities=ACTION_ENTITY_SLOTS + 2)
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
     action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
     env = VectorizedEnv(
         n_envs=2,

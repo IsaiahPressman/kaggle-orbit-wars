@@ -14,8 +14,8 @@ from owl.rl import (
     MAX_COMETS,
     MAX_PLANETS,
     ActionPureConfig,
+    EntityBasedConfig,
     ObsBatch,
-    ObsV1Config,
 )
 from owl.train import FullConfig, PPOTrainer
 from owl.train.logging import LogMode
@@ -402,6 +402,7 @@ def test_eval_actions_for_assignments_uses_stochastic_model_outputs() -> None:
         global_features=torch.zeros((1, 1)),
         can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
         max_launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+        max_launch_features=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 28)),
     )
 
     actions = run_ppo._eval_actions_for_assignments(
@@ -418,8 +419,8 @@ def test_eval_actions_for_assignments_uses_stochastic_model_outputs() -> None:
 
 
 def test_create_model_uses_env_owned_specs() -> None:
-    obs_spec = ObsV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 2)
-    action_spec = ActionPureConfig(max_per_planet_launches=2)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     model = run_ppo._create_model(
         _full_config().model,
         obs_spec=obs_spec,
@@ -429,7 +430,7 @@ def test_create_model_uses_env_owned_specs() -> None:
     assert model.obs_spec == obs_spec
     assert model.action_spec == action_spec
     assert model.fleet_proj.in_features == obs_spec.fleet_channels
-    assert model.actor.launch_slot_tokens.num_embeddings == 2
+    assert model.actor.launch_slot_tokens.num_embeddings == 1
 
 
 def test_trainable_parameter_count_ignores_frozen_parameters() -> None:
