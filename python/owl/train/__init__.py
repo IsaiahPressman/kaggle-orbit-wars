@@ -5,6 +5,14 @@ from .advantages import (
     compute_puffer_vtrace_action_aligned,
 )
 from .config import FullConfig
+from .distributed import (
+    DistributedContext,
+    all_reduce_any,
+    all_reduce_max,
+    all_reduce_sum,
+    broadcast_object,
+    distributed_session,
+)
 from .metrics import explained_variance
 from .optimizer import (
     AdamWConfig,
@@ -49,6 +57,7 @@ __all__ = [
     "AdvantageMode",
     "CompileMode",
     "CompositeOptimizer",
+    "DistributedContext",
     "FullConfig",
     "LRScheduleConfig",
     "LRScheduler",
@@ -67,14 +76,19 @@ __all__ = [
     "SegmentSamplingConfig",
     "SegmentSamplingMetrics",
     "TrainingDType",
+    "all_reduce_any",
+    "all_reduce_max",
+    "all_reduce_sum",
     "assert_finite",
     "autocast_context",
+    "broadcast_object",
     "compute_advantages",
     "compute_gae",
     "compute_puffer_vtrace_action_aligned",
     "configure_torch",
     "create_lr_scheduler",
     "create_optimizer",
+    "distributed_session",
     "explained_variance",
     "lr_multiplier",
     "normalize_masked_advantages",
