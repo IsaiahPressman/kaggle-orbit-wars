@@ -14,7 +14,7 @@ use vec_env::PyRlVecEnv;
 pub const MAX_PLANETS: usize = 40;
 pub const MAX_COMETS: usize = 4;
 pub const MAX_COMET_PATH_LENGTH: usize = 40;
-pub const DEFAULT_MAX_ENTITIES: usize = 1024;
+pub const DEFAULT_MAX_ENTITIES: usize = 512;
 const BASE_PLANET_CHANNELS: usize = 17;
 const BASE_FLEET_CHANNELS: usize = 10;
 const CARTESIAN_FOURIER_FREQUENCY_COUNT: usize = 6;

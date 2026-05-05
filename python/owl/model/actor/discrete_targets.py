@@ -152,7 +152,7 @@ class DiscreteTargetsActor(nn.Module):
             source_active,
             can_act,
             min_fleet_size=min_fleet_size,
-            max_ship_support=self.config.entropy_ship_support_cap,
+            entropy_ship_quantiles=self.config.entropy_ship_quantiles,
         )
         per_player_entity_log_prob = launch_log_prob + target_log_prob + size_log_prob
         per_player_entity_entropy = launch_entropy + target_entropy + size_entropy
@@ -252,7 +252,7 @@ class DiscreteTargetsActor(nn.Module):
             source_active,
             can_act,
             min_fleet_size=min_fleet_size,
-            max_ship_support=self.config.entropy_ship_support_cap,
+            entropy_ship_quantiles=self.config.entropy_ship_quantiles,
         )
         per_player_entity_log_prob = launch_log_prob + target_log_prob + size_log_prob
         per_player_entity_entropy = launch_entropy + target_entropy + size_entropy
@@ -632,7 +632,7 @@ def discrete_action_entropy(
     can_act: torch.Tensor,
     *,
     min_fleet_size: int,
-    max_ship_support: int,
+    entropy_ship_quantiles: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     launch_entropy = binary_entropy_from_logits(params.continue_logits.float())
     target_prob = torch.softmax(params.target_logits.float(), dim=-1)
@@ -641,24 +641,14 @@ def discrete_action_entropy(
         -(target_prob * target_log_prob).masked_fill(~can_act, 0.0).sum(dim=-1)
     )
 
-    support = ship_support(
+    size_entropy = truncated_logistic_mixture_entropy(
+        params.size_mix_logits,
+        params.size_mu,
+        params.size_scale,
         residual_budget,
         min_fleet_size=min_fleet_size,
-        max_ship_support=max_ship_support,
+        entropy_ship_quantiles=entropy_ship_quantiles,
     )
-    log_probs = discretized_logistic_mixture_log_prob(
-        support,
-        residual_budget.unsqueeze(-1),
-        params.size_mix_logits.unsqueeze(-2),
-        params.size_mu.unsqueeze(-2),
-        params.size_scale.unsqueeze(-2),
-        min_fleet_size=min_fleet_size,
-    )
-    valid = support <= residual_budget.unsqueeze(-1)
-    probs = torch.where(valid, log_probs.exp(), torch.zeros_like(log_probs))
-    size_entropy = -(
-        probs * torch.where(valid, log_probs, torch.zeros_like(log_probs))
-    ).sum(dim=-1)
     size_mix_log_prob = F.log_softmax(params.size_mix_logits.float(), dim=-1)
     size_mix_prob = size_mix_log_prob.exp()
     size_mixture_entropy = -(size_mix_prob * size_mix_log_prob).sum(dim=-1)
@@ -688,6 +678,55 @@ def discrete_action_entropy(
             torch.zeros_like(size_logistic_entropy),
         ),
     )
+
+
+def truncated_logistic_mixture_entropy(
+    mix_logits: torch.Tensor,
+    mu: torch.Tensor,
+    scale: torch.Tensor,
+    residual_budget: torch.Tensor,
+    *,
+    min_fleet_size: int,
+    entropy_ship_quantiles: int,
+) -> torch.Tensor:
+    mix_logits = mix_logits.float()
+    mu = mu.float()
+    scale = scale.float()
+    safe_residual_budget = residual_budget.clamp_min(min_fleet_size).float()
+    support_lo = float(min_fleet_size) - 0.5
+    support_hi = safe_residual_budget.unsqueeze(-1) + 0.5
+
+    cdf_lo = torch.sigmoid((support_lo - mu) / scale)
+    cdf_hi = torch.sigmoid((support_hi - mu) / scale)
+    support_mass = (cdf_hi - cdf_lo).clamp_min(1e-12)
+    quantiles = (
+        torch.arange(
+            entropy_ship_quantiles,
+            device=mu.device,
+            dtype=mu.dtype,
+        )
+        + 0.5
+    ) / entropy_ship_quantiles
+    quantiles = quantiles.view(*((1,) * mu.ndim), entropy_ship_quantiles)
+    cdf_samples = cdf_lo.unsqueeze(-1) + support_mass.unsqueeze(-1) * quantiles
+    cdf_samples = cdf_samples.clamp(1e-6, 1.0 - 1e-6)
+    samples = mu.unsqueeze(-1) + scale.unsqueeze(-1) * torch.logit(cdf_samples)
+
+    z = (samples.unsqueeze(-1) - mu.unsqueeze(-2).unsqueeze(-2)) / scale.unsqueeze(
+        -2,
+    ).unsqueeze(-2)
+    log_pdf = (
+        F.logsigmoid(z) + F.logsigmoid(-z) - scale.log().unsqueeze(-2).unsqueeze(-2)
+    )
+    component_log_prob = (
+        F.log_softmax(mix_logits, dim=-1).unsqueeze(-2).unsqueeze(-2)
+        + log_pdf
+        - support_mass.log().unsqueeze(-2).unsqueeze(-2)
+    )
+    log_prob = torch.logsumexp(component_log_prob, dim=-1)
+    component_entropy = -log_prob.mean(dim=-1)
+    mix_prob = torch.softmax(mix_logits, dim=-1)
+    return (mix_prob * component_entropy).sum(dim=-1)
 
 
 def _require_discrete_actions_shape(

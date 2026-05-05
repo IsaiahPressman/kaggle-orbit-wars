@@ -929,7 +929,7 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     config = StatelessTransformerV1Config(
         actor=ActorDiscreteTargetsConfig(
             n_action_mixtures=3,
-            entropy_ship_support_cap=16,
+            entropy_ship_quantiles=8,
         ),
         embed_dim=32,
         depth=1,
@@ -1120,7 +1120,7 @@ def test_discrete_targets_size_log_prob_conditions_on_replayed_target() -> None:
     config = StatelessTransformerV1Config(
         actor=ActorDiscreteTargetsConfig(
             n_action_mixtures=1,
-            entropy_ship_support_cap=16,
+            entropy_ship_quantiles=8,
         ),
         embed_dim=4,
         depth=1,
@@ -1188,7 +1188,7 @@ def test_discrete_targets_replay_entropy_ignores_no_launch_target_placeholder() 
     config = StatelessTransformerV1Config(
         actor=ActorDiscreteTargetsConfig(
             n_action_mixtures=2,
-            entropy_ship_support_cap=16,
+            entropy_ship_quantiles=8,
         ),
         embed_dim=8,
         depth=1,
@@ -1407,7 +1407,7 @@ def test_ship_support_counts_only_valid_min_to_residual_entries() -> None:
     assert torch.equal(capped_support[0, 0], torch.tensor([6, 7, 8, 9]))
 
 
-def test_discrete_targets_entropy_ignores_invalid_ship_support_gradients() -> None:
+def test_discrete_targets_entropy_ignores_inactive_source_gradients() -> None:
     mix_logits = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 2), requires_grad=True)
     mu = torch.full((1, 4, ACTION_ENTITY_SLOTS, 2), 2.0, requires_grad=True)
     scale = torch.full((1, 4, ACTION_ENTITY_SLOTS, 2), 0.5, requires_grad=True)
@@ -1433,13 +1433,35 @@ def test_discrete_targets_entropy_ignores_invalid_ship_support_gradients() -> No
         source_active,
         can_act,
         min_fleet_size=2,
-        max_ship_support=4,
+        entropy_ship_quantiles=4,
     )
     sum(entropy.sum() for entropy in entropies).backward()
 
     for tensor in (mix_logits, mu, scale, continue_logits, target_logits):
         assert tensor.grad is not None
         assert torch.isfinite(tensor.grad).all()
+
+
+def test_discrete_targets_quantile_entropy_accounts_for_component_overlap() -> None:
+    residual_budget = torch.tensor([100], dtype=torch.int64)
+    single_entropy = discrete_targets_impl.truncated_logistic_mixture_entropy(
+        torch.zeros((1, 1)),
+        torch.full((1, 1), 50.0),
+        torch.full((1, 1), 2.0),
+        residual_budget,
+        min_fleet_size=1,
+        entropy_ship_quantiles=32,
+    )
+    duplicated_entropy = discrete_targets_impl.truncated_logistic_mixture_entropy(
+        torch.zeros((1, 2)),
+        torch.full((1, 2), 50.0),
+        torch.full((1, 2), 2.0),
+        residual_budget,
+        min_fleet_size=1,
+        entropy_ship_quantiles=32,
+    )
+
+    assert torch.allclose(duplicated_entropy, single_entropy)
 
 
 def test_min_fleet_size_masks_and_shifts_ship_distribution() -> None:

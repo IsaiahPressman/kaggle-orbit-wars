@@ -8,7 +8,7 @@ actor:
   action_spec: discrete_targets
   n_action_mixtures: 8
   max_ship_normalizer: 500.0
-  entropy_ship_support_cap: 1024
+  entropy_ship_quantiles: 16
   scale_min: 0.10
   scale_max_frac: 0.5
   scale_max_abs_floor: 8.0

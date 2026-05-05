@@ -34,7 +34,7 @@ Actor-specific fields live inside the actor config. `ActorPureConfig` owns
 pure-head fields such as `n_action_mixtures`, `kappa_min`, `kappa_max`,
 `tau_min`, `alpha_beta_eps`, `dir_eps`, `max_ship_normalizer=500.0`, and
 `entropy_ship_support_cap`. `ActorDiscreteTargetsConfig` owns
-`n_action_mixtures`, `max_ship_normalizer=500.0`, `entropy_ship_support_cap`,
+`n_action_mixtures`, `max_ship_normalizer=500.0`, `entropy_ship_quantiles=16`,
 and the logistic-mixture scale parameters `scale_min=0.10`,
 `scale_max_frac=0.5`, and `scale_max_abs_floor=8.0`.
 Model YAML files can reference actor presets by name through adjacent
@@ -223,8 +223,10 @@ Entropy outputs also carry policy-specific component names for logging, such as
 The angle/size entropy is an augmented latent-mixture entropy estimate: mixture
 label entropy plus expected component entropy. It is not the exact marginal
 entropy of the emitted action when mixture components overlap. Ship-count
-entropy enumerates support only up to `entropy_ship_support_cap`; residual ship
-budgets above that cap use truncated support.
+entropy for the pure actor enumerates support only up to
+`entropy_ship_support_cap`; residual ship budgets above that cap use truncated
+support. The discrete-target actor instead uses deterministic truncated-logistic
+quantile quadrature controlled by `entropy_ship_quantiles`.
 
 ### Discrete Targets Actor
 
@@ -271,6 +273,15 @@ weighting target and size entropy by launch probability. To avoid materializing
 all source-target size parameters, the size entropy term uses the current
 policy's argmax target as a proxy; replayed action targets are used only for
 action log-probability, so no-launch placeholder targets do not affect entropy.
+Fleet-size entropy is estimated with deterministic per-component quantile
+quadrature under the continuous truncated logistic mixture. This accounts for
+component overlap and uses memory proportional to
+`n_action_mixtures * entropy_ship_quantiles`, independent of the ship budget.
+Because this is a continuous-density estimate rather than exact entropy over
+rounded integer ship counts, very narrow scales can produce a negative size
+entropy term; the PPO bonus still encourages broader size distributions, but
+the logged value should be interpreted as an exploration heuristic rather than a
+non-negative discrete entropy.
 
 ## Log-Prob Replay
 
