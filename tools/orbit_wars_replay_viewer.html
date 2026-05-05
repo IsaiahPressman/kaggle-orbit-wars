@@ -183,6 +183,25 @@
         font-size: 0.95rem;
       }
 
+      button.icon.play {
+        background-color: var(--panel-active);
+        border-color: var(--line-active);
+        color: #fff;
+      }
+
+      button.icon.step {
+        width: 30px;
+        background-color: #101020;
+        color: var(--muted);
+        border-color: #3a3a4c;
+        font-size: 0.8rem;
+      }
+
+      button.icon.step:hover {
+        background-color: #1f1f34;
+        color: var(--text);
+      }
+
       input[type="file"] {
         width: 235px;
         color: #ccc;
@@ -293,9 +312,9 @@
     </main>
 
     <div class="timeline">
-      <button id="backBtn" class="icon" type="button" title="Previous frame">◀</button>
-      <button id="playBtn" class="icon" type="button" title="Play or pause">▶</button>
-      <button id="nextBtn" class="icon" type="button" title="Next frame">▶</button>
+      <button id="backBtn" class="icon step" type="button" title="Previous frame">⏮</button>
+      <button id="playBtn" class="icon play" type="button" title="Play or pause">▶</button>
+      <button id="nextBtn" class="icon step" type="button" title="Next frame">⏭</button>
       <input id="stepSlider" type="range" min="0" max="0" value="0" />
       <select id="speedSelect" aria-label="Speed">
         <option value="0.25">0.25x</option>
@@ -311,6 +330,7 @@
       const BOARD_SIZE = 100;
       const CENTER = 50;
       const SUN_RADIUS = 10;
+      const ORBIT_WARS_STEP_DURATION_MS = 1000 / 3;
       const PLAYER_COLORS = ["#0072B2", "#E69F00", "#009E73", "#F0E442"];
       const NEUTRAL_COLOR = "#666666";
       const TEXT_SIZES = { small: 0.7, medium: 1.0, large: 1.4 };
@@ -758,13 +778,30 @@
         if (timer) window.clearInterval(timer);
         timer = null;
         if (!playing) return;
-        const fps = Number(speedSelect.value) || 1;
+        const speed = Number(speedSelect.value) || 1;
         timer = window.setInterval(() => {
           if (!episode?.frames?.length) return setPlaying(false);
           if (frameIndex >= episode.frames.length - 1) return setPlaying(false);
           frameIndex += 1;
           render();
-        }, Math.max(30, 180 / fps));
+        }, Math.max(30, ORBIT_WARS_STEP_DURATION_MS / speed));
+      }
+
+      function stepFrame(delta) {
+        const frameCount = episode?.frames?.length || 1;
+        frameIndex = Math.min(frameCount - 1, Math.max(0, frameIndex + delta));
+        render();
+      }
+
+      function shiftSpeed(delta) {
+        const nextIndex = Math.min(speedSelect.options.length - 1, Math.max(0, speedSelect.selectedIndex + delta));
+        if (nextIndex === speedSelect.selectedIndex) return;
+        speedSelect.selectedIndex = nextIndex;
+        setPlaying(true);
+      }
+
+      function isFormField(element) {
+        return ["INPUT", "SELECT", "TEXTAREA"].includes(element?.tagName);
       }
 
       fileInput.addEventListener("change", async () => {
@@ -788,14 +825,8 @@
         if (playing) setPlaying(true);
       });
       playBtn.addEventListener("click", () => setPlaying(!playing));
-      backBtn.addEventListener("click", () => {
-        frameIndex = Math.max(0, frameIndex - 1);
-        render();
-      });
-      nextBtn.addEventListener("click", () => {
-        frameIndex = Math.min((episode?.frames?.length || 1) - 1, frameIndex + 1);
-        render();
-      });
+      backBtn.addEventListener("click", () => stepFrame(-1));
+      nextBtn.addEventListener("click", () => stepFrame(1));
       fleetBtn.addEventListener("click", () => {
         settings.showFleetNumbers = !settings.showFleetNumbers;
         fleetBtn.classList.toggle("active", settings.showFleetNumbers);
@@ -814,6 +845,25 @@
           render();
         });
       }
+      window.addEventListener("keydown", (event) => {
+        if (isFormField(event.target)) return;
+        if (event.code === "Space") {
+          event.preventDefault();
+          setPlaying(!playing);
+        } else if (!playing && event.key === "ArrowLeft") {
+          event.preventDefault();
+          stepFrame(-1);
+        } else if (!playing && event.key === "ArrowRight") {
+          event.preventDefault();
+          stepFrame(1);
+        } else if (playing && event.key === "ArrowUp") {
+          event.preventDefault();
+          shiftSpeed(1);
+        } else if (playing && event.key === "ArrowDown") {
+          event.preventDefault();
+          shiftSpeed(-1);
+        }
+      });
       window.addEventListener("resize", render);
       render();
     </script>
