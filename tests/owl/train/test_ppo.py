@@ -1601,7 +1601,7 @@ def test_discrete_target_transformer_train_iteration_keeps_parameters_finite() -
         StatelessTransformerV1Config(
             actor=ActorDiscreteTargetsConfig(
                 n_action_mixtures=2,
-                entropy_ship_support_cap=16,
+                entropy_ship_quantiles=8,
             ),
             embed_dim=32,
             depth=1,
