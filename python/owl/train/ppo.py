@@ -812,19 +812,6 @@ class PPOTrainer:
                 for name, component in entropy_components.items()
             },
         )
-        if (
-            self.config.target_kl is not None
-            and metrics.approx_kl.item() > self.config.target_kl
-        ):
-            return PPOUpdateResult(
-                metrics=metrics,
-                indices=idx,
-                new_logp=new_logp.detach(),
-                new_values=new_values.detach(),
-                grad_norm=metrics.loss.detach().new_zeros(()),
-                target_kl_exceeded=True,
-            )
-
         self.optimizer.zero_grad(set_to_none=True)
         backward_loss = (
             metrics.loss if metrics.backward_loss is None else metrics.backward_loss
@@ -837,6 +824,10 @@ class PPOTrainer:
         self.optimizer_steps += 1
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
+        target_kl_exceeded = (
+            self.config.target_kl is not None
+            and metrics.approx_kl.item() > self.config.target_kl
+        )
 
         return PPOUpdateResult(
             metrics=metrics,
@@ -844,6 +835,7 @@ class PPOTrainer:
             new_logp=new_logp.detach(),
             new_values=new_values.detach(),
             grad_norm=grad_norm.detach(),
+            target_kl_exceeded=target_kl_exceeded,
         )
 
     def _mean_policy_metric(

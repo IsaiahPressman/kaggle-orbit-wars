@@ -1191,6 +1191,66 @@ def test_update_minibatch_value_clipping_uses_current_value_anchor() -> None:
     assert update.metrics.value_loss.item() == pytest.approx(2.0)
 
 
+def test_update_minibatch_steps_before_target_kl_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(6)
+    env = TinyOrbitEnv(n_envs=1)
+    model = TinyOrbitModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            target_kl=0.01,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+        ),
+        device=torch.device("cpu"),
+    )
+    bootstrap_values = trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+
+    def fake_ppo_loss(
+        *,
+        new_logp: torch.Tensor,
+        entropy: torch.Tensor,  # noqa: ARG001
+        new_values: torch.Tensor,  # noqa: ARG001
+        old_logp: torch.Tensor,  # noqa: ARG001
+        old_values: torch.Tensor,  # noqa: ARG001
+        returns: torch.Tensor,  # noqa: ARG001
+        advantages: torch.Tensor,  # noqa: ARG001
+        policy_weight: torch.Tensor,  # noqa: ARG001
+        value_weight: torch.Tensor,  # noqa: ARG001
+        config: ppo.PPOConfig,  # noqa: ARG001
+    ) -> ppo.PPOLossMetrics:
+        loss = new_logp.sum()
+        return replace(
+            _zero_loss_metrics(loss),
+            approx_kl=loss.detach().new_tensor(0.02),
+        )
+
+    monkeypatch.setattr(trainer, "_ppo_loss", fake_ppo_loss)
+
+    update = trainer._update_minibatch(
+        segments,
+        advantages=torch.ones_like(segments.values),
+        returns=bootstrap_values[:, None, :].expand_as(segments.values),
+        policy_mask=ppo._policy_mask(segments.obs),
+        value_mask=segments.obs.still_playing,
+        sample=ppo.SegmentSample(
+            indices=torch.zeros((1,), dtype=torch.int64),
+            importance=torch.ones((1, 1)),
+            probabilities=torch.ones((1,)),
+        ),
+        value_clip_anchor=segments.values,
+    )
+
+    assert update.target_kl_exceeded
+    assert trainer.optimizer_steps == 1
+    assert update.grad_norm.item() > 0.0
+
+
 def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
