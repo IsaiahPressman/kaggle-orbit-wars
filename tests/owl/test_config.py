@@ -13,6 +13,20 @@ class InnerConfig(BaseConfig):
     size: int = Field(ge=1)
 
 
+class LeafConfig(BaseConfig):
+    name: str
+    size: int = Field(ge=1)
+
+
+class InnerConfigWithSubconfigRef(BaseConfig):
+    name: str
+    leaf: LeafConfig
+
+    @classmethod
+    def subconfig_dirs(cls) -> set[str]:
+        return {"leaf"}
+
+
 class RootConfig(BaseConfig):
     inner: InnerConfig
     seed: int = Field(ge=0)
@@ -20,6 +34,14 @@ class RootConfig(BaseConfig):
 
 class RootConfigWithSubconfigRef(BaseConfig):
     inner: InnerConfig
+
+    @classmethod
+    def subconfig_dirs(cls) -> set[str]:
+        return {"inner"}
+
+
+class RootConfigWithNestedSubconfigRef(BaseConfig):
+    inner: InnerConfigWithSubconfigRef
 
     @classmethod
     def subconfig_dirs(cls) -> set[str]:
@@ -99,6 +121,62 @@ def test_base_config_can_override_subconfig_reference_and_nested_value(
 
     assert cfg.inner.name == "preset-b"
     assert cfg.inner.size == 10
+
+
+def test_base_config_can_override_nested_subconfig_reference(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "inner").mkdir()
+    (tmp_path / "inner" / "leaf").mkdir()
+    _write_yaml(
+        tmp_path / "inner" / "preset.yaml",
+        {"name": "inner", "leaf": "leaf_a"},
+    )
+    _write_yaml(
+        tmp_path / "inner" / "leaf" / "leaf_a.yaml",
+        {"name": "leaf-a", "size": 2},
+    )
+    _write_yaml(
+        tmp_path / "inner" / "leaf" / "leaf_b.yaml",
+        {"name": "leaf-b", "size": 3},
+    )
+    _write_yaml(tmp_path / "config.yaml", {"inner": "preset"})
+
+    cfg = RootConfigWithNestedSubconfigRef.from_file(
+        tmp_path / "config.yaml",
+        overrides={"inner.leaf": "leaf_b"},
+    )
+
+    assert cfg.inner.leaf.name == "leaf-b"
+    assert cfg.inner.leaf.size == 3
+
+
+def test_base_config_can_override_nested_subconfig_reference_and_nested_value(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "inner").mkdir()
+    (tmp_path / "inner" / "leaf").mkdir()
+    _write_yaml(
+        tmp_path / "inner" / "preset.yaml",
+        {"name": "inner", "leaf": "leaf_a"},
+    )
+    _write_yaml(
+        tmp_path / "inner" / "leaf" / "leaf_a.yaml",
+        {"name": "leaf-a", "size": 2},
+    )
+    _write_yaml(
+        tmp_path / "inner" / "leaf" / "leaf_b.yaml",
+        {"name": "leaf-b", "size": 3},
+    )
+    _write_yaml(tmp_path / "config.yaml", {"inner": "preset"})
+
+    cfg = RootConfigWithNestedSubconfigRef.from_file(
+        tmp_path / "config.yaml",
+        overrides={"inner.leaf": "leaf_b", "inner.leaf.size": 10},
+    )
+
+    assert cfg.inner.leaf.name == "leaf-b"
+    assert cfg.inner.leaf.size == 10
 
 
 def test_base_config_from_file_does_not_mutate_input_overrides(tmp_path: Path) -> None:

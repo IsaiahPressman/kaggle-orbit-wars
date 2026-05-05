@@ -18,7 +18,7 @@ from owl.rl import (
     ACTION_ENTITY_SLOTS,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
-    ObsV1Config,
+    EntityBasedConfig,
     VectorizedEnv,
 )
 from owl.rs import assert_release_build
@@ -106,7 +106,10 @@ def parse_args() -> argparse.Namespace:
         "--max-entities",
         type=int,
         default=None,
-        help="Rust observation max_entities. Defaults to ObsV1Config().max_entities.",
+        help=(
+            "Rust observation max_entities. Defaults to "
+            "EntityBasedConfig().max_entities."
+        ),
     )
     parser.add_argument(
         "--max-per-planet-launches",
@@ -156,9 +159,9 @@ def parse_args() -> argparse.Namespace:
 
 def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
     assert_release_build()
-    obs_spec = ObsV1Config()
+    obs_spec = EntityBasedConfig()
     if args.max_entities is not None:
-        obs_spec = ObsV1Config(max_entities=args.max_entities)
+        obs_spec = EntityBasedConfig(max_entities=args.max_entities)
 
     action_spec = (
         ActionPureConfig(

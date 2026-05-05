@@ -37,6 +37,8 @@ pure-head fields such as `n_action_mixtures`, `kappa_min`, `kappa_max`,
 `n_action_mixtures`, `max_ship_normalizer=500.0`, `entropy_ship_quantiles=16`,
 and the logistic-mixture scale parameters `scale_min=0.10`,
 `scale_max_frac=0.5`, and `scale_max_abs_floor=8.0`.
+`kappa_max` may be `None`; when set, `kappa_min` must be less than or equal to
+`kappa_max`.
 Model YAML files can reference actor presets by name through adjacent
 `configs/model/actor/*.yaml` files, for example `actor: discrete_targets`, or
 can inline an actor config to override preset fields such as mixture count.
@@ -56,10 +58,10 @@ from `docs/rl-api-specs.md`.
 
 Each observation tensor receives one feedforward projection to `embed_dim`:
 
-- static planets: `(batch, MAX_PLANETS, 61) -> (batch, MAX_PLANETS, embed_dim)`
-- orbiting planets: `(batch, MAX_PLANETS, 61) -> (batch, MAX_PLANETS, embed_dim)`
-- fleets: `(batch, max_fleets, 57) -> (batch, max_fleets, embed_dim)`
-- comets: `(batch, MAX_COMETS, 286) -> (batch, MAX_COMETS, embed_dim)`
+- static planets: `(batch, MAX_PLANETS, 107) -> (batch, MAX_PLANETS, embed_dim)`
+- orbiting planets: `(batch, MAX_PLANETS, 107) -> (batch, MAX_PLANETS, embed_dim)`
+- fleets: `(batch, max_fleets, 79) -> (batch, max_fleets, embed_dim)`
+- comets: `(batch, MAX_COMETS, 330) -> (batch, MAX_COMETS, embed_dim)`
 - globals: `(batch, 3) -> (batch, 1, embed_dim)`
 
 The boolean `orbiting_planets` mask selects the orbiting-planet projection for
@@ -87,8 +89,9 @@ The shared trunk is a stack of pre-norm transformer blocks configured by:
 - `mlp_ratio`
 - `embed_dim`
 
-`n_heads` must evenly divide `embed_dim`. The default activation is GELU. LayerNorm
-is used for normalization, and no dropout is applied.
+`n_heads` must evenly divide `embed_dim`, and `int(embed_dim * mlp_ratio)` must
+be at least 1. The default activation is GELU. LayerNorm is used for
+normalization, and no dropout is applied.
 
 CPU execution uses torch scaled-dot-product attention over regular
 `(batch, seq, dim)` tensors with the token mask passed as the attention key
@@ -148,7 +151,7 @@ Both actor heads start from the same shared transformer trunk. For each
 
 - source entity hidden state
 - player hidden token
-- normalized `max_launch`
+- Rust-provided `max_launch_features` using the planet ship-count bucket grid
 
 The final action head is selected by `config.actor.action_spec`. The concrete
 heads live under `python/owl/model/actor/`: `PureActor` for raw angles and
@@ -185,9 +188,12 @@ implementation uses the straightforward sequential recurrence rather than the
 paper's parallel scan variant.
 
 `ActionPureConfig()` defaults to `max_per_planet_launches=3` and
-`min_fleet_size=1`. PPO model construction uses the environment action spec as
-the source of truth, so the model launch-slot count and minimum launched fleet
-size match the action tensors submitted to the environment.
+`min_fleet_size=1`, but the pure actor currently raises `NotImplementedError`
+for `max_per_planet_launches > 1` because launch-budget ship-count features are
+encoded by Rust for the initial launch budget only. PPO model construction uses
+the environment action spec as the source of truth, so the model launch-slot
+count and minimum launched fleet size match the action tensors submitted to the
+environment.
 
 For every slot, the policy emits:
 

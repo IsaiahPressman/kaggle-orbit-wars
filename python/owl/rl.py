@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from owl.config import BaseConfig
 from owl.rs import RlVecEnv as _RustRlVecEnv
-from owl.rs import encode_obs_v1, rl_obs_constants
+from owl.rs import encode_entity_based, rl_obs_constants
 
 (
     MAX_PLANETS,
@@ -21,11 +21,12 @@ from owl.rs import encode_obs_v1, rl_obs_constants
     FLEET_CHANNELS,
     COMET_CHANNELS,
     GLOBAL_CHANNELS,
+    MAX_LAUNCH_FEATURES,
 ) = rl_obs_constants()
 
 
-class ObsV1Config(BaseConfig):
-    obs_spec: Literal["obs_v1"] = "obs_v1"
+class EntityBasedConfig(BaseConfig):
+    obs_spec: Literal["entity_based"] = "entity_based"
     max_entities: int = Field(default=DEFAULT_MAX_ENTITIES, gt=MAX_PLANETS + MAX_COMETS)
 
     @property
@@ -60,6 +61,10 @@ class ObsV1Config(BaseConfig):
     def global_channels(self) -> int:
         return GLOBAL_CHANNELS
 
+    @property
+    def max_launch_features(self) -> int:
+        return MAX_LAUNCH_FEATURES
+
 
 class ActionPureConfig(BaseConfig):
     """Pure action spec.
@@ -87,7 +92,7 @@ class ActionDiscreteTargetsConfig(BaseConfig):
     min_fleet_size: int = Field(default=6, ge=1)
 
 
-type ObsConfig = Annotated[ObsV1Config, Field(discriminator="obs_spec")]
+type ObsConfig = Annotated[EntityBasedConfig, Field(discriminator="obs_spec")]
 type ActionConfig = Annotated[
     ActionPureConfig | ActionDiscreteTargetsConfig,
     Field(discriminator="action_spec"),
@@ -98,7 +103,7 @@ OUTER_PLAYER_SLOTS = 4
 
 class EnvConfig(BaseConfig):
     n_envs: int = Field(default=2, ge=1)
-    obs_spec: ObsConfig = Field(default_factory=ObsV1Config)
+    obs_spec: ObsConfig = Field(default_factory=EntityBasedConfig)
     action_spec: ActionConfig = Field(default_factory=ActionPureConfig)
     two_player_weight: float = Field(default=0.5, ge=0.0, le=1.0)
     pin_memory: bool = True
@@ -123,6 +128,7 @@ class ObsBatch(BaseModel):
     global_features: torch.Tensor
     can_act: torch.Tensor
     max_launch: torch.Tensor
+    max_launch_features: torch.Tensor
 
 
 class VectorizedEnv:
@@ -173,6 +179,7 @@ class VectorizedEnv:
         self._global_obs_np = self.observations.global_features.numpy()
         self._can_act_np = self.observations.can_act.numpy()
         self._max_launch_np = self.observations.max_launch.numpy()
+        self._max_launch_features_np = self.observations.max_launch_features.numpy()
         self._rewards_np = self.rewards.numpy()
         self._dones_np = self.dones.numpy()
 
@@ -187,6 +194,7 @@ class VectorizedEnv:
             self._global_obs_np,
             self._can_act_np,
             self._max_launch_np,
+            self._max_launch_features_np,
         )
         return self.observations
 
@@ -241,6 +249,7 @@ class VectorizedEnv:
                 self._global_obs_np,
                 self._can_act_np,
                 self._max_launch_np,
+                self._max_launch_features_np,
                 self._rewards_np,
                 self._dones_np,
             )
@@ -265,6 +274,7 @@ class VectorizedEnv:
                 self._global_obs_np,
                 self._can_act_np,
                 self._max_launch_np,
+                self._max_launch_features_np,
                 self._rewards_np,
                 self._dones_np,
             )
@@ -334,12 +344,22 @@ class VectorizedEnv:
                 dtype=torch.int64,
                 pin_memory=pin_memory,
             ),
+            max_launch_features=torch.zeros(
+                (
+                    self.n_envs,
+                    self.n_players,
+                    ACTION_ENTITY_SLOTS,
+                    MAX_LAUNCH_FEATURES,
+                ),
+                dtype=torch.float32,
+                pin_memory=pin_memory,
+            ),
         )
 
 
 def encode_python_observation(
     obs: dict[str, Any],
-    obs_spec: ObsV1Config | None = None,
+    obs_spec: EntityBasedConfig | None = None,
     action_spec: ActionConfig | None = None,
 ) -> tuple[
     np.ndarray,
@@ -350,13 +370,14 @@ def encode_python_observation(
     np.ndarray,
     np.ndarray,
     np.ndarray,
+    np.ndarray,
 ]:
-    spec = obs_spec or ObsV1Config()
+    spec = obs_spec or EntityBasedConfig()
     action = action_spec or ActionPureConfig()
     comet_planet_ids, comet_path_indices, comet_path_lengths, comet_paths = (
         _comets_to_arrays(obs.get("comets", []))
     )
-    encoded = encode_obs_v1(
+    encoded = encode_entity_based(
         _rows_to_array(obs.get("planets", []), name="planets"),
         _rows_to_array(obs.get("fleets", []), name="fleets"),
         comet_planet_ids,
@@ -381,6 +402,7 @@ def encode_python_observation(
         global_features,
         source_can_act,
         max_launch,
+        max_launch_features,
     ) = encoded
     target_exists = entity_mask[:ACTION_ENTITY_SLOTS]
     source_target_can_act = source_can_act[:, :, None] & target_exists[None, None, :]
@@ -395,6 +417,7 @@ def encode_python_observation(
         global_features,
         source_target_can_act,
         max_launch,
+        max_launch_features,
     )
 
 

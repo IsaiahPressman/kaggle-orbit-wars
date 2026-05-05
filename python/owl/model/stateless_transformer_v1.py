@@ -46,12 +46,13 @@ from owl.model.base import (
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
+    MAX_LAUNCH_FEATURES,
     OUTER_PLAYER_SLOTS,
     ActionConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
+    EntityBasedConfig,
     ObsBatch,
-    ObsV1Config,
 )
 
 __all__ = [
@@ -111,6 +112,8 @@ class StatelessTransformerV1Config(BaseConfig):
     def _validate_config(self) -> Self:
         if self.embed_dim % self.n_heads != 0:
             raise ValueError("n_heads must evenly divide embed_dim")
+        if int(self.embed_dim * self.mlp_ratio) < 1:
+            raise ValueError("embed_dim * mlp_ratio must be at least 1")
         return self
 
 
@@ -134,7 +137,7 @@ class StatelessTransformerV1(BaseModelAPI):
         self,
         config: StatelessTransformerV1Config,
         *,
-        obs_spec: ObsV1Config,
+        obs_spec: EntityBasedConfig,
         action_spec: ActionConfig,
     ) -> None:
         super().__init__()
@@ -150,6 +153,17 @@ class StatelessTransformerV1(BaseModelAPI):
         self.config = config
         self.obs_spec = obs_spec
         self.action_spec = action_spec
+        if (
+            isinstance(action_spec, ActionPureConfig)
+            and action_spec.max_per_planet_launches > 1
+        ):
+            raise NotImplementedError(
+                "PureActor with max_per_planet_launches > 1 is not supported "
+                "because actor max_launch_features are produced by the Rust "
+                "observation encoder for the initial launch budget only. Use "
+                "ActionPureConfig(max_per_planet_launches=1) or the "
+                "discrete_targets actor."
+            )
 
         dim = self.config.embed_dim
         self.static_planet_proj = nn.Linear(self.obs_spec.planet_channels, dim)
@@ -165,7 +179,7 @@ class StatelessTransformerV1(BaseModelAPI):
         self.final_norm = nn.LayerNorm(dim)
 
         self.critic_head = OutputProjectionMLP(self.config, 1)
-        self.action_info_proj = nn.Linear(1, dim)
+        self.action_info_proj = nn.Linear(MAX_LAUNCH_FEATURES, dim)
         self.actor_input_proj = nn.Linear(dim * 3, dim)
         self.actor: PureActor | DiscreteTargetsActor
         if isinstance(action_spec, ActionPureConfig):
@@ -271,6 +285,7 @@ class StatelessTransformerV1(BaseModelAPI):
             hidden,
             obs.can_act,
             obs.max_launch,
+            obs.max_launch_features,
             deterministic=deterministic,
         )
         return ModelOutput(
@@ -292,6 +307,7 @@ class StatelessTransformerV1(BaseModelAPI):
             hidden,
             obs.can_act,
             obs.max_launch,
+            obs.max_launch_features,
             actions,
         )
         return ModelEvaluation(
@@ -337,9 +353,25 @@ class StatelessTransformerV1(BaseModelAPI):
     def _actor_inputs(
         self,
         hidden: torch.Tensor,
-        max_launch: torch.Tensor,
+        max_launch_features: torch.Tensor,
     ) -> torch.Tensor:
         action_entity_hidden = hidden[:, :ACTION_ENTITY_SLOTS, :]
+        if max_launch_features.shape != (
+            hidden.shape[0],
+            OUTER_PLAYER_SLOTS,
+            ACTION_ENTITY_SLOTS,
+            MAX_LAUNCH_FEATURES,
+        ):
+            expected_shape = (
+                hidden.shape[0],
+                OUTER_PLAYER_SLOTS,
+                ACTION_ENTITY_SLOTS,
+                MAX_LAUNCH_FEATURES,
+            )
+            raise ValueError(
+                "max_launch_features must have shape "
+                f"{expected_shape}, got {tuple(max_launch_features.shape)}"
+            )
 
         player_hidden = hidden[:, -OUTER_PLAYER_SLOTS:, :]
         entity_features = action_entity_hidden[:, None, :, :].expand(
@@ -354,11 +386,9 @@ class StatelessTransformerV1(BaseModelAPI):
             ACTION_ENTITY_SLOTS,
             -1,
         )
-        max_launch_float = max_launch.to(dtype=action_entity_hidden.dtype)
-        action_info = (
-            max_launch_float / self.config.actor.max_ship_normalizer
-        ).unsqueeze(-1)
-        action_features = self.action_info_proj(action_info)
+        action_features = self.action_info_proj(
+            max_launch_features.to(dtype=action_entity_hidden.dtype)
+        )
         return self.actor_input_proj(
             torch.cat((entity_features, player_features, action_features), dim=-1)
         )
@@ -368,11 +398,12 @@ class StatelessTransformerV1(BaseModelAPI):
         hidden: torch.Tensor,
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
+        max_launch_features: torch.Tensor,
         *,
         deterministic: bool,
     ) -> tuple[ModelActions, ModelActionLogProbs, ModelActionEntropies]:
         return self.actor(
-            self._actor_inputs(hidden, max_launch),
+            self._actor_inputs(hidden, max_launch_features),
             can_act,
             max_launch,
             min_fleet_size=self.action_spec.min_fleet_size,
@@ -384,10 +415,11 @@ class StatelessTransformerV1(BaseModelAPI):
         hidden: torch.Tensor,
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
+        max_launch_features: torch.Tensor,
         actions: ModelActions,
     ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
         return self.actor.log_prob(
-            self._actor_inputs(hidden, max_launch),
+            self._actor_inputs(hidden, max_launch_features),
             can_act,
             max_launch,
             actions,

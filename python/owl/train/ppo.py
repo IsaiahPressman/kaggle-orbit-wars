@@ -16,8 +16,8 @@ from owl.rl import (
     OUTER_PLAYER_SLOTS,
     ActionConfig,
     ActionPureConfig,
+    EntityBasedConfig,
     ObsBatch,
-    ObsV1Config,
     VectorizedEnv,
 )
 from owl.train.advantages import (
@@ -150,6 +150,14 @@ class PPORolloutSegments:
     dones: torch.Tensor
 
 
+@dataclass(frozen=True)
+class PPOCheckpointMetadata:
+    env_steps: int
+    optimizer_steps: int
+    player_step_total: int
+    wandb_run_id: str | None
+
+
 class PPORolloutBuffer:
     """Collect rollouts in time-major layout [T, N, ...]."""
 
@@ -158,7 +166,7 @@ class PPORolloutBuffer:
         *,
         horizon: int,
         n_envs: int,
-        obs_spec: ObsV1Config,
+        obs_spec: EntityBasedConfig,
         action_spec: ActionConfig,
         device: torch.device,
     ) -> None:
@@ -227,6 +235,17 @@ class PPORolloutBuffer:
             max_launch=torch.zeros(
                 (horizon, n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
                 dtype=torch.int64,
+                device=device,
+            ),
+            max_launch_features=torch.zeros(
+                (
+                    horizon,
+                    n_envs,
+                    OUTER_PLAYER_SLOTS,
+                    ACTION_ENTITY_SLOTS,
+                    obs_spec.max_launch_features,
+                ),
+                dtype=torch.float32,
                 device=device,
             ),
         )
@@ -421,6 +440,7 @@ class PPOTrainer:
         path: Path,
         *,
         env_steps: int,
+        wandb_run_id: str | None = None,
     ) -> None:
         checkpoint = {
             "model": self.model.state_dict(),
@@ -429,11 +449,70 @@ class PPOTrainer:
                 None if self.lr_scheduler is None else self.lr_scheduler.state_dict()
             ),
             "env_steps": env_steps,
+            "optimizer_steps": self.optimizer_steps,
+            "player_step_total": self.player_step_total,
+            "wandb_run_id": wandb_run_id,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f".{path.name}.tmp")
         torch.save(checkpoint, tmp_path)
         tmp_path.replace(path)
+
+    def load_checkpoint(self, path: Path) -> PPOCheckpointMetadata:
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        if not isinstance(checkpoint, dict):
+            raise ValueError("checkpoint must be a dictionary")
+        expected_keys = {
+            "model",
+            "optimizer",
+            "lr_scheduler",
+            "env_steps",
+            "optimizer_steps",
+            "player_step_total",
+            "wandb_run_id",
+        }
+        if set(checkpoint) != expected_keys:
+            raise ValueError(
+                f"checkpoint keys must be {sorted(expected_keys)}, "
+                f"got {sorted(checkpoint)}"
+            )
+
+        env_steps = _checkpoint_nonnegative_int(
+            checkpoint["env_steps"],
+            name="env_steps",
+        )
+        optimizer_steps = _checkpoint_nonnegative_int(
+            checkpoint["optimizer_steps"],
+            name="optimizer_steps",
+        )
+        player_step_total = _checkpoint_nonnegative_int(
+            checkpoint["player_step_total"],
+            name="player_step_total",
+        )
+        wandb_run_id = _checkpoint_optional_str(
+            checkpoint["wandb_run_id"],
+            name="wandb_run_id",
+        )
+        self.model.load_state_dict(checkpoint["model"])
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler_state = checkpoint["lr_scheduler"]
+        if self.lr_scheduler is None:
+            if scheduler_state is not None:
+                raise ValueError(
+                    "checkpoint has lr_scheduler state but trainer does not"
+                )
+        else:
+            if scheduler_state is None:
+                raise ValueError("checkpoint is missing lr_scheduler state")
+            self.lr_scheduler.load_state_dict(scheduler_state)
+        self.optimizer_steps = optimizer_steps
+        self.player_step_total = player_step_total
+        return PPOCheckpointMetadata(
+            env_steps=env_steps,
+            optimizer_steps=optimizer_steps,
+            player_step_total=player_step_total,
+            wandb_run_id=wandb_run_id,
+        )
 
     def _collect_rollout(self) -> torch.Tensor:
         self.rollout.rewards.zero_()
@@ -1191,6 +1270,22 @@ def _current_learning_rate(
 
 def _torch_optimizer_learning_rate(optimizer: torch.optim.Optimizer) -> float:
     return float(optimizer.param_groups[0]["lr"])
+
+
+def _checkpoint_nonnegative_int(value: object, *, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"checkpoint {name} must be an integer")
+    if value < 0:
+        raise ValueError(f"checkpoint {name} must be non-negative")
+    return value
+
+
+def _checkpoint_optional_str(value: object, *, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"checkpoint {name} must be a non-empty string or None")
+    return value
 
 
 def _output_actions(output: ModelOutput) -> ModelActions:

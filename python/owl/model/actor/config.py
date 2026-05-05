@@ -18,6 +18,12 @@ class ActorPureConfig(BaseConfig):
     max_ship_normalizer: float = Field(default=500.0, gt=0.0)
     entropy_ship_support_cap: int = Field(default=256, ge=1)
 
+    @model_validator(mode="after")
+    def _validate_kappa_bounds(self) -> Self:
+        if self.kappa_max is not None and self.kappa_min > self.kappa_max:
+            raise ValueError("kappa_min must be <= kappa_max")
+        return self
+
 
 class ActorDiscreteTargetsConfig(BaseConfig):
     action_spec: Literal["discrete_targets"] = "discrete_targets"
