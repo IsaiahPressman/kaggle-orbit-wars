@@ -33,20 +33,20 @@ class BaseConfig(BaseModel):
     def from_file(cls, path: Path, overrides: dict[str, Any] | None = None) -> Self:
         config_data = cls._load_yaml_mapping(path)
         overrides_map = copy.deepcopy(overrides or {})
-        top_level_overrides: dict[str, Any] = {}
-        nested_overrides: dict[str, Any] = {}
+        overrides_by_depth: dict[int, dict[str, Any]] = {}
         for field_path, value in overrides_map.items():
             path_parts = _split_override_field_path(field_path)
-            if len(path_parts) == 1:
-                top_level_overrides[field_path] = value
-            else:
-                nested_overrides[field_path] = value
+            overrides_by_depth.setdefault(len(path_parts), {})[field_path] = value
 
-        cls._apply_overrides(config_data, top_level_overrides)
+        cls._apply_overrides(config_data, overrides_by_depth.pop(1, {}))
         cls._resolve_all_subconfig_references(
             config_data, root_dir=path.resolve().parent
         )
-        cls._apply_overrides(config_data, nested_overrides)
+        for depth in sorted(overrides_by_depth):
+            cls._apply_overrides(config_data, overrides_by_depth[depth])
+            cls._resolve_all_subconfig_references(
+                config_data, root_dir=path.resolve().parent
+            )
         return cls.model_validate(config_data)
 
     def to_file(self, path: Path) -> None:
@@ -163,21 +163,24 @@ class BaseConfig(BaseModel):
                 )
 
             field_value = config_data.get(field_name)
-            if not isinstance(field_value, str):
+            if isinstance(field_value, str):
+                subconfig_data, subconfig_root_dir = cls._resolve_subconfig_reference(
+                    root_dir=root_dir,
+                    field_name=field_name,
+                    value=field_value,
+                )
+                config_data[field_name] = subconfig_data
+            elif isinstance(field_value, dict):
+                subconfig_data = field_value
+                subconfig_root_dir = root_dir / field_name
+            else:
                 continue
 
-            subconfig_data, subconfig_root_dir = cls._resolve_subconfig_reference(
-                root_dir=root_dir,
-                field_name=field_name,
-                value=field_value,
-            )
             subconfig_type = cls._subconfig_type_for_data(field_name, subconfig_data)
             if subconfig_type is not None:
                 subconfig_type._resolve_all_subconfig_references(
                     subconfig_data, root_dir=subconfig_root_dir
                 )
-
-            config_data[field_name] = subconfig_data
 
     @classmethod
     def _load_yaml_mapping(cls, path: Path) -> dict[str, Any]:
