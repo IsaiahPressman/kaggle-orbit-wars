@@ -95,6 +95,7 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
     assert config.optimizer.lr_schedule is not None
     assert config.optimizer.lr_schedule.warmup_steps == 2
     assert config.rl.segment_sampling.sampling == "advantage_priority"
+    assert config.runtime.n_runtime_gpus == 1
 
 
 def test_full_config_defaults_to_multi_launch_actions() -> None:

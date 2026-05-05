@@ -440,6 +440,29 @@ def test_trainable_parameter_count_ignores_frozen_parameters() -> None:
     assert run_ppo._trainable_parameter_count(model) == 10
 
 
+def test_with_runtime_gpus_records_world_size() -> None:
+    cfg = _full_config()
+
+    updated = run_ppo._with_runtime_gpus(cfg, 4)
+
+    assert updated.runtime.n_runtime_gpus == 4
+    assert cfg.runtime.n_runtime_gpus == 1
+
+
+def test_validate_runtime_gpus_rejects_resume_mismatch() -> None:
+    cfg = run_ppo._with_runtime_gpus(_full_config(), 4)
+    distributed = run_ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=False,
+    )
+
+    with pytest.raises(ValueError, match="resume runtime GPU count mismatch"):
+        run_ppo._validate_runtime_gpus(cfg, distributed)
+
+
 def test_run_training_loop_writes_periodic_checkpoints(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -605,6 +628,40 @@ def test_run_training_session_sets_trainable_parameter_summary(
 
     assert logger.summary == {"trainable_parameters": 123}
     assert logger.closed
+
+
+def test_run_training_session_worker_skips_logger_and_final_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _full_config()
+    trainer = _FakeTrainer()
+    distributed = run_ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=1,
+        local_rank=1,
+        world_size=2,
+        initialized=False,
+    )
+
+    def create_fake_logger(*_args: object, **_kwargs: object) -> _FakeLogger:
+        raise AssertionError("worker rank must not create a logger")
+
+    monkeypatch.setattr(run_ppo, "create_logger", create_fake_logger)
+
+    run_ppo._run_training_session(
+        trainer=trainer,
+        run_dir=tmp_path,
+        cfg=cfg,
+        log_mode=LogMode.DEBUG,
+        env_steps_per_iteration=8,
+        max_env_steps=8,
+        max_runtime_seconds=None,
+        distributed=distributed,
+    )
+
+    assert trainer.iterations == 1
+    assert trainer.checkpoints == []
 
 
 def test_run_training_session_closes_logger_and_skips_final_checkpoint_on_error(

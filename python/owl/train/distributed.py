@@ -181,7 +181,7 @@ class DistributedModelAdapter(BaseModelAPI):
 
     @property
     def action_spec(self) -> ActionConfig:
-        return self.wrapped_model.action_spec
+        return cast(ActionConfig, self.wrapped_model.action_spec)
 
     def forward(
         self,

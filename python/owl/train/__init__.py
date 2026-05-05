@@ -4,7 +4,7 @@ from .advantages import (
     compute_gae,
     compute_puffer_vtrace_action_aligned,
 )
-from .config import FullConfig
+from .config import FullConfig, RuntimeConfig
 from .distributed import (
     DistributedContext,
     DistributedModelAdapter,
@@ -75,6 +75,7 @@ __all__ = [
     "PPORolloutBuffer",
     "PPORolloutSegments",
     "PPOTrainer",
+    "RuntimeConfig",
     "SegmentSample",
     "SegmentSampling",
     "SegmentSamplingConfig",

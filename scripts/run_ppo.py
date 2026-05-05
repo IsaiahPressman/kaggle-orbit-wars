@@ -19,6 +19,13 @@ from owl.replay import ReplayRecorder
 from owl.rl import ActionConfig, ObsBatch, ObsConfig, VectorizedEnv
 from owl.rs import assert_release_build
 from owl.train import FullConfig, PPOCheckpointMetadata, PPOTrainer, configure_torch
+from owl.train.distributed import (
+    DistributedContext,
+    broadcast_object,
+    distributed_session,
+    unwrap_model,
+    wrap_model_for_distributed,
+)
 from owl.train.logging import LogMode, create_logger
 from owl.train.optimizer import (
     create_lr_scheduler,
@@ -57,80 +64,113 @@ class ResumeLaunch:
 Launch = FreshLaunch | ResumeLaunch
 
 
+class _NoopLogger:
+    @property
+    def run_id(self) -> None:
+        return None
+
+    def log(self, metrics: dict[str, float], *, step: int) -> None:  # noqa: ARG002
+        return None
+
+    def set_summary(
+        self,
+        key: str,  # noqa: ARG002
+        value: int | float,  # noqa: ARG002
+    ) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
 def main() -> None:
     args = _parse_args()
     assert_release_build()
     configure_torch()
     launch = _resolve_launch(args)
-    cfg = FullConfig.from_file(
-        launch.config_path,
-        overrides=launch.overrides if isinstance(launch, FreshLaunch) else None,
-    )
+    with distributed_session() as distributed:
+        cfg = FullConfig.from_file(
+            launch.config_path,
+            overrides=launch.overrides if isinstance(launch, FreshLaunch) else None,
+        )
 
-    if isinstance(launch, FreshLaunch):
-        run_dir = _create_run_dir(launch.output_dir)
-        cfg.to_file(run_dir / "config.yaml")
-    else:
-        run_dir = launch.run_dir
+        if isinstance(launch, FreshLaunch):
+            cfg = _with_runtime_gpus(cfg, distributed.world_size)
+            run_dir = (
+                _create_run_dir(launch.output_dir)
+                if distributed.is_main_process
+                else None
+            )
+            if distributed.is_main_process:
+                if run_dir is None:
+                    raise RuntimeError("main process failed to create run dir")
+                cfg.to_file(run_dir / "config.yaml")
+            run_dir = broadcast_object(run_dir, distributed)
+        else:
+            _validate_runtime_gpus(cfg, distributed)
+            run_dir = launch.run_dir
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = VectorizedEnv(
-        n_envs=cfg.env.n_envs,
-        obs_spec=cfg.env.obs_spec,
-        action_spec=cfg.env.action_spec,
-        two_player_weight=cfg.env.two_player_weight,
-        pin_memory=cfg.env.pin_memory,
-    )
-    model = _create_model(
-        cfg.model,
-        obs_spec=cfg.env.obs_spec,
-        action_spec=cfg.env.action_spec,
-    ).to(device)
-    trainable_parameters = _trainable_parameter_count(model)
-    optimizer = create_optimizer(model, cfg.optimizer)
-    lr_scheduler = create_lr_scheduler(optimizer, cfg.optimizer.lr_schedule)
-    trainer = PPOTrainer(
-        config=cfg.rl,
-        env=env,
-        model=model,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        device=device,
-    )
-    start_env_steps = 0
-    resume_run_id: str | None = None
-    last_best_model: BaseModelAPI | None = None
-    if isinstance(launch, ResumeLaunch):
-        checkpoint_metadata = trainer.load_checkpoint(launch.checkpoint_path)
-        resume_run_id = _resume_wandb_run_id(checkpoint_metadata, args.log_mode)
-        start_env_steps = checkpoint_metadata.env_steps
-        last_best_model = _clone_eval_model(model)
-        last_best_metadata = _load_model_from_checkpoint(
-            last_best_model,
-            path=launch.last_best_checkpoint_path,
+        device = distributed.device
+        env = VectorizedEnv(
+            n_envs=cfg.env.n_envs,
+            obs_spec=cfg.env.obs_spec,
+            action_spec=cfg.env.action_spec,
+            two_player_weight=cfg.env.two_player_weight,
+            pin_memory=cfg.env.pin_memory,
+        )
+        model = _create_model(
+            cfg.model,
+            obs_spec=cfg.env.obs_spec,
+            action_spec=cfg.env.action_spec,
+        ).to(device)
+        trainable_parameters = _trainable_parameter_count(model)
+        optimizer = create_optimizer(model, cfg.optimizer)
+        lr_scheduler = create_lr_scheduler(optimizer, cfg.optimizer.lr_schedule)
+        model = wrap_model_for_distributed(model, distributed)
+        trainer = PPOTrainer(
+            config=cfg.rl,
+            env=env,
+            model=model,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
             device=device,
+            distributed_context=distributed,
         )
-        _validate_last_best_run_id(
-            last_best_metadata,
-            resume_run_id=resume_run_id,
-            checkpoint_path=launch.last_best_checkpoint_path,
-        )
+        start_env_steps = 0
+        resume_run_id: str | None = None
+        last_best_model: BaseModelAPI | None = None
+        if isinstance(launch, ResumeLaunch):
+            checkpoint_metadata = trainer.load_checkpoint(launch.checkpoint_path)
+            resume_run_id = _resume_wandb_run_id(checkpoint_metadata, args.log_mode)
+            start_env_steps = checkpoint_metadata.env_steps
+            last_best_model = _clone_eval_model(unwrap_model(model))
+            last_best_metadata = _load_model_from_checkpoint(
+                last_best_model,
+                path=launch.last_best_checkpoint_path,
+                device=device,
+            )
+            _validate_last_best_run_id(
+                last_best_metadata,
+                resume_run_id=resume_run_id,
+                checkpoint_path=launch.last_best_checkpoint_path,
+            )
 
-    env_steps_per_iteration = cfg.rl.horizon * env.n_envs
-    max_runtime_seconds = _max_runtime_seconds(args.max_runtime_hours)
-    _run_training_session(
-        trainer=trainer,
-        run_dir=run_dir,
-        cfg=cfg,
-        log_mode=args.log_mode,
-        env_steps_per_iteration=env_steps_per_iteration,
-        max_env_steps=args.max_env_steps,
-        max_runtime_seconds=max_runtime_seconds,
-        start_env_steps=start_env_steps,
-        resume_run_id=resume_run_id,
-        last_best_model=last_best_model,
-        trainable_parameters=trainable_parameters,
-    )
+        env_steps_per_iteration = cfg.rl.horizon * env.n_envs * distributed.world_size
+        max_runtime_seconds = _max_runtime_seconds(args.max_runtime_hours)
+        _run_training_session(
+            trainer=trainer,
+            run_dir=run_dir,
+            cfg=cfg,
+            log_mode=args.log_mode,
+            env_steps_per_iteration=env_steps_per_iteration,
+            max_env_steps=args.max_env_steps,
+            max_runtime_seconds=max_runtime_seconds,
+            distributed=distributed,
+            start_env_steps=start_env_steps,
+            resume_run_id=resume_run_id,
+            last_best_model=last_best_model,
+            trainable_parameters=trainable_parameters,
+        )
 
 
 def _run_training_session(
@@ -142,11 +182,33 @@ def _run_training_session(
     env_steps_per_iteration: int,
     max_env_steps: int | None,
     max_runtime_seconds: float | None,
+    distributed: DistributedContext | None = None,
     start_env_steps: int = 0,
     resume_run_id: str | None = None,
     last_best_model: BaseModelAPI | None = None,
     trainable_parameters: int | None = None,
 ) -> None:
+    distributed = distributed or DistributedContext(
+        device=trainer.device,
+        rank=0,
+        local_rank=0,
+        world_size=1,
+        initialized=False,
+    )
+    if not distributed.is_main_process:
+        _run_training_session_worker(
+            trainer=trainer,
+            run_dir=run_dir,
+            cfg=cfg,
+            env_steps_per_iteration=env_steps_per_iteration,
+            max_env_steps=max_env_steps,
+            max_runtime_seconds=max_runtime_seconds,
+            distributed=distributed,
+            start_env_steps=start_env_steps,
+            last_best_model=last_best_model,
+        )
+        return
+
     with closing(
         create_logger(log_mode, run_dir, cfg, resume_run_id=resume_run_id)
     ) as logger:
@@ -160,6 +222,7 @@ def _run_training_session(
             env_steps_per_iteration=env_steps_per_iteration,
             max_env_steps=max_env_steps,
             max_runtime_seconds=max_runtime_seconds,
+            distributed=distributed,
             start_env_steps=start_env_steps,
             wandb_run_id=logger.run_id,
             last_best_model=last_best_model,
@@ -171,6 +234,32 @@ def _run_training_session(
         )
 
 
+def _run_training_session_worker(
+    *,
+    trainer: PPOTrainer,
+    run_dir: Path,
+    cfg: FullConfig,
+    env_steps_per_iteration: int,
+    max_env_steps: int | None,
+    max_runtime_seconds: float | None,
+    distributed: DistributedContext,
+    start_env_steps: int = 0,
+    last_best_model: BaseModelAPI | None = None,
+) -> None:
+    _run_training_loop(
+        trainer=trainer,
+        logger=_NoopLogger(),
+        run_dir=run_dir,
+        cfg=cfg,
+        env_steps_per_iteration=env_steps_per_iteration,
+        max_env_steps=max_env_steps,
+        max_runtime_seconds=max_runtime_seconds,
+        distributed=distributed,
+        start_env_steps=start_env_steps,
+        last_best_model=last_best_model,
+    )
+
+
 def _run_training_loop(
     *,
     trainer: PPOTrainer,
@@ -180,10 +269,18 @@ def _run_training_loop(
     env_steps_per_iteration: int,
     max_env_steps: int | None,
     max_runtime_seconds: float | None,
+    distributed: DistributedContext | None = None,
     start_env_steps: int = 0,
     wandb_run_id: str | None = None,
     last_best_model: BaseModelAPI | None = None,
 ) -> int:
+    distributed = distributed or DistributedContext(
+        device=trainer.device,
+        rank=0,
+        local_rank=0,
+        world_size=1,
+        initialized=False,
+    )
     env_steps = start_env_steps
     started_at = time.monotonic()
     next_checkpoint_env_steps = _next_periodic_checkpoint_step(
@@ -191,7 +288,7 @@ def _run_training_loop(
         env_steps=env_steps,
     )
     if next_checkpoint_env_steps is not None and last_best_model is None:
-        last_best_model = _clone_eval_model(trainer.model)
+        last_best_model = _clone_eval_model(unwrap_model(trainer.model))
     if _should_stop_training(
         env_steps=env_steps,
         started_at=started_at,
@@ -199,7 +296,12 @@ def _run_training_loop(
         max_runtime_seconds=max_runtime_seconds,
     ):
         return env_steps
-    with tqdm(unit="env steps", dynamic_ncols=True, initial=env_steps) as progress:
+    with tqdm(
+        unit="env steps",
+        dynamic_ncols=True,
+        initial=env_steps,
+        disable=not distributed.is_main_process,
+    ) as progress:
         while True:
             metrics = trainer.train_iteration()
             env_steps += env_steps_per_iteration
@@ -212,35 +314,45 @@ def _run_training_loop(
                 checkpoint_path = (
                     run_dir / f"checkpoint_{_format_checkpoint_step(env_steps)}.pt"
                 )
-                trainer.write_checkpoint(
-                    checkpoint_path,
-                    env_steps=env_steps,
-                    wandb_run_id=wandb_run_id,
-                )
-                if last_best_model is None:
-                    raise RuntimeError("last_best_model must exist for checkpoints")
-                eval_metrics = _evaluate_against_last_best(
-                    current_model=trainer.model,
-                    last_best_model=last_best_model,
-                    cfg=cfg,
-                    device=trainer.device,
-                    replay_dir=(
-                        run_dir / "eval_replays" / checkpoint_path.stem
-                        if cfg.rl.eval_replay_games > 0
-                        else None
-                    ),
-                )
-                logger.log(eval_metrics, step=env_steps)
-                if (
-                    eval_metrics["eval/win_rate_against_last_best"]
-                    >= LAST_BEST_WIN_RATE_THRESHOLD
-                ):
-                    _copy_model_state(last_best_model, trainer.model)
+                if distributed.is_main_process:
                     trainer.write_checkpoint(
-                        run_dir / "checkpoint_last_best.pt",
+                        checkpoint_path,
                         env_steps=env_steps,
                         wandb_run_id=wandb_run_id,
                     )
+                if last_best_model is None:
+                    raise RuntimeError("last_best_model must exist for checkpoints")
+                distributed.barrier()
+                eval_metrics: dict[str, float] | None = None
+                if distributed.is_main_process:
+                    eval_metrics = _evaluate_against_last_best(
+                        current_model=unwrap_model(trainer.model),
+                        last_best_model=last_best_model,
+                        cfg=cfg,
+                        device=trainer.device,
+                        replay_dir=(
+                            run_dir / "eval_replays" / checkpoint_path.stem
+                            if cfg.rl.eval_replay_games > 0
+                            else None
+                        ),
+                    )
+                eval_metrics = broadcast_object(eval_metrics, distributed)
+                if eval_metrics is None:
+                    raise RuntimeError("missing broadcast eval metrics")
+                logger.log(eval_metrics, step=env_steps)
+                replace_last_best = (
+                    eval_metrics["eval/win_rate_against_last_best"]
+                    >= LAST_BEST_WIN_RATE_THRESHOLD
+                )
+                if replace_last_best:
+                    _copy_model_state(last_best_model, unwrap_model(trainer.model))
+                    if distributed.is_main_process:
+                        trainer.write_checkpoint(
+                            run_dir / "checkpoint_last_best.pt",
+                            env_steps=env_steps,
+                            wandb_run_id=wandb_run_id,
+                        )
+                distributed.barrier()
                 next_checkpoint_env_steps = _next_periodic_checkpoint_step(
                     checkpoint_freq=cfg.rl.checkpoint_freq,
                     env_steps=env_steps,
@@ -441,6 +553,30 @@ def _create_model(
             )
         case _:
             assert_never(config)
+
+
+def _with_runtime_gpus(cfg: FullConfig, world_size: int) -> FullConfig:
+    return cfg.model_copy(
+        update={
+            "runtime": cfg.runtime.model_copy(
+                update={"n_runtime_gpus": world_size},
+            ),
+        },
+    )
+
+
+def _validate_runtime_gpus(
+    cfg: FullConfig,
+    distributed: DistributedContext,
+) -> None:
+    expected = cfg.runtime.n_runtime_gpus
+    actual = distributed.world_size
+    if expected != actual:
+        raise ValueError(
+            "resume runtime GPU count mismatch: "
+            f"config has runtime.n_runtime_gpus={expected}, "
+            f"current launch has {actual}"
+        )
 
 
 def _trainable_parameter_count(model: torch.nn.Module) -> int:
