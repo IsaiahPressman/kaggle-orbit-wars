@@ -5,8 +5,8 @@ use super::generation::{
     spawn_comet_group, RandomSource,
 };
 use super::state::{
-    CometSpawnInjection, Fleet, FleetLossStats, LaunchAction, PlanetVector, PlayerResult, Point,
-    ResetConfig, State, StepInjections, StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS,
+    CometSpawnInjection, Fleet, FleetLossStats, LaunchAction, Planet, PlanetVector, PlayerResult,
+    Point, ResetConfig, State, StepInjections, StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS,
     MAX_PLAYERS, SUN_RADIUS,
 };
 use super::utils::{fleet_speed, is_orbiting, orbit_position, point_to_segment_distance};
@@ -479,13 +479,7 @@ fn resolve_combats(state: &mut State, combat_lists: CombatLists) -> CaptureStats
         let mut player_ships = [0_i32; MAX_PLAYERS];
         let mut player_present = [false; MAX_PLAYERS];
         for fleet in planet_fleets {
-            assert!(fleet.owner != -1, "combat fleet owner cannot be neutral");
-            assert!(
-                fleet.owner >= 0 && (fleet.owner as usize) < MAX_PLAYERS,
-                "combat fleet owner out of bounds: {}",
-                fleet.owner
-            );
-            let owner = fleet.owner as usize;
+            let owner = valid_fleet_owner(&fleet, state.config.player_count);
             player_ships[owner] += fleet.ships;
             player_present[owner] = true;
         }
@@ -554,12 +548,12 @@ fn player_results(state: &State) -> Vec<PlayerResult> {
     let player_count = state.config.player_count;
     let mut alive_players = [false; MAX_PLAYERS];
     for planet in state.planets.iter() {
-        if planet.owner != -1 {
-            alive_players[planet.owner as usize] = true;
+        if let Some(owner) = valid_planet_owner(planet, player_count) {
+            alive_players[owner] = true;
         }
     }
     for fleet in &state.fleets {
-        alive_players[fleet.owner as usize] = true;
+        alive_players[valid_fleet_owner(fleet, player_count)] = true;
     }
 
     let active_alive_players = &alive_players[..player_count];
@@ -580,12 +574,12 @@ fn player_results(state: &State) -> Vec<PlayerResult> {
 
     let mut scores = [0_i32; MAX_PLAYERS];
     for planet in state.planets.iter() {
-        if planet.owner != -1 {
-            scores[planet.owner as usize] += planet.ships;
+        if let Some(owner) = valid_planet_owner(planet, player_count) {
+            scores[owner] += planet.ships;
         }
     }
     for fleet in &state.fleets {
-        scores[fleet.owner as usize] += fleet.ships;
+        scores[valid_fleet_owner(fleet, player_count)] += fleet.ships;
     }
 
     let active_scores = &scores[..player_count];
@@ -609,14 +603,42 @@ fn reached_step_limit(state: &State) -> bool {
 pub fn player_alive_flags(state: &State) -> Vec<bool> {
     let mut alive_players = vec![false; state.config.player_count];
     for planet in state.planets.iter() {
-        if planet.owner != -1 {
-            alive_players[planet.owner as usize] = true;
+        if let Some(owner) = valid_planet_owner(planet, state.config.player_count) {
+            alive_players[owner] = true;
         }
     }
     for fleet in &state.fleets {
-        alive_players[fleet.owner as usize] = true;
+        alive_players[valid_fleet_owner(fleet, state.config.player_count)] = true;
     }
     alive_players
+}
+
+fn valid_planet_owner(planet: &Planet, player_count: usize) -> Option<usize> {
+    if planet.owner == -1 {
+        return None;
+    }
+    if planet.owner >= 0 && (planet.owner as usize) < player_count {
+        return Some(planet.owner as usize);
+    }
+    panic!(
+        "planet {} owner out of bounds for {player_count} players: {}",
+        planet.id, planet.owner
+    );
+}
+
+fn valid_fleet_owner(fleet: &Fleet, player_count: usize) -> usize {
+    assert!(
+        fleet.owner != -1,
+        "fleet {} owner cannot be neutral",
+        fleet.id
+    );
+    if fleet.owner >= 0 && (fleet.owner as usize) < player_count {
+        return fleet.owner as usize;
+    }
+    panic!(
+        "fleet {} owner out of bounds for {player_count} players: {}",
+        fleet.id, fleet.owner
+    );
 }
 
 #[cfg(test)]
@@ -719,6 +741,58 @@ mod tests {
             ships: 0,
             production: 0,
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "planet 0 owner out of bounds for 2 players: -2")]
+    fn step_rejects_negative_non_neutral_planet_owner() {
+        let mut state = base_state(2);
+        state.planets[0].owner = -2;
+
+        step(&mut state, &[vec![], vec![]]);
+    }
+
+    #[test]
+    #[should_panic(expected = "planet 0 owner out of bounds for 2 players: 2")]
+    fn step_rejects_planet_owner_outside_player_count() {
+        let mut state = base_state(2);
+        state.planets[0].owner = 2;
+
+        step(&mut state, &[vec![], vec![]]);
+    }
+
+    #[test]
+    #[should_panic(expected = "fleet 0 owner out of bounds for 2 players: 2")]
+    fn step_rejects_fleet_owner_outside_player_count() {
+        let mut state = base_state(2);
+        state.fleets = vec![Fleet {
+            id: 0,
+            owner: 2,
+            x: 40.0,
+            y: 20.0,
+            angle: 0.0,
+            from_planet_id: 0,
+            ships: 1,
+        }];
+
+        step(&mut state, &[vec![], vec![]]);
+    }
+
+    #[test]
+    #[should_panic(expected = "fleet 0 owner cannot be neutral")]
+    fn player_alive_flags_rejects_neutral_fleet_owner() {
+        let mut state = base_state(2);
+        state.fleets = vec![Fleet {
+            id: 0,
+            owner: -1,
+            x: 40.0,
+            y: 20.0,
+            angle: 0.0,
+            from_planet_id: 0,
+            ships: 1,
+        }];
+
+        player_alive_flags(&state);
     }
 
     #[test]
@@ -1548,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "combat fleet owner cannot be neutral")]
+    #[should_panic(expected = "fleet 0 owner cannot be neutral")]
     fn resolve_combats_rejects_neutral_fleet_owner() {
         let mut state = base_state(2);
         let mut combat_lists = CombatLists::for_planets(&state.planets);
@@ -1569,7 +1643,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "combat fleet owner out of bounds")]
+    #[should_panic(expected = "fleet 0 owner out of bounds for 2 players: 2")]
     fn resolve_combats_rejects_out_of_bounds_fleet_owner() {
         let mut state = base_state(2);
         let mut combat_lists = CombatLists::for_planets(&state.planets);
@@ -1577,7 +1651,7 @@ mod tests {
             1,
             Fleet {
                 id: 0,
-                owner: MAX_PLAYERS as i32,
+                owner: 2,
                 x: 80.0,
                 y: 20.0,
                 angle: 0.0,

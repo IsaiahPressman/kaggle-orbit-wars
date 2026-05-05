@@ -164,6 +164,10 @@ The current downloaded reference episodes are:
   position.
 - Manual states with duplicate planet IDs or planet IDs at/above
   `MAX_PLANET_ID` panic during state construction.
+- Manual planet owners must be neutral (`-1`) or within `0..player_count`, and
+  manual fleet owners must be within `0..player_count`; result, alive-player,
+  and combat paths panic with explicit owner messages when malformed states
+  violate those bounds.
 - Four-player home assignment chooses among any symmetric group, using the
   reference RNG stream after planet generation.
 - Combat is queued during fleet movement and sweep, then resolved after all
