@@ -39,8 +39,9 @@ planets leave empty slots.
 
 `StepResult` returns one result per actual player: active, won, or lost. It also
 returns auxiliary counters for fleets and ships removed by the sun or by leaving
-the board, plus the number of planets and comet planets captured during
-the step. Combat fleets are excluded from those loss counters. This matches the
+the board, fleets removed during planet/combat resolution, ships removed during
+combat resolution, plus the number of planets and comet planets captured during
+the step. This matches the
 actual player count without making 2-player games carry ignored entries. Orbit
 Wars' Python reference leaves nonterminal eliminated players in Kaggle `ACTIVE`
 status until global termination; this simulator intentionally marks those
@@ -166,9 +167,10 @@ The current downloaded reference episodes are:
 - Four-player home assignment chooses among any symmetric group, using the
   reference RNG stream after planet generation.
 - Combat is queued during fleet movement and sweep, then resolved after all
-  movement. `StepResult.ships_lost_in_combat` counts ships destroyed by
-  fleet-vs-fleet and fleet-vs-planet combat resolution; sun and out-of-bounds
-  losses remain in `FleetLossStats`.
+  movement. `StepResult.fleets_lost_in_combat` counts fleets removed during
+  planet/combat resolution, and `StepResult.ships_lost_in_combat` counts ships
+  destroyed by fleet-vs-fleet and fleet-vs-planet combat resolution; sun and
+  out-of-bounds losses remain in `FleetLossStats`.
 - Fleet movement queues planet collisions before checking out-of-bounds or sun
   removal, matching the reference behavior for fast fleets that cross multiple
   collision/removal zones in one step.

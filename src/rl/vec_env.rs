@@ -838,6 +838,7 @@ struct EpisodeStats {
     min_fleet_size: Option<i32>,
     planets_captured: u32,
     comets_captured: u32,
+    fleets_lost_in_combat: u32,
     ships_lost_in_combat: i64,
     max_entities_exceeded_turns: u32,
     fleet_losses: FleetLossStats,
@@ -1123,6 +1124,10 @@ impl EpisodeStats {
         self.ships_lost_in_combat += ships_lost_in_combat;
     }
 
+    fn record_fleets_lost_in_combat(&mut self, fleets_lost_in_combat: u32) {
+        self.fleets_lost_in_combat += fleets_lost_in_combat;
+    }
+
     fn record_comet_launch_failures(&mut self, comet_launch_failures: u32) {
         self.comet_launch_failures += comet_launch_failures;
     }
@@ -1133,8 +1138,9 @@ impl EpisodeStats {
         player_map: &PlayerMap,
         player_results: &[PlayerResult],
     ) -> TerminalEpisodeMetrics {
-        let fleets_lost = self.fleet_losses.fleets_in_sun + self.fleet_losses.fleets_out_of_bounds;
-        let fleets_lost_to_sun_or_oob = fleets_lost;
+        let fleets_lost_to_sun_or_oob =
+            self.fleet_losses.fleets_in_sun + self.fleet_losses.fleets_out_of_bounds;
+        let fleets_lost = fleets_lost_to_sun_or_oob + self.fleets_lost_in_combat;
         let ships_lost = i64::from(self.fleet_losses.ships_in_sun)
             + i64::from(self.fleet_losses.ships_out_of_bounds)
             + self.ships_lost_in_combat;
@@ -1186,6 +1192,10 @@ impl EpisodeStats {
             (
                 "ships_lost_in_combat_per_game",
                 self.ships_lost_in_combat as f64,
+            ),
+            (
+                "fleets_lost_in_combat_per_game",
+                f64::from(self.fleets_lost_in_combat),
             ),
             ("ships_lost_per_game_mean", ships_lost as f64),
             (
@@ -1431,6 +1441,7 @@ fn step_one_env(
     episode_stats.record_step_result(state, result.fleet_losses, max_fleets);
     episode_stats.record_planets_captured(result.planets_captured);
     episode_stats.record_comets_captured(result.comets_captured);
+    episode_stats.record_fleets_lost_in_combat(result.fleets_lost_in_combat);
     episode_stats.record_ships_lost_in_combat(result.ships_lost_in_combat);
     let should_reset = result_is_terminal(&result.player_results);
     let won_reward = split_won_reward(
@@ -1869,6 +1880,7 @@ mod tests {
             128,
         );
         episode_stats.record_ships_lost_in_combat(11);
+        episode_stats.record_fleets_lost_in_combat(4);
         let metrics = episode_stats.terminal_metrics(
             &state,
             &player_map,
@@ -1891,6 +1903,7 @@ mod tests {
             128,
         );
         second_episode_stats.record_ships_lost_in_combat(90);
+        second_episode_stats.record_fleets_lost_in_combat(9);
         let second_metrics = second_episode_stats.terminal_metrics(
             &state,
             &player_map,
@@ -1915,7 +1928,7 @@ mod tests {
                 .iter()
                 .find(|(key, _)| *key == "fleets_lost_to_sun_or_oob_rate")
                 .map(|(_, value)| *value),
-            Some(1.0)
+            Some(5.0 / 9.0)
         );
         let collected = collect_terminal_metrics(vec![Some(metrics), Some(second_metrics)]);
 
@@ -1923,12 +1936,17 @@ mod tests {
         assert_eq!(collected["launches_per_game"], vec![2.0, 0.0]);
         assert_eq!(collected["comet_launch_failures_per_game"], vec![3.0, 0.0]);
         assert_eq!(collected["ships_lost_in_combat_per_game"], vec![11.0, 90.0]);
+        assert_eq!(collected["fleets_lost_in_combat_per_game"], vec![4.0, 9.0]);
         assert_eq!(collected["ships_lost_per_game_mean"], vec![20.0, 100.0]);
+        assert_eq!(collected["fleets_lost_per_game_mean"], vec![9.0, 10.0]);
         assert_eq!(
             collected["ships_lost_to_sun_or_oob_rate"],
             vec![19.0 / 120.0]
         );
-        assert_eq!(collected["fleets_lost_to_sun_or_oob_rate"], vec![1.0]);
+        assert_eq!(
+            collected["fleets_lost_to_sun_or_oob_rate"],
+            vec![6.0 / 19.0]
+        );
         assert_eq!(collected["launches_per_turn"], vec![0.5, 0.0]);
         assert_eq!(collected["fleet_size_max"], vec![5.0, 0.0]);
         assert_eq!(collected["fleet_size_min"], vec![3.0, 0.0]);

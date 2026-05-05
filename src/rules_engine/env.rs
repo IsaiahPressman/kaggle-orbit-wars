@@ -87,6 +87,7 @@ pub fn step_with_injections(
         fleet_losses,
         planets_captured: captures.planets_captured,
         comets_captured: captures.comets_captured,
+        fleets_lost_in_combat: captures.fleets_lost_in_combat,
         ships_lost_in_combat: captures.ships_lost_in_combat,
     }
 }
@@ -454,6 +455,7 @@ fn remove_marked_fleets(state: &mut State, combat_lists: &CombatLists) {
 struct CaptureStats {
     planets_captured: u32,
     comets_captured: u32,
+    fleets_lost_in_combat: u32,
     ships_lost_in_combat: i64,
 }
 
@@ -469,6 +471,7 @@ fn resolve_combats(state: &mut State, combat_lists: CombatLists) -> CaptureStats
             continue;
         }
 
+        captures.fleets_lost_in_combat += planet_fleets.len() as u32;
         let Some(planet) = state.planets.get_mut(planet_id) else {
             continue;
         };
@@ -881,6 +884,7 @@ mod tests {
         assert_eq!(state.planets[1].ships, 15);
         assert_eq!(result.planets_captured, 1);
         assert_eq!(result.comets_captured, 0);
+        assert_eq!(result.fleets_lost_in_combat, 1);
         assert_eq!(result.ships_lost_in_combat, 10);
     }
 
@@ -1047,6 +1051,7 @@ mod tests {
         assert!(state.fleets.is_empty());
         assert_eq!(state.planets[1].owner, -1);
         assert_eq!(state.planets[1].ships, 7);
+        assert_eq!(result.fleets_lost_in_combat, 2);
         assert_eq!(result.ships_lost_in_combat, 20);
     }
 

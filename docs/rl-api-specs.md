@@ -420,7 +420,8 @@ Terminal episode metrics:
 | `ships_lost_in_sun_per_game_mean` | Ships removed by sun fleet loss. |
 | `ships_lost_out_of_bounds_per_game_mean` | Ships removed by out-of-bounds fleet loss. |
 | `ships_lost_to_sun_or_oob_rate` | `(ships_lost_in_sun_per_game_mean + ships_lost_out_of_bounds_per_game_mean) / ships_lost_per_game_mean`. Omitted when no ships were lost. |
-| `fleets_lost_per_game_mean` | Fleets removed by sun or out-of-bounds loss. |
+| `fleets_lost_in_combat_per_game` | Fleets removed during planet/combat resolution. |
+| `fleets_lost_per_game_mean` | Fleets removed by combat, sun, or out-of-bounds loss. |
 | `fleets_lost_in_sun_per_game_mean` | Fleets removed by sun loss. |
 | `fleets_lost_out_of_bounds_per_game_mean` | Fleets removed by out-of-bounds loss. |
 | `fleets_lost_to_sun_or_oob_rate` | `(fleets_lost_in_sun_per_game_mean + fleets_lost_out_of_bounds_per_game_mean) / fleets_lost_per_game_mean`. Omitted when no fleets were lost. |

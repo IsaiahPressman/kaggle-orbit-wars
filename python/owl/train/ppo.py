@@ -72,7 +72,7 @@ class PPOConfig(BaseConfig):
     gamma: float = Field(default=0.99, ge=0.0, le=1.0)
     gae_lambda: float = Field(default=0.95, ge=0.0, le=1.0)
     clip_coef: float = Field(default=0.2, ge=0.0)
-    vf_clip_coef: float = Field(default=0.2, ge=0.0)
+    vf_clip_coef: float | None = Field(default=0.2, gt=0.0)
     vf_coef: float = Field(default=0.5, ge=0.0)
     ent_coef: float = Field(default=0.01, ge=0.0)
     max_grad_norm: float = Field(default=0.5, gt=0.0)
@@ -906,7 +906,7 @@ def _ppo_loss_tensors(
     policy_weight: torch.Tensor,
     value_weight: torch.Tensor,
     clip_coef: float,
-    vf_clip_coef: float,
+    vf_clip_coef: float | None,
     vf_coef: float,
     ent_coef: float,
 ) -> tuple[
@@ -928,17 +928,23 @@ def _ppo_loss_tensors(
     pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef)
     policy_loss = weighted_mean(torch.max(pg_loss1, pg_loss2), policy_weight)
 
-    value_clipped = old_values + torch.clamp(
-        new_values - old_values,
-        -vf_clip_coef,
-        vf_clip_coef,
-    )
-    value_loss_unclipped = (new_values - returns).pow(2)
-    value_loss_clipped = (value_clipped - returns).pow(2)
-    value_loss = 0.5 * weighted_mean(
-        torch.max(value_loss_unclipped, value_loss_clipped),
-        value_weight,
-    )
+    if vf_clip_coef:
+        value_clipped = old_values + torch.clamp(
+            new_values - old_values,
+            -vf_clip_coef,
+            vf_clip_coef,
+        )
+        value_loss_unclipped = (new_values - returns).pow(2)
+        value_loss_clipped = (value_clipped - returns).pow(2)
+        value_loss = 0.5 * weighted_mean(
+            torch.max(value_loss_unclipped, value_loss_clipped),
+            value_weight,
+        )
+    else:
+        value_loss = 0.5 * weighted_mean(
+            (new_values - returns).pow(2),
+            value_weight,
+        )
 
     entropy_mean = weighted_mean(entropy, policy_weight)
     loss = policy_loss + vf_coef * value_loss - ent_coef * entropy_mean
