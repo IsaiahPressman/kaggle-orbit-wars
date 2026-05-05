@@ -7,11 +7,14 @@ from .advantages import (
 from .config import FullConfig
 from .distributed import (
     DistributedContext,
+    DistributedModelAdapter,
     all_reduce_any,
     all_reduce_max,
     all_reduce_sum,
     broadcast_object,
     distributed_session,
+    unwrap_model,
+    wrap_model_for_distributed,
 )
 from .metrics import explained_variance
 from .optimizer import (
@@ -58,6 +61,7 @@ __all__ = [
     "CompileMode",
     "CompositeOptimizer",
     "DistributedContext",
+    "DistributedModelAdapter",
     "FullConfig",
     "LRScheduleConfig",
     "LRScheduler",
@@ -98,5 +102,7 @@ __all__ = [
     "sample_segments_uniform",
     "sample_segments_uniform_single_pass",
     "segment_sampling_metrics",
+    "unwrap_model",
     "validate_ppo_loss_inputs",
+    "wrap_model_for_distributed",
 ]

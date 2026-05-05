@@ -8,6 +8,11 @@ from typing import cast
 
 import torch
 import torch.distributed as dist
+from torch import nn
+from torch.nn.parallel import DistributedDataParallel
+
+from owl.model import BaseModelAPI, ModelActions, ModelEvaluation, ModelOutput
+from owl.rl import ActionConfig, ObsBatch
 
 
 @dataclass(frozen=True)
@@ -125,3 +130,97 @@ def all_reduce_any(value: bool, context: DistributedContext) -> bool:
     flag = torch.tensor(int(value), device=context.device)
     dist.all_reduce(flag, op=dist.ReduceOp.MAX)
     return bool(flag.item())
+
+
+class _DistributedModelDispatch(nn.Module):
+    def __init__(self, model: BaseModelAPI) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(
+        self,
+        mode: str,
+        obs: object,
+        actions: object | None = None,
+        deterministic: bool = False,
+    ) -> object:
+        if mode == "forward":
+            return self.model(cast(ObsBatch, obs), deterministic=deterministic)
+        if mode == "evaluate_actions":
+            if actions is None:
+                raise ValueError("actions are required for evaluate_actions")
+            return self.model.evaluate_actions(
+                cast(ObsBatch, obs),
+                cast(ModelActions, actions),
+            )
+        if mode == "compute_value":
+            return self.model.compute_value(cast(ObsBatch, obs))
+        raise ValueError(f"unknown distributed model mode: {mode}")
+
+
+class DistributedModelAdapter(BaseModelAPI):
+    def __init__(
+        self,
+        model: BaseModelAPI,
+        context: DistributedContext,
+    ) -> None:
+        super().__init__()
+        if not context.initialized:
+            raise ValueError("DistributedModelAdapter requires an initialized context")
+        if context.device.type != "cuda":
+            raise RuntimeError("distributed model wrapping requires a CUDA device")
+        self._ddp = DistributedDataParallel(
+            _DistributedModelDispatch(model),
+            device_ids=[context.local_rank],
+            output_device=context.local_rank,
+        )
+
+    @property
+    def wrapped_model(self) -> BaseModelAPI:
+        return self._ddp.module.model
+
+    @property
+    def action_spec(self) -> ActionConfig:
+        return self.wrapped_model.action_spec
+
+    def forward(
+        self,
+        obs: ObsBatch,
+        *,
+        deterministic: bool = False,
+    ) -> ModelOutput:
+        return cast(ModelOutput, self._ddp("forward", obs, None, deterministic))
+
+    def evaluate_actions(
+        self,
+        obs: ObsBatch,
+        actions: ModelActions,
+    ) -> ModelEvaluation:
+        return cast(
+            ModelEvaluation,
+            self._ddp("evaluate_actions", obs, actions, False),
+        )
+
+    def compute_value(self, obs: ObsBatch) -> torch.Tensor:
+        return cast(torch.Tensor, self._ddp("compute_value", obs, None, False))
+
+    def get_input_layers(self) -> tuple[nn.Module, ...]:
+        return self.wrapped_model.get_input_layers()
+
+    def get_output_layers(self) -> tuple[nn.Module, ...]:
+        return self.wrapped_model.get_output_layers()
+
+
+def wrap_model_for_distributed(
+    model: BaseModelAPI,
+    context: DistributedContext,
+) -> BaseModelAPI:
+    if not context.initialized:
+        return model
+    return DistributedModelAdapter(model, context)
+
+
+def unwrap_model(model: BaseModelAPI) -> BaseModelAPI:
+    if isinstance(model, DistributedModelAdapter):
+        return model.wrapped_model
+    return model

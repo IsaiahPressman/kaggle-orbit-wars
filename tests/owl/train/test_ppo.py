@@ -541,6 +541,67 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
     assert metrics["train/win_rate_player_0"] == 0.5
 
 
+def test_distributed_weighted_mean_uses_global_sum_and_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=True,
+    )
+
+    def fake_all_reduce_sum(
+        tensor: torch.Tensor,
+        _context: ppo.DistributedContext,
+    ) -> torch.Tensor:
+        assert _context is context
+        return tensor + torch.tensor([800.0, 8.0], dtype=tensor.dtype)
+
+    monkeypatch.setattr(ppo, "all_reduce_sum", fake_all_reduce_sum)
+
+    actual = ppo._distributed_weighted_mean(
+        torch.tensor([2.0, 4.0]),
+        torch.tensor([1.0, 1.0]),
+        context,
+    )
+
+    assert actual.item() == pytest.approx(80.6)
+
+
+def test_distributed_backward_weighted_mean_scales_for_ddp_average(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=True,
+    )
+
+    def fake_all_reduce_sum(
+        tensor: torch.Tensor,
+        _context: ppo.DistributedContext,
+    ) -> torch.Tensor:
+        assert _context is context
+        return tensor + torch.tensor(8.0, dtype=tensor.dtype)
+
+    monkeypatch.setattr(ppo, "all_reduce_sum", fake_all_reduce_sum)
+    values = torch.tensor([2.0, 4.0], requires_grad=True)
+
+    loss = ppo._distributed_backward_weighted_mean(
+        values,
+        torch.tensor([1.0, 1.0]),
+        context,
+    )
+    loss.backward()
+
+    assert loss.item() == pytest.approx(1.2)
+    assert torch.allclose(values.grad, torch.full_like(values, 0.2))
+
+
 def test_player_segment_returns_preserve_per_player_terminal_rewards() -> None:
     rewards = torch.tensor(
         [

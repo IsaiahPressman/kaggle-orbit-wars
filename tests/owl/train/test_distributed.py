@@ -2,15 +2,120 @@ from __future__ import annotations
 
 import pytest
 import torch
+from owl.model import (
+    BaseModelAPI,
+    ModelActionEntropies,
+    ModelActionLogProbs,
+    ModelActions,
+    ModelEvaluation,
+    ModelOutput,
+)
+from owl.rl import ACTION_ENTITY_SLOTS, ActionPureConfig, ObsBatch
 from owl.train import distributed as distributed_module
 from owl.train.distributed import (
     DistributedContext,
+    DistributedModelAdapter,
     all_reduce_any,
     all_reduce_max,
     all_reduce_sum,
     broadcast_object,
     distributed_session,
+    unwrap_model,
+    wrap_model_for_distributed,
 )
+
+
+class _TinyModel(BaseModelAPI):
+    def __init__(self) -> None:
+        super().__init__()
+        self.action_spec = ActionPureConfig()
+        self.weight = torch.nn.Parameter(torch.ones(()))
+
+    def forward(
+        self,
+        obs: ObsBatch,
+        *,
+        deterministic: bool = False,  # noqa: ARG002
+    ) -> ModelOutput:
+        n_envs = obs.global_features.shape[0]
+        actions = _actions(n_envs)
+        values = self.weight.expand(n_envs, 4)
+        log_probs = _log_probs(torch.zeros_like(values))
+        entropies = _entropies(torch.zeros_like(values))
+        return ModelOutput(
+            actions=actions,
+            log_probs=log_probs,
+            entropies=entropies,
+            values=values,
+            winner_probabilities=torch.softmax(values, dim=-1),
+        )
+
+    def evaluate_actions(
+        self,
+        obs: ObsBatch,
+        actions: ModelActions,  # noqa: ARG002
+    ) -> ModelEvaluation:
+        values = self.weight.expand(obs.global_features.shape[0], 4)
+        log_probs = _log_probs(torch.zeros_like(values))
+        entropies = _entropies(torch.zeros_like(values))
+        return ModelEvaluation(
+            log_probs=log_probs,
+            entropies=entropies,
+            values=values,
+            winner_probabilities=torch.softmax(values, dim=-1),
+        )
+
+    def get_input_layers(self) -> tuple[torch.nn.Module, ...]:
+        return ()
+
+    def get_output_layers(self) -> tuple[torch.nn.Module, ...]:
+        return ()
+
+
+class _FakeDDP(torch.nn.Module):
+    def __init__(
+        self,
+        module: torch.nn.Module,
+        *,
+        device_ids: list[int],
+        output_device: int,
+    ) -> None:
+        super().__init__()
+        self.module = module
+        self.device_ids = device_ids
+        self.output_device = output_device
+
+    def forward(self, *args: object) -> object:
+        return self.module(*args)
+
+
+def _actions(n_envs: int) -> ModelActions:
+    shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
+    return ModelActions(
+        launch=torch.zeros(shape, dtype=torch.bool),
+        ships=torch.zeros(shape, dtype=torch.int64),
+        angle=torch.zeros(shape, dtype=torch.float32),
+    )
+
+
+def _log_probs(per_player: torch.Tensor) -> ModelActionLogProbs:
+    n_envs = per_player.shape[0]
+    action_shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
+    return ModelActionLogProbs(
+        launch=torch.zeros(action_shape),
+        angle_and_size=torch.zeros(action_shape),
+        per_player_entity=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS)),
+    )
+
+
+def _entropies(per_player: torch.Tensor) -> ModelActionEntropies:
+    n_envs = per_player.shape[0]
+    action_shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
+    return ModelActionEntropies(
+        launch=torch.zeros(action_shape),
+        angle_and_size=torch.zeros(action_shape),
+        per_player_entity=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS)),
+    )
 
 
 def test_distributed_context_defaults_to_cpu_without_process_group(
@@ -191,3 +296,56 @@ def test_collective_helpers_delegate_to_torch_distributed(
         distributed_module.dist.ReduceOp.MAX,
         ("broadcast", 0),
     ]
+
+
+def test_wrap_model_for_distributed_returns_model_without_process_group() -> None:
+    model = _TinyModel()
+    context = DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=1,
+        initialized=False,
+    )
+
+    assert wrap_model_for_distributed(model, context) is model
+
+
+def test_wrap_model_for_distributed_uses_ddp_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(distributed_module, "DistributedDataParallel", _FakeDDP)
+    model = _TinyModel()
+    context = DistributedContext(
+        device=torch.device("cuda", 3),
+        rank=3,
+        local_rank=3,
+        world_size=4,
+        initialized=True,
+    )
+
+    wrapped = wrap_model_for_distributed(model, context)
+
+    assert isinstance(wrapped, DistributedModelAdapter)
+    assert unwrap_model(wrapped) is model
+    assert isinstance(wrapped._ddp, _FakeDDP)
+    assert wrapped._ddp.device_ids == [3]
+    assert wrapped._ddp.output_device == 3
+    assert wrapped.action_spec == model.action_spec
+
+
+def test_wrap_model_for_distributed_requires_cuda_device() -> None:
+    model = _TinyModel()
+    context = DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=True,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="distributed model wrapping requires a CUDA device",
+    ):
+        wrap_model_for_distributed(model, context)
