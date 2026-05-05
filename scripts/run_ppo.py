@@ -4,8 +4,10 @@ import argparse
 import copy
 import itertools
 import random
+import re
 import time
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, assert_never
@@ -16,7 +18,7 @@ from owl.model import BaseModelAPI, ModelActions, ModelConfig, StatelessTransfor
 from owl.replay import ReplayRecorder
 from owl.rl import ActionConfig, ObsBatch, ObsConfig, VectorizedEnv
 from owl.rs import assert_release_build
-from owl.train import FullConfig, PPOTrainer, configure_torch
+from owl.train import FullConfig, PPOCheckpointMetadata, PPOTrainer, configure_torch
 from owl.train.logging import LogMode, create_logger
 from owl.train.optimizer import (
     create_lr_scheduler,
@@ -30,17 +32,46 @@ MODEL_CURRENT = 0
 MODEL_LAST_BEST = 1
 PLAYER_COUNTS = (2, 4)
 LAST_BEST_WIN_RATE_THRESHOLD = 0.7
+CHECKPOINT_FINAL = "checkpoint_final.pt"
+CHECKPOINT_LAST_BEST = "checkpoint_last_best.pt"
+_NUMBERED_CHECKPOINT_RE = re.compile(
+    r"^checkpoint_(\d{2})_(\d{3})_(\d{3})_(\d{3})\.pt$"
+)
+
+
+@dataclass(frozen=True)
+class FreshLaunch:
+    config_path: Path
+    output_dir: Path
+    overrides: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ResumeLaunch:
+    config_path: Path
+    run_dir: Path
+    checkpoint_path: Path
+    last_best_checkpoint_path: Path
+
+
+Launch = FreshLaunch | ResumeLaunch
 
 
 def main() -> None:
     args = _parse_args()
     assert_release_build()
     configure_torch()
-    overrides = _parse_cli_overrides(args.overrides)
-    cfg = FullConfig.from_file(args.config, overrides=overrides)
+    launch = _resolve_launch(args)
+    cfg = FullConfig.from_file(
+        launch.config_path,
+        overrides=launch.overrides if isinstance(launch, FreshLaunch) else None,
+    )
 
-    run_dir = _create_run_dir(args.output_dir)
-    cfg.to_file(run_dir / "config.yaml")
+    if isinstance(launch, FreshLaunch):
+        run_dir = _create_run_dir(launch.output_dir)
+        cfg.to_file(run_dir / "config.yaml")
+    else:
+        run_dir = launch.run_dir
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = VectorizedEnv(
@@ -66,11 +97,24 @@ def main() -> None:
         lr_scheduler=lr_scheduler,
         device=device,
     )
-    start_env_steps = (
-        trainer.load_checkpoint(args.resume_checkpoint)
-        if args.resume_checkpoint is not None
-        else 0
-    )
+    start_env_steps = 0
+    resume_run_id: str | None = None
+    last_best_model: BaseModelAPI | None = None
+    if isinstance(launch, ResumeLaunch):
+        checkpoint_metadata = trainer.load_checkpoint(launch.checkpoint_path)
+        resume_run_id = _resume_wandb_run_id(checkpoint_metadata, args.log_mode)
+        start_env_steps = checkpoint_metadata.env_steps
+        last_best_model = _clone_eval_model(model)
+        last_best_metadata = _load_model_from_checkpoint(
+            last_best_model,
+            path=launch.last_best_checkpoint_path,
+            device=device,
+        )
+        _validate_last_best_run_id(
+            last_best_metadata,
+            resume_run_id=resume_run_id,
+            checkpoint_path=launch.last_best_checkpoint_path,
+        )
 
     env_steps_per_iteration = cfg.rl.horizon * env.n_envs
     max_runtime_seconds = _max_runtime_seconds(args.max_runtime_hours)
@@ -83,6 +127,8 @@ def main() -> None:
         max_env_steps=args.max_env_steps,
         max_runtime_seconds=max_runtime_seconds,
         start_env_steps=start_env_steps,
+        resume_run_id=resume_run_id,
+        last_best_model=last_best_model,
         trainable_parameters=trainable_parameters,
     )
 
@@ -97,9 +143,13 @@ def _run_training_session(
     max_env_steps: int | None,
     max_runtime_seconds: float | None,
     start_env_steps: int = 0,
+    resume_run_id: str | None = None,
+    last_best_model: BaseModelAPI | None = None,
     trainable_parameters: int | None = None,
 ) -> None:
-    with closing(create_logger(log_mode, run_dir, cfg)) as logger:
+    with closing(
+        create_logger(log_mode, run_dir, cfg, resume_run_id=resume_run_id)
+    ) as logger:
         if trainable_parameters is not None:
             logger.set_summary("trainable_parameters", trainable_parameters)
         env_steps = _run_training_loop(
@@ -111,10 +161,13 @@ def _run_training_session(
             max_env_steps=max_env_steps,
             max_runtime_seconds=max_runtime_seconds,
             start_env_steps=start_env_steps,
+            wandb_run_id=logger.run_id,
+            last_best_model=last_best_model,
         )
         trainer.write_checkpoint(
             run_dir / "checkpoint_final.pt",
             env_steps=env_steps,
+            wandb_run_id=logger.run_id,
         )
 
 
@@ -128,6 +181,8 @@ def _run_training_loop(
     max_env_steps: int | None,
     max_runtime_seconds: float | None,
     start_env_steps: int = 0,
+    wandb_run_id: str | None = None,
+    last_best_model: BaseModelAPI | None = None,
 ) -> int:
     env_steps = start_env_steps
     started_at = time.monotonic()
@@ -135,11 +190,8 @@ def _run_training_loop(
         checkpoint_freq=cfg.rl.checkpoint_freq,
         env_steps=env_steps,
     )
-    last_best_model = (
-        _clone_eval_model(trainer.model)
-        if next_checkpoint_env_steps is not None
-        else None
-    )
+    if next_checkpoint_env_steps is not None and last_best_model is None:
+        last_best_model = _clone_eval_model(trainer.model)
     if _should_stop_training(
         env_steps=env_steps,
         started_at=started_at,
@@ -163,6 +215,7 @@ def _run_training_loop(
                 trainer.write_checkpoint(
                     checkpoint_path,
                     env_steps=env_steps,
+                    wandb_run_id=wandb_run_id,
                 )
                 if last_best_model is None:
                     raise RuntimeError("last_best_model must exist for checkpoints")
@@ -186,6 +239,7 @@ def _run_training_loop(
                     trainer.write_checkpoint(
                         run_dir / "checkpoint_last_best.pt",
                         env_steps=env_steps,
+                        wandb_run_id=wandb_run_id,
                     )
                 next_checkpoint_env_steps = _next_periodic_checkpoint_step(
                     checkpoint_freq=cfg.rl.checkpoint_freq,
@@ -203,8 +257,19 @@ def _run_training_loop(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run PPO training for Orbit Wars.")
-    parser.add_argument("config", type=Path, help="Top-level config YAML file")
-    parser.add_argument("output_dir", type=Path, help="Directory for run artifacts")
+    parser.add_argument(
+        "target",
+        type=Path,
+        help=(
+            "Config YAML for a fresh run, or a run directory/checkpoint file to resume"
+        ),
+    )
+    parser.add_argument(
+        "output_dir",
+        nargs="?",
+        type=Path,
+        help="Directory for fresh run artifacts",
+    )
     parser.add_argument(
         "--log-mode",
         type=LogMode,
@@ -233,12 +298,6 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Stop after at least this many wall-clock hours",
     )
-    parser.add_argument(
-        "--resume-checkpoint",
-        type=Path,
-        default=None,
-        help="Load model, optimizer, scheduler, and counters from a checkpoint",
-    )
     args = parser.parse_args()
     _validate_args(args)
     return args
@@ -249,9 +308,74 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-env-steps must be positive")
     if args.max_runtime_hours is not None and args.max_runtime_hours <= 0.0:
         raise ValueError("--max-runtime-hours must be positive")
-    resume_checkpoint = getattr(args, "resume_checkpoint", None)
-    if resume_checkpoint is not None and not resume_checkpoint.is_file():
-        raise ValueError(f"--resume-checkpoint does not exist: {resume_checkpoint}")
+    if args.output_dir is None and args.overrides is not None:
+        raise ValueError("resume launches cannot use config overrides")
+    if args.output_dir is None and args.log_mode == LogMode.DEBUG:
+        raise ValueError("resume launches require wandb logging")
+
+
+def _resolve_launch(args: argparse.Namespace) -> Launch:
+    if args.output_dir is not None:
+        if not args.target.is_file():
+            raise ValueError(f"fresh run config does not exist: {args.target}")
+        return FreshLaunch(
+            config_path=args.target,
+            output_dir=args.output_dir,
+            overrides=_parse_cli_overrides(args.overrides),
+        )
+    return _resolve_resume_launch(args.target)
+
+
+def _resolve_resume_launch(target: Path) -> ResumeLaunch:
+    if target.is_dir():
+        run_dir = target
+        checkpoint_path = _latest_resume_checkpoint(run_dir)
+    elif target.is_file():
+        if target.name == CHECKPOINT_LAST_BEST:
+            raise ValueError(
+                "checkpoint_last_best.pt cannot be used as a resume target"
+            )
+        run_dir = target.parent
+        checkpoint_path = target
+    else:
+        raise ValueError(f"resume target does not exist: {target}")
+
+    config_path = run_dir / "config.yaml"
+    if not config_path.is_file():
+        raise ValueError(f"expected resume config at {config_path}")
+    last_best_checkpoint_path = run_dir / CHECKPOINT_LAST_BEST
+    if not last_best_checkpoint_path.is_file():
+        raise ValueError(
+            f"expected last-best checkpoint at {last_best_checkpoint_path}"
+        )
+    return ResumeLaunch(
+        config_path=config_path,
+        run_dir=run_dir,
+        checkpoint_path=checkpoint_path,
+        last_best_checkpoint_path=last_best_checkpoint_path,
+    )
+
+
+def _latest_resume_checkpoint(run_dir: Path) -> Path:
+    final_checkpoint = run_dir / CHECKPOINT_FINAL
+    if final_checkpoint.is_file():
+        return final_checkpoint
+
+    numbered_checkpoints: list[tuple[int, Path]] = []
+    for checkpoint_path in run_dir.glob("checkpoint_*.pt"):
+        step = _parse_numbered_checkpoint_step(checkpoint_path.name)
+        if step is not None:
+            numbered_checkpoints.append((step, checkpoint_path))
+    if not numbered_checkpoints:
+        raise ValueError(f"no resume checkpoint found in {run_dir}")
+    return max(numbered_checkpoints, key=lambda item: item[0])[1]
+
+
+def _parse_numbered_checkpoint_step(name: str) -> int | None:
+    match = _NUMBERED_CHECKPOINT_RE.fullmatch(name)
+    if match is None:
+        return None
+    return int("".join(match.groups()))
 
 
 def _parse_cli_overrides(raw_overrides: list[list[str]] | None) -> dict[str, Any]:
@@ -332,6 +456,112 @@ def _clone_eval_model(model: BaseModelAPI) -> BaseModelAPI:
 def _copy_model_state(dst: BaseModelAPI, src: BaseModelAPI) -> None:
     dst.load_state_dict(src.state_dict())
     dst.eval()
+
+
+def _resume_wandb_run_id(
+    metadata: PPOCheckpointMetadata,
+    log_mode: LogMode,
+) -> str:
+    if log_mode == LogMode.DEBUG:
+        raise ValueError("resume launches require wandb logging")
+    if metadata.wandb_run_id is None:
+        raise ValueError("resume checkpoint is missing wandb_run_id")
+    return metadata.wandb_run_id
+
+
+def _load_model_from_checkpoint(
+    model: BaseModelAPI,
+    *,
+    path: Path,
+    device: torch.device,
+) -> PPOCheckpointMetadata:
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    if not isinstance(checkpoint, dict):
+        raise ValueError(f"checkpoint must be a dictionary: {path}")
+    metadata = _checkpoint_metadata(checkpoint, path=path)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    return metadata
+
+
+def _checkpoint_metadata(
+    checkpoint: object,
+    *,
+    path: Path,
+) -> PPOCheckpointMetadata:
+    if not isinstance(checkpoint, dict):
+        raise ValueError(f"checkpoint must be a dictionary: {path}")
+    expected_keys = {
+        "model",
+        "optimizer",
+        "lr_scheduler",
+        "env_steps",
+        "optimizer_steps",
+        "player_step_total",
+        "wandb_run_id",
+    }
+    if set(checkpoint) != expected_keys:
+        raise ValueError(
+            f"checkpoint keys must be {sorted(expected_keys)}, "
+            f"got {sorted(checkpoint)}: {path}"
+        )
+    return PPOCheckpointMetadata(
+        env_steps=_checkpoint_nonnegative_int(
+            checkpoint["env_steps"],
+            name="env_steps",
+            path=path,
+        ),
+        optimizer_steps=_checkpoint_nonnegative_int(
+            checkpoint["optimizer_steps"],
+            name="optimizer_steps",
+            path=path,
+        ),
+        player_step_total=_checkpoint_nonnegative_int(
+            checkpoint["player_step_total"],
+            name="player_step_total",
+            path=path,
+        ),
+        wandb_run_id=_checkpoint_optional_str(
+            checkpoint["wandb_run_id"],
+            name="wandb_run_id",
+            path=path,
+        ),
+    )
+
+
+def _checkpoint_nonnegative_int(value: object, *, name: str, path: Path) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"checkpoint {name} must be an integer: {path}")
+    if value < 0:
+        raise ValueError(f"checkpoint {name} must be non-negative: {path}")
+    return value
+
+
+def _checkpoint_optional_str(value: object, *, name: str, path: Path) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            f"checkpoint {name} must be a non-empty string or None: {path}"
+        )
+    return value
+
+
+def _validate_last_best_run_id(
+    metadata: PPOCheckpointMetadata,
+    *,
+    resume_run_id: str,
+    checkpoint_path: Path,
+) -> None:
+    if metadata.wandb_run_id is None:
+        raise ValueError(
+            f"last-best checkpoint is missing wandb_run_id: {checkpoint_path}"
+        )
+    if metadata.wandb_run_id != resume_run_id:
+        raise ValueError(
+            f"last-best checkpoint wandb_run_id does not match resume checkpoint: "
+            f"{checkpoint_path}"
+        )
 
 
 def _next_periodic_checkpoint_step(

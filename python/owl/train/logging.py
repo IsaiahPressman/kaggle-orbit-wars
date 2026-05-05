@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import StrEnum, auto
 from pathlib import Path
-from typing import assert_never
+from typing import Any, assert_never
 
 from owl.train import FullConfig
 
@@ -13,6 +13,10 @@ class LogMode(StrEnum):
 
 
 class MetricLogger:
+    @property
+    def run_id(self) -> str | None:
+        raise NotImplementedError
+
     def log(self, metrics: dict[str, float], *, step: int) -> None:
         raise NotImplementedError
 
@@ -24,6 +28,10 @@ class MetricLogger:
 
 
 class DebugLogger(MetricLogger):
+    @property
+    def run_id(self) -> str | None:
+        return None
+
     def log(self, metrics: dict[str, float], *, step: int) -> None:  # noqa: ARG002
         print(metrics)
 
@@ -39,16 +47,31 @@ class DebugLogger(MetricLogger):
 
 
 class WandbLogger(MetricLogger):
-    def __init__(self, run_dir: Path, cfg: FullConfig) -> None:
+    def __init__(
+        self,
+        run_dir: Path,
+        cfg: FullConfig,
+        *,
+        resume_run_id: str | None = None,
+    ) -> None:
         import wandb
 
         self._wandb = wandb
+        init_kwargs: dict[str, Any] = {}
+        if resume_run_id is not None:
+            init_kwargs["id"] = resume_run_id
+            init_kwargs["resume"] = "must"
         self._run = wandb.init(
             project="orbit-wars",
             dir=run_dir,
             name=run_dir.name,
             config=cfg.model_dump(mode="json"),
+            **init_kwargs,
         )
+
+    @property
+    def run_id(self) -> str | None:
+        return self._run.id
 
     def log(self, metrics: dict[str, float], *, step: int) -> None:
         self._wandb.log(metrics, step=step)
@@ -63,11 +86,17 @@ class WandbLogger(MetricLogger):
         self._run.finish()
 
 
-def create_logger(log_mode: LogMode, run_dir: Path, cfg: FullConfig) -> MetricLogger:
+def create_logger(
+    log_mode: LogMode,
+    run_dir: Path,
+    cfg: FullConfig,
+    *,
+    resume_run_id: str | None = None,
+) -> MetricLogger:
     match log_mode:
         case LogMode.DEBUG:
             return DebugLogger()
         case LogMode.WANDB:
-            return WandbLogger(run_dir, cfg)
+            return WandbLogger(run_dir, cfg, resume_run_id=resume_run_id)
         case _:
             assert_never(log_mode)

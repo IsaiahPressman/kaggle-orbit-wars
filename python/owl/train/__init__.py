@@ -21,6 +21,7 @@ from .optimizer import (
 )
 from .ppo import (
     CompileMode,
+    PPOCheckpointMetadata,
     PPOConfig,
     PPOLossMetrics,
     PPORolloutBuffer,
@@ -55,6 +56,7 @@ __all__ = [
     "Optimizer",
     "OptimizerConfig",
     "OptimizerName",
+    "PPOCheckpointMetadata",
     "PPOConfig",
     "PPOLossMetrics",
     "PPORolloutBuffer",

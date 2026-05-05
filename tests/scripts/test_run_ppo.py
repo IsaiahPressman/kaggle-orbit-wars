@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import time
 from argparse import Namespace
 from pathlib import Path
@@ -24,6 +25,7 @@ _RUN_PPO_SPEC = importlib.util.spec_from_file_location("run_ppo", _RUN_PPO_PATH)
 assert _RUN_PPO_SPEC is not None
 assert _RUN_PPO_SPEC.loader is not None
 run_ppo = importlib.util.module_from_spec(_RUN_PPO_SPEC)
+sys.modules["run_ppo"] = run_ppo
 _RUN_PPO_SPEC.loader.exec_module(run_ppo)
 
 
@@ -66,10 +68,15 @@ def _config_with_envs(n_envs: int) -> FullConfig:
 
 
 class _FakeLogger:
-    def __init__(self) -> None:
+    def __init__(self, *, run_id: str | None = "run-123") -> None:
         self.closed = False
         self.logged: list[tuple[dict[str, float], int]] = []
         self.summary: dict[str, int | float] = {}
+        self._run_id = run_id
+
+    @property
+    def run_id(self) -> str | None:
+        return self._run_id
 
     def log(self, metrics: dict[str, float], *, step: int) -> None:
         self.logged.append((metrics, step))
@@ -84,7 +91,7 @@ class _FakeLogger:
 class _FakeTrainer:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
-        self.checkpoints: list[tuple[Path, int]] = []
+        self.checkpoints: list[tuple[Path, int, str | None]] = []
         self.iterations = 0
         self.model = torch.nn.Linear(1, 1)
         self.device = torch.device("cpu")
@@ -100,8 +107,9 @@ class _FakeTrainer:
         path: Path,
         *,
         env_steps: int,
+        wandb_run_id: str | None = None,
     ) -> None:
-        self.checkpoints.append((path, env_steps))
+        self.checkpoints.append((path, env_steps, wandb_run_id))
 
 
 def test_next_periodic_checkpoint_step_handles_crossed_cadence() -> None:
@@ -149,20 +157,107 @@ def test_max_runtime_hours_converts_to_seconds() -> None:
 
 def test_validate_args_rejects_non_positive_runtime_hours() -> None:
     with pytest.raises(ValueError, match="--max-runtime-hours must be positive"):
-        run_ppo._validate_args(Namespace(max_env_steps=None, max_runtime_hours=0.0))
+        run_ppo._validate_args(
+            Namespace(
+                max_env_steps=None,
+                max_runtime_hours=0.0,
+                output_dir=Path("runs"),
+                overrides=None,
+                log_mode=LogMode.WANDB,
+            )
+        )
 
 
-def test_validate_args_rejects_missing_resume_checkpoint(tmp_path: Path) -> None:
-    missing_path = tmp_path / "missing.pt"
-
-    with pytest.raises(ValueError, match="--resume-checkpoint does not exist"):
+def test_validate_args_rejects_debug_resume() -> None:
+    with pytest.raises(ValueError, match="resume launches require wandb logging"):
         run_ppo._validate_args(
             Namespace(
                 max_env_steps=None,
                 max_runtime_hours=None,
-                resume_checkpoint=missing_path,
+                output_dir=None,
+                overrides=None,
+                log_mode=LogMode.DEBUG,
             )
         )
+
+
+def test_validate_args_rejects_resume_overrides() -> None:
+    with pytest.raises(ValueError, match="resume launches cannot use config overrides"):
+        run_ppo._validate_args(
+            Namespace(
+                max_env_steps=None,
+                max_runtime_hours=None,
+                output_dir=None,
+                overrides=[["rl.horizon=8"]],
+                log_mode=LogMode.WANDB,
+            )
+        )
+
+
+def test_resolve_resume_launch_prefers_final_checkpoint(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "config.yaml").write_text("env: {}\nmodel: {}\noptimizer: {}\nrl: {}\n")
+    final_checkpoint = run_dir / "checkpoint_final.pt"
+    final_checkpoint.touch()
+    (run_dir / "checkpoint_00_000_010_000.pt").touch()
+    (run_dir / "checkpoint_last_best.pt").touch()
+
+    launch = run_ppo._resolve_resume_launch(run_dir)
+
+    assert launch.config_path == run_dir / "config.yaml"
+    assert launch.checkpoint_path == final_checkpoint
+    assert launch.last_best_checkpoint_path == run_dir / "checkpoint_last_best.pt"
+
+
+def test_resolve_resume_launch_uses_latest_numbered_checkpoint(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "config.yaml").write_text("env: {}\nmodel: {}\noptimizer: {}\nrl: {}\n")
+    (run_dir / "checkpoint_00_000_010_000.pt").touch()
+    latest_checkpoint = run_dir / "checkpoint_00_000_020_000.pt"
+    latest_checkpoint.touch()
+    (run_dir / "checkpoint_last_best.pt").touch()
+
+    launch = run_ppo._resolve_resume_launch(run_dir)
+
+    assert launch.checkpoint_path == latest_checkpoint
+
+
+def test_resolve_resume_launch_rejects_missing_last_best(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "config.yaml").write_text("env: {}\nmodel: {}\noptimizer: {}\nrl: {}\n")
+    (run_dir / "checkpoint_final.pt").touch()
+
+    with pytest.raises(ValueError, match="expected last-best checkpoint"):
+        run_ppo._resolve_resume_launch(run_dir)
+
+
+def test_resolve_resume_launch_uses_adjacent_config_for_file(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "config.yaml").write_text("env: {}\nmodel: {}\noptimizer: {}\nrl: {}\n")
+    checkpoint = run_dir / "checkpoint_00_000_020_000.pt"
+    checkpoint.touch()
+    (run_dir / "checkpoint_last_best.pt").touch()
+
+    launch = run_ppo._resolve_resume_launch(checkpoint)
+
+    assert launch.config_path == run_dir / "config.yaml"
+    assert launch.checkpoint_path == checkpoint
+
+
+def test_resume_wandb_run_id_requires_checkpoint_run_id() -> None:
+    metadata = run_ppo.PPOCheckpointMetadata(
+        env_steps=1,
+        optimizer_steps=1,
+        player_step_total=1,
+        wandb_run_id=None,
+    )
+
+    with pytest.raises(ValueError, match="missing wandb_run_id"):
+        run_ppo._resume_wandb_run_id(metadata, LogMode.WANDB)
 
 
 def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
@@ -375,7 +470,9 @@ def test_run_training_loop_writes_periodic_checkpoints(
     )
 
     assert env_steps == 1600
-    assert trainer.checkpoints == [(tmp_path / "checkpoint_00_000_001_600.pt", 1600)]
+    assert trainer.checkpoints == [
+        (tmp_path / "checkpoint_00_000_001_600.pt", 1600, None)
+    ]
     assert [step for _metrics, step in logger.logged] == [800, 1600, 1600]
     assert logger.logged[-1][0] == {"eval/win_rate_against_last_best": 0.25}
     assert eval_calls == 1
@@ -409,10 +506,13 @@ def test_run_training_loop_resumes_checkpoint_cadence(
         max_env_steps=2000,
         max_runtime_seconds=None,
         start_env_steps=1200,
+        wandb_run_id="run-123",
     )
 
     assert env_steps == 2000
-    assert trainer.checkpoints == [(tmp_path / "checkpoint_00_000_002_000.pt", 2000)]
+    assert trainer.checkpoints == [
+        (tmp_path / "checkpoint_00_000_002_000.pt", 2000, "run-123")
+    ]
     assert [step for _metrics, step in logger.logged] == [2000, 2000]
 
 
@@ -472,8 +572,8 @@ def test_run_training_loop_saves_last_best_when_eval_clears_threshold(
 
     assert env_steps == 1000
     assert trainer.checkpoints == [
-        (tmp_path / "checkpoint_00_000_001_000.pt", 1000),
-        (tmp_path / "checkpoint_last_best.pt", 1000),
+        (tmp_path / "checkpoint_00_000_001_000.pt", 1000, None),
+        (tmp_path / "checkpoint_last_best.pt", 1000, None),
     ]
     assert logger.logged[-1][0]["eval/game_length_mean"] == 12.0
 
@@ -485,7 +585,7 @@ def test_run_training_session_sets_trainable_parameter_summary(
     trainer = _FakeTrainer()
     logger = _FakeLogger()
 
-    def create_fake_logger(*_args: object) -> _FakeLogger:
+    def create_fake_logger(*_args: object, **_kwargs: object) -> _FakeLogger:
         return logger
 
     monkeypatch.setattr(run_ppo, "create_logger", create_fake_logger)
@@ -516,7 +616,7 @@ def test_run_training_session_closes_logger_and_skips_final_checkpoint_on_error(
     def raise_from_loop(**_kwargs: object) -> int:
         raise RuntimeError("training failed")
 
-    def create_fake_logger(*_args: object) -> _FakeLogger:
+    def create_fake_logger(*_args: object, **_kwargs: object) -> _FakeLogger:
         return logger
 
     monkeypatch.setattr(run_ppo, "create_logger", create_fake_logger)
@@ -546,16 +646,20 @@ def test_ppo_trainer_write_checkpoint_includes_training_state(tmp_path: Path) ->
     trainer.optimizer = optimizer
     trainer.lr_scheduler = scheduler
     trainer.optimizer_steps = 7
+    trainer.player_step_total = 19
     path = tmp_path / "checkpoint.pt"
 
     trainer.write_checkpoint(
         path,
         env_steps=512,
+        wandb_run_id="run-abc",
     )
 
     checkpoint = torch.load(path, weights_only=False)
     assert checkpoint["env_steps"] == 512
     assert checkpoint["optimizer_steps"] == 7
+    assert checkpoint["player_step_total"] == 19
+    assert checkpoint["wandb_run_id"] == "run-abc"
     assert checkpoint["model"].keys() == model.state_dict().keys()
     assert "state" in checkpoint["optimizer"]
     assert checkpoint["lr_scheduler"] == scheduler.state_dict()
@@ -565,6 +669,8 @@ def test_ppo_trainer_write_checkpoint_includes_training_state(tmp_path: Path) ->
         "lr_scheduler",
         "env_steps",
         "optimizer_steps",
+        "player_step_total",
+        "wandb_run_id",
     }
     assert not (tmp_path / ".checkpoint.pt.tmp").exists()
 
@@ -593,20 +699,26 @@ def test_ppo_trainer_load_checkpoint_restores_training_state(tmp_path: Path) -> 
     src_trainer.optimizer = src_optimizer
     src_trainer.lr_scheduler = src_scheduler
     src_trainer.optimizer_steps = 11
+    src_trainer.player_step_total = 37
     path = tmp_path / "checkpoint.pt"
-    src_trainer.write_checkpoint(path, env_steps=2048)
+    src_trainer.write_checkpoint(path, env_steps=2048, wandb_run_id="run-abc")
 
     dst_trainer = PPOTrainer.__new__(PPOTrainer)
     dst_trainer.model = dst_model
     dst_trainer.optimizer = dst_optimizer
     dst_trainer.lr_scheduler = dst_scheduler
     dst_trainer.optimizer_steps = 0
+    dst_trainer.player_step_total = 0
     dst_trainer.device = torch.device("cpu")
 
-    env_steps = dst_trainer.load_checkpoint(path)
+    metadata = dst_trainer.load_checkpoint(path)
 
-    assert env_steps == 2048
+    assert metadata.env_steps == 2048
+    assert metadata.optimizer_steps == 11
+    assert metadata.player_step_total == 37
+    assert metadata.wandb_run_id == "run-abc"
     assert dst_trainer.optimizer_steps == 11
+    assert dst_trainer.player_step_total == 37
     for src_param, dst_param in zip(
         src_model.parameters(),
         dst_model.parameters(),
@@ -628,6 +740,7 @@ def test_ppo_trainer_load_checkpoint_rejects_scheduler_mismatch(
     trainer.optimizer = optimizer
     trainer.lr_scheduler = scheduler
     trainer.optimizer_steps = 0
+    trainer.player_step_total = 0
     trainer.device = torch.device("cpu")
     path = tmp_path / "checkpoint.pt"
     torch.save(
@@ -637,6 +750,8 @@ def test_ppo_trainer_load_checkpoint_rejects_scheduler_mismatch(
             "lr_scheduler": None,
             "env_steps": 1,
             "optimizer_steps": 0,
+            "player_step_total": 0,
+            "wandb_run_id": "run-abc",
         },
         path,
     )

@@ -66,7 +66,20 @@ uv run python scripts/run_ppo.py configs/baseline.yaml runs --log-mode debug --m
 
 PPO run directories save `config.yaml` alongside checkpoints. Checkpoints save
 model, optimizer, scheduler, environment-step metadata, and optimizer-step
-metadata. Resume training with `--resume-checkpoint path/to/checkpoint.pt`.
+metadata, player-step metadata, plus the W&B run ID used for resume. Resume
+training by passing either a run directory or a checkpoint file as the only
+positional path:
+
+```sh
+uv run python scripts/run_ppo.py runs/20260505-120000
+uv run python scripts/run_ppo.py runs/20260505-120000/checkpoint_00_020_000_000.pt
+```
+
+Directory resume loads `checkpoint_final.pt` when present, otherwise the latest
+numbered checkpoint, and never treats `checkpoint_last_best.pt` as the primary
+training checkpoint. File resume loads `config.yaml` from the checkpoint's
+parent directory. Both resume modes require the associated
+`checkpoint_last_best.pt` and W&B logging so the saved run ID can be resumed.
 Checkpoints do not save the Rust environment state or current observation, so
 resumed runs continue from a fresh environment batch rather than acting as exact
 simulator snapshots. Periodic checkpoint names use grouped zero-padded
