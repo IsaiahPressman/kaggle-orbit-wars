@@ -53,7 +53,10 @@ Training presets live in `configs/`:
 The training entrypoint configures PyTorch for TF32 matmul/conv precision and
 cuDNN benchmarking before constructing the environment, model, and optimizer.
 Training `EnvConfig.n_envs` must be even so periodic checkpoint evaluation can
-split evaluation games across 2-player and 4-player batches.
+split evaluation games across 2-player and 4-player batches. In distributed PPO
+launches, `EnvConfig.n_envs`, rollout horizon, and minibatch segment width are
+per GPU. Checkpoint cadence, `--max-env-steps`, W&B step values, and
+`train/env_steps` are counted across all ranks.
 PPO supports both `pure` and `discrete_targets` action specs when the
 `StatelessTransformerV1` actor discriminator matches the environment action
 spec. The current discrete-target actor requires `max_per_planet_launches: 1`.
@@ -64,11 +67,12 @@ Run a preset with:
 uv run python scripts/run_ppo.py configs/baseline.yaml runs --log-mode debug --max-env-steps 16
 ```
 
-PPO run directories save `config.yaml` alongside checkpoints. Checkpoints save
-model, optimizer, scheduler, environment-step metadata, and optimizer-step
-metadata, player-step metadata, plus the W&B run ID used for resume. Resume
-training by passing either a run directory or a checkpoint file as the only
-positional path:
+PPO run directories save `config.yaml` alongside checkpoints. The saved config
+includes `runtime.n_runtime_gpus`, and resume fails if the current launch uses a
+different number of ranks. Checkpoints save model, optimizer, scheduler,
+environment-step metadata, optimizer-step metadata, player-step metadata, plus
+the W&B run ID used for resume. Resume training by passing either a run
+directory or a checkpoint file as the only positional path:
 
 ```sh
 uv run python scripts/run_ppo.py runs/20260505-120000

@@ -541,6 +541,118 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
     assert metrics["train/win_rate_player_0"] == 0.5
 
 
+def test_distributed_env_metrics_reduce_matching_global_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=True,
+    )
+
+    def fake_all_gather_object(
+        value: set[str],
+        _context: ppo.DistributedContext,
+    ) -> list[set[str]]:
+        assert value == {"z_metric"}
+        assert _context is context
+        return [{"z_metric"}, {"a_metric", "z_metric"}]
+
+    def fake_all_reduce_sum(
+        tensor: torch.Tensor,
+        _context: ppo.DistributedContext,
+    ) -> torch.Tensor:
+        assert _context is context
+        assert torch.equal(
+            tensor,
+            torch.tensor(
+                [[0.0, 0.0], [6.0, 2.0]],
+                dtype=torch.float64,
+            ),
+        )
+        return torch.tensor(
+            [[10.0, 2.0], [36.0, 5.0]],
+            dtype=torch.float64,
+        )
+
+    monkeypatch.setattr(ppo, "all_gather_object", fake_all_gather_object)
+    monkeypatch.setattr(ppo, "all_reduce_sum", fake_all_reduce_sum)
+
+    metrics = ppo._mean_env_metrics(
+        {"z_metric": [2.0, 4.0]},
+        context=context,
+        device=torch.device("cpu"),
+    )
+
+    assert metrics == {
+        "train/a_metric": 5.0,
+        "train/z_metric": 7.2,
+    }
+
+
+def test_distributed_weighted_mean_uses_global_sum_and_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=True,
+    )
+
+    def fake_all_reduce_sum(
+        tensor: torch.Tensor,
+        _context: ppo.DistributedContext,
+    ) -> torch.Tensor:
+        assert _context is context
+        return tensor + torch.tensor([800.0, 8.0], dtype=tensor.dtype)
+
+    monkeypatch.setattr(ppo, "all_reduce_sum", fake_all_reduce_sum)
+
+    actual = ppo._distributed_weighted_mean(
+        torch.tensor([2.0, 4.0]),
+        torch.tensor([1.0, 1.0]),
+        context,
+    )
+
+    assert actual.item() == pytest.approx(80.6)
+
+
+def test_distributed_backward_weighted_mean_scales_for_ddp_average(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=True,
+    )
+
+    def fake_all_reduce_sum(
+        tensor: torch.Tensor,
+        _context: ppo.DistributedContext,
+    ) -> torch.Tensor:
+        assert _context is context
+        return tensor + torch.tensor(8.0, dtype=tensor.dtype)
+
+    monkeypatch.setattr(ppo, "all_reduce_sum", fake_all_reduce_sum)
+    values = torch.tensor([2.0, 4.0], requires_grad=True)
+
+    loss = ppo._distributed_backward_weighted_mean(
+        values,
+        torch.tensor([1.0, 1.0]),
+        context,
+    )
+    loss.backward()
+
+    assert loss.item() == pytest.approx(1.2)
+    assert torch.allclose(values.grad, torch.full_like(values, 0.2))
+
+
 def test_player_segment_returns_preserve_per_player_terminal_rewards() -> None:
     rewards = torch.tensor(
         [
@@ -1077,6 +1189,66 @@ def test_update_minibatch_value_clipping_uses_current_value_anchor() -> None:
     )
 
     assert update.metrics.value_loss.item() == pytest.approx(2.0)
+
+
+def test_update_minibatch_steps_before_target_kl_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(6)
+    env = TinyOrbitEnv(n_envs=1)
+    model = TinyOrbitModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            target_kl=0.01,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=1),
+        ),
+        device=torch.device("cpu"),
+    )
+    bootstrap_values = trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+
+    def fake_ppo_loss(
+        *,
+        new_logp: torch.Tensor,
+        entropy: torch.Tensor,  # noqa: ARG001
+        new_values: torch.Tensor,  # noqa: ARG001
+        old_logp: torch.Tensor,  # noqa: ARG001
+        old_values: torch.Tensor,  # noqa: ARG001
+        returns: torch.Tensor,  # noqa: ARG001
+        advantages: torch.Tensor,  # noqa: ARG001
+        policy_weight: torch.Tensor,  # noqa: ARG001
+        value_weight: torch.Tensor,  # noqa: ARG001
+        config: ppo.PPOConfig,  # noqa: ARG001
+    ) -> ppo.PPOLossMetrics:
+        loss = new_logp.sum()
+        return replace(
+            _zero_loss_metrics(loss),
+            approx_kl=loss.detach().new_tensor(0.02),
+        )
+
+    monkeypatch.setattr(trainer, "_ppo_loss", fake_ppo_loss)
+
+    update = trainer._update_minibatch(
+        segments,
+        advantages=torch.ones_like(segments.values),
+        returns=bootstrap_values[:, None, :].expand_as(segments.values),
+        policy_mask=ppo._policy_mask(segments.obs),
+        value_mask=segments.obs.still_playing,
+        sample=ppo.SegmentSample(
+            indices=torch.zeros((1,), dtype=torch.int64),
+            importance=torch.ones((1, 1)),
+            probabilities=torch.ones((1,)),
+        ),
+        value_clip_anchor=segments.values,
+    )
+
+    assert update.target_kl_exceeded
+    assert trainer.optimizer_steps == 1
+    assert update.grad_norm.item() > 0.0
 
 
 def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(

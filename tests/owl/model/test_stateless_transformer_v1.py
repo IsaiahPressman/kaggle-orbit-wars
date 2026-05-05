@@ -483,9 +483,58 @@ def test_force_flash_attention_rejects_non_flash_projection(
 
     monkeypatch.setattr(model_impl, "use_flash_attn", disable_flash_attn)
     monkeypatch.setattr(model_impl, "varlen_attention", fail_varlen_attention)
+    monkeypatch.setattr(
+        model_impl,
+        "_requires_flash_attn",
+        lambda _tensor, *, force_flash_attn: force_flash_attn,
+    )
 
     with pytest.raises(RuntimeError, match="force_flash_attn=True"):
         attn(packed_x, None, packed)
+
+
+def test_force_flash_attention_is_ignored_for_cpu_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = StatelessTransformerV1Config(
+        embed_dim=16,
+        depth=1,
+        n_heads=4,
+        force_flash_attn=True,
+    )
+    attn = MultiHeadSelfAttention(config)
+    x = torch.randn((2, 5, config.embed_dim))
+    mask = torch.tensor(
+        [
+            [True, False, True, True, False],
+            [False, True, True, False, True],
+        ]
+    )
+    packed_x, packed = pack_sequence(x, mask)
+    calls = 0
+
+    def disable_flash_attn(q: torch.Tensor) -> bool:
+        return q.numel() < 0
+
+    def fake_varlen_attention(
+        q: torch.Tensor,
+        k: torch.Tensor,  # noqa: ARG001
+        v: torch.Tensor,  # noqa: ARG001
+        *,
+        cu_seqlens: torch.Tensor,  # noqa: ARG001
+        max_seqlen: int,  # noqa: ARG001
+    ) -> torch.Tensor:
+        nonlocal calls
+        calls += 1
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(model_impl, "use_flash_attn", disable_flash_attn)
+    monkeypatch.setattr(model_impl, "varlen_attention", fake_varlen_attention)
+
+    output = attn(packed_x, None, packed)
+
+    assert output.shape == packed_x.shape
+    assert calls == 1
 
 
 def test_non_flash_encoder_does_not_build_or_pack_sequences(
@@ -557,9 +606,46 @@ def test_force_flash_encoder_rejects_non_flash_inputs(
 
     monkeypatch.setattr(model_impl, "use_flash_attn", disable_flash_attn)
     monkeypatch.setattr(model_impl, "pack_sequence", fail_pack_sequence)
+    monkeypatch.setattr(
+        model_impl,
+        "_requires_flash_attn",
+        lambda _tensor, *, force_flash_attn: force_flash_attn,
+    )
 
     with pytest.raises(RuntimeError, match="force_flash_attn=True"):
         model.encode_observations(obs)
+
+
+def test_force_flash_encoder_ignores_cpu_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        force_flash_attn=True,
+    )
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+
+    def disable_flash_attn(q: torch.Tensor) -> bool:
+        return q.numel() < 0
+
+    def fail_pack_sequence(
+        _x: torch.Tensor,
+        _token_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, model_impl.PackedSequence]:
+        pytest.fail("CPU force_flash_attn should use the SDPA path")
+
+    monkeypatch.setattr(model_impl, "use_flash_attn", disable_flash_attn)
+    monkeypatch.setattr(model_impl, "pack_sequence", fail_pack_sequence)
+
+    hidden, mask = model.encode_observations(obs)
+
+    assert hidden.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS, 32)
+    assert mask.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS)
 
 
 def test_orbiting_planets_select_separate_planet_projection() -> None:

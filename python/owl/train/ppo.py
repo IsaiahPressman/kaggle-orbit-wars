@@ -26,6 +26,13 @@ from owl.train.advantages import (
     compile_compute_gae,
     compute_gae,
 )
+from owl.train.distributed import (
+    DistributedContext,
+    all_gather_object,
+    all_reduce_max,
+    all_reduce_sum,
+    unwrap_model,
+)
 from owl.train.metrics import (
     explained_variance,
     masked_mean,
@@ -126,6 +133,7 @@ class PPOLossMetrics:
     logratio_mean: torch.Tensor
     logratio_abs_max: torch.Tensor
     entropy_components: dict[str, torch.Tensor] = dataclass_field(default_factory=dict)
+    backward_loss: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -333,6 +341,7 @@ class PPOTrainer:
         optimizer: Optimizer,
         device: torch.device,
         lr_scheduler: LRScheduler | None = None,
+        distributed_context: DistributedContext | None = None,
     ) -> None:
         self.env = env
         self.model = model
@@ -346,6 +355,13 @@ class PPOTrainer:
         self.lr_scheduler = lr_scheduler
         self.config = config
         self.device = device
+        self.distributed_context = distributed_context or DistributedContext(
+            device=device,
+            rank=0,
+            local_rank=0,
+            world_size=1,
+            initialized=False,
+        )
         self.n_envs = env.n_envs
         self.optimizer_steps = 0
         self.player_step_total = 0
@@ -365,6 +381,10 @@ class PPOTrainer:
             device=device,
         )
         self._last_env_metrics: dict[str, list[float]] = {}
+
+    @property
+    def world_size(self) -> int:
+        return self.distributed_context.world_size
 
     def train_iteration(self) -> dict[str, float]:
         start = perf_counter()
@@ -407,25 +427,37 @@ class PPOTrainer:
             value_mask,
         )
         metrics["train/return_mean"] = float(
-            masked_mean(player_returns, player_return_mask).item()
+            self._masked_mean(player_returns, player_return_mask).item()
         )
         metrics["train/return_max"] = float(
-            _masked_reward_max(segments.rewards, value_mask).item()
+            self._masked_max(_masked_reward_max(segments.rewards, value_mask)).item()
         )
         metrics["train/explained_variance"] = float(
-            explained_variance(segments.values, returns, valid_mask=value_mask).item()
+            self._explained_variance(
+                segments.values,
+                returns,
+                valid_mask=value_mask,
+            ).item()
         )
         metrics["train/advantage_mean"] = float(
-            masked_mean(advantages, policy_mask).item()
+            self._masked_mean(advantages, policy_mask).item()
         )
         metrics["train/advantage_std"] = float(
-            masked_std(advantages, policy_mask).item()
+            self._masked_std(advantages, policy_mask).item()
         )
-        self.player_step_total += int(value_mask.sum().item())
+        self.player_step_total += self._sum_int(value_mask.sum())
         metrics["train/player_step_total"] = float(self.player_step_total)
-        metrics.update(_mean_env_metrics(env_metrics))
-        elapsed = max(perf_counter() - start, 1e-12)
-        rollout_steps = self.config.horizon * self.n_envs
+        metrics.update(
+            _mean_env_metrics(
+                env_metrics,
+                context=self.distributed_context,
+                device=self.device,
+            )
+        )
+        elapsed = self._max_float(max(perf_counter() - start, 1e-12))
+        rollout_elapsed = self._max_float(rollout_elapsed)
+        update_elapsed = self._max_float(update_elapsed)
+        rollout_steps = self.config.horizon * self.n_envs * self.world_size
         update_steps = rollout_steps * metrics["sampling/effective_replay_exposure"]
         metrics["time/rollout_seconds"] = float(rollout_elapsed)
         metrics["time/update_seconds"] = float(update_elapsed)
@@ -443,7 +475,7 @@ class PPOTrainer:
         wandb_run_id: str | None = None,
     ) -> None:
         checkpoint = {
-            "model": self.model.state_dict(),
+            "model": unwrap_model(self.model).state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "lr_scheduler": (
                 None if self.lr_scheduler is None else self.lr_scheduler.state_dict()
@@ -493,7 +525,7 @@ class PPOTrainer:
             checkpoint["wandb_run_id"],
             name="wandb_run_id",
         )
-        self.model.load_state_dict(checkpoint["model"])
+        unwrap_model(self.model).load_state_dict(checkpoint["model"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler_state = checkpoint["lr_scheduler"]
         if self.lr_scheduler is None:
@@ -641,11 +673,14 @@ class PPOTrainer:
             raise RuntimeError("internal error: PPO update produced no minibatches")
         metrics = _mean_loss_metrics(loss_metrics)
         metrics["policy/target_kl_exceeded"] = float(target_kl_exceeded)
-        metrics["optimizer/grad_norm"] = float(torch.stack(grad_norms).mean().item())
+        metrics["optimizer/grad_norm"] = float(
+            self._mean_scalar(torch.stack(grad_norms).mean()).item()
+        )
         metrics["optimizer/steps"] = float(self.optimizer_steps)
         metrics["optimizer/minibatches_per_update"] = float(n_minibatches)
         metrics["sampling/effective_replay_exposure"] = float(
-            sampled_segments / self.n_envs
+            self._sum_int(torch.tensor(sampled_segments, device=self.device))
+            / (self.n_envs * self.world_size)
         )
         metrics["train/policy_active_ratio"] = float(policy_mask.float().mean().item())
         metrics["optimizer/learning_rate"] = _current_learning_rate(
@@ -654,7 +689,7 @@ class PPOTrainer:
         )
         if sampling_metrics:
             metrics.update(_mean_sampling_metrics(sampling_metrics))
-        return metrics
+        return self._reduce_mean_metrics(metrics)
 
     def _should_recompute_advantages(self, minibatch_index: int) -> bool:
         if minibatch_index == 0:
@@ -743,40 +778,45 @@ class PPOTrainer:
         entropy_components = _output_entropy_components(output, batch_old_logp)
         new_values = _output_values(output).view_as(batch_old_values)
 
-        metrics = self._ppo_loss(
-            new_logp=new_logp,
-            entropy=entropy,
-            new_values=new_values,
-            old_logp=batch_old_logp,
-            old_values=batch_old_values,
-            returns=batch_returns,
-            advantages=batch_advantages,
-            policy_weight=batch_policy_weight,
-            value_weight=batch_value_weight,
-            config=self.config,
-        )
+        if self.distributed_context.initialized:
+            metrics = distributed_ppo_loss(
+                new_logp=new_logp,
+                entropy=entropy,
+                new_values=new_values,
+                old_logp=batch_old_logp,
+                old_values=batch_old_values,
+                returns=batch_returns,
+                advantages=batch_advantages,
+                policy_weight=batch_policy_weight,
+                value_weight=batch_value_weight,
+                config=self.config,
+                context=self.distributed_context,
+            )
+        else:
+            metrics = self._ppo_loss(
+                new_logp=new_logp,
+                entropy=entropy,
+                new_values=new_values,
+                old_logp=batch_old_logp,
+                old_values=batch_old_values,
+                returns=batch_returns,
+                advantages=batch_advantages,
+                policy_weight=batch_policy_weight,
+                value_weight=batch_value_weight,
+                config=self.config,
+            )
         metrics = replace(
             metrics,
             entropy_components={
-                name: weighted_mean(component, batch_policy_weight).detach()
+                name: self._mean_policy_metric(component, batch_policy_weight).detach()
                 for name, component in entropy_components.items()
             },
         )
-        if (
-            self.config.target_kl is not None
-            and metrics.approx_kl.item() > self.config.target_kl
-        ):
-            return PPOUpdateResult(
-                metrics=metrics,
-                indices=idx,
-                new_logp=new_logp.detach(),
-                new_values=new_values.detach(),
-                grad_norm=metrics.loss.detach().new_zeros(()),
-                target_kl_exceeded=True,
-            )
-
         self.optimizer.zero_grad(set_to_none=True)
-        metrics.loss.backward()
+        backward_loss = (
+            metrics.loss if metrics.backward_loss is None else metrics.backward_loss
+        )
+        backward_loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(
             self.model.parameters(), self.config.max_grad_norm
         )
@@ -784,6 +824,10 @@ class PPOTrainer:
         self.optimizer_steps += 1
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
+        target_kl_exceeded = (
+            self.config.target_kl is not None
+            and metrics.approx_kl.item() > self.config.target_kl
+        )
 
         return PPOUpdateResult(
             metrics=metrics,
@@ -791,7 +835,82 @@ class PPOTrainer:
             new_logp=new_logp.detach(),
             new_values=new_values.detach(),
             grad_norm=grad_norm.detach(),
+            target_kl_exceeded=target_kl_exceeded,
         )
+
+    def _mean_policy_metric(
+        self,
+        values: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.distributed_context.initialized:
+            return _distributed_weighted_mean(values, weights, self.distributed_context)
+        return weighted_mean(values, weights)
+
+    def _masked_mean(self, values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        if self.distributed_context.initialized:
+            return _distributed_weighted_mean(
+                values,
+                mask.to(dtype=values.dtype),
+                self.distributed_context,
+            )
+        return masked_mean(values, mask)
+
+    def _masked_std(self, values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        if self.distributed_context.initialized:
+            mean = self._masked_mean(values, mask)
+            return self._masked_mean((values - mean).pow(2), mask).sqrt()
+        return masked_std(values, mask)
+
+    def _masked_max(self, value: torch.Tensor) -> torch.Tensor:
+        if self.distributed_context.initialized:
+            return all_reduce_max(value, self.distributed_context)
+        return value
+
+    def _explained_variance(
+        self,
+        predicted: torch.Tensor,
+        target: torch.Tensor,
+        *,
+        valid_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.distributed_context.initialized:
+            return _distributed_explained_variance(
+                predicted,
+                target,
+                valid_mask=valid_mask,
+                context=self.distributed_context,
+            )
+        return explained_variance(predicted, target, valid_mask=valid_mask)
+
+    def _sum_int(self, value: torch.Tensor) -> int:
+        if self.distributed_context.initialized:
+            total = all_reduce_sum(value.to(self.device), self.distributed_context)
+            return int(total.item())
+        return int(value.item())
+
+    def _max_float(self, value: float) -> float:
+        if not self.distributed_context.initialized:
+            return value
+        tensor = torch.tensor(value, device=self.device)
+        return float(all_reduce_max(tensor, self.distributed_context).item())
+
+    def _mean_scalar(self, value: torch.Tensor) -> torch.Tensor:
+        if not self.distributed_context.initialized:
+            return value
+        total = all_reduce_sum(value.to(self.device), self.distributed_context)
+        return total / self.world_size
+
+    def _reduce_mean_metrics(self, metrics: dict[str, float]) -> dict[str, float]:
+        if not self.distributed_context.initialized or not metrics:
+            return metrics
+        keys = sorted(metrics)
+        values = torch.tensor([metrics[key] for key in keys], device=self.device)
+        reduced = all_reduce_sum(values, self.distributed_context) / self.world_size
+        return {
+            key: float(value)
+            for key, value in zip(keys, reduced.detach().cpu().tolist(), strict=True)
+        }
 
 
 def _compile_compute_gae(compile_mode: CompileMode | None) -> ComputeGAEFn:
@@ -900,6 +1019,126 @@ def ppo_loss(
             config.vf_coef,
             config.ent_coef,
         )
+    )
+
+
+def distributed_ppo_loss(
+    *,
+    new_logp: torch.Tensor,
+    entropy: torch.Tensor,
+    new_values: torch.Tensor,
+    old_logp: torch.Tensor,
+    old_values: torch.Tensor,
+    returns: torch.Tensor,
+    advantages: torch.Tensor,
+    policy_weight: torch.Tensor,
+    value_weight: torch.Tensor,
+    config: PPOConfig,
+    context: DistributedContext,
+) -> PPOLossMetrics:
+    _validate_ppo_loss_inputs_if_debug(
+        new_logp=new_logp,
+        entropy=entropy,
+        new_values=new_values,
+        old_logp=old_logp,
+        old_values=old_values,
+        returns=returns,
+        advantages=advantages,
+        policy_weight=policy_weight,
+        value_weight=value_weight,
+        config=config,
+    )
+    logratio = new_logp - old_logp
+    ratio = logratio.exp()
+    pg_loss1 = -advantages * ratio
+    pg_loss2 = -advantages * torch.clamp(
+        ratio,
+        1.0 - config.clip_coef,
+        1.0 + config.clip_coef,
+    )
+    policy_loss_values = torch.max(pg_loss1, pg_loss2)
+
+    if config.vf_clip_coef:
+        value_clipped = old_values + torch.clamp(
+            new_values - old_values,
+            -config.vf_clip_coef,
+            config.vf_clip_coef,
+        )
+        value_loss_unclipped = (new_values - returns).pow(2)
+        value_loss_clipped = (value_clipped - returns).pow(2)
+        value_loss_values = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped)
+    else:
+        value_loss_values = 0.5 * (new_values - returns).pow(2)
+
+    policy_loss = _distributed_weighted_mean(
+        policy_loss_values.detach(),
+        policy_weight,
+        context,
+    )
+    value_loss = _distributed_weighted_mean(
+        value_loss_values.detach(),
+        value_weight,
+        context,
+    )
+    entropy_mean = _distributed_weighted_mean(entropy.detach(), policy_weight, context)
+    loss = policy_loss + config.vf_coef * value_loss - config.ent_coef * entropy_mean
+    entropy_loss = -config.ent_coef * entropy_mean
+    approx_kl_values = (ratio - 1.0) - logratio
+    clipfrac_values = ((ratio - 1.0).abs() > config.clip_coef).float()
+    backward_policy_loss = _distributed_backward_weighted_mean(
+        policy_loss_values,
+        policy_weight,
+        context,
+    )
+    backward_value_loss = _distributed_backward_weighted_mean(
+        value_loss_values,
+        value_weight,
+        context,
+    )
+    backward_entropy = _distributed_backward_weighted_mean(
+        entropy,
+        policy_weight,
+        context,
+    )
+    backward_loss = (
+        backward_policy_loss
+        + config.vf_coef * backward_value_loss
+        - config.ent_coef * backward_entropy
+    )
+
+    return PPOLossMetrics(
+        loss=loss,
+        policy_loss=policy_loss,
+        value_loss=value_loss,
+        entropy_loss=entropy_loss,
+        entropy=entropy_mean,
+        approx_kl=_distributed_weighted_mean(
+            approx_kl_values.detach(),
+            policy_weight,
+            context,
+        ),
+        clipfrac=_distributed_weighted_mean(
+            clipfrac_values,
+            policy_weight,
+            context,
+        ),
+        ratio_mean=_distributed_weighted_mean(ratio.detach(), policy_weight, context),
+        ratio_max=_distributed_masked_max_or_zero(
+            ratio.detach(),
+            policy_weight > 0,
+            context,
+        ),
+        logratio_mean=_distributed_weighted_mean(
+            logratio.detach(),
+            policy_weight,
+            context,
+        ),
+        logratio_abs_max=_distributed_masked_max_or_zero(
+            logratio.detach().abs(),
+            policy_weight > 0,
+            context,
+        ),
+        backward_loss=backward_loss,
     )
 
 
@@ -1233,12 +1472,56 @@ def _extend_env_metrics(
         totals.setdefault(key, []).extend(values)
 
 
-def _mean_env_metrics(metrics: dict[str, list[float]]) -> dict[str, float]:
+def _mean_env_metrics(
+    metrics: dict[str, list[float]],
+    *,
+    context: DistributedContext | None = None,
+    device: torch.device | None = None,
+) -> dict[str, float]:
+    if context is not None and context.initialized:
+        return _distributed_mean_env_metrics(
+            metrics,
+            context=context,
+            device=device or context.device,
+        )
+
     logged: dict[str, float] = {}
     for key, values in metrics.items():
         if not values:
             continue
-        logged[f"train/{key}"] = float(sum(values) / len(values))
+        local = torch.tensor(
+            [sum(values), len(values)],
+            dtype=torch.float64,
+            device=device,
+        )
+        if local[1].item() == 0:
+            continue
+        logged[f"train/{key}"] = float((local[0] / local[1]).item())
+    return logged
+
+
+def _distributed_mean_env_metrics(
+    metrics: dict[str, list[float]],
+    *,
+    context: DistributedContext,
+    device: torch.device,
+) -> dict[str, float]:
+    key_sets = all_gather_object(set(metrics), context)
+    keys = sorted(set().union(*key_sets))
+    if not keys:
+        return {}
+
+    local = torch.tensor(
+        [[sum(metrics.get(key, ())), len(metrics.get(key, ()))] for key in keys],
+        dtype=torch.float64,
+        device=device,
+    )
+    totals = all_reduce_sum(local, context)
+    logged: dict[str, float] = {}
+    for key, total in zip(keys, totals, strict=True):
+        if total[1].item() == 0:
+            continue
+        logged[f"train/{key}"] = float((total[0] / total[1]).item())
     return logged
 
 
@@ -1407,6 +1690,68 @@ def _masked_max_or_zero(values: torch.Tensor, mask: torch.Tensor) -> torch.Tenso
         masked.max(),
         torch.zeros((), dtype=values.dtype, device=values.device),
     )
+
+
+def _distributed_weighted_mean(
+    values: torch.Tensor,
+    weights: torch.Tensor,
+    context: DistributedContext,
+) -> torch.Tensor:
+    totals = torch.stack(
+        [
+            (values * weights).sum(),
+            weights.sum().to(dtype=values.dtype),
+        ]
+    )
+    totals = all_reduce_sum(totals, context)
+    return totals[0] / totals[1].clamp_min(1e-8)
+
+
+def _distributed_backward_weighted_mean(
+    values: torch.Tensor,
+    weights: torch.Tensor,
+    context: DistributedContext,
+) -> torch.Tensor:
+    local_numerator = (values * weights).sum()
+    global_denominator = all_reduce_sum(weights.sum().to(dtype=values.dtype), context)
+    return local_numerator * context.world_size / global_denominator.clamp_min(1e-8)
+
+
+def _distributed_masked_max_or_zero(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    context: DistributedContext,
+) -> torch.Tensor:
+    return all_reduce_max(_masked_max_or_zero(values, mask), context)
+
+
+def _distributed_explained_variance(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    valid_mask: torch.Tensor,
+    context: DistributedContext,
+) -> torch.Tensor:
+    values = target[valid_mask]
+    errors = (target - predicted)[valid_mask]
+    local = torch.stack(
+        [
+            values.sum(),
+            values.pow(2).sum(),
+            errors.sum(),
+            errors.pow(2).sum(),
+            torch.tensor(values.numel(), dtype=target.dtype, device=target.device),
+        ]
+    )
+    total = all_reduce_sum(local, context)
+    count = total[4].clamp_min(1.0)
+    target_mean = total[0] / count
+    error_mean = total[2] / count
+    target_variance = total[1] / count - target_mean.pow(2)
+    error_variance = total[3] / count - error_mean.pow(2)
+    if target_variance == 0:
+        return torch.zeros((), dtype=predicted.dtype, device=predicted.device)
+    return 1.0 - error_variance / target_variance
 
 
 def normalize_masked_advantages(

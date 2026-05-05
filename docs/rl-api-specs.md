@@ -5,6 +5,9 @@ The Python config API uses pydantic discriminator fields so future specs can add
 different options without changing the outer `VectorizedEnv` constructor shape.
 `EnvConfig.n_envs` defaults to `2` and must be even so built-in checkpoint
 evaluation can split evaluation games across 2-player and 4-player batches.
+All tensor shapes in this document are local to one `VectorizedEnv` instance.
+Distributed PPO creates one vectorized environment per rank, so global rollout
+width is a training-layer concern rather than an RL API shape change.
 
 ```python
 from owl.rl import ActionPureConfig, EntityBasedConfig, VectorizedEnv

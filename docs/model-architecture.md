@@ -43,6 +43,9 @@ Model YAML files can reference actor presets by name through adjacent
 `configs/model/actor/*.yaml` files, for example `actor: discrete_targets`, or
 can inline an actor config to override preset fields such as mixture count.
 
+`force_flash_attn=True` is ignored for CPU tensors; CPU execution always uses
+the regular SDPA fallback path.
+
 `FullConfig` validates that `env.action_spec.action_spec` matches
 `model.actor.action_spec`. Direct model construction performs the same check
 against the supplied environment action spec.
@@ -99,7 +102,8 @@ mask. CUDA execution uses packed varlen `flash-attn` when it is installed and
 the attention tensors are fp16/bf16; otherwise it uses the same regular-shaped
 scaled-dot-product attention path without packing and unpacking activations.
 Set `force_flash_attn=True` to require packed varlen flash-attn and fail fast
-when the backend, device, or dtype is not compatible.
+when the backend, device, or dtype is not compatible on CUDA. CPU execution
+ignores this flag and uses the SDPA fallback.
 
 Attention uses separate `q`, `k`, and `v` linear layers instead of one packed
 QKV projection. SwiGLU also uses separate gate and value projections. This keeps

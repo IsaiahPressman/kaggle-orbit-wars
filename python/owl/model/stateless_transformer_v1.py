@@ -254,7 +254,10 @@ class StatelessTransformerV1(BaseModelAPI):
         x = torch.cat((planet_x, comet_x, fleet_x, player_tokens), dim=1)
         packed: PackedSequence | None
         should_use_flash = use_flash_attn(x)
-        if self.config.force_flash_attn and not should_use_flash:
+        if (
+            _requires_flash_attn(x, force_flash_attn=self.config.force_flash_attn)
+            and not should_use_flash
+        ):
             raise RuntimeError(
                 "force_flash_attn=True requires CUDA fp16/bf16 tensors "
                 "and the flash-attn package"
@@ -467,7 +470,9 @@ class MultiHeadSelfAttention(nn.Module):
             q = self.q(x).view(seq_len, self.n_heads, self.head_dim)
             k = self.k(x).view(seq_len, self.n_heads, self.head_dim)
             v = self.v(x).view(seq_len, self.n_heads, self.head_dim)
-            if self.force_flash_attn and not use_flash_attn(q):
+            if _requires_flash_attn(
+                q, force_flash_attn=self.force_flash_attn
+            ) and not use_flash_attn(q):
                 raise RuntimeError(
                     "force_flash_attn=True requires CUDA fp16/bf16 attention "
                     "projections and the flash-attn package"
@@ -497,6 +502,14 @@ class MultiHeadSelfAttention(nn.Module):
         )
         attn = attn.transpose(1, 2)
         return self.out(attn.reshape(batch_size, seq_len, -1))
+
+
+def _requires_flash_attn(
+    tensor: torch.Tensor,
+    *,
+    force_flash_attn: bool,
+) -> bool:
+    return force_flash_attn and tensor.device.type != "cpu"
 
 
 def _init_module(module: nn.Module) -> None:

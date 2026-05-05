@@ -60,6 +60,15 @@
         border-top: 1px solid var(--line);
       }
 
+      .content-shell {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 360px;
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        overflow: hidden;
+      }
+
       .renderer-container {
         display: flex;
         flex-direction: column;
@@ -213,6 +222,64 @@
         accent-color: var(--line-active);
       }
 
+      .stats-panel {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        min-height: 0;
+        padding: 12px 12px 12px 0;
+        border-left: 1px solid var(--line);
+        background: #0d0d1a;
+      }
+
+      .stats-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 4px 0 10px 12px;
+        color: var(--text);
+        font-size: 0.85rem;
+        font-weight: 700;
+      }
+
+      .stats-step {
+        color: var(--muted);
+        font-size: 0.75rem;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+
+      .stats-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 10px;
+        padding: 0 0 8px 12px;
+        color: var(--muted);
+        font-size: 0.72rem;
+      }
+
+      .legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+      }
+
+      .legend-line {
+        width: 14px;
+        height: 2px;
+        background: currentColor;
+      }
+
+      .timeline-chart {
+        display: block;
+        flex: 1 1 0;
+        width: 100%;
+        min-height: 180px;
+        cursor: crosshair;
+        touch-action: none;
+      }
+
       .canvas-wrapper {
         position: relative;
         flex: 1 1 0;
@@ -224,7 +291,7 @@
         container-type: size;
       }
 
-      canvas {
+      #board {
         display: block;
         width: min(100cqw, 100cqh);
         height: min(100cqw, 100cqh);
@@ -285,6 +352,23 @@
           width: 78vw;
         }
       }
+
+      @media (max-width: 980px) {
+        .content-shell {
+          grid-template-columns: 1fr;
+          grid-template-rows: minmax(0, 1fr) 220px;
+        }
+
+        .stats-panel {
+          padding: 8px 12px;
+          border-left: 0;
+          border-top: 1px solid var(--line);
+        }
+
+        .timeline-chart {
+          min-height: 120px;
+        }
+      }
     </style>
   </head>
   <body>
@@ -294,22 +378,33 @@
       <div class="status" id="fileStatus">No replay loaded</div>
     </div>
 
-    <main class="renderer-container">
-      <div class="header" id="header"></div>
-      <div class="controls-bar">
-        <button id="fleetBtn" class="active" type="button">Fleet #</button>
-        <button id="productionBtn" class="active" type="button">Production</button>
-        <span class="ctrl-group">
-          <span class="ctrl-label">Text:</span>
-          <button class="text-size" data-size="small" type="button">Small</button>
-          <button class="text-size active" data-size="medium" type="button">Medium</button>
-          <button class="text-size" data-size="large" type="button">Large</button>
-        </span>
-      </div>
-      <div class="canvas-wrapper" id="canvasWrapper">
-        <canvas id="board"></canvas>
-      </div>
-    </main>
+    <div class="content-shell">
+      <main class="renderer-container">
+        <div class="header" id="header"></div>
+        <div class="controls-bar">
+          <button id="fleetBtn" class="active" type="button">Fleet #</button>
+          <button id="productionBtn" class="active" type="button">Production</button>
+          <span class="ctrl-group">
+            <span class="ctrl-label">Text:</span>
+            <button class="text-size" data-size="small" type="button">Small</button>
+            <button class="text-size active" data-size="medium" type="button">Medium</button>
+            <button class="text-size" data-size="large" type="button">Large</button>
+          </span>
+        </div>
+        <div class="canvas-wrapper" id="canvasWrapper">
+          <canvas id="board"></canvas>
+        </div>
+      </main>
+
+      <aside class="stats-panel" aria-label="Replay statistics timeline">
+        <div class="stats-header">
+          <span>Timeline</span>
+          <span class="stats-step" id="timelineStep">Step 0</span>
+        </div>
+        <div class="stats-legend" id="timelineLegend"></div>
+        <canvas class="timeline-chart" id="timelineChart"></canvas>
+      </aside>
+    </div>
 
     <div class="timeline">
       <button id="backBtn" class="icon step" type="button" title="Previous frame">⏮</button>
@@ -349,12 +444,17 @@
       const nextBtn = document.getElementById("nextBtn");
       const fleetBtn = document.getElementById("fleetBtn");
       const productionBtn = document.getElementById("productionBtn");
+      const timelineStep = document.getElementById("timelineStep");
+      const timelineLegend = document.getElementById("timelineLegend");
+      const timelineChart = document.getElementById("timelineChart");
 
       let episodes = [];
       let episode = null;
       let frameIndex = 0;
       let playing = false;
       let timer = null;
+      let timelineDataCache = null;
+      let scrubbingTimeline = false;
       let settings = {
         showFleetNumbers: true,
         showProductionDots: true,
@@ -419,6 +519,7 @@
       function loadEpisode(index) {
         episode = episodes[index] || null;
         frameIndex = 0;
+        timelineDataCache = null;
         stepSlider.max = Math.max(0, (episode?.frames?.length || 1) - 1);
         stepSlider.value = "0";
         render();
@@ -434,6 +535,14 @@
 
       function currentFleets() {
         return (frame()?.fleets || []).map(asFleet);
+      }
+
+      function framePlanets(sourceFrame) {
+        return (sourceFrame?.planets || []).map(asPlanet);
+      }
+
+      function frameFleets(sourceFrame) {
+        return (sourceFrame?.fleets || []).map(asFleet);
       }
 
       function previousPlanetMap() {
@@ -483,6 +592,16 @@
         return values;
       }
 
+      function productionTotals(planets) {
+        const values = [0, 0, 0, 0];
+        for (const planet of planets) {
+          if (planet.owner >= 0 && planet.owner < values.length && !planet.is_comet) {
+            values[planet.owner] += Math.floor(planet.production || 0);
+          }
+        }
+        return values;
+      }
+
       function activePlayers(planets, fleets) {
         const values = new Set();
         for (const planet of planets) if (planet.owner >= 0) values.add(planet.owner);
@@ -521,6 +640,7 @@
         const fleets = currentFleets();
         renderHeader(planets, fleets);
         drawBoard(currentFrame, planets, fleets);
+        drawTimeline();
 
         const frameCount = episode?.frames?.length || 0;
         stepSlider.max = Math.max(0, frameCount - 1);
@@ -529,6 +649,197 @@
         frameStatus.textContent = frameCount
           ? `Frame ${frameIndex + 1} / ${frameCount} · Step ${step}`
           : "Frame 0 / 0";
+        timelineStep.textContent = frameCount ? `Step ${step}` : "Step 0";
+      }
+
+      function timelineData() {
+        if (timelineDataCache) return timelineDataCache;
+        const frames = episode?.frames || [];
+        const firstFrame = frames[0] || null;
+        const slots = activeOuterSlots(episode, firstFrame);
+        const samples = frames.map((sourceFrame) => {
+          const planets = framePlanets(sourceFrame);
+          const fleets = frameFleets(sourceFrame);
+          return {
+            step: sourceFrame?.step ?? 0,
+            ships: scores(planets, fleets),
+            production: productionTotals(planets),
+          };
+        });
+        const maxShips = Math.max(1, ...samples.flatMap((sample) => slots.map((slot) => sample.ships[slot] || 0)));
+        const maxProduction = Math.max(
+          1,
+          ...samples.flatMap((sample) => slots.map((slot) => sample.production[slot] || 0)),
+        );
+        timelineDataCache = { frames, maxProduction, maxShips, samples, slots };
+        return timelineDataCache;
+      }
+
+      function drawTimeline() {
+        const dpr = window.devicePixelRatio || 1;
+        const rect = timelineChart.getBoundingClientRect();
+        const width = Math.max(160, Math.floor(rect.width));
+        const height = Math.max(160, Math.floor(rect.height));
+        timelineChart.width = Math.round(width * dpr);
+        timelineChart.height = Math.round(height * dpr);
+        const c = timelineChart.getContext("2d");
+        if (!c) return;
+        c.scale(dpr, dpr);
+        c.fillStyle = "#080812";
+        c.fillRect(0, 0, width, height);
+
+        const data = timelineData();
+        renderTimelineLegend(data.slots);
+        if (!data.frames.length) {
+          c.fillStyle = "#888";
+          c.font = "12px Inter, sans-serif";
+          c.textAlign = "center";
+          c.textBaseline = "middle";
+          c.fillText("Open a replay to plot turns", width / 2, height / 2);
+          return;
+        }
+
+        const left = 38;
+        const right = 10;
+        const top = 18;
+        const bottom = 32;
+        const gap = 28;
+        const bandHeight = (height - top - bottom - gap) / 2;
+        const plotWidth = Math.max(1, width - left - right);
+        const shipsBand = { y: top, height: bandHeight, max: data.maxShips, label: "Ships / turn" };
+        const productionBand = {
+          y: top + bandHeight + gap,
+          height: bandHeight,
+          max: data.maxProduction,
+          label: "Production / turn",
+        };
+
+        drawTimelineBand(c, data, shipsBand, "ships", left, plotWidth);
+        drawTimelineBand(c, data, productionBand, "production", left, plotWidth);
+        drawTimelineXAxis(c, data, left, plotWidth, height - bottom + 8, top, height - bottom);
+
+        const selectedX = frameToTimelineX(frameIndex, data.frames.length, left, plotWidth);
+        c.strokeStyle = "#ffffff";
+        c.lineWidth = 1;
+        c.beginPath();
+        c.moveTo(selectedX, top - 4);
+        c.lineTo(selectedX, height - bottom + 4);
+        c.stroke();
+      }
+
+      function renderTimelineLegend(slots) {
+        timelineLegend.innerHTML = slots
+          .map(
+            (slot) =>
+              `<span class="legend-item" style="color:${playerColor(slot)}">` +
+              `<span class="legend-line"></span>${playerName(episode, slot)}` +
+              `</span>`,
+          )
+          .join("");
+      }
+
+      function drawTimelineBand(c, data, band, metric, left, plotWidth) {
+        const yBottom = band.y + band.height;
+        c.fillStyle = "#aaa";
+        c.font = "11px Inter, sans-serif";
+        c.textAlign = "left";
+        c.textBaseline = "top";
+        c.fillText(band.label, left, band.y - 15);
+        c.textAlign = "right";
+        c.fillStyle = "#777";
+        c.fillText(String(Math.ceil(band.max)), left - 6, band.y - 4);
+        c.fillText("0", left - 6, yBottom - 9);
+
+        c.strokeStyle = "#2a2a38";
+        c.lineWidth = 1;
+        c.beginPath();
+        c.moveTo(left, band.y);
+        c.lineTo(left + plotWidth, band.y);
+        c.moveTo(left, yBottom);
+        c.lineTo(left + plotWidth, yBottom);
+        c.stroke();
+
+        for (const slot of data.slots) {
+          c.beginPath();
+          for (let index = 0; index < data.samples.length; index++) {
+            const sample = data.samples[index];
+            const x = frameToTimelineX(index, data.samples.length, left, plotWidth);
+            const value = sample[metric][slot] || 0;
+            const y = yBottom - (value / band.max) * band.height;
+            if (index === 0) c.moveTo(x, y);
+            else c.lineTo(x, y);
+          }
+          c.strokeStyle = playerColor(slot);
+          c.lineWidth = 2;
+          c.stroke();
+        }
+      }
+
+      function drawTimelineXAxis(c, data, left, plotWidth, axisY, top, bottom) {
+        c.strokeStyle = "#444";
+        c.lineWidth = 1;
+        c.beginPath();
+        c.moveTo(left, axisY);
+        c.lineTo(left + plotWidth, axisY);
+        c.stroke();
+
+        const tickIndexes = timelineTickIndexes(data.samples.length);
+        c.font = "10px Inter, sans-serif";
+        c.textAlign = "center";
+        c.textBaseline = "top";
+        for (const index of tickIndexes) {
+          const x = frameToTimelineX(index, data.samples.length, left, plotWidth);
+          c.strokeStyle = "rgba(255, 255, 255, 0.12)";
+          c.beginPath();
+          c.moveTo(x, top);
+          c.lineTo(x, bottom);
+          c.stroke();
+
+          c.strokeStyle = "#666";
+          c.beginPath();
+          c.moveTo(x, axisY);
+          c.lineTo(x, axisY + 4);
+          c.stroke();
+
+          c.fillStyle = "#777";
+          c.fillText(String(data.samples[index]?.step ?? index), x, axisY + 6);
+        }
+
+        c.textAlign = "right";
+        c.fillStyle = "#777";
+        c.fillText("Step", left + plotWidth, axisY + 18);
+      }
+
+      function timelineTickIndexes(frameCount) {
+        if (frameCount <= 1) return [0];
+        const tickCount = Math.min(5, frameCount);
+        const indexes = [];
+        for (let tick = 0; tick < tickCount; tick++) {
+          indexes.push(Math.round((tick * (frameCount - 1)) / (tickCount - 1)));
+        }
+        return [...new Set(indexes)];
+      }
+
+      function frameToTimelineX(index, frameCount, left, plotWidth) {
+        if (frameCount <= 1) return left;
+        return left + (index / (frameCount - 1)) * plotWidth;
+      }
+
+      function timelineFrameFromPointer(event) {
+        const frameCount = episode?.frames?.length || 0;
+        if (!frameCount) return 0;
+        const rect = timelineChart.getBoundingClientRect();
+        const left = 38;
+        const right = 10;
+        const plotWidth = Math.max(1, rect.width - left - right);
+        const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left - left) / plotWidth));
+        return Math.round(ratio * (frameCount - 1));
+      }
+
+      function setFrame(index) {
+        const frameCount = episode?.frames?.length || 1;
+        frameIndex = Math.min(frameCount - 1, Math.max(0, index));
+        render();
       }
 
       function drawBoard(currentFrame, planets, fleets) {
@@ -782,15 +1093,12 @@
         timer = window.setInterval(() => {
           if (!episode?.frames?.length) return setPlaying(false);
           if (frameIndex >= episode.frames.length - 1) return setPlaying(false);
-          frameIndex += 1;
-          render();
+          setFrame(frameIndex + 1);
         }, Math.max(30, ORBIT_WARS_STEP_DURATION_MS / speed));
       }
 
       function stepFrame(delta) {
-        const frameCount = episode?.frames?.length || 1;
-        frameIndex = Math.min(frameCount - 1, Math.max(0, frameIndex + delta));
-        render();
+        setFrame(frameIndex + delta);
       }
 
       function shiftSpeed(delta) {
@@ -818,8 +1126,32 @@
 
       episodeSelect.addEventListener("change", () => loadEpisode(Number(episodeSelect.value)));
       stepSlider.addEventListener("input", () => {
-        frameIndex = Number(stepSlider.value);
-        render();
+        setFrame(Number(stepSlider.value));
+      });
+      timelineChart.addEventListener("pointerdown", (event) => {
+        if (!episode?.frames?.length) return;
+        scrubbingTimeline = true;
+        setPlaying(false);
+        timelineChart.setPointerCapture(event.pointerId);
+        setFrame(timelineFrameFromPointer(event));
+        event.preventDefault();
+      });
+      timelineChart.addEventListener("pointermove", (event) => {
+        if (!scrubbingTimeline) return;
+        setFrame(timelineFrameFromPointer(event));
+        event.preventDefault();
+      });
+      timelineChart.addEventListener("pointerup", (event) => {
+        scrubbingTimeline = false;
+        if (timelineChart.hasPointerCapture(event.pointerId)) {
+          timelineChart.releasePointerCapture(event.pointerId);
+        }
+      });
+      timelineChart.addEventListener("pointercancel", (event) => {
+        scrubbingTimeline = false;
+        if (timelineChart.hasPointerCapture(event.pointerId)) {
+          timelineChart.releasePointerCapture(event.pointerId);
+        }
       });
       speedSelect.addEventListener("change", () => {
         if (playing) setPlaying(true);
