@@ -21,6 +21,12 @@ from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS
 
 
 @dataclass(frozen=True)
+class DiscreteActorInputs:
+    source: torch.Tensor
+    target: torch.Tensor
+
+
+@dataclass(frozen=True)
 class DiscreteTargetSelectionParams:
     continue_logits: torch.Tensor
     target_logits: torch.Tensor
@@ -56,7 +62,10 @@ class DiscreteTargetsActor(nn.Module):
         self.head_dim = transformer_config.embed_dim
         mixtures = config.n_action_mixtures
 
-        self.norm1 = nn.LayerNorm(transformer_config.embed_dim)
+        self.source_role = nn.Embedding(1, transformer_config.embed_dim)
+        self.target_role = nn.Embedding(1, transformer_config.embed_dim)
+        self.source_norm = nn.LayerNorm(transformer_config.embed_dim)
+        self.target_norm = nn.LayerNorm(transformer_config.embed_dim)
         self.q = nn.Linear(transformer_config.embed_dim, transformer_config.embed_dim)
         self.k = nn.Linear(transformer_config.embed_dim, transformer_config.embed_dim)
         self.v = nn.Linear(transformer_config.embed_dim, transformer_config.embed_dim)
@@ -77,7 +86,7 @@ class DiscreteTargetsActor(nn.Module):
         self.scale_head = OutputProjectionMLP(transformer_config, mixtures)
 
     def get_input_layers(self) -> tuple[nn.Module, ...]:
-        return ()
+        return (self.source_role, self.target_role)
 
     def get_output_layers(self) -> tuple[nn.Linear, ...]:
         return (
@@ -89,14 +98,14 @@ class DiscreteTargetsActor(nn.Module):
 
     def forward(
         self,
-        slot_input: torch.Tensor,
+        actor_inputs: DiscreteActorInputs,
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
         *,
         min_fleet_size: int,
         deterministic: bool,
     ) -> tuple[ModelActions, ModelActionLogProbs, ModelActionEntropies]:
-        selection = self._selection_params(slot_input, can_act)
+        selection = self._selection_params(actor_inputs, can_act)
         source_active = can_act.any(dim=-1) & (max_launch >= min_fleet_size)
         launch = sample_launch(
             selection.continue_logits,
@@ -110,7 +119,7 @@ class DiscreteTargetsActor(nn.Module):
         target = torch.where(launch, target, torch.zeros_like(target))
         params = self._policy_params_for_selected_target(
             selection,
-            slot_input,
+            actor_inputs.source,
             max_launch,
             target,
             min_fleet_size=min_fleet_size,
@@ -127,7 +136,7 @@ class DiscreteTargetsActor(nn.Module):
 
         entropy_params = self._policy_params_for_entropy(
             selection,
-            slot_input,
+            actor_inputs.source,
             max_launch,
             min_fleet_size=min_fleet_size,
         )
@@ -186,7 +195,7 @@ class DiscreteTargetsActor(nn.Module):
 
     def log_prob(
         self,
-        slot_input: torch.Tensor,
+        actor_inputs: DiscreteActorInputs,
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
         actions: ModelActions,
@@ -196,7 +205,7 @@ class DiscreteTargetsActor(nn.Module):
         _require_discrete_actions_shape(
             actions,
             (
-                slot_input.shape[0],
+                actor_inputs.source.shape[0],
                 OUTER_PLAYER_SLOTS,
                 ACTION_ENTITY_SLOTS,
                 1,
@@ -204,7 +213,7 @@ class DiscreteTargetsActor(nn.Module):
         )
         if actions.target is None:
             raise ValueError("discrete target actions require actions.target")
-        selection = self._selection_params(slot_input, can_act)
+        selection = self._selection_params(actor_inputs, can_act)
         source_active = can_act.any(dim=-1) & (max_launch >= min_fleet_size)
         launch = actions.launch[..., 0]
         target = actions.target[..., 0]
@@ -220,14 +229,14 @@ class DiscreteTargetsActor(nn.Module):
         )
         params = self._policy_params_for_selected_target(
             selection,
-            slot_input,
+            actor_inputs.source,
             max_launch,
             target.clamp(0, ACTION_ENTITY_SLOTS - 1),
             min_fleet_size=min_fleet_size,
         )
         entropy_params = self._policy_params_for_entropy(
             selection,
-            slot_input,
+            actor_inputs.source,
             max_launch,
             min_fleet_size=min_fleet_size,
         )
@@ -280,17 +289,35 @@ class DiscreteTargetsActor(nn.Module):
 
     def _selection_params(
         self,
-        slot_input: torch.Tensor,
+        actor_inputs: DiscreteActorInputs,
         can_act: torch.Tensor,
     ) -> DiscreteTargetSelectionParams:
+        source_input = actor_inputs.source
+        target_input = actor_inputs.target
+        expected_input_shape = (
+            source_input.shape[0],
+            OUTER_PLAYER_SLOTS,
+            ACTION_ENTITY_SLOTS,
+            self.head_dim,
+        )
+        if source_input.shape != expected_input_shape:
+            raise ValueError(
+                "discrete target source input must have shape "
+                f"{expected_input_shape}, got {tuple(source_input.shape)}"
+            )
+        if target_input.shape != expected_input_shape:
+            raise ValueError(
+                "discrete target target input must have shape "
+                f"{expected_input_shape}, got {tuple(target_input.shape)}"
+            )
         if can_act.shape != (
-            slot_input.shape[0],
+            source_input.shape[0],
             OUTER_PLAYER_SLOTS,
             ACTION_ENTITY_SLOTS,
             ACTION_ENTITY_SLOTS,
         ):
             expected_shape = (
-                slot_input.shape[0],
+                source_input.shape[0],
                 OUTER_PLAYER_SLOTS,
                 ACTION_ENTITY_SLOTS,
                 ACTION_ENTITY_SLOTS,
@@ -299,10 +326,13 @@ class DiscreteTargetsActor(nn.Module):
                 "discrete target can_act must have shape "
                 f"{expected_shape}, got {tuple(can_act.shape)}"
             )
-        x = self.norm1(slot_input)
-        q = self.q(x)
-        k = self.k(x)
-        v = self.v(x)
+        source_role = self.source_role.weight.to(dtype=source_input.dtype)
+        target_role = self.target_role.weight.to(dtype=target_input.dtype)
+        source_x = self.source_norm(source_input + source_role)
+        target_x = self.target_norm(target_input + target_role)
+        q = self.q(source_x)
+        k = self.k(target_x)
+        v = self.v(target_x)
         target_logits = torch.einsum("bpsd,bptd->bpst", q, k)
         target_logits = target_logits / math.sqrt(self.head_dim)
         target_logits = target_logits.masked_fill(
@@ -314,7 +344,7 @@ class DiscreteTargetsActor(nn.Module):
             target_logits,
             torch.zeros_like(target_logits),
         )
-        launch_hidden = self.continue_source_proj(slot_input)
+        launch_hidden = self.continue_source_proj(source_input)
         return DiscreteTargetSelectionParams(
             continue_logits=self.continue_head(launch_hidden).squeeze(-1),
             target_logits=safe_target_logits,
@@ -324,7 +354,7 @@ class DiscreteTargetsActor(nn.Module):
     def _policy_params_for_selected_target(
         self,
         selection: DiscreteTargetSelectionParams,
-        slot_input: torch.Tensor,
+        source_input: torch.Tensor,
         max_launch: torch.Tensor,
         target_index: torch.Tensor,
         *,
@@ -335,7 +365,7 @@ class DiscreteTargetsActor(nn.Module):
             target_index,
         )
         size_params = self._size_params_from_target_values(
-            slot_input,
+            source_input,
             max_launch,
             selected_target_values,
             min_fleet_size=min_fleet_size,
@@ -345,7 +375,7 @@ class DiscreteTargetsActor(nn.Module):
     def _policy_params_for_entropy(
         self,
         selection: DiscreteTargetSelectionParams,
-        slot_input: torch.Tensor,
+        source_input: torch.Tensor,
         max_launch: torch.Tensor,
         *,
         min_fleet_size: int,
@@ -353,7 +383,7 @@ class DiscreteTargetsActor(nn.Module):
         target_index = selection.target_logits.argmax(dim=-1)
         return self._policy_params_for_selected_target(
             selection,
-            slot_input,
+            source_input,
             max_launch,
             target_index,
             min_fleet_size=min_fleet_size,
@@ -362,12 +392,12 @@ class DiscreteTargetsActor(nn.Module):
     def _all_size_params(
         self,
         selection: DiscreteTargetSelectionParams,
-        slot_input: torch.Tensor,
+        source_input: torch.Tensor,
         max_launch: torch.Tensor,
         *,
         min_fleet_size: int,
     ) -> DiscreteTargetSizeParams:
-        batch, players, source_slots, _ = slot_input.shape
+        batch, players, source_slots, _ = source_input.shape
         target_slots = selection.target_values.shape[2]
         target_values = selection.target_values.unsqueeze(2).expand(
             batch,
@@ -377,7 +407,7 @@ class DiscreteTargetsActor(nn.Module):
             self.head_dim,
         )
         return self._size_params_from_target_values(
-            slot_input.unsqueeze(3),
+            source_input.unsqueeze(3),
             max_launch,
             target_values,
             min_fleet_size=min_fleet_size,
@@ -385,14 +415,14 @@ class DiscreteTargetsActor(nn.Module):
 
     def _size_params_from_target_values(
         self,
-        slot_input: torch.Tensor,
+        source_input: torch.Tensor,
         max_launch: torch.Tensor,
         target_values: torch.Tensor,
         *,
         min_fleet_size: int,
     ) -> DiscreteTargetSizeParams:
         selected_v = self.out(target_values)
-        enriched = slot_input + selected_v
+        enriched = source_input + selected_v
         enriched = enriched + self.mlp(self.norm2(enriched))
         source_hidden = self.size_pair_proj(enriched)
 

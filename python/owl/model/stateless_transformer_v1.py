@@ -25,6 +25,7 @@ from owl.model.actor.common import (
     sample_launch,
 )
 from owl.model.actor.discrete_targets import (
+    DiscreteActorInputs,
     DiscreteTargetPolicyParams,
     DiscreteTargetSizeParams,
     discrete_action_entropy,
@@ -59,9 +60,11 @@ __all__ = [
     "STATELESS_TRANSFORMER_V1",
     "ActorDiscreteTargetsConfig",
     "ActorPureConfig",
+    "DiscreteActorInputs",
     "DiscreteTargetPolicyParams",
     "DiscreteTargetSizeParams",
     "DiscreteTargetsActor",
+    "EncodedObservations",
     "FeedForward",
     "MinGRUCell",
     "ModelConfig",
@@ -102,6 +105,7 @@ class StatelessTransformerV1Config(BaseConfig):
     mlp_ratio: float = Field(default=4.0, gt=0.0)
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
     force_flash_attn: bool = False
+    n_board_tokens: int = Field(default=4, ge=0)
     actor: ActorConfig = Field(default_factory=ActorPureConfig)
 
     @classmethod
@@ -130,6 +134,18 @@ class PackedSequence:
     max_seqlen: int
     batch_size: int
     padded_seq_len: int
+
+
+@dataclass(frozen=True)
+class EncodedObservations:
+    hidden: torch.Tensor
+    token_mask: torch.Tensor
+    action_entity_hidden: torch.Tensor
+    player_hidden: torch.Tensor
+    global_feature_hidden: torch.Tensor
+    board_hidden: torch.Tensor
+    actor_plan_hidden: torch.Tensor
+    critic_value_hidden: torch.Tensor
 
 
 class StatelessTransformerV1(BaseModelAPI):
@@ -166,12 +182,28 @@ class StatelessTransformerV1(BaseModelAPI):
             )
 
         dim = self.config.embed_dim
-        self.static_planet_proj = nn.Linear(self.obs_spec.planet_channels, dim)
-        self.orbit_planet_proj = nn.Linear(self.obs_spec.planet_channels, dim)
-        self.fleet_proj = nn.Linear(self.obs_spec.fleet_channels, dim)
-        self.comet_proj = nn.Linear(self.obs_spec.comet_channels, dim)
-        self.global_proj = nn.Linear(self.obs_spec.global_channels, dim)
+        self.static_planet_proj = ObservationInputStem(
+            self.obs_spec.planet_channels,
+            self.config,
+        )
+        self.orbit_planet_proj = ObservationInputStem(
+            self.obs_spec.planet_channels,
+            self.config,
+        )
+        self.fleet_proj = ObservationInputStem(
+            self.obs_spec.fleet_channels, self.config
+        )
+        self.comet_proj = ObservationInputStem(
+            self.obs_spec.comet_channels, self.config
+        )
+        self.global_proj = ObservationInputStem(
+            self.obs_spec.global_channels,
+            self.config,
+        )
         self.player_tokens = nn.Embedding(OUTER_PLAYER_SLOTS, dim)
+        self.board_tokens = nn.Embedding(self.config.n_board_tokens, dim)
+        self.actor_plan_tokens = nn.Embedding(OUTER_PLAYER_SLOTS, dim)
+        self.critic_value_tokens = nn.Embedding(OUTER_PLAYER_SLOTS, dim)
 
         self.blocks = nn.ModuleList(
             TransformerBlock(self.config) for _ in range(self.config.depth)
@@ -180,9 +212,12 @@ class StatelessTransformerV1(BaseModelAPI):
 
         self.critic_head = OutputProjectionMLP(self.config, 1)
         self.action_info_proj = nn.Linear(MAX_LAUNCH_FEATURES, dim)
-        self.actor_input_proj = nn.Linear(dim * 3, dim)
+        self.pure_actor_input_proj: nn.Linear | None = None
+        self.source_actor_input_proj: nn.Linear | None = None
+        self.target_actor_input_proj: nn.Linear | None = None
         self.actor: PureActor | DiscreteTargetsActor
         if isinstance(action_spec, ActionPureConfig):
+            self.pure_actor_input_proj = nn.Linear(dim * 3, dim)
             self.actor = PureActor(
                 cast(ActorPureConfig, self.config.actor),
                 embed_dim=dim,
@@ -190,6 +225,8 @@ class StatelessTransformerV1(BaseModelAPI):
                 activation=self.config.activation,
             )
         else:
+            self.source_actor_input_proj = nn.Linear(dim * 4, dim)
+            self.target_actor_input_proj = nn.Linear(dim * 3, dim)
             self.actor = DiscreteTargetsActor(
                 cast(ActorDiscreteTargetsConfig, self.config.actor),
                 transformer_config=self.config,
@@ -215,22 +252,36 @@ class StatelessTransformerV1(BaseModelAPI):
             _init_linear(layer, gain=gain)
 
     def get_input_layers(self) -> tuple[nn.Module, ...]:
+        actor_input_layers = [
+            layer
+            for layer in (
+                self.pure_actor_input_proj,
+                self.source_actor_input_proj,
+                self.target_actor_input_proj,
+            )
+            if layer is not None
+        ]
         return (
-            self.static_planet_proj,
-            self.orbit_planet_proj,
-            self.fleet_proj,
-            self.comet_proj,
-            self.global_proj,
+            self.static_planet_proj.input,
+            self.orbit_planet_proj.input,
+            self.fleet_proj.input,
+            self.comet_proj.input,
+            self.global_proj.input,
             self.player_tokens,
+            self.board_tokens,
+            self.actor_plan_tokens,
+            self.critic_value_tokens,
             self.action_info_proj,
+            *actor_input_layers,
             *self.actor.get_input_layers(),
         )
 
     def get_output_layers(self) -> tuple[nn.Linear, ...]:
         return (self.critic_head.out, *self.actor.get_output_layers())
 
-    def encode_observations(self, obs: ObsBatch) -> tuple[torch.Tensor, torch.Tensor]:
-        global_token = self.global_proj(obs.global_features).unsqueeze(1)
+    def encode_observations(self, obs: ObsBatch) -> EncodedObservations:
+        global_x = self.global_proj(obs.global_features)
+        global_token = global_x.unsqueeze(1)
         orbiting = obs.orbiting_planets.unsqueeze(-1)
         planet_x = (
             torch.where(
@@ -242,15 +293,56 @@ class StatelessTransformerV1(BaseModelAPI):
         )
         fleet_x = self.fleet_proj(obs.fleets) + global_token
         comet_x = self.comet_proj(obs.comets) + global_token
-        player_tokens = self.player_tokens.weight.to(dtype=global_token.dtype)
-        player_tokens = player_tokens.unsqueeze(0).expand(
-            obs.planets.shape[0],
-            -1,
-            -1,
+        batch_size = obs.planets.shape[0]
+        player_tokens = _expand_tokens(
+            self.player_tokens,
+            batch_size,
+            dtype=global_token.dtype,
+        )
+        board_tokens = _expand_tokens(
+            self.board_tokens,
+            batch_size,
+            dtype=global_token.dtype,
+        )
+        actor_plan_tokens = _expand_tokens(
+            self.actor_plan_tokens,
+            batch_size,
+            dtype=global_token.dtype,
+        )
+        critic_value_tokens = _expand_tokens(
+            self.critic_value_tokens,
+            batch_size,
+            dtype=global_token.dtype,
         )
 
-        token_mask = torch.cat((obs.entity_mask, obs.still_playing), dim=1)
-        x = torch.cat((planet_x, comet_x, fleet_x, player_tokens), dim=1)
+        always_on_mask = torch.ones(
+            (batch_size, 1 + self.config.n_board_tokens),
+            dtype=torch.bool,
+            device=obs.entity_mask.device,
+        )
+        token_mask = torch.cat(
+            (
+                obs.entity_mask,
+                obs.still_playing,
+                always_on_mask,
+                obs.still_playing,
+                obs.still_playing,
+            ),
+            dim=1,
+        )
+        x = torch.cat(
+            (
+                planet_x,
+                comet_x,
+                fleet_x,
+                player_tokens,
+                global_token,
+                board_tokens,
+                actor_plan_tokens,
+                critic_value_tokens,
+            ),
+            dim=1,
+        )
         packed: PackedSequence | None
         should_use_flash = use_flash_attn(x)
         if (
@@ -273,7 +365,26 @@ class StatelessTransformerV1(BaseModelAPI):
         if packed is not None:
             x = unpack_sequence(x, packed)
         x = x.masked_fill(~token_mask.unsqueeze(-1), 0.0)
-        return x, token_mask
+        entity_count = obs.entity_mask.shape[1]
+        player_start = entity_count
+        global_start = player_start + OUTER_PLAYER_SLOTS
+        board_start = global_start + 1
+        actor_plan_start = board_start + self.config.n_board_tokens
+        critic_value_start = actor_plan_start + OUTER_PLAYER_SLOTS
+        return EncodedObservations(
+            hidden=x,
+            token_mask=token_mask,
+            action_entity_hidden=x[:, :ACTION_ENTITY_SLOTS, :],
+            player_hidden=x[:, player_start:global_start, :],
+            global_feature_hidden=x[:, global_start : global_start + 1, :],
+            board_hidden=x[:, board_start:actor_plan_start, :],
+            actor_plan_hidden=x[:, actor_plan_start:critic_value_start, :],
+            critic_value_hidden=x[
+                :,
+                critic_value_start : critic_value_start + OUTER_PLAYER_SLOTS,
+                :,
+            ],
+        )
 
     def forward(
         self,
@@ -281,10 +392,10 @@ class StatelessTransformerV1(BaseModelAPI):
         *,
         deterministic: bool = False,
     ) -> ModelOutput:
-        hidden, _ = self.encode_observations(obs)
-        values, winner_probabilities = self._value_from_hidden(hidden, obs)
+        encoded = self.encode_observations(obs)
+        values, winner_probabilities = self._value_from_encoded(encoded, obs)
         actions, log_probs, entropies = self._actor(
-            hidden,
+            encoded,
             obs.can_act,
             obs.max_launch,
             obs.max_launch_features,
@@ -303,10 +414,10 @@ class StatelessTransformerV1(BaseModelAPI):
         obs: ObsBatch,
         actions: ModelActions,
     ) -> ModelEvaluation:
-        hidden, _ = self.encode_observations(obs)
-        values, winner_probabilities = self._value_from_hidden(hidden, obs)
+        encoded = self.encode_observations(obs)
+        values, winner_probabilities = self._value_from_encoded(encoded, obs)
         log_probs, entropies = self._actor_log_prob(
-            hidden,
+            encoded,
             obs.can_act,
             obs.max_launch,
             obs.max_launch_features,
@@ -320,17 +431,16 @@ class StatelessTransformerV1(BaseModelAPI):
         )
 
     def compute_value(self, obs: ObsBatch) -> torch.Tensor:
-        hidden, _ = self.encode_observations(obs)
-        values, _winner_probabilities = self._value_from_hidden(hidden, obs)
+        encoded = self.encode_observations(obs)
+        values, _winner_probabilities = self._value_from_encoded(encoded, obs)
         return values
 
-    def _value_from_hidden(
+    def _value_from_encoded(
         self,
-        hidden: torch.Tensor,
+        encoded: EncodedObservations,
         obs: ObsBatch,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        player_hidden = hidden[:, -OUTER_PLAYER_SLOTS:, :]
-        return self._critic(player_hidden, obs.still_playing)
+        return self._critic(encoded.critic_value_hidden, obs.still_playing)
 
     def _critic(
         self,
@@ -352,20 +462,20 @@ class StatelessTransformerV1(BaseModelAPI):
         values = 2.0 * probabilities - 1.0
         return values, probabilities
 
-    def _actor_inputs(
+    def _pure_actor_inputs(
         self,
-        hidden: torch.Tensor,
+        encoded: EncodedObservations,
         max_launch_features: torch.Tensor,
     ) -> torch.Tensor:
-        action_entity_hidden = hidden[:, :ACTION_ENTITY_SLOTS, :]
+        action_entity_hidden = encoded.action_entity_hidden
         if max_launch_features.shape != (
-            hidden.shape[0],
+            encoded.hidden.shape[0],
             OUTER_PLAYER_SLOTS,
             ACTION_ENTITY_SLOTS,
             MAX_LAUNCH_FEATURES,
         ):
             expected_shape = (
-                hidden.shape[0],
+                encoded.hidden.shape[0],
                 OUTER_PLAYER_SLOTS,
                 ACTION_ENTITY_SLOTS,
                 MAX_LAUNCH_FEATURES,
@@ -375,7 +485,7 @@ class StatelessTransformerV1(BaseModelAPI):
                 f"{expected_shape}, got {tuple(max_launch_features.shape)}"
             )
 
-        player_hidden = hidden[:, -OUTER_PLAYER_SLOTS:, :]
+        player_hidden = encoded.player_hidden
         entity_features = action_entity_hidden[:, None, :, :].expand(
             -1,
             OUTER_PLAYER_SLOTS,
@@ -391,21 +501,88 @@ class StatelessTransformerV1(BaseModelAPI):
         action_features = self.action_info_proj(
             max_launch_features.to(dtype=action_entity_hidden.dtype)
         )
-        return self.actor_input_proj(
+        if self.pure_actor_input_proj is None:
+            raise RuntimeError("pure actor input projection is not initialized")
+        return self.pure_actor_input_proj(
             torch.cat((entity_features, player_features, action_features), dim=-1)
         )
 
+    def _discrete_actor_inputs(
+        self,
+        encoded: EncodedObservations,
+        max_launch_features: torch.Tensor,
+    ) -> DiscreteActorInputs:
+        action_entity_hidden = encoded.action_entity_hidden
+        if max_launch_features.shape != (
+            encoded.hidden.shape[0],
+            OUTER_PLAYER_SLOTS,
+            ACTION_ENTITY_SLOTS,
+            MAX_LAUNCH_FEATURES,
+        ):
+            expected_shape = (
+                encoded.hidden.shape[0],
+                OUTER_PLAYER_SLOTS,
+                ACTION_ENTITY_SLOTS,
+                MAX_LAUNCH_FEATURES,
+            )
+            raise ValueError(
+                "max_launch_features must have shape "
+                f"{expected_shape}, got {tuple(max_launch_features.shape)}"
+            )
+
+        entity_features = action_entity_hidden[:, None, :, :].expand(
+            -1,
+            OUTER_PLAYER_SLOTS,
+            -1,
+            -1,
+        )
+        player_features = encoded.player_hidden[:, :, None, :].expand(
+            -1,
+            -1,
+            ACTION_ENTITY_SLOTS,
+            -1,
+        )
+        plan_features = encoded.actor_plan_hidden[:, :, None, :].expand(
+            -1,
+            -1,
+            ACTION_ENTITY_SLOTS,
+            -1,
+        )
+        action_features = self.action_info_proj(
+            max_launch_features.to(dtype=action_entity_hidden.dtype)
+        )
+        if self.source_actor_input_proj is None or self.target_actor_input_proj is None:
+            raise RuntimeError("discrete actor input projections are not initialized")
+        source = self.source_actor_input_proj(
+            torch.cat(
+                (entity_features, player_features, plan_features, action_features),
+                dim=-1,
+            )
+        )
+        target = self.target_actor_input_proj(
+            torch.cat((entity_features, player_features, plan_features), dim=-1)
+        )
+        return DiscreteActorInputs(source=source, target=target)
+
     def _actor(
         self,
-        hidden: torch.Tensor,
+        encoded: EncodedObservations,
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
         max_launch_features: torch.Tensor,
         *,
         deterministic: bool,
     ) -> tuple[ModelActions, ModelActionLogProbs, ModelActionEntropies]:
+        if isinstance(self.actor, DiscreteTargetsActor):
+            return self.actor(
+                self._discrete_actor_inputs(encoded, max_launch_features),
+                can_act,
+                max_launch,
+                min_fleet_size=self.action_spec.min_fleet_size,
+                deterministic=deterministic,
+            )
         return self.actor(
-            self._actor_inputs(hidden, max_launch_features),
+            self._pure_actor_inputs(encoded, max_launch_features),
             can_act,
             max_launch,
             min_fleet_size=self.action_spec.min_fleet_size,
@@ -414,19 +591,58 @@ class StatelessTransformerV1(BaseModelAPI):
 
     def _actor_log_prob(
         self,
-        hidden: torch.Tensor,
+        encoded: EncodedObservations,
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
         max_launch_features: torch.Tensor,
         actions: ModelActions,
     ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
+        if isinstance(self.actor, DiscreteTargetsActor):
+            return self.actor.log_prob(
+                self._discrete_actor_inputs(encoded, max_launch_features),
+                can_act,
+                max_launch,
+                actions,
+                min_fleet_size=self.action_spec.min_fleet_size,
+            )
         return self.actor.log_prob(
-            self._actor_inputs(hidden, max_launch_features),
+            self._pure_actor_inputs(encoded, max_launch_features),
             can_act,
             max_launch,
             actions,
             min_fleet_size=self.action_spec.min_fleet_size,
         )
+
+
+class ObservationInputStem(nn.Module):
+    def __init__(self, input_dim: int, config: StatelessTransformerV1Config) -> None:
+        super().__init__()
+        hidden_dim = int(config.embed_dim * config.mlp_ratio)
+        self.activation = config.activation
+        self.input = nn.Linear(input_dim, hidden_dim)
+        self.output = nn.Linear(hidden_dim, config.embed_dim)
+
+    @property
+    def in_features(self) -> int:
+        return self.input.in_features
+
+    @property
+    def out_features(self) -> int:
+        return self.output.out_features
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.activation == "gelu":
+            return self.output(F.gelu(self.input(x)))
+        return self.output(F.silu(self.input(x)))
+
+
+def _expand_tokens(
+    tokens: nn.Embedding,
+    batch_size: int,
+    *,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    return tokens.weight.to(dtype=dtype).unsqueeze(0).expand(batch_size, -1, -1)
 
 
 class TransformerBlock(nn.Module):
