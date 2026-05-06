@@ -137,8 +137,8 @@ be large.
 
 The current reference episodes are:
 
-- `75601099` (4-player game)
-- `75598045` (2-player 500-step game)
+- `75930761` (2-player game)
+- `75926553` (4-player game)
 
 If fixture files are missing, download them directly into the test fixture
 directory:

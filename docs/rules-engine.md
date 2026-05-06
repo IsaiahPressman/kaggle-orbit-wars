@@ -139,8 +139,8 @@ Replay parity tests:
 
 The current downloaded reference episodes are:
 
-- `75601099`: 4-player, 141 recorded transitions.
-- `75598045`: 2-player, 499 recorded transitions.
+- `75930761`: 2-player, 103 recorded transitions.
+- `75926553`: 4-player, 222 recorded transitions.
 
 ## Maintenance Rules
 

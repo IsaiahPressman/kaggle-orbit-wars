@@ -15,8 +15,8 @@ when generation fixtures are missing.
 
 Replay coverage is required for:
 
-- `75601099`: 4 players, 141 recorded transitions.
-- `75598045`: 2 players, 499 recorded transitions.
+- `75930761`: 2 players, 103 recorded transitions.
+- `75926553`: 4 players, 222 recorded transitions.
 
 The replay parity test checks each transition against the Python reference for:
 
@@ -40,8 +40,8 @@ are not fields in the Kaggle rows. They are covered by focused Rust unit tests
 rather than replay parity assertions.
 
 The current local replay set covers both 2-player and 4-player games, launches,
-production, fleet movement, collisions, captures, comet movement and expiry,
-and step-limit termination.
+production, fleet movement, collisions, captures, and comet movement and expiry.
+Step-limit termination is covered by focused Rust unit tests.
 
 ## Covered By Generation Fixtures
 
