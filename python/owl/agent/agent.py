@@ -54,6 +54,7 @@ class Agent:
         self.model.load_state_dict(checkpoint["model"])
         self.model.eval()
 
+    @torch.inference_mode()
     def act(self, observation: KaggleObservation) -> list[list[float]]:
         obs_dict = observation.to_rl_observation()
         encoded = encode_python_observation(
@@ -62,8 +63,7 @@ class Agent:
             action_spec=self.config.env.action_spec,
         )
         obs = self._obs_batch(encoded, player=observation.player)
-        with torch.inference_mode():
-            output = self.model(self._obs_to_device(obs), deterministic=True)
+        output = self.model(self._obs_to_device(obs), deterministic=True)
         actions = output.actions
         return actions_to_kaggle(
             obs_dict,

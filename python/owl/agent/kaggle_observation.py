@@ -16,15 +16,13 @@ Point = Annotated[tuple[float, float], Field(min_length=2, max_length=2)]
 
 
 class Comet(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
     planet_ids: list[int]
     paths: list[list[Point]]
     path_index: int
 
 
 class KaggleObservation(BaseModel):
-    model_config = ConfigDict(extra="ignore", from_attributes=True)
+    model_config = ConfigDict(from_attributes=True)
 
     remaining_overage_time: float = Field(alias="remainingOverageTime")
     step: int = Field(ge=0, lt=KAGGLE_EPISODE_STEPS)
