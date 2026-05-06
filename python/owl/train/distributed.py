@@ -4,7 +4,7 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import cast
+from typing import Self, cast
 
 import torch
 import torch.distributed as dist
@@ -30,7 +30,7 @@ class DistributedContext:
     initialized: bool
 
     @classmethod
-    def from_runtime(cls) -> DistributedContext:
+    def from_runtime(cls) -> Self:
         initialized = dist.is_available() and dist.is_initialized()
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         if torch.cuda.is_available():
@@ -55,6 +55,16 @@ class DistributedContext:
             device=device,
             rank=0,
             local_rank=local_rank,
+            world_size=1,
+            initialized=False,
+        )
+
+    @classmethod
+    def single_process_cpu(cls) -> Self:
+        return cls(
+            device=torch.device("cpu"),
+            rank=0,
+            local_rank=0,
             world_size=1,
             initialized=False,
         )
@@ -87,7 +97,9 @@ def distributed_session() -> Iterator[DistributedContext]:
         if dist.is_initialized():
             raise RuntimeError("torch.distributed is already initialized")
 
-        dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
+        dist.init_process_group(
+            backend="nccl", device_id=torch.device(f"cuda:{local_rank}")
+        )
 
     try:
         yield DistributedContext.from_runtime()

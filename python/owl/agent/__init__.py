@@ -1,5 +1,4 @@
-from .agent import Agent
-from .config import AgentConfig
+from .agent import Agent, AgentConfig
 from .kaggle_observation import KaggleObservation
 
 __all__ = [

@@ -42,8 +42,9 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
     ships[0, 0, 0, 0] = 1
 
     class FakeModel:
-        def __call__(self, _obs: object, *, deterministic: bool) -> object:
+        def __call__(self, obs: object, *, deterministic: bool) -> object:
             assert not deterministic
+            assert obs.still_playing.tolist() == [[True, True, True, True]]
             return SimpleNamespace(
                 actions=ModelActions(launch=launch, angle=angle, ships=ships)
             )

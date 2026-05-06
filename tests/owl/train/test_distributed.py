@@ -194,7 +194,9 @@ def test_distributed_session_initializes_and_destroys_process_group(
     monkeypatch.setattr(
         distributed_module.dist,
         "init_process_group",
-        lambda backend: calls.append(("init_process_group", backend)),
+        lambda backend, device_id: calls.append(
+            ("init_process_group", (backend, device_id))
+        ),
     )
     monkeypatch.setattr(
         distributed_module.dist,
@@ -219,8 +221,8 @@ def test_distributed_session_initializes_and_destroys_process_group(
         assert context.local_rank == 1
 
     assert calls == [
-        ("set_device", 1),
-        ("init_process_group", "nccl"),
+        ("set_device", torch.device("cuda:1")),
+        ("init_process_group", ("nccl", torch.device("cuda:1"))),
         ("destroy_process_group", None),
     ]
 

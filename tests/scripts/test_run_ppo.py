@@ -18,6 +18,7 @@ from owl.rl import (
     ObsBatch,
 )
 from owl.train import FullConfig, PPOTrainer
+from owl.train.distributed import DistributedContext
 from owl.train.logging import LogMode
 
 _RUN_PPO_PATH = Path(__file__).parents[2] / "scripts" / "run_ppo.py"
@@ -527,6 +528,7 @@ def test_run_training_loop_writes_periodic_checkpoints(
         env_steps_per_iteration=800,
         max_env_steps=1600,
         max_runtime_seconds=None,
+        dist_ctx=DistributedContext.single_process_cpu(),
     )
 
     assert env_steps == 1600
@@ -567,6 +569,7 @@ def test_run_training_loop_resumes_checkpoint_cadence(
         max_runtime_seconds=None,
         start_env_steps=1200,
         wandb_run_id="run-123",
+        dist_ctx=DistributedContext.single_process_cpu(),
     )
 
     assert env_steps == 2000
@@ -592,6 +595,7 @@ def test_run_training_loop_returns_immediately_when_resume_reached_step_limit(
         max_env_steps=1200,
         max_runtime_seconds=None,
         start_env_steps=1200,
+        dist_ctx=DistributedContext.single_process_cpu(),
     )
 
     assert env_steps == 1200
@@ -628,6 +632,7 @@ def test_run_training_loop_saves_last_best_when_eval_clears_threshold(
         env_steps_per_iteration=1000,
         max_env_steps=1000,
         max_runtime_seconds=None,
+        dist_ctx=DistributedContext.single_process_cpu(),
     )
 
     assert env_steps == 1000
