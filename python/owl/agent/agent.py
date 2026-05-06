@@ -59,7 +59,7 @@ class Agent:
         checkpoint = torch.load(
             self.checkpoint_path,
             map_location=self.device,
-            weights_only=False,
+            weights_only=True,
         )
         if not isinstance(checkpoint, dict):
             raise ValueError(f"checkpoint must be a dictionary: {self.checkpoint_path}")
