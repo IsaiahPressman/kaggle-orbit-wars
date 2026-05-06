@@ -28,7 +28,7 @@ without changing callers that validate config dictionaries through the union.
 | `mlp_ratio` | `4.0` | FFN hidden width multiplier. |
 | `activation` | `"gelu"` | FFN activation: `"gelu"`, `"silu"`, or `"swiglu"`. |
 | `force_flash_attn` | `False` | Require packed varlen flash-attn; raise an error instead of falling back when tensors are not flash-compatible. |
-| `n_board_tokens` | `4` | Learned shared scratch tokens appended to the trunk sequence. |
+| `n_scratch_tokens` | `4` | Learned shared scratch tokens appended to the trunk sequence. |
 | `actor` | `{"action_spec": "pure"}` | Discriminated actor-head config. Supported actor specs are `"pure"` and `"discrete_targets"`. |
 
 Actor-specific fields live inside the actor config. `ActorPureConfig` owns

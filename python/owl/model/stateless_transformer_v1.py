@@ -103,7 +103,7 @@ class StatelessTransformerV1Config(BaseConfig):
     depth: int = Field(default=4, ge=1)
     n_heads: int = Field(default=8, ge=1)
     mlp_ratio: float = Field(default=4.0, gt=0.0)
-    n_board_tokens: int = Field(default=4, ge=0)
+    n_scratch_tokens: int = Field(default=4, ge=0)
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
     force_flash_attn: bool = False
     actor: ActorConfig = Field(default_factory=ActorPureConfig)
@@ -189,7 +189,7 @@ class StatelessTransformerV1(BaseModelAPI):
             self.config,
         )
         self.player_tokens = nn.Parameter(torch.empty(OUTER_PLAYER_SLOTS, dim))
-        self.board_tokens = nn.Parameter(torch.empty(self.config.n_board_tokens, dim))
+        self.board_tokens = nn.Parameter(torch.empty(self.config.n_scratch_tokens, dim))
         self.actor_plan_tokens = nn.Parameter(torch.empty(OUTER_PLAYER_SLOTS, dim))
         self.critic_value_tokens = nn.Parameter(torch.empty(OUTER_PLAYER_SLOTS, dim))
 
@@ -292,7 +292,7 @@ class StatelessTransformerV1(BaseModelAPI):
         )
 
         always_on_mask = torch.ones(
-            (batch_size, 1 + self.config.n_board_tokens),
+            (batch_size, 1 + self.config.n_scratch_tokens),
             dtype=torch.bool,
             device=obs.entity_mask.device,
         )
@@ -345,7 +345,7 @@ class StatelessTransformerV1(BaseModelAPI):
         player_start = entity_count
         global_start = player_start + OUTER_PLAYER_SLOTS
         board_start = global_start + 1
-        actor_plan_start = board_start + self.config.n_board_tokens
+        actor_plan_start = board_start + self.config.n_scratch_tokens
         critic_value_start = actor_plan_start + OUTER_PLAYER_SLOTS
         return EncodedObservations(
             hidden=x,

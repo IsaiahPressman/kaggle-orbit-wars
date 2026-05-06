@@ -932,7 +932,7 @@ def test_observation_encoder_returns_structured_token_fields() -> None:
     assert encoded.action_entity_hidden.shape == (2, ACTION_ENTITY_SLOTS, 32)
     assert encoded.player_hidden.shape == (2, OUTER_PLAYER_SLOTS, 32)
     assert encoded.global_feature_hidden.shape == (2, 1, 32)
-    assert encoded.board_hidden.shape == (2, config.n_board_tokens, 32)
+    assert encoded.board_hidden.shape == (2, config.n_scratch_tokens, 32)
     assert encoded.actor_plan_hidden.shape == (2, OUTER_PLAYER_SLOTS, 32)
     assert encoded.critic_value_hidden.shape == (2, OUTER_PLAYER_SLOTS, 32)
     assert encoded.token_mask[:, -4:].all()

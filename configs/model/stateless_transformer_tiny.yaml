@@ -3,5 +3,6 @@ embed_dim: 128
 depth: 4
 n_heads: 4
 mlp_ratio: 3.0
+n_scratch_tokens: 4
 force_flash_attn: true
 actor: discrete_targets
