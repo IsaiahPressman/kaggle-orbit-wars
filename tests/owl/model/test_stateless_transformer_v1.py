@@ -833,6 +833,9 @@ def test_model_initialization_sets_stable_rl_priors() -> None:
         if isinstance(module, nn.Linear):
             assert module.bias is not None
             assert torch.allclose(module.bias, torch.zeros_like(module.bias))
+        if isinstance(module, nn.Parameter):
+            assert torch.isfinite(module).all()
+            assert not torch.allclose(module, torch.zeros_like(module))
 
     residual_gain = 1.0 / math.sqrt(2.0 * config.depth)
     for block in model.blocks:
@@ -936,8 +939,8 @@ def test_observation_encoder_returns_structured_token_fields() -> None:
     assert encoded.token_mask[:, :MAX_PLANETS].sum().item() == 4
     assert encoded.token_mask[:, MAX_PLANETS].all()
     assert not torch.allclose(
-        model.player_tokens.weight[0],
-        model.player_tokens.weight[1],
+        model.player_tokens[0],
+        model.player_tokens[1],
     )
 
 
@@ -1000,7 +1003,7 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert torch.all(output.winner_probabilities[~obs.still_playing] == 0)
     assert torch.all(output.actions.ships[~output.actions.launch] == 0)
     assert torch.all(output.actions.ships.sum(dim=-1) <= obs.max_launch)
-    assert model.actor.launch_slot_tokens.weight.shape == (1, config.embed_dim)
+    assert model.actor.launch_slot_tokens.shape == (1, config.embed_dim)
     assert model.actor.slot_dynamic_proj.in_features == 9
 
     evaluation = model.evaluate_actions(obs, output.actions)
@@ -1310,8 +1313,8 @@ def test_discrete_targets_size_log_prob_conditions_on_replayed_target() -> None:
         actor.mean_head.weight[0, 0] = 10.0
         actor.scale_head.weight.zero_()
         actor.scale_head.bias.fill_(-3.0)
-        actor.source_role.weight.zero_()
-        actor.target_role.weight.zero_()
+        actor.source_role.zero_()
+        actor.target_role.zero_()
 
     slot_input = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
     slot_input[0, 0, 1] = torch.tensor([2.0, -2.0, 0.0, 0.0])
@@ -1718,7 +1721,7 @@ def test_launch_slot_embedding_is_added_to_each_slot_input() -> None:
         include_dynamic_features=False,
     )
 
-    expected_first_slot = actor.launch_slot_tokens.weight[0].view(1, 1, 1, -1)
+    expected_first_slot = actor.launch_slot_tokens[0].view(1, 1, 1, -1)
     assert torch.allclose(first_slot, expected_first_slot.expand_as(first_slot))
     assert not torch.allclose(first_slot, second_slot)
 

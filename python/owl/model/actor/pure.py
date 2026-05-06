@@ -15,7 +15,12 @@ from owl.model.actor.common import (
     sample_launch,
 )
 from owl.model.actor.config import ActorPureConfig
-from owl.model.base import ModelActionEntropies, ModelActionLogProbs, ModelActions
+from owl.model.base import (
+    InputLayer,
+    ModelActionEntropies,
+    ModelActionLogProbs,
+    ModelActions,
+)
 from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS
 
 
@@ -54,7 +59,10 @@ class PureActor(nn.Module):
         super().__init__()
         self.config = config
         self.max_per_planet_launches = max_per_planet_launches
-        self.launch_slot_tokens = nn.Embedding(max_per_planet_launches, embed_dim)
+        self.launch_slot_tokens = nn.Parameter(
+            torch.empty(max_per_planet_launches, embed_dim)
+        )
+        _init_token_parameter(self.launch_slot_tokens)
         self.slot_dynamic_proj = nn.Linear(9, embed_dim)
         self.actor_gru = MinGRUStack(embed_dim, embed_dim, n_layers=2)
         self.actor_heads = LaunchPolicyHeads(
@@ -63,7 +71,7 @@ class PureActor(nn.Module):
             activation=activation,
         )
 
-    def get_input_layers(self) -> tuple[nn.Module, ...]:
+    def get_input_layers(self) -> tuple[InputLayer, ...]:
         return (self.launch_slot_tokens, self.slot_dynamic_proj)
 
     def get_output_layers(self) -> tuple[nn.Linear, ...]:
@@ -422,7 +430,7 @@ class PureActor(nn.Module):
         *,
         include_dynamic_features: bool,
     ) -> torch.Tensor:
-        slot_token = self.launch_slot_tokens.weight[slot].to(dtype=slot_input.dtype)
+        slot_token = self.launch_slot_tokens[slot].to(dtype=slot_input.dtype)
         slot_context = slot_input + slot_token
         if not include_dynamic_features:
             return slot_context
@@ -473,6 +481,10 @@ class PureActor(nn.Module):
             ),
             dim=-1,
         )
+
+
+def _init_token_parameter(parameter: nn.Parameter) -> None:
+    nn.init.normal_(parameter, mean=0.0, std=parameter.shape[-1] ** -0.5)
 
 
 class MinGRUStack(nn.Module):

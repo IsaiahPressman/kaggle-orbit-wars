@@ -39,6 +39,7 @@ from owl.model.actor.pure import (
 from owl.model.attn import use_flash_attn, varlen_attention
 from owl.model.base import (
     BaseModelAPI,
+    InputLayer,
     ModelActionEntropies,
     ModelActionLogProbs,
     ModelActions,
@@ -102,9 +103,9 @@ class StatelessTransformerV1Config(BaseConfig):
     depth: int = Field(default=4, ge=1)
     n_heads: int = Field(default=8, ge=1)
     mlp_ratio: float = Field(default=4.0, gt=0.0)
+    n_board_tokens: int = Field(default=4, ge=0)
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
     force_flash_attn: bool = False
-    n_board_tokens: int = Field(default=4, ge=0)
     actor: ActorConfig = Field(default_factory=ActorPureConfig)
 
     @classmethod
@@ -187,10 +188,10 @@ class StatelessTransformerV1(BaseModelAPI):
             self.obs_spec.global_channels,
             self.config,
         )
-        self.player_tokens = nn.Embedding(OUTER_PLAYER_SLOTS, dim)
-        self.board_tokens = nn.Embedding(self.config.n_board_tokens, dim)
-        self.actor_plan_tokens = nn.Embedding(OUTER_PLAYER_SLOTS, dim)
-        self.critic_value_tokens = nn.Embedding(OUTER_PLAYER_SLOTS, dim)
+        self.player_tokens = nn.Parameter(torch.empty(OUTER_PLAYER_SLOTS, dim))
+        self.board_tokens = nn.Parameter(torch.empty(self.config.n_board_tokens, dim))
+        self.actor_plan_tokens = nn.Parameter(torch.empty(OUTER_PLAYER_SLOTS, dim))
+        self.critic_value_tokens = nn.Parameter(torch.empty(OUTER_PLAYER_SLOTS, dim))
 
         self.blocks = nn.ModuleList(
             TransformerBlock(self.config) for _ in range(self.config.depth)
@@ -237,7 +238,7 @@ class StatelessTransformerV1(BaseModelAPI):
             )
             _init_linear(layer, gain=gain)
 
-    def get_input_layers(self) -> tuple[nn.Module, ...]:
+    def get_input_layers(self) -> tuple[InputLayer, ...]:
         return (
             self.static_planet_proj.input,
             self.orbit_planet_proj.input,
@@ -563,12 +564,12 @@ class ObservationInputStem(nn.Module):
 
 
 def _expand_tokens(
-    tokens: nn.Embedding,
+    tokens: torch.Tensor,
     batch_size: int,
     *,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    return tokens.weight.to(dtype=dtype).unsqueeze(0).expand(batch_size, -1, -1)
+    return tokens.to(dtype=dtype).unsqueeze(0).expand(batch_size, -1, -1)
 
 
 class TransformerBlock(nn.Module):
@@ -656,18 +657,20 @@ def _requires_flash_attn(
 def _init_module(module: nn.Module) -> None:
     if isinstance(module, nn.Linear):
         _init_linear(module, gain=_HIDDEN_INIT_GAIN)
-    elif isinstance(module, nn.Embedding):
-        nn.init.normal_(module.weight, mean=0.0, std=module.embedding_dim**-0.5)
     elif isinstance(module, nn.LayerNorm):
         nn.init.ones_(module.weight)
         nn.init.zeros_(module.bias)
 
 
-def _init_input_layer(module: nn.Module) -> None:
+def _init_input_layer(module: InputLayer) -> None:
     if isinstance(module, nn.Linear):
         _init_linear(module, gain=_INPUT_INIT_GAIN)
-    elif isinstance(module, nn.Embedding):
-        nn.init.normal_(module.weight, mean=0.0, std=module.embedding_dim**-0.5)
+    elif isinstance(module, nn.Parameter):
+        _init_token_parameter(module)
+
+
+def _init_token_parameter(parameter: nn.Parameter) -> None:
+    nn.init.normal_(parameter, mean=0.0, std=parameter.shape[-1] ** -0.5)
 
 
 def _init_linear(module: nn.Linear, *, gain: float) -> None:

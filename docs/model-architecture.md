@@ -130,10 +130,9 @@ Linear layers use orthogonal initialization with zero biases. Only the first
 linear layer in each observation stem is treated as an input projection and
 uses unit gain; hidden projections use ReLU-style gain, and transformer
 residual output projections are scaled by `1 / sqrt(2 * depth)`.
-Learned token state embeddings, including player, board scratch, actor-plan,
-critic-value, pure launch-slot, and discrete source/target role embeddings, are
-also classified as input layers for optimizer grouping so Muon does not update
-them.
+Learned token state parameters, including player, board scratch, actor-plan,
+critic-value, pure launch-slot, and discrete source/target role tags, are also
+classified as input layers for optimizer grouping so Muon does not update them.
 
 Actor and critic output heads are two-layer MLP projections with hidden width
 `embed_dim`, the configured activation in the middle, and output-specific final

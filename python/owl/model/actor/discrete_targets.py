@@ -16,7 +16,12 @@ from owl.model.actor.common import (
     sample_launch,
 )
 from owl.model.actor.config import ActorDiscreteTargetsConfig
-from owl.model.base import ModelActionEntropies, ModelActionLogProbs, ModelActions
+from owl.model.base import (
+    InputLayer,
+    ModelActionEntropies,
+    ModelActionLogProbs,
+    ModelActions,
+)
 from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS
 
 
@@ -62,8 +67,10 @@ class DiscreteTargetsActor(nn.Module):
         self.head_dim = transformer_config.embed_dim
         mixtures = config.n_action_mixtures
 
-        self.source_role = nn.Embedding(1, transformer_config.embed_dim)
-        self.target_role = nn.Embedding(1, transformer_config.embed_dim)
+        self.source_role = nn.Parameter(torch.empty(1, transformer_config.embed_dim))
+        self.target_role = nn.Parameter(torch.empty(1, transformer_config.embed_dim))
+        _init_token_parameter(self.source_role)
+        _init_token_parameter(self.target_role)
         self.source_norm = nn.LayerNorm(transformer_config.embed_dim)
         self.target_norm = nn.LayerNorm(transformer_config.embed_dim)
         self.q = nn.Linear(transformer_config.embed_dim, transformer_config.embed_dim)
@@ -85,7 +92,7 @@ class DiscreteTargetsActor(nn.Module):
         self.mean_head = OutputProjectionMLP(transformer_config, mixtures)
         self.scale_head = OutputProjectionMLP(transformer_config, mixtures)
 
-    def get_input_layers(self) -> tuple[nn.Module, ...]:
+    def get_input_layers(self) -> tuple[InputLayer, ...]:
         return (self.source_role, self.target_role)
 
     def get_output_layers(self) -> tuple[nn.Linear, ...]:
@@ -326,8 +333,8 @@ class DiscreteTargetsActor(nn.Module):
                 "discrete target can_act must have shape "
                 f"{expected_shape}, got {tuple(can_act.shape)}"
             )
-        source_role = self.source_role.weight.to(dtype=source_input.dtype)
-        target_role = self.target_role.weight.to(dtype=target_input.dtype)
+        source_role = self.source_role.to(dtype=source_input.dtype)
+        target_role = self.target_role.to(dtype=target_input.dtype)
         source_x = self.source_norm(source_input + source_role)
         target_x = self.target_norm(target_input + target_role)
         q = self.q(source_x)
@@ -448,6 +455,10 @@ class DiscreteTargetsActor(nn.Module):
             size_mu=mu,
             size_scale=scale,
         )
+
+
+def _init_token_parameter(parameter: nn.Parameter) -> None:
+    nn.init.normal_(parameter, mean=0.0, std=parameter.shape[-1] ** -0.5)
 
 
 def policy_params_for_selected_target(
