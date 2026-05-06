@@ -223,7 +223,6 @@ class StatelessTransformerV1(BaseModelAPI):
             self.global_proj,
             self.player_tokens,
             self.action_info_proj,
-            self.actor_input_proj,
             *self.actor.get_input_layers(),
         )
 
