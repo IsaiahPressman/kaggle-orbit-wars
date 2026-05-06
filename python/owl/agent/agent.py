@@ -1,4 +1,5 @@
 from pathlib import Path
+from time import perf_counter
 
 import torch
 
@@ -68,25 +69,51 @@ class Agent:
 
     @torch.inference_mode()
     def act(self, observation: KaggleObservation) -> list[list[float]]:
+        total_start = perf_counter()
+
+        encode_start = perf_counter()
         obs_dict = observation.to_rl_observation()
         obs = encode_python_observation(
             obs_dict,
             obs_spec=self.config.env.obs_spec,
             action_spec=self.config.env.action_spec,
         )
+        device_obs = self._obs_to_device(obs)
+        self._synchronize_device()
+        encode_ms = _elapsed_ms(encode_start)
+
+        inference_start = perf_counter()
         output = self.model(
-            self._obs_to_device(obs),
+            device_obs,
             deterministic=self.agent_config.deterministic,
         )
-        actions = output.actions
-        return actions_to_kaggle(
+        self._synchronize_device()
+        values = output.values.detach().cpu()[0]
+        inference_ms = _elapsed_ms(inference_start)
+
+        conversion_start = perf_counter()
+        actions = actions_to_kaggle(
             obs_dict,
             observation.player,
-            actions.launch.cpu(),
-            actions.action_value().cpu(),
-            actions.ships.cpu(),
+            output.actions.launch.detach().cpu(),
+            output.actions.action_value().detach().cpu(),
+            output.actions.ships.detach().cpu(),
             action_spec=self.config.env.action_spec,
         )
+        conversion_ms = _elapsed_ms(conversion_start)
+        total_ms = _elapsed_ms(total_start)
+
+        self.log(
+            total_ms=total_ms,
+            encode_ms=encode_ms,
+            inference_ms=inference_ms,
+            conversion_ms=conversion_ms,
+            self_value=float(values[observation.player].item()),
+            player_values=[float(value) for value in values.tolist()],
+            entity_count=int(obs.entity_mask.sum().item()),
+            remaining_overage_time=observation.remaining_overage_time,
+        )
+        return actions
 
     def _obs_to_device(self, obs: ObsBatch) -> ObsBatch:
         return ObsBatch(
@@ -95,3 +122,36 @@ class Agent:
                 for field in ObsBatch.model_fields
             }
         )
+
+    def _synchronize_device(self) -> None:
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    def log(
+        self,
+        *,
+        total_ms: int,
+        encode_ms: int,
+        inference_ms: int,
+        conversion_ms: int,
+        self_value: float,
+        player_values: list[float],
+        entity_count: int,
+        remaining_overage_time: float,
+    ) -> None:
+        values = ",".join(f"{value:.3f}" for value in player_values)
+        print(
+            "agent "
+            f"total_ms={total_ms} "
+            f"encode_ms={encode_ms} "
+            f"inference_ms={inference_ms} "
+            f"conversion_ms={conversion_ms} "
+            f"value_self={self_value:.3f} "
+            f"values=[{values}] "
+            f"entities={entity_count} "
+            f"remaining_overage_s={remaining_overage_time:.3f}"
+        )
+
+
+def _elapsed_ms(start: float) -> int:
+    return round((perf_counter() - start) * 1000)
