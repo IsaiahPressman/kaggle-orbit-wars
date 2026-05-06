@@ -313,7 +313,10 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
         assert not torch.is_grad_enabled()
         seen_eval_sizes.append((kwargs["n_games"], kwargs["n_envs"]))
         stats = run_ppo._EvalStats.empty()
-        stats.add_game_result(run_ppo.MODEL_CURRENT)
+        if kwargs["player_count"] == 2:
+            stats.add_game_result(run_ppo.MODEL_CURRENT)
+        else:
+            stats.add_game_result(run_ppo.MODEL_LAST_BEST)
         return (
             stats,
             {
@@ -336,7 +339,9 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
         device=torch.device("cpu"),
     )
 
-    assert metrics["eval/win_rate_against_last_best"] == pytest.approx(1.0)
+    assert metrics["eval/win_rate_against_last_best"] == pytest.approx(0.5)
+    assert metrics["eval/win_rate_against_last_best_2p"] == pytest.approx(1.0)
+    assert metrics["eval/win_rate_against_last_best_4p"] == pytest.approx(0.0)
     assert metrics["eval/game_length_mean"] == pytest.approx(12.0)
     assert metrics["time/eval_seconds"] == pytest.approx(4.0)
     assert metrics["perf/eval_sps"] == pytest.approx(3.0)

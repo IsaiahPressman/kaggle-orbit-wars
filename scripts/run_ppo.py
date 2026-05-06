@@ -733,6 +733,7 @@ def _evaluate_against_last_best(
     current_model.eval()
     last_best_model.eval()
     stats = _EvalStats.empty()
+    stats_by_player_count: dict[int, _EvalStats] = {}
     env_metrics: dict[str, list[float]] = {}
     try:
         with torch.no_grad():
@@ -756,6 +757,7 @@ def _evaluate_against_last_best(
                         else None
                     ),
                 )
+                stats_by_player_count[player_count] = player_stats
                 stats.merge(player_stats)
                 _extend_env_metrics(env_metrics, player_env_metrics)
                 eval_steps += player_steps
@@ -766,6 +768,10 @@ def _evaluate_against_last_best(
     elapsed = max(time.perf_counter() - started_at, 1e-12)
     metrics = _eval_env_metrics(env_metrics)
     metrics["eval/win_rate_against_last_best"] = stats.win_rate(MODEL_CURRENT)
+    for player_count, player_stats in stats_by_player_count.items():
+        metrics[f"eval/win_rate_against_last_best_{player_count}p"] = (
+            player_stats.win_rate(MODEL_CURRENT)
+        )
     metrics["time/eval_seconds"] = float(elapsed)
     metrics["perf/eval_sps"] = float(eval_steps / elapsed)
     return metrics
