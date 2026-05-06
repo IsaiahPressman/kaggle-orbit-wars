@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import warnings
-from typing import Annotated, Any, Literal, SupportsFloat, SupportsInt, cast
+from typing import Annotated, Any, Literal, SupportsFloat, cast
 
 import numpy as np
 import torch
@@ -339,8 +339,8 @@ class VectorizedEnv:
 
 def encode_python_observation(
     obs: dict[str, Any],
-    obs_spec: EntityBasedConfig | None = None,
-    action_spec: ActionConfig | None = None,
+    obs_spec: EntityBasedConfig,
+    action_spec: ActionConfig,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -351,25 +351,23 @@ def encode_python_observation(
     np.ndarray,
     np.ndarray,
 ]:
-    spec = obs_spec or EntityBasedConfig()
-    action = action_spec or ActionPureConfig()
     comet_planet_ids, comet_path_indices, comet_path_lengths, comet_paths = (
-        _comets_to_arrays(obs.get("comets", []))
+        _comets_to_arrays(obs["comets"])
     )
     encoded = encode_entity_based(
-        _rows_to_array(obs.get("planets", []), name="planets"),
-        _rows_to_array(obs.get("fleets", []), name="fleets"),
+        _rows_to_array(obs["planets"], name="planets"),
+        _rows_to_array(obs["fleets"], name="fleets"),
         comet_planet_ids,
         comet_path_indices,
         comet_path_lengths,
         comet_paths,
-        float(cast(SupportsFloat, obs.get("angular_velocity", 0.0))),
-        int(cast(SupportsInt, obs.get("step", 0))),
-        int(cast(SupportsInt, obs.get("episode_steps", 500))),
-        spec.max_entities,
-        action.min_fleet_size,
+        float(obs["angular_velocity"]),
+        int(obs["step"]),
+        int(obs["episode_steps"]),
+        obs_spec.max_entities,
+        action_spec.min_fleet_size,
     )
-    if isinstance(action, ActionPureConfig):
+    if isinstance(action_spec, ActionPureConfig):
         return encoded
 
     (

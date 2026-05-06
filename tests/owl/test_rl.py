@@ -419,6 +419,7 @@ def test_min_fleet_size_controls_action_mask_and_validation() -> None:
             "fleets": [],
             "comets": [],
         },
+        obs_spec=EntityBasedConfig(),
         action_spec=action_spec,
     )
 
@@ -465,6 +466,7 @@ def test_python_observation_encoder_writes_discrete_target_mask() -> None:
             "fleets": [],
             "comets": [],
         },
+        obs_spec=EntityBasedConfig(),
         action_spec=ActionDiscreteTargetsConfig(),
     )
 
@@ -494,7 +496,9 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
             "planets": [[0, -1, 25.0, 75.0, 2.0, 50, 3]],
             "fleets": [[1, 0, 10.0, 20.0, np.pi / 2, 0, 25]],
             "comets": [],
-        }
+        },
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionPureConfig(),
     )
 
     assert planets.shape == (MAX_PLANETS, PLANET_CHANNELS)
@@ -1053,7 +1057,9 @@ def test_python_observation_encoder_rejects_invalid_globals(
                 "planets": [],
                 "fleets": [],
                 "comets": [],
-            }
+            },
+            obs_spec=EntityBasedConfig(),
+            action_spec=ActionPureConfig(),
         )
 
 
@@ -1067,7 +1073,9 @@ def test_python_observation_encoder_rejects_invalid_planet_production(
                 "planets": [[0, -1, 25.0, 75.0, 2.0, 50, production]],
                 "fleets": [],
                 "comets": [],
-            }
+            },
+            obs_spec=EntityBasedConfig(),
+            action_spec=ActionPureConfig(),
         )
 
 
@@ -1084,7 +1092,8 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
                 [2, 1, 30.0, 40.0, 0.0, 0, 20],
             ],
         },
-        spec,
+        obs_spec=spec,
+        action_spec=ActionPureConfig(),
     )
     fleet_mask = entity_mask[ACTION_ENTITY_SLOTS:]
 
@@ -1116,7 +1125,9 @@ def test_python_observation_encoder_writes_comet_future_paths() -> None:
                     "path_index": 1,
                 }
             ],
-        }
+        },
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionPureConfig(),
     )
     planet_mask = entity_mask[:MAX_PLANETS]
     comet_mask = entity_mask[MAX_PLANETS:ACTION_ENTITY_SLOTS]
