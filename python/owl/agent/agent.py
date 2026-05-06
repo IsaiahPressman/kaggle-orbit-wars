@@ -141,15 +141,14 @@ class Agent:
     ) -> None:
         values = ",".join(f"{value:.3f}" for value in player_values)
         print(
-            "agent "
-            f"total_ms={total_ms} "
-            f"encode_ms={encode_ms} "
-            f"inference_ms={inference_ms} "
-            f"conversion_ms={conversion_ms} "
-            f"value_self={self_value:.3f} "
-            f"values=[{values}] "
-            f"entities={entity_count} "
-            f"remaining_overage_s={remaining_overage_time:.3f}"
+            f"total_ms={total_ms} - "
+            f"encode_ms={encode_ms} - "
+            f"inference_ms={inference_ms} - "
+            f"conversion_ms={conversion_ms} - "
+            f"value_self={self_value:.3f} - "
+            f"values=[{values}] - "
+            f"entities={entity_count} - "
+            f"remaining_overage_s={remaining_overage_time:.1f}"
         )
 
 
