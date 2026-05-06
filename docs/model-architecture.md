@@ -130,6 +130,10 @@ Linear layers use orthogonal initialization with zero biases. Only the first
 linear layer in each observation stem is treated as an input projection and
 uses unit gain; hidden projections use ReLU-style gain, and transformer
 residual output projections are scaled by `1 / sqrt(2 * depth)`.
+Learned token state embeddings, including player, board scratch, actor-plan,
+critic-value, pure launch-slot, and discrete source/target role embeddings, are
+also classified as input layers for optimizer grouping so Muon does not update
+them.
 
 Actor and critic output heads are two-layer MLP projections with hidden width
 `embed_dim`, the configured activation in the middle, and output-specific final
@@ -171,7 +175,6 @@ Both actor heads start from the same shared transformer trunk. For each
 - source entity hidden state
 - player hidden token
 - the actor plan token for that player, for the discrete-target actor
-- Rust-provided `max_launch_features` using the planet ship-count bucket grid
 
 The final action head is selected by `config.actor.action_spec`. The concrete
 heads live under `python/owl/model/actor/`: `PureActor` for raw angles and
@@ -208,12 +211,9 @@ implementation uses the straightforward sequential recurrence rather than the
 paper's parallel scan variant.
 
 `ActionPureConfig()` defaults to `max_per_planet_launches=3` and
-`min_fleet_size=1`, but the pure actor currently raises `NotImplementedError`
-for `max_per_planet_launches > 1` because launch-budget ship-count features are
-encoded by Rust for the initial launch budget only. PPO model construction uses
-the environment action spec as the source of truth, so the model launch-slot
-count and minimum launched fleet size match the action tensors submitted to the
-environment.
+`min_fleet_size=1`. PPO model construction uses the environment action spec as
+the source of truth, so the model launch-slot count and minimum launched fleet
+size match the action tensors submitted to the environment.
 
 For every slot, the policy emits:
 
@@ -264,14 +264,13 @@ Instead of the pure actor's minGRU, the discrete-target actor uses one
 feedforward action block per source entity. The model constructs separate
 source and target streams for each player/action entity position. Both streams
 receive entity hidden state, player hidden state, and the player's actor plan
-token; only the source stream receives Rust-provided `max_launch_features`.
-The actor adds learned source/target role embeddings before normalizing the two
-streams, then projects source slots to queries and target slots to keys and
-values with a single target-selection head independent of the shared
+token. The actor adds learned source/target role embeddings before normalizing
+the two streams, then projects source slots to queries and target slots to keys
+and values with a single target-selection head independent of the shared
 transformer trunk's attention head count. It computes scaled dot-product target
 logits for every `(source, target)` pair and masks those logits with the 4-D
-discrete `can_act` tensor. Fully masked source rows are sanitized to finite
-zero logits and are suppressed by the launch/source mask.
+discrete `can_act` tensor. Fully masked source rows are sanitized to finite zero
+logits and are suppressed by the launch/source mask.
 
 After sampling or replaying a target from the masked softmax, the actor gathers
 only the selected target value vector, adds it to the source residual stream,

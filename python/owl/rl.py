@@ -21,7 +21,6 @@ from owl.rs import encode_entity_based, rl_obs_constants
     FLEET_CHANNELS,
     COMET_CHANNELS,
     GLOBAL_CHANNELS,
-    MAX_LAUNCH_FEATURES,
 ) = rl_obs_constants()
 
 
@@ -60,10 +59,6 @@ class EntityBasedConfig(BaseConfig):
     @property
     def global_channels(self) -> int:
         return GLOBAL_CHANNELS
-
-    @property
-    def max_launch_features(self) -> int:
-        return MAX_LAUNCH_FEATURES
 
 
 class ActionPureConfig(BaseConfig):
@@ -128,7 +123,6 @@ class ObsBatch(BaseModel):
     global_features: torch.Tensor
     can_act: torch.Tensor
     max_launch: torch.Tensor
-    max_launch_features: torch.Tensor
 
 
 class VectorizedEnv:
@@ -179,7 +173,6 @@ class VectorizedEnv:
         self._global_obs_np = self.observations.global_features.numpy()
         self._can_act_np = self.observations.can_act.numpy()
         self._max_launch_np = self.observations.max_launch.numpy()
-        self._max_launch_features_np = self.observations.max_launch_features.numpy()
         self._rewards_np = self.rewards.numpy()
         self._dones_np = self.dones.numpy()
 
@@ -194,7 +187,6 @@ class VectorizedEnv:
             self._global_obs_np,
             self._can_act_np,
             self._max_launch_np,
-            self._max_launch_features_np,
         )
         return self.observations
 
@@ -249,7 +241,6 @@ class VectorizedEnv:
                 self._global_obs_np,
                 self._can_act_np,
                 self._max_launch_np,
-                self._max_launch_features_np,
                 self._rewards_np,
                 self._dones_np,
             )
@@ -274,7 +265,6 @@ class VectorizedEnv:
                 self._global_obs_np,
                 self._can_act_np,
                 self._max_launch_np,
-                self._max_launch_features_np,
                 self._rewards_np,
                 self._dones_np,
             )
@@ -344,16 +334,6 @@ class VectorizedEnv:
                 dtype=torch.int64,
                 pin_memory=pin_memory,
             ),
-            max_launch_features=torch.zeros(
-                (
-                    self.n_envs,
-                    self.n_players,
-                    ACTION_ENTITY_SLOTS,
-                    MAX_LAUNCH_FEATURES,
-                ),
-                dtype=torch.float32,
-                pin_memory=pin_memory,
-            ),
         )
 
 
@@ -362,7 +342,6 @@ def encode_python_observation(
     obs_spec: EntityBasedConfig | None = None,
     action_spec: ActionConfig | None = None,
 ) -> tuple[
-    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -402,7 +381,6 @@ def encode_python_observation(
         global_features,
         source_can_act,
         max_launch,
-        max_launch_features,
     ) = encoded
     target_exists = entity_mask[:ACTION_ENTITY_SLOTS]
     source_target_can_act = source_can_act[:, :, None] & target_exists[None, None, :]
@@ -417,7 +395,6 @@ def encode_python_observation(
         global_features,
         source_target_can_act,
         max_launch,
-        max_launch_features,
     )
 
 

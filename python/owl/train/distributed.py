@@ -11,7 +11,13 @@ import torch.distributed as dist
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel
 
-from owl.model import BaseModelAPI, ModelActions, ModelEvaluation, ModelOutput
+from owl.model import (
+    BaseModelAPI,
+    InputLayer,
+    ModelActions,
+    ModelEvaluation,
+    ModelOutput,
+)
 from owl.rl import ActionConfig, ObsBatch
 
 
@@ -212,7 +218,7 @@ class DistributedModelAdapter(BaseModelAPI):
     def compute_value(self, obs: ObsBatch) -> torch.Tensor:
         return cast(torch.Tensor, self._ddp("compute_value", obs, None, False))
 
-    def get_input_layers(self) -> tuple[nn.Module, ...]:
+    def get_input_layers(self) -> tuple[InputLayer, ...]:
         return self.wrapped_model.get_input_layers()
 
     def get_output_layers(self) -> tuple[nn.Module, ...]:

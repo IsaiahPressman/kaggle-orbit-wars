@@ -8,6 +8,8 @@ from torch import nn
 
 from owl.rl import ObsBatch
 
+InputLayer = nn.Module | nn.Parameter
+
 
 @dataclass
 class ModelActions:
@@ -78,7 +80,7 @@ class BaseModelAPI(nn.Module, ABC):
         return self(obs, deterministic=True).values
 
     @abstractmethod
-    def get_input_layers(self) -> tuple[nn.Module, ...]: ...
+    def get_input_layers(self) -> tuple[InputLayer, ...]: ...
 
     @abstractmethod
     def get_output_layers(self) -> tuple[nn.Module, ...]: ...

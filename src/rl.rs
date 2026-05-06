@@ -22,8 +22,6 @@ const PLANET_SHIP_COUNT_BUCKETS: usize = 12;
 const FLEET_SHIP_COUNT_BUCKETS: usize = 10;
 const COMET_SHIP_COUNT_BUCKETS: usize = 11;
 const SHIP_COUNT_OVERFLOW_CHANNELS: usize = 2;
-const ACTION_SHIP_COUNT_CHANNELS: usize =
-    2 + PLANET_SHIP_COUNT_BUCKETS * 2 + SHIP_COUNT_OVERFLOW_CHANNELS;
 const NEUTRAL_SHIP_COUNT_CHANNELS: usize =
     NEUTRAL_SHIP_COUNT_BUCKETS * 2 + SHIP_COUNT_OVERFLOW_CHANNELS;
 const PLANET_SHIP_COUNT_CHANNELS: usize =
@@ -53,7 +51,6 @@ pub const FLEET_CHANNELS: usize =
 pub const COMET_CHANNELS: usize =
     COMET_BASE_CHANNELS + COMET_CURRENT_STATE_CHANNELS + COMET_PATH_CHANNELS;
 pub const GLOBAL_CHANNELS: usize = 3;
-pub const MAX_LAUNCH_FEATURES: usize = ACTION_SHIP_COUNT_CHANNELS;
 pub const OUTER_PLAYER_SLOTS: usize = MAX_PLAYERS;
 pub const ACTION_ENTITY_SLOTS: usize = MAX_PLANETS + MAX_COMETS;
 
@@ -154,7 +151,6 @@ pub fn rl_obs_constants() -> (
     usize,
     usize,
     usize,
-    usize,
 ) {
     (
         MAX_PLANETS,
@@ -166,7 +162,6 @@ pub fn rl_obs_constants() -> (
         FLEET_CHANNELS,
         COMET_CHANNELS,
         GLOBAL_CHANNELS,
-        MAX_LAUNCH_FEATURES,
     )
 }
 

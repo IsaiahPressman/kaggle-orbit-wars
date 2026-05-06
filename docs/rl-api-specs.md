@@ -63,7 +63,6 @@ environment returns an `ObsBatch` with these tensors:
 | `global_features` | `float32` | `(n_envs, 3)` |
 | `can_act` | `bool` | action-spec dependent |
 | `max_launch` | `int64` | `(n_envs, 4, ACTION_ENTITY_SLOTS)` |
-| `max_launch_features` | `float32` | `(n_envs, 4, ACTION_ENTITY_SLOTS, 28)` |
 
 All reused buffers are fully overwritten on each observation write. Inactive
 rows are zero-filled and their `entity_mask` slots are set to `False`.
@@ -290,7 +289,6 @@ These are written alongside the observation tensors:
 | --- | --- | --- | --- |
 | `can_act` | `bool` | `(n_envs, 4, 44)` | whether a player can launch from an entity slot |
 | `max_launch` | `int64` | `(n_envs, 4, 44)` | maximum launchable ship count for that slot |
-| `max_launch_features` | `float32` | `(n_envs, 4, 44, 28)` | Rust-encoded features for `max_launch` using the owned-planet ship-count bucket grid |
 
 `can_act[player, entity]` is true when the entity is owned by that outer player
 slot and has at least `min_fleet_size` ships. In 2-player games, two random
@@ -350,7 +348,6 @@ train against this action spec when the model actor config also uses
 | --- | --- | --- | --- |
 | `can_act` | `bool` | `(n_envs, 4, 44, 44)` | whether a player can launch from a source slot to a target slot |
 | `max_launch` | `int64` | `(n_envs, 4, 44)` | maximum launchable ship count for that source slot |
-| `max_launch_features` | `float32` | `(n_envs, 4, 44, 28)` | Rust-encoded features for `max_launch` using the owned-planet ship-count bucket grid |
 
 `can_act[player, source, target]` is true when the source entity is owned by
 that outer player slot, has at least `min_fleet_size` ships, the target slot

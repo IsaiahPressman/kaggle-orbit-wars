@@ -47,7 +47,6 @@ from owl.model.base import (
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
-    MAX_LAUNCH_FEATURES,
     OUTER_PLAYER_SLOTS,
     ActionConfig,
     ActionDiscreteTargetsConfig,
@@ -169,18 +168,6 @@ class StatelessTransformerV1(BaseModelAPI):
         self.config = config
         self.obs_spec = obs_spec
         self.action_spec = action_spec
-        if (
-            isinstance(action_spec, ActionPureConfig)
-            and action_spec.max_per_planet_launches > 1
-        ):
-            raise NotImplementedError(
-                "PureActor with max_per_planet_launches > 1 is not supported "
-                "because actor max_launch_features are produced by the Rust "
-                "observation encoder for the initial launch budget only. Use "
-                "ActionPureConfig(max_per_planet_launches=1) or the "
-                "discrete_targets actor."
-            )
-
         dim = self.config.embed_dim
         self.static_planet_proj = ObservationInputStem(
             self.obs_spec.planet_channels,
@@ -211,13 +198,12 @@ class StatelessTransformerV1(BaseModelAPI):
         self.final_norm = nn.LayerNorm(dim)
 
         self.critic_head = OutputProjectionMLP(self.config, 1)
-        self.action_info_proj = nn.Linear(MAX_LAUNCH_FEATURES, dim)
         self.pure_actor_input_proj: nn.Linear | None = None
         self.source_actor_input_proj: nn.Linear | None = None
         self.target_actor_input_proj: nn.Linear | None = None
         self.actor: PureActor | DiscreteTargetsActor
         if isinstance(action_spec, ActionPureConfig):
-            self.pure_actor_input_proj = nn.Linear(dim * 3, dim)
+            self.pure_actor_input_proj = nn.Linear(dim * 2, dim)
             self.actor = PureActor(
                 cast(ActorPureConfig, self.config.actor),
                 embed_dim=dim,
@@ -225,7 +211,7 @@ class StatelessTransformerV1(BaseModelAPI):
                 activation=self.config.activation,
             )
         else:
-            self.source_actor_input_proj = nn.Linear(dim * 4, dim)
+            self.source_actor_input_proj = nn.Linear(dim * 3, dim)
             self.target_actor_input_proj = nn.Linear(dim * 3, dim)
             self.actor = DiscreteTargetsActor(
                 cast(ActorDiscreteTargetsConfig, self.config.actor),
@@ -262,7 +248,6 @@ class StatelessTransformerV1(BaseModelAPI):
             self.board_tokens,
             self.actor_plan_tokens,
             self.critic_value_tokens,
-            self.action_info_proj,
             *self.actor.get_input_layers(),
         )
 
@@ -388,7 +373,6 @@ class StatelessTransformerV1(BaseModelAPI):
             encoded,
             obs.can_act,
             obs.max_launch,
-            obs.max_launch_features,
             deterministic=deterministic,
         )
         return ModelOutput(
@@ -410,7 +394,6 @@ class StatelessTransformerV1(BaseModelAPI):
             encoded,
             obs.can_act,
             obs.max_launch,
-            obs.max_launch_features,
             actions,
         )
         return ModelEvaluation(
@@ -455,26 +438,8 @@ class StatelessTransformerV1(BaseModelAPI):
     def _pure_actor_inputs(
         self,
         encoded: EncodedObservations,
-        max_launch_features: torch.Tensor,
     ) -> torch.Tensor:
         action_entity_hidden = encoded.action_entity_hidden
-        if max_launch_features.shape != (
-            encoded.hidden.shape[0],
-            OUTER_PLAYER_SLOTS,
-            ACTION_ENTITY_SLOTS,
-            MAX_LAUNCH_FEATURES,
-        ):
-            expected_shape = (
-                encoded.hidden.shape[0],
-                OUTER_PLAYER_SLOTS,
-                ACTION_ENTITY_SLOTS,
-                MAX_LAUNCH_FEATURES,
-            )
-            raise ValueError(
-                "max_launch_features must have shape "
-                f"{expected_shape}, got {tuple(max_launch_features.shape)}"
-            )
-
         player_hidden = encoded.player_hidden
         entity_features = action_entity_hidden[:, None, :, :].expand(
             -1,
@@ -488,38 +453,17 @@ class StatelessTransformerV1(BaseModelAPI):
             ACTION_ENTITY_SLOTS,
             -1,
         )
-        action_features = self.action_info_proj(
-            max_launch_features.to(dtype=action_entity_hidden.dtype)
-        )
         if self.pure_actor_input_proj is None:
             raise RuntimeError("pure actor input projection is not initialized")
         return self.pure_actor_input_proj(
-            torch.cat((entity_features, player_features, action_features), dim=-1)
+            torch.cat((entity_features, player_features), dim=-1)
         )
 
     def _discrete_actor_inputs(
         self,
         encoded: EncodedObservations,
-        max_launch_features: torch.Tensor,
     ) -> DiscreteActorInputs:
         action_entity_hidden = encoded.action_entity_hidden
-        if max_launch_features.shape != (
-            encoded.hidden.shape[0],
-            OUTER_PLAYER_SLOTS,
-            ACTION_ENTITY_SLOTS,
-            MAX_LAUNCH_FEATURES,
-        ):
-            expected_shape = (
-                encoded.hidden.shape[0],
-                OUTER_PLAYER_SLOTS,
-                ACTION_ENTITY_SLOTS,
-                MAX_LAUNCH_FEATURES,
-            )
-            raise ValueError(
-                "max_launch_features must have shape "
-                f"{expected_shape}, got {tuple(max_launch_features.shape)}"
-            )
-
         entity_features = action_entity_hidden[:, None, :, :].expand(
             -1,
             OUTER_PLAYER_SLOTS,
@@ -538,16 +482,10 @@ class StatelessTransformerV1(BaseModelAPI):
             ACTION_ENTITY_SLOTS,
             -1,
         )
-        action_features = self.action_info_proj(
-            max_launch_features.to(dtype=action_entity_hidden.dtype)
-        )
         if self.source_actor_input_proj is None or self.target_actor_input_proj is None:
             raise RuntimeError("discrete actor input projections are not initialized")
         source = self.source_actor_input_proj(
-            torch.cat(
-                (entity_features, player_features, plan_features, action_features),
-                dim=-1,
-            )
+            torch.cat((entity_features, player_features, plan_features), dim=-1)
         )
         target = self.target_actor_input_proj(
             torch.cat((entity_features, player_features, plan_features), dim=-1)
@@ -559,20 +497,19 @@ class StatelessTransformerV1(BaseModelAPI):
         encoded: EncodedObservations,
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
-        max_launch_features: torch.Tensor,
         *,
         deterministic: bool,
     ) -> tuple[ModelActions, ModelActionLogProbs, ModelActionEntropies]:
         if isinstance(self.actor, DiscreteTargetsActor):
             return self.actor(
-                self._discrete_actor_inputs(encoded, max_launch_features),
+                self._discrete_actor_inputs(encoded),
                 can_act,
                 max_launch,
                 min_fleet_size=self.action_spec.min_fleet_size,
                 deterministic=deterministic,
             )
         return self.actor(
-            self._pure_actor_inputs(encoded, max_launch_features),
+            self._pure_actor_inputs(encoded),
             can_act,
             max_launch,
             min_fleet_size=self.action_spec.min_fleet_size,
@@ -584,19 +521,18 @@ class StatelessTransformerV1(BaseModelAPI):
         encoded: EncodedObservations,
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
-        max_launch_features: torch.Tensor,
         actions: ModelActions,
     ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
         if isinstance(self.actor, DiscreteTargetsActor):
             return self.actor.log_prob(
-                self._discrete_actor_inputs(encoded, max_launch_features),
+                self._discrete_actor_inputs(encoded),
                 can_act,
                 max_launch,
                 actions,
                 min_fleet_size=self.action_spec.min_fleet_size,
             )
         return self.actor.log_prob(
-            self._pure_actor_inputs(encoded, max_launch_features),
+            self._pure_actor_inputs(encoded),
             can_act,
             max_launch,
             actions,

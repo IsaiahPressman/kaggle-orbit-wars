@@ -172,7 +172,6 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context(
         global_features=torch.zeros((1, 1)),
         can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
         max_launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
-        max_launch_features=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 28)),
     )
     assignments = torch.tensor([[0, 1, 0, 1]])
 

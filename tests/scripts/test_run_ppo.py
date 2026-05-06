@@ -439,7 +439,6 @@ def test_eval_actions_for_assignments_uses_stochastic_model_outputs() -> None:
         global_features=torch.zeros((1, 1)),
         can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
         max_launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
-        max_launch_features=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 28)),
     )
 
     actions = run_ppo._eval_actions_for_assignments(

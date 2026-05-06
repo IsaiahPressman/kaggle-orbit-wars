@@ -39,7 +39,6 @@ from owl.model.stateless_transformer_v1 import (
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     MAX_COMETS,
-    MAX_LAUNCH_FEATURES,
     MAX_PLANETS,
     OUTER_PLAYER_SLOTS,
     ActionConfig,
@@ -111,10 +110,6 @@ def _obs_batch(
     max_launch[:, 0, 0] = 5
     max_launch[:, 1, 1] = 3
     max_launch[:, 2, MAX_PLANETS] = 2
-    max_launch_features = torch.zeros(
-        (batch_size, 4, ACTION_ENTITY_SLOTS, MAX_LAUNCH_FEATURES),
-        dtype=torch.float32,
-    )
 
     assert action_spec.max_per_planet_launches >= 1
     return ObsBatch(
@@ -127,7 +122,6 @@ def _obs_batch(
         global_features=global_features,
         can_act=can_act,
         max_launch=max_launch,
-        max_launch_features=max_launch_features,
     )
 
 
@@ -192,10 +186,10 @@ def test_model_config_loads_actor_subconfig_reference() -> None:
 @pytest.mark.parametrize(
     ("filename", "expected_params"),
     [
-        ("stateless_transformer_tiny.yaml", 1_554_446),
-        ("stateless_transformer_5m.yaml", 7_014_414),
-        ("stateless_transformer_20m.yaml", 24_267_290),
-        ("stateless_transformer_20m_swiglu.yaml", 24_031_898),
+        ("stateless_transformer_tiny.yaml", 1_534_350),
+        ("stateless_transformer_5m.yaml", 6_941_454),
+        ("stateless_transformer_20m.yaml", 24_108_698),
+        ("stateless_transformer_20m_swiglu.yaml", 23_873_306),
     ],
 )
 def test_model_config_file_parameter_count(
@@ -1192,6 +1186,55 @@ def test_discrete_targets_output_layers_include_only_second_head_layers() -> Non
         assert id(head.up) not in output_layer_ids
 
 
+def test_learned_token_embeddings_are_input_layers() -> None:
+    pure_config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        actor=ActorPureConfig(),
+    )
+    pure_model = _model(
+        pure_config,
+        action_spec=ActionPureConfig(max_per_planet_launches=3),
+    )
+
+    pure_input_layer_ids = {id(layer) for layer in pure_model.get_input_layers()}
+
+    for layer in (
+        pure_model.player_tokens,
+        pure_model.board_tokens,
+        pure_model.actor_plan_tokens,
+        pure_model.critic_value_tokens,
+        pure_model.actor.launch_slot_tokens,
+    ):
+        assert id(layer) in pure_input_layer_ids
+
+    discrete_config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        actor=ActorDiscreteTargetsConfig(),
+    )
+    discrete_model = _model(
+        discrete_config,
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+
+    discrete_input_layer_ids = {
+        id(layer) for layer in discrete_model.get_input_layers()
+    }
+
+    for layer in (
+        discrete_model.player_tokens,
+        discrete_model.board_tokens,
+        discrete_model.actor_plan_tokens,
+        discrete_model.critic_value_tokens,
+        discrete_model.actor.source_role,
+        discrete_model.actor.target_role,
+    ):
+        assert id(layer) in discrete_input_layer_ids
+
+
 def test_discrete_targets_actor_masks_target_logits_under_bfloat16_autocast() -> None:
     config = StatelessTransformerV1Config(
         actor=ActorDiscreteTargetsConfig(),
@@ -1896,7 +1939,7 @@ def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
     assert all(torch.isfinite(grad).all() for grad in grads)
 
 
-def test_pure_actor_rejects_multi_launch_action_spec() -> None:
+def test_pure_actor_supports_multi_launch_action_spec() -> None:
     obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     action_spec = ActionPureConfig(max_per_planet_launches=3)
     config = StatelessTransformerV1Config(
@@ -1906,8 +1949,18 @@ def test_pure_actor_rejects_multi_launch_action_spec() -> None:
         actor=ActorPureConfig(n_action_mixtures=2),
     )
 
-    with pytest.raises(NotImplementedError, match="max_per_planet_launches > 1"):
-        _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+
+    output = model(obs)
+    assert output.actions.launch.shape == (2, 4, ACTION_ENTITY_SLOTS, 3)
+
+    evaluation = model.evaluate_actions(obs, output.actions)
+    assert evaluation.log_probs.per_player_entity.shape == (
+        2,
+        4,
+        ACTION_ENTITY_SLOTS,
+    )
 
 
 def test_evaluate_actions_rejects_invalid_action_dtypes() -> None:

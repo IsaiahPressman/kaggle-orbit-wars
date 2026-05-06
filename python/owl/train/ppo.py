@@ -245,17 +245,6 @@ class PPORolloutBuffer:
                 dtype=torch.int64,
                 device=device,
             ),
-            max_launch_features=torch.zeros(
-                (
-                    horizon,
-                    n_envs,
-                    OUTER_PLAYER_SLOTS,
-                    ACTION_ENTITY_SLOTS,
-                    obs_spec.max_launch_features,
-                ),
-                dtype=torch.float32,
-                device=device,
-            ),
         )
         action_shape = (
             horizon,
