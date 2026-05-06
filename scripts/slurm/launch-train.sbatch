@@ -3,7 +3,7 @@
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
-#SBATCH --cpus-per-gpu=32
+#SBATCH --cpus-per-gpu=28
 #SBATCH --mem-per-gpu=128G
 #SBATCH --partition=llm
 #SBATCH --time=24:00:00
