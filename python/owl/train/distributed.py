@@ -72,7 +72,7 @@ class DistributedContext:
 def distributed_session() -> Iterator[DistributedContext]:
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
+        torch.cuda.set_device(torch.device(f"cuda:{local_rank}"))
 
     manage_process_group = int(os.environ.get("WORLD_SIZE", "1")) > 1
     if manage_process_group:
@@ -87,7 +87,7 @@ def distributed_session() -> Iterator[DistributedContext]:
         if dist.is_initialized():
             raise RuntimeError("torch.distributed is already initialized")
 
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
 
     try:
         yield DistributedContext.from_runtime()

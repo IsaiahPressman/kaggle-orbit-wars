@@ -223,7 +223,7 @@ def _run_training_session(
             env_steps_per_iteration=env_steps_per_iteration,
             max_env_steps=max_env_steps,
             max_runtime_seconds=max_runtime_seconds,
-            distributed=distributed,
+            dist_ctx=distributed,
             start_env_steps=start_env_steps,
             wandb_run_id=logger.run_id,
             last_best_model=last_best_model,
@@ -255,7 +255,7 @@ def _run_training_session_worker(
         env_steps_per_iteration=env_steps_per_iteration,
         max_env_steps=max_env_steps,
         max_runtime_seconds=max_runtime_seconds,
-        distributed=distributed,
+        dist_ctx=distributed,
         start_env_steps=start_env_steps,
         last_best_model=last_best_model,
     )
@@ -270,18 +270,11 @@ def _run_training_loop(
     env_steps_per_iteration: int,
     max_env_steps: int | None,
     max_runtime_seconds: float | None,
-    distributed: DistributedContext | None = None,
+    dist_ctx: DistributedContext,
     start_env_steps: int = 0,
     wandb_run_id: str | None = None,
     last_best_model: BaseModelAPI | None = None,
 ) -> int:
-    distributed = distributed or DistributedContext(
-        device=trainer.device,
-        rank=0,
-        local_rank=0,
-        world_size=1,
-        initialized=False,
-    )
     env_steps = start_env_steps
     started_at = time.monotonic()
     next_checkpoint_env_steps = _next_periodic_checkpoint_step(
@@ -295,14 +288,14 @@ def _run_training_loop(
         started_at=started_at,
         max_env_steps=max_env_steps,
         max_runtime_seconds=max_runtime_seconds,
-        distributed=distributed,
+        distributed=dist_ctx,
     ):
         return env_steps
     with tqdm(
         unit="env steps",
         dynamic_ncols=True,
         initial=env_steps,
-        disable=not distributed.is_main_process,
+        disable=not dist_ctx.is_main_process,
     ) as progress:
         while True:
             metrics = trainer.train_iteration()
@@ -316,7 +309,7 @@ def _run_training_loop(
                 checkpoint_path = (
                     run_dir / f"checkpoint_{_format_checkpoint_step(env_steps)}.pt"
                 )
-                if distributed.is_main_process:
+                if dist_ctx.is_main_process:
                     trainer.write_checkpoint(
                         checkpoint_path,
                         env_steps=env_steps,
@@ -324,9 +317,9 @@ def _run_training_loop(
                     )
                 if last_best_model is None:
                     raise RuntimeError("last_best_model must exist for checkpoints")
-                distributed.barrier()
+                dist_ctx.barrier()
                 eval_metrics: dict[str, float] | None = None
-                if distributed.is_main_process:
+                if dist_ctx.is_main_process:
                     eval_metrics = _evaluate_against_last_best(
                         current_model=unwrap_model(trainer.model),
                         last_best_model=last_best_model,
@@ -338,7 +331,7 @@ def _run_training_loop(
                             else None
                         ),
                     )
-                eval_metrics = broadcast_object(eval_metrics, distributed)
+                eval_metrics = broadcast_object(eval_metrics, dist_ctx)
                 if eval_metrics is None:
                     raise RuntimeError("missing broadcast eval metrics")
                 logger.log(eval_metrics, step=env_steps)
@@ -348,13 +341,13 @@ def _run_training_loop(
                 )
                 if replace_last_best:
                     _copy_model_state(last_best_model, unwrap_model(trainer.model))
-                    if distributed.is_main_process:
+                    if dist_ctx.is_main_process:
                         trainer.write_checkpoint(
                             run_dir / "checkpoint_last_best.pt",
                             env_steps=env_steps,
                             wandb_run_id=wandb_run_id,
                         )
-                distributed.barrier()
+                dist_ctx.barrier()
                 next_checkpoint_env_steps = _next_periodic_checkpoint_step(
                     checkpoint_freq=cfg.rl.checkpoint_freq,
                     env_steps=env_steps,
@@ -364,7 +357,7 @@ def _run_training_loop(
                 started_at=started_at,
                 max_env_steps=max_env_steps,
                 max_runtime_seconds=max_runtime_seconds,
-                distributed=distributed,
+                distributed=dist_ctx,
             ):
                 break
     return env_steps
