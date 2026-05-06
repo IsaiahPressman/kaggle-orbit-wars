@@ -29,6 +29,21 @@ See `docs/containerization.md` for building a Docker image with the locked Pytho
 dependencies, Rust toolchain, compiled extension module, and example Slurm launch
 patterns.
 
+## Kaggle submission build
+
+Build a Kaggle-compatible image and create `artifacts/submission.tar.gz` with:
+
+```sh
+just kaggle-image
+just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt
+```
+
+The submission builder compiles the Rust extension inside Kaggle's Python image
+and packages `python/owl`, `python/main.py` or `main.py`, the requested model,
+and the model's adjacent `config.yaml` at the archive root. The packaged
+checkpoint keeps the original filename but contains only the model weights
+needed by the Kaggle agent.
+
 ## Orbit Wars reference
 
 The Rust rules engine targets the installed `kaggle-environments` Orbit Wars

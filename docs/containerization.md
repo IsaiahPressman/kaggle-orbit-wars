@@ -4,6 +4,14 @@ This repository can be built into an image that contains Python 3.12, `uv`, the
 repo-pinned Rust toolchain, Cargo dependencies, Python dependencies, and the
 compiled `maturin` extension.
 
+For Kaggle submission builds, use `Dockerfile.kaggle`. It starts from Kaggle's
+CPU Python image, installs the repo-pinned Rust toolchain, creates a uv build
+venv for `maturin`, compiles the PyO3 extension in release mode with the same
+native CPU optimization used by `just prepare-rl`, and packages the importable
+`owl` package plus the requested model checkpoint and adjacent model config into
+`submission.tar.gz`. The checkpoint is slimmed into a temporary file before
+packaging so the original training checkpoint is not overwritten.
+
 ## When this helps
 
 Containerizing makes sense for Slurm if the cluster has a supported container
@@ -58,6 +66,28 @@ container runtime exposing the GPU devices into the container.
 
 The image installs the Rust toolchain declared in `rust-toolchain.toml`, so local
 and container builds use the same compiler channel.
+
+Build the Kaggle submission image separately:
+
+```sh
+just kaggle-image
+```
+
+Then create a submission tarball on the host:
+
+```sh
+just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt
+```
+
+The resulting file is `artifacts/submission.tar.gz`. The package script expects
+`python/main.py` or `main.py` to exist and copies it to `main.py` at the archive
+root. It also extracts `checkpoint["model"]` from the requested checkpoint into a
+temporary file, copies that file to the archive root using the original
+checkpoint filename, and copies `config.yaml` from the same directory. The image
+build validates Kaggle-targeted Rust compilation directly; artifact generation
+runs later with the mounted checkpoint directory. Both `just kaggle-image` and
+`just kaggle-submission` depend on `just prepare`, so local CI checks run before
+the Docker workflow starts.
 
 The `flash-attn` extra is installed by default. Skip it only for machines where
 CUDA compiler, PyTorch, or GPU architecture compatibility makes the image build

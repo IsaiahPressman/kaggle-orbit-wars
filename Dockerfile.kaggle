@@ -1,0 +1,63 @@
+# syntax=docker/dockerfile:1.7
+
+ARG KAGGLE_IMAGE=gcr.io/kaggle-images/python:v168
+FROM --platform=linux/amd64 ${KAGGLE_IMAGE}
+
+ARG TARGETPLATFORM
+ARG JUST_VERSION=1.50.0
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    CARGO_HOME=/opt/cargo \
+    RUSTUP_HOME=/opt/rustup \
+    VIRTUAL_ENV=/opt/kaggle-build-venv \
+    PATH=/opt/kaggle-build-venv/bin:/opt/cargo/bin:$PATH
+
+RUN test "${TARGETPLATFORM}" = "linux/amd64" || \
+    (echo "Kaggle Python images target linux/amd64. Build with: docker build --platform linux/amd64 -f Dockerfile.kaggle -t orbit-wars:kaggle ." >&2 && exit 1)
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN python -c 'import sys; assert sys.version_info >= (3, 12), f"Python 3.12+ required, found {sys.version}"'
+
+WORKDIR /workspace/orbit-wars
+
+COPY rust-toolchain.toml ./
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain none && \
+    RUST_TOOLCHAIN="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" && \
+    test -n "${RUST_TOOLCHAIN}" && \
+    rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal \
+        --component rustfmt && \
+    rustup default "${RUST_TOOLCHAIN}" && \
+    cargo install just --version "${JUST_VERSION}" --locked && \
+    python -m pip install --no-cache-dir uv && \
+    uv venv --system-site-packages "${VIRTUAL_ENV}" && \
+    uv pip install --python "${VIRTUAL_ENV}/bin/python" "maturin>=1.13.1,<2.0"
+
+COPY Cargo.toml Cargo.lock pyproject.toml rustfmt.toml ./
+COPY .cargo/ .cargo/
+COPY src/lib.rs src/lib.rs
+
+RUN --mount=type=cache,target=/opt/cargo/registry \
+    --mount=type=cache,target=/opt/cargo/git \
+    cargo fetch --locked
+
+COPY . .
+
+RUN --mount=type=cache,target=/opt/cargo/registry \
+    --mount=type=cache,target=/opt/cargo/git \
+    --mount=type=cache,target=/workspace/orbit-wars/target \
+    just build-release && \
+    python -c 'import owl.rs; owl.rs.assert_release_build()'
+
+ENTRYPOINT ["scripts/build_kaggle_submission.sh"]
+CMD ["--help"]
