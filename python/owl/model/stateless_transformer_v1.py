@@ -259,16 +259,13 @@ class StatelessTransformerV1(BaseModelAPI):
         global_x = self.global_proj(obs.global_features)
         global_token = global_x.unsqueeze(1)
         orbiting = obs.orbiting_planets.unsqueeze(-1)
-        planet_x = (
-            torch.where(
-                orbiting,
-                self.orbit_planet_proj(obs.planets),
-                self.static_planet_proj(obs.planets),
-            )
-            + global_token
+        planet_x = torch.where(
+            orbiting,
+            self.orbit_planet_proj(obs.planets),
+            self.static_planet_proj(obs.planets),
         )
-        fleet_x = self.fleet_proj(obs.fleets) + global_token
-        comet_x = self.comet_proj(obs.comets) + global_token
+        fleet_x = self.fleet_proj(obs.fleets)
+        comet_x = self.comet_proj(obs.comets)
         batch_size = obs.planets.shape[0]
         player_tokens = _expand_tokens(
             self.player_tokens,

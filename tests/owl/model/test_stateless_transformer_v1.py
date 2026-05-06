@@ -186,10 +186,10 @@ def test_model_config_loads_actor_subconfig_reference() -> None:
 @pytest.mark.parametrize(
     ("filename", "expected_params"),
     [
-        ("stateless_transformer_tiny.yaml", 1_534_350),
-        ("stateless_transformer_5m.yaml", 6_941_454),
-        ("stateless_transformer_20m.yaml", 24_108_698),
-        ("stateless_transformer_20m_swiglu.yaml", 23_873_306),
+        ("stateless_transformer_tiny.yaml", 1_207_182),
+        ("stateless_transformer_5m.yaml", 5_532_942),
+        ("stateless_transformer_20m.yaml", 20_093_402),
+        ("stateless_transformer_20m_swiglu.yaml", 20_914_202),
     ],
 )
 def test_model_config_file_parameter_count(
