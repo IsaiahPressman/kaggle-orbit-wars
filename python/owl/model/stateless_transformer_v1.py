@@ -252,15 +252,6 @@ class StatelessTransformerV1(BaseModelAPI):
             _init_linear(layer, gain=gain)
 
     def get_input_layers(self) -> tuple[nn.Module, ...]:
-        actor_input_layers = [
-            layer
-            for layer in (
-                self.pure_actor_input_proj,
-                self.source_actor_input_proj,
-                self.target_actor_input_proj,
-            )
-            if layer is not None
-        ]
         return (
             self.static_planet_proj.input,
             self.orbit_planet_proj.input,
@@ -272,7 +263,6 @@ class StatelessTransformerV1(BaseModelAPI):
             self.actor_plan_tokens,
             self.critic_value_tokens,
             self.action_info_proj,
-            *actor_input_layers,
             *self.actor.get_input_layers(),
         )
 
