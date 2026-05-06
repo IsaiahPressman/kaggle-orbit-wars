@@ -17,9 +17,26 @@ from owl.rl import (
     EntityBasedConfig,
     EnvConfig,
     VectorizedEnv,
+    actions_to_kaggle,
     encode_entity_based,
     encode_python_observation,
 )
+
+
+def _python_obs(**overrides: object) -> dict[str, object]:
+    obs = {
+        "step": 0,
+        "episode_steps": 500,
+        "angular_velocity": 0.025,
+        "planets": [],
+        "initial_planets": [],
+        "fleets": [],
+        "comets": [],
+    }
+    obs.update(overrides)
+    if "initial_planets" not in overrides:
+        obs["initial_planets"] = obs["planets"]
+    return obs
 
 
 def test_vectorized_env_writes_into_preallocated_torch_buffers() -> None:
@@ -400,6 +417,58 @@ def test_discrete_targets_step_uses_int_target_tensor() -> None:
         env.step(launch, target.astype(np.float32), ships)
 
 
+def test_actions_to_kaggle_converts_pure_model_actions() -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    shape = (1, 4, ACTION_ENTITY_SLOTS, action_spec.max_per_planet_launches)
+    launch = torch.zeros(shape, dtype=torch.bool)
+    angle = torch.zeros(shape, dtype=torch.float32)
+    ships = torch.zeros(shape, dtype=torch.int64)
+    launch[0, 0, 0, 0] = True
+    angle[0, 0, 0, 0] = 1.25
+    ships[0, 0, 0, 0] = action_spec.min_fleet_size
+
+    actions = actions_to_kaggle(
+        _python_obs(planets=[[0, 0, 25.0, 50.0, 2.0, 10, 3]]),
+        0,
+        launch,
+        angle,
+        ships,
+        action_spec=action_spec,
+    )
+
+    assert actions == [[0.0, pytest.approx(1.25), float(action_spec.min_fleet_size)]]
+
+
+def test_actions_to_kaggle_converts_discrete_target_model_actions() -> None:
+    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+    shape = (1, 4, ACTION_ENTITY_SLOTS, action_spec.max_per_planet_launches)
+    launch = torch.zeros(shape, dtype=torch.bool)
+    target = torch.zeros(shape, dtype=torch.int64)
+    ships = torch.zeros(shape, dtype=torch.int64)
+    launch[0, 0, 0, 0] = True
+    target[0, 0, 0, 0] = 1
+    ships[0, 0, 0, 0] = action_spec.min_fleet_size
+
+    actions = actions_to_kaggle(
+        _python_obs(
+            planets=[
+                [0, 0, 25.0, 50.0, 2.0, 10, 3],
+                [1, -1, 75.0, 50.0, 2.0, 10, 3],
+            ]
+        ),
+        0,
+        launch,
+        target,
+        ships,
+        action_spec=action_spec,
+    )
+
+    assert len(actions) == 1
+    assert actions[0][0] == 0.0
+    assert np.isfinite(actions[0][1])
+    assert actions[0][2] == float(action_spec.min_fleet_size)
+
+
 def test_min_fleet_size_controls_action_mask_and_validation() -> None:
     action_spec = ActionPureConfig(min_fleet_size=3)
     (
@@ -412,13 +481,7 @@ def test_min_fleet_size_controls_action_mask_and_validation() -> None:
         can_act,
         max_launch,
     ) = encode_python_observation(
-        {
-            "step": 0,
-            "angular_velocity": 0.025,
-            "planets": [[0, 0, 25.0, 75.0, 2.0, 2, 3]],
-            "fleets": [],
-            "comets": [],
-        },
+        _python_obs(planets=[[0, 0, 25.0, 75.0, 2.0, 2, 3]]),
         obs_spec=EntityBasedConfig(),
         action_spec=action_spec,
     )
@@ -445,6 +508,31 @@ def test_min_fleet_size_controls_action_mask_and_validation() -> None:
         env.step(launch, angle, ships)
 
 
+def test_python_observation_encoder_requires_missing_keys() -> None:
+    obs = _python_obs()
+    del obs["comets"]
+
+    with pytest.raises(KeyError, match="comets"):
+        encode_python_observation(
+            obs,
+            obs_spec=EntityBasedConfig(),
+            action_spec=ActionPureConfig(),
+        )
+
+
+@pytest.mark.parametrize("field", ["step", "episode_steps"])
+@pytest.mark.parametrize("value", [1.5, "1", True])
+def test_python_observation_encoder_rejects_non_integer_globals(
+    field: str, value: object
+) -> None:
+    with pytest.raises(TypeError, match=rf"obs\['{field}'\] must be an integer"):
+        encode_python_observation(
+            _python_obs(**{field: value}),
+            obs_spec=EntityBasedConfig(),
+            action_spec=ActionPureConfig(),
+        )
+
+
 def test_python_observation_encoder_writes_discrete_target_mask() -> None:
     (
         _planets,
@@ -456,16 +544,12 @@ def test_python_observation_encoder_writes_discrete_target_mask() -> None:
         can_act,
         max_launch,
     ) = encode_python_observation(
-        {
-            "step": 0,
-            "angular_velocity": 0.025,
-            "planets": [
+        _python_obs(
+            planets=[
                 [0, 0, 25.0, 75.0, 2.0, 10, 3],
                 [1, -1, 75.0, 75.0, 2.0, 10, 3],
-            ],
-            "fleets": [],
-            "comets": [],
-        },
+            ]
+        ),
         obs_spec=EntityBasedConfig(),
         action_spec=ActionDiscreteTargetsConfig(),
     )
@@ -490,13 +574,12 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
         can_act,
         max_launch,
     ) = encode_python_observation(
-        {
-            "step": 50,
-            "angular_velocity": 0.05,
-            "planets": [[0, -1, 25.0, 75.0, 2.0, 50, 3]],
-            "fleets": [[1, 0, 10.0, 20.0, np.pi / 2, 0, 25]],
-            "comets": [],
-        },
+        _python_obs(
+            step=50,
+            angular_velocity=0.05,
+            planets=[[0, -1, 25.0, 75.0, 2.0, 50, 3]],
+            fleets=[[1, 0, 10.0, 20.0, np.pi / 2, 0, 25]],
+        ),
         obs_spec=EntityBasedConfig(),
         action_spec=ActionPureConfig(),
     )
@@ -1052,12 +1135,7 @@ def test_python_observation_encoder_rejects_invalid_globals(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         encode_python_observation(
-            {
-                field: value,
-                "planets": [],
-                "fleets": [],
-                "comets": [],
-            },
+            _python_obs(**{field: value}),
             obs_spec=EntityBasedConfig(),
             action_spec=ActionPureConfig(),
         )
@@ -1069,11 +1147,7 @@ def test_python_observation_encoder_rejects_invalid_planet_production(
 ) -> None:
     with pytest.raises(ValueError, match="planet production must be between 1 and 5"):
         encode_python_observation(
-            {
-                "planets": [[0, -1, 25.0, 75.0, 2.0, 50, production]],
-                "fleets": [],
-                "comets": [],
-            },
+            _python_obs(planets=[[0, -1, 25.0, 75.0, 2.0, 50, production]]),
             obs_spec=EntityBasedConfig(),
             action_spec=ActionPureConfig(),
         )
@@ -1085,13 +1159,12 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
     spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 1)
 
     _, _, fleets, _, entity_mask, _, _, _ = encode_python_observation(
-        {
-            "planets": [],
-            "fleets": [
+        _python_obs(
+            fleets=[
                 [1, 0, 10.0, 20.0, 0.0, 0, 5],
                 [2, 1, 30.0, 40.0, 0.0, 0, 20],
-            ],
-        },
+            ]
+        ),
         obs_spec=spec,
         action_spec=ActionPureConfig(),
     )
@@ -1115,17 +1188,16 @@ def test_python_observation_encoder_writes_comet_future_paths() -> None:
         can_act,
         max_launch,
     ) = encode_python_observation(
-        {
-            "planets": [[10, 2, 50.0, 50.0, 1.0, 25, 1]],
-            "fleets": [],
-            "comets": [
+        _python_obs(
+            planets=[[10, 2, 50.0, 50.0, 1.0, 25, 1]],
+            comets=[
                 {
                     "planet_ids": [10],
                     "paths": [path],
                     "path_index": 1,
                 }
             ],
-        },
+        ),
         obs_spec=EntityBasedConfig(),
         action_spec=ActionPureConfig(),
     )
@@ -1153,3 +1225,64 @@ def test_python_observation_encoder_writes_comet_future_paths() -> None:
     assert comets[0, 329] == pytest.approx(1.0)
     assert can_act[2, MAX_PLANETS]
     assert max_launch[2, MAX_PLANETS] == 25
+
+
+@pytest.mark.parametrize(
+    ("comets", "message"),
+    [
+        (
+            [
+                {
+                    "planet_ids": [1, 2],
+                    "paths": [[[0.0, 0.0]]],
+                    "path_index": 0,
+                }
+            ],
+            "comet planet_ids and paths must have the same length",
+        ),
+        (
+            [
+                {
+                    "planet_ids": [1, 2, 3, 4, 5],
+                    "paths": [[[0.0, 0.0]]] * 5,
+                    "path_index": 0,
+                }
+            ],
+            "comet groups must have at most 4 paths",
+        ),
+        (
+            [
+                {
+                    "planet_ids": [1, 2, 3],
+                    "paths": [[[0.0, 0.0]]] * 3,
+                    "path_index": 0,
+                },
+                {
+                    "planet_ids": [4, 5],
+                    "paths": [[[0.0, 0.0]]] * 2,
+                    "path_index": 0,
+                },
+            ],
+            "observations must have at most 4 active comets",
+        ),
+        (
+            [
+                {
+                    "planet_ids": [1],
+                    "paths": [[[0.0, 0.0]] * (MAX_COMET_PATH_LENGTH + 1)],
+                    "path_index": 0,
+                }
+            ],
+            "comet paths must have at most 40 points",
+        ),
+    ],
+)
+def test_python_observation_encoder_rejects_comet_truncation(
+    comets: list[dict[str, object]], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        encode_python_observation(
+            _python_obs(comets=comets),
+            obs_spec=EntityBasedConfig(),
+            action_spec=ActionPureConfig(),
+        )

@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use numpy::ndarray::{Array1, Array2};
+use numpy::ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView4};
 use numpy::{
     IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray4,
-    PyUntypedArrayMethods,
+    PyReadonlyArrayDyn, PyUntypedArrayMethods,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -14,8 +14,8 @@ use crate::rules_engine::state::{
 use crate::rules_engine::utils::{fleet_speed, is_orbiting};
 
 use super::action_spec::{
-    action_entity_slots, encode_action_spec, sorted_comet_planet_ids, ActionEntitySlots,
-    RlActionSpec,
+    action_entity_slots, decode_discrete_target_actions, decode_pure_actions, encode_action_spec,
+    sorted_comet_planet_ids, ActionEntitySlots, RlActionSpec,
 };
 use super::{
     log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
@@ -617,49 +617,71 @@ fn state_from_arrays(
     step: u32,
     episode_steps: u32,
 ) -> PyResult<State> {
-    let planet_rows = planets.as_array();
-    let fleet_rows = fleets.as_array();
-    let comet_planet_id_rows = comet_planet_ids.as_array();
-    let comet_path_index_rows = comet_path_indices.as_array();
-    let comet_path_length_rows = comet_path_lengths.as_array();
-    let comet_path_rows = comet_paths.as_array();
+    state_from_array_views(
+        planets.as_array(),
+        None,
+        fleets.as_array(),
+        comet_planet_ids.as_array(),
+        comet_path_indices.as_array(),
+        comet_path_lengths.as_array(),
+        comet_paths.as_array(),
+        angular_velocity,
+        step,
+        episode_steps,
+    )
+}
 
+#[allow(clippy::too_many_arguments)]
+fn state_from_arrays_with_initial_planets(
+    planets: PyReadonlyArray2<'_, f64>,
+    initial_planets: PyReadonlyArray2<'_, f64>,
+    fleets: PyReadonlyArray2<'_, f64>,
+    comet_planet_ids: PyReadonlyArray2<'_, f64>,
+    comet_path_indices: PyReadonlyArray1<'_, f64>,
+    comet_path_lengths: PyReadonlyArray2<'_, f64>,
+    comet_paths: PyReadonlyArray4<'_, f64>,
+    angular_velocity: f64,
+    step: u32,
+    episode_steps: u32,
+) -> PyResult<State> {
+    state_from_array_views(
+        planets.as_array(),
+        Some(initial_planets.as_array()),
+        fleets.as_array(),
+        comet_planet_ids.as_array(),
+        comet_path_indices.as_array(),
+        comet_path_lengths.as_array(),
+        comet_paths.as_array(),
+        angular_velocity,
+        step,
+        episode_steps,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn state_from_array_views(
+    planet_rows: ArrayView2<'_, f64>,
+    initial_planet_rows: Option<ArrayView2<'_, f64>>,
+    fleet_rows: ArrayView2<'_, f64>,
+    comet_planet_id_rows: ArrayView2<'_, f64>,
+    comet_path_index_rows: ArrayView1<'_, f64>,
+    comet_path_length_rows: ArrayView2<'_, f64>,
+    comet_path_rows: ArrayView4<'_, f64>,
+    angular_velocity: f64,
+    step: u32,
+    episode_steps: u32,
+) -> PyResult<State> {
     finite_f64(angular_velocity, "angular_velocity")?;
     if episode_steps == 0 {
         return Err(PyValueError::new_err("episode_steps must be > 0"));
     }
 
-    let planets = planet_rows
-        .rows()
-        .into_iter()
-        .map(|row| {
-            Ok(Planet {
-                id: finite_u32(row[0], "planet id")?,
-                owner: finite_i32(row[1], "planet owner")?,
-                x: finite_f64(row[2], "planet x")?,
-                y: finite_f64(row[3], "planet y")?,
-                radius: finite_f64(row[4], "planet radius")?,
-                ships: finite_i32(row[5], "planet ships")?,
-                production: finite_production(row[6])?,
-            })
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-
-    let fleets = fleet_rows
-        .rows()
-        .into_iter()
-        .map(|row| {
-            Ok(Fleet {
-                id: finite_u32(row[0], "fleet id")?,
-                owner: finite_i32(row[1], "fleet owner")?,
-                x: finite_f64(row[2], "fleet x")?,
-                y: finite_f64(row[3], "fleet y")?,
-                angle: finite_f64(row[4], "fleet angle")?,
-                from_planet_id: finite_u32(row[5], "fleet from_planet_id")?,
-                ships: finite_i32(row[6], "fleet ships")?,
-            })
-        })
-        .collect::<PyResult<Vec<_>>>()?;
+    let planets = parse_planets(planet_rows)?;
+    let initial_planets = initial_planet_rows
+        .map(parse_planets)
+        .transpose()?
+        .unwrap_or_else(|| planets.clone());
+    let fleets = parse_fleets(fleet_rows)?;
 
     if comet_planet_id_rows.shape()[0] != comet_path_index_rows.shape()[0]
         || comet_planet_id_rows.shape()[0] != comet_path_length_rows.shape()[0]
@@ -718,13 +740,49 @@ fn state_from_arrays(
         config,
         step,
         angular_velocity,
-        initial_planets: planets.clone().into(),
+        initial_planets: initial_planets.into(),
         planets: planets.into(),
         fleets,
         next_fleet_id: 0,
         comets,
         comet_planet_ids: flattened_comet_planet_ids,
     })
+}
+
+fn parse_planets(planet_rows: ArrayView2<'_, f64>) -> PyResult<Vec<Planet>> {
+    planet_rows
+        .rows()
+        .into_iter()
+        .map(|row| {
+            Ok(Planet {
+                id: finite_u32(row[0], "planet id")?,
+                owner: finite_i32(row[1], "planet owner")?,
+                x: finite_f64(row[2], "planet x")?,
+                y: finite_f64(row[3], "planet y")?,
+                radius: finite_f64(row[4], "planet radius")?,
+                ships: finite_i32(row[5], "planet ships")?,
+                production: finite_production(row[6])?,
+            })
+        })
+        .collect()
+}
+
+fn parse_fleets(fleet_rows: ArrayView2<'_, f64>) -> PyResult<Vec<Fleet>> {
+    fleet_rows
+        .rows()
+        .into_iter()
+        .map(|row| {
+            Ok(Fleet {
+                id: finite_u32(row[0], "fleet id")?,
+                owner: finite_i32(row[1], "fleet owner")?,
+                x: finite_f64(row[2], "fleet x")?,
+                y: finite_f64(row[3], "fleet y")?,
+                angle: finite_f64(row[4], "fleet angle")?,
+                from_planet_id: finite_u32(row[5], "fleet from_planet_id")?,
+                ships: finite_i32(row[6], "fleet ships")?,
+            })
+        })
+        .collect()
 }
 
 fn finite_f64(value: f64, name: &str) -> PyResult<f64> {
@@ -934,6 +992,239 @@ pub fn encode_entity_based<'py>(
         can_act.into_pyarray(py),
         max_launch.into_pyarray(py),
     ))
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (
+    planets,
+    initial_planets,
+    fleets,
+    comet_planet_ids,
+    comet_path_indices,
+    comet_path_lengths,
+    comet_paths,
+    angular_velocity,
+    step,
+    episode_steps,
+    player,
+    launch,
+    angle,
+    ships,
+    max_per_planet_launches,
+    min_fleet_size
+))]
+pub fn pure_actions_to_kaggle(
+    planets: PyReadonlyArray2<'_, f64>,
+    initial_planets: PyReadonlyArray2<'_, f64>,
+    fleets: PyReadonlyArray2<'_, f64>,
+    comet_planet_ids: PyReadonlyArray2<'_, f64>,
+    comet_path_indices: PyReadonlyArray1<'_, f64>,
+    comet_path_lengths: PyReadonlyArray2<'_, f64>,
+    comet_paths: PyReadonlyArray4<'_, f64>,
+    angular_velocity: f64,
+    step: u32,
+    episode_steps: u32,
+    player: usize,
+    launch: PyReadonlyArrayDyn<'_, bool>,
+    angle: PyReadonlyArrayDyn<'_, f32>,
+    ships: PyReadonlyArrayDyn<'_, i64>,
+    max_per_planet_launches: usize,
+    min_fleet_size: i64,
+) -> PyResult<Vec<Vec<f64>>> {
+    require_kaggle_action_args(player, max_per_planet_launches, min_fleet_size)?;
+    let action_shape = [
+        OUTER_PLAYER_SLOTS,
+        ACTION_ENTITY_SLOTS,
+        max_per_planet_launches,
+    ];
+    require_shape("launch", launch.shape(), &action_shape)?;
+    require_shape("angle", angle.shape(), &action_shape)?;
+    require_shape("ships", ships.shape(), &action_shape)?;
+    require_shape_suffix("planets", planets.shape(), 7)?;
+    require_shape_suffix("initial_planets", initial_planets.shape(), 7)?;
+    require_shape_suffix("fleets", fleets.shape(), 7)?;
+    require_comet_shapes(
+        &comet_planet_ids,
+        &comet_path_indices,
+        &comet_path_lengths,
+        &comet_paths,
+    )?;
+
+    let state = state_from_arrays_with_initial_planets(
+        planets,
+        initial_planets,
+        fleets,
+        comet_planet_ids,
+        comet_path_indices,
+        comet_path_lengths,
+        comet_paths,
+        angular_velocity,
+        step,
+        episode_steps,
+    )?;
+    let action_slots = action_entity_slots(&state);
+    let decoded = decode_pure_actions(
+        &state,
+        &PlayerMap::identity(),
+        &action_slots,
+        launch.as_slice()?,
+        angle.as_slice()?,
+        ships.as_slice()?,
+        max_per_planet_launches,
+        min_fleet_size,
+    )
+    .map_err(PyValueError::new_err)?;
+    Ok(player_actions_to_kaggle(&decoded[player]))
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (
+    planets,
+    initial_planets,
+    fleets,
+    comet_planet_ids,
+    comet_path_indices,
+    comet_path_lengths,
+    comet_paths,
+    angular_velocity,
+    step,
+    episode_steps,
+    player,
+    launch,
+    target,
+    ships,
+    max_per_planet_launches,
+    min_fleet_size
+))]
+pub fn discrete_target_actions_to_kaggle(
+    planets: PyReadonlyArray2<'_, f64>,
+    initial_planets: PyReadonlyArray2<'_, f64>,
+    fleets: PyReadonlyArray2<'_, f64>,
+    comet_planet_ids: PyReadonlyArray2<'_, f64>,
+    comet_path_indices: PyReadonlyArray1<'_, f64>,
+    comet_path_lengths: PyReadonlyArray2<'_, f64>,
+    comet_paths: PyReadonlyArray4<'_, f64>,
+    angular_velocity: f64,
+    step: u32,
+    episode_steps: u32,
+    player: usize,
+    launch: PyReadonlyArrayDyn<'_, bool>,
+    target: PyReadonlyArrayDyn<'_, i64>,
+    ships: PyReadonlyArrayDyn<'_, i64>,
+    max_per_planet_launches: usize,
+    min_fleet_size: i64,
+) -> PyResult<Vec<Vec<f64>>> {
+    require_kaggle_action_args(player, max_per_planet_launches, min_fleet_size)?;
+    let action_shape = [
+        OUTER_PLAYER_SLOTS,
+        ACTION_ENTITY_SLOTS,
+        max_per_planet_launches,
+    ];
+    require_shape("launch", launch.shape(), &action_shape)?;
+    require_shape("target", target.shape(), &action_shape)?;
+    require_shape("ships", ships.shape(), &action_shape)?;
+    require_shape_suffix("planets", planets.shape(), 7)?;
+    require_shape_suffix("initial_planets", initial_planets.shape(), 7)?;
+    require_shape_suffix("fleets", fleets.shape(), 7)?;
+    require_comet_shapes(
+        &comet_planet_ids,
+        &comet_path_indices,
+        &comet_path_lengths,
+        &comet_paths,
+    )?;
+
+    let state = state_from_arrays_with_initial_planets(
+        planets,
+        initial_planets,
+        fleets,
+        comet_planet_ids,
+        comet_path_indices,
+        comet_path_lengths,
+        comet_paths,
+        angular_velocity,
+        step,
+        episode_steps,
+    )?;
+    let action_slots = action_entity_slots(&state);
+    let decoded = decode_discrete_target_actions(
+        &state,
+        &PlayerMap::identity(),
+        &action_slots,
+        launch.as_slice()?,
+        target.as_slice()?,
+        ships.as_slice()?,
+        max_per_planet_launches,
+        min_fleet_size,
+    )
+    .map_err(PyValueError::new_err)?;
+    Ok(player_actions_to_kaggle(&decoded.actions[player]))
+}
+
+fn require_comet_shapes(
+    comet_planet_ids: &PyReadonlyArray2<'_, f64>,
+    comet_path_indices: &PyReadonlyArray1<'_, f64>,
+    comet_path_lengths: &PyReadonlyArray2<'_, f64>,
+    comet_paths: &PyReadonlyArray4<'_, f64>,
+) -> PyResult<()> {
+    let comet_group_count = comet_planet_ids.shape()[0];
+    require_shape(
+        "comet_planet_ids",
+        comet_planet_ids.shape(),
+        &[comet_group_count, MAX_COMETS],
+    )?;
+    require_shape(
+        "comet_path_indices",
+        comet_path_indices.shape(),
+        &[comet_group_count],
+    )?;
+    require_shape(
+        "comet_path_lengths",
+        comet_path_lengths.shape(),
+        &[comet_group_count, MAX_COMETS],
+    )?;
+    require_shape(
+        "comet_paths",
+        comet_paths.shape(),
+        &[comet_group_count, MAX_COMETS, MAX_COMET_PATH_LENGTH, 2],
+    )
+}
+
+fn require_kaggle_action_args(
+    player: usize,
+    max_per_planet_launches: usize,
+    min_fleet_size: i64,
+) -> PyResult<()> {
+    if player >= OUTER_PLAYER_SLOTS {
+        return Err(PyValueError::new_err(format!(
+            "player must be < {OUTER_PLAYER_SLOTS}, got {player}"
+        )));
+    }
+    if !(1..=4).contains(&max_per_planet_launches) {
+        return Err(PyValueError::new_err(
+            "max_per_planet_launches must be between 1 and 4",
+        ));
+    }
+    if min_fleet_size < 1 || min_fleet_size > i64::from(i32::MAX) {
+        return Err(PyValueError::new_err(
+            "min_fleet_size must be between 1 and i32::MAX",
+        ));
+    }
+    Ok(())
+}
+
+fn player_actions_to_kaggle(actions: &[crate::rules_engine::state::LaunchAction]) -> Vec<Vec<f64>> {
+    actions
+        .iter()
+        .map(|action| {
+            vec![
+                f64::from(action.from_planet_id),
+                action.angle,
+                f64::from(action.ships),
+            ]
+        })
+        .collect()
 }
 
 #[cfg(test)]

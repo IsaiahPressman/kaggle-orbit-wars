@@ -240,8 +240,12 @@ Shape per env: `(3,)`.
 | `1` | `steps_until_next_comet_spawn / 100` |
 | `2` | normalized angular velocity |
 
-Standalone observation encoding rejects non-finite `angular_velocity` and
-requires `episode_steps > 0` before computing these values.
+Standalone observation encoding uses strict application-boundary parsing:
+required observation keys are read directly, `step` and `episode_steps` must be
+integers rather than coerced strings or floats, comet groups must provide
+matching `planet_ids`, `paths`, and `path_index`, and comet/path overflow is
+rejected rather than truncated. It also rejects non-finite `angular_velocity`
+and requires `episode_steps > 0` before computing these values.
 
 Comet spawn steps currently come from the rules engine constant:
 
@@ -328,6 +332,13 @@ env, other sub-envs may have advanced before the error is returned.
 For each player and source entity, decoding stops at the first `False` launch
 slot, so later slots for that source are ignored.
 
+For Kaggle submissions, `actions_to_kaggle(obs, player, launch, angle, ships,
+action_spec=...)` accepts a single batched model output with shape
+`(1, 4, 44, max_per_planet_launches)` and returns the selected player's
+`list[list[float]]` action triples. Pure triples are
+`[from_planet_id, angle, ships]` and use the same Rust validation path as
+environment stepping.
+
 ## Discrete Targets Action Spec
 
 Config:
@@ -371,6 +382,9 @@ obs, rewards, dones, episode_metrics = env.step(launch, target, ships)
 Validation matches `pure` for inactive players, source ownership, source budget,
 ship count, missing source slots, and stale source slots. Launched target slots
 must be in range, present, and different from the source slot.
+The Kaggle conversion helper accepts the same batched model output shape and
+uses the Rust target decoder to convert discrete target slots into submitted
+`[from_planet_id, angle, ships]` triples for one selected player.
 
 ### Targeting Rules
 
