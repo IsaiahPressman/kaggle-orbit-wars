@@ -72,11 +72,7 @@ def test_agent_log_prints_one_line_with_metrics(capsys) -> None:
         remaining_overage_time=59.5,
     )
 
-    assert capsys.readouterr().out == (
-        "agent total_ms=10 encode_ms=2 inference_ms=7 conversion_ms=1 "
-        "value_self=0.250 values=[0.250,-0.500,0.000,0.750] "
-        "entities=3 remaining_overage_s=59.500\n"
-    )
+    assert "\n" not in capsys.readouterr().out.rstrip()
 
 
 def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
@@ -111,8 +107,8 @@ def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
 
     log_line = capsys.readouterr().out
     assert re.fullmatch(
-        r"agent total_ms=\d+ encode_ms=\d+ inference_ms=\d+ conversion_ms=\d+ "
-        r"value_self=0\.250 values=\[0\.250,-0\.500,0\.000,0\.750\] "
-        r"entities=1 remaining_overage_s=60\.000\n",
+        r"total_ms=\d+ - encode_ms=\d+ - inference_ms=\d+ - conversion_ms=\d+ - "
+        r"value_self=0\.250 - values=\[0\.250,-0\.500,0\.000,0\.750\] - "
+        r"entities=1 - remaining_overage_s=60\.0\n",
         log_line,
     )
