@@ -5,6 +5,9 @@ to make the final agent review repeatable and repository-owned, following the
 agent workflow guidance in OpenAI's harness-engineering writeup:
 <https://openai.com/index/harness-engineering/>.
 
+When using GitHub CLI commands, run all `gh` commands with elevated permissions;
+they are not allowed in the sandbox.
+
 ## Final Review
 
 1. Inspect the branch state:
