@@ -50,6 +50,19 @@ build:
 [group: 'build']
 build-release:
 	RUSTFLAGS="-C target-cpu=native" uv run maturin develop --release
+[group: 'build']
+kaggle-image: prepare
+	docker build --platform linux/amd64 -f Dockerfile.kaggle -t orbit-wars:kaggle .
+[group: 'build']
+kaggle-submission model output="artifacts/submission.tar.gz": prepare
+	#!/usr/bin/env bash
+	set -euo pipefail
+	model_abs="$(cd "$(dirname "{{model}}")" && pwd)/$(basename "{{model}}")"
+	output_abs="$(mkdir -p "$(dirname "{{output}}")" && cd "$(dirname "{{output}}")" && pwd)/$(basename "{{output}}")"
+	docker run --rm \
+	  -v "$(dirname "$model_abs"):/model:ro" \
+	  -v "$(dirname "$output_abs"):/artifacts" \
+	  orbit-wars:kaggle "/model/$(basename "$model_abs")" "/artifacts/$(basename "$output_abs")"
 
 _prepare_base: build rs-format py-format rs-lint py-lint docs-lint py-static rs-test py-test-full
 [group: 'ci']

@@ -7,7 +7,6 @@ from typing import Annotated, Any, Literal, Self, Union, get_args, get_origin
 import yaml
 from pydantic import BaseModel, ConfigDict
 
-_YAML_SUFFIXES = (".yaml", ".yml")
 _logger = logging.getLogger(__name__)
 
 
@@ -51,7 +50,7 @@ class BaseConfig(BaseModel):
 
     def to_file(self, path: Path) -> None:
         suffix = path.suffix.lower()
-        if suffix not in _YAML_SUFFIXES:
+        if suffix != ".yaml":
             raise ValueError(f"Unsupported config file extension '{suffix}'")
 
         data = self.model_dump(mode="json", round_trip=True)
@@ -95,19 +94,13 @@ class BaseConfig(BaseModel):
         cls, root_dir: Path, field_name: str, value: str
     ) -> tuple[dict[str, Any], Path]:
         candidate = root_dir / field_name / value
-        if candidate.suffix:
-            candidates = [candidate]
-        else:
-            candidates = [candidate.with_suffix(suffix) for suffix in _YAML_SUFFIXES]
+        if not candidate.suffix:
+            candidate = candidate.with_suffix(".yaml")
 
-        for candidate_path in candidates:
-            if candidate_path.is_file():
-                return cls._load_yaml_mapping(candidate_path), candidate_path.parent
+        if candidate.is_file():
+            return cls._load_yaml_mapping(candidate), candidate.parent
 
-        attempted = ", ".join(str(path) for path in candidates)
-        raise ValueError(
-            f"Could not resolve '{field_name}: {value}'. Tried: {attempted}"
-        )
+        raise ValueError(f"Could not resolve '{field_name}: {value}'")
 
     @classmethod
     def _iter_base_config_types(cls, annotation: Any) -> list[type["BaseConfig"]]:
@@ -185,7 +178,7 @@ class BaseConfig(BaseModel):
     @classmethod
     def _load_yaml_mapping(cls, path: Path) -> dict[str, Any]:
         suffix = path.suffix.lower()
-        if suffix not in _YAML_SUFFIXES:
+        if suffix != ".yaml":
             raise ValueError(f"Unsupported config file extension '{suffix}'")
 
         with path.open(encoding="utf-8") as f:

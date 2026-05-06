@@ -851,6 +851,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "policy/logratio_mean",
         "policy/logratio_abs_max",
         "policy/target_kl_exceeded",
+        "policy/target_kl_exceeded_total",
         "optimizer/grad_norm",
         "optimizer/steps",
         "optimizer/learning_rate",
@@ -875,6 +876,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
     )
     assert metrics["policy/launch_entropy"] == pytest.approx(metrics["policy/entropy"])
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(0.0)
+    assert metrics["policy/target_kl_exceeded_total"] == pytest.approx(0.0)
     assert metrics["train/player_step_total"] == pytest.approx(80.0)
     assert metrics["optimizer/steps"] == pytest.approx(2.0)
     assert metrics["optimizer/learning_rate"] == pytest.approx(0.05)
@@ -1376,6 +1378,8 @@ def test_update_reports_target_kl_guard_when_exceeded(
 
     assert update_calls == 1
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(1.0)
+    assert metrics["policy/target_kl_exceeded_total"] == pytest.approx(1.0)
+    assert trainer.target_kl_exceeded_total == 1
 
 
 def test_train_iteration_update_sps_uses_actual_segments_when_target_kl_stops_update(
@@ -1425,6 +1429,7 @@ def test_train_iteration_update_sps_uses_actual_segments_when_target_kl_stops_up
     metrics = trainer.train_iteration()
 
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(1.0)
+    assert metrics["policy/target_kl_exceeded_total"] == pytest.approx(1.0)
     assert metrics["sampling/effective_replay_exposure"] == pytest.approx(0.25)
     assert metrics["perf/update_sps"] == pytest.approx(2.0)
 

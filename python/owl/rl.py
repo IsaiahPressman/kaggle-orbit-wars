@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import warnings
-from typing import Annotated, Any, Literal, SupportsFloat, SupportsInt, cast
+from numbers import Integral
+from typing import Annotated, Any, Literal, SupportsFloat, cast
 
 import numpy as np
 import torch
@@ -9,7 +10,16 @@ from pydantic import BaseModel, Field, field_validator
 
 from owl.config import BaseConfig
 from owl.rs import RlVecEnv as _RustRlVecEnv
-from owl.rs import encode_entity_based, rl_obs_constants
+from owl.rs import (
+    discrete_target_actions_to_kaggle as _discrete_target_actions_to_kaggle,
+)
+from owl.rs import (
+    encode_entity_based,
+    rl_obs_constants,
+)
+from owl.rs import (
+    pure_actions_to_kaggle as _pure_actions_to_kaggle,
+)
 
 (
     MAX_PLANETS,
@@ -339,38 +349,41 @@ class VectorizedEnv:
 
 def encode_python_observation(
     obs: dict[str, Any],
-    obs_spec: EntityBasedConfig | None = None,
-    action_spec: ActionConfig | None = None,
-) -> tuple[
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-]:
-    spec = obs_spec or EntityBasedConfig()
-    action = action_spec or ActionPureConfig()
-    comet_planet_ids, comet_path_indices, comet_path_lengths, comet_paths = (
-        _comets_to_arrays(obs.get("comets", []))
-    )
-    encoded = encode_entity_based(
-        _rows_to_array(obs.get("planets", []), name="planets"),
-        _rows_to_array(obs.get("fleets", []), name="fleets"),
+    obs_spec: EntityBasedConfig,
+    action_spec: ActionConfig,
+) -> ObsBatch:
+    (
+        planets_in,
+        _initial_planets_in,
+        fleets_in,
         comet_planet_ids,
         comet_path_indices,
         comet_path_lengths,
         comet_paths,
-        float(cast(SupportsFloat, obs.get("angular_velocity", 0.0))),
-        int(cast(SupportsInt, obs.get("step", 0))),
-        int(cast(SupportsInt, obs.get("episode_steps", 500))),
-        spec.max_entities,
-        action.min_fleet_size,
+        angular_velocity,
+        step,
+        episode_steps,
+    ) = _observation_arrays(obs)
+    still_playing = _still_playing_from_arrays(
+        planets_in,
+        fleets_in,
+        player=obs["player"],
     )
-    if isinstance(action, ActionPureConfig):
-        return encoded
+    encoded = encode_entity_based(
+        planets_in,
+        fleets_in,
+        comet_planet_ids,
+        comet_path_indices,
+        comet_path_lengths,
+        comet_paths,
+        angular_velocity,
+        step,
+        episode_steps,
+        obs_spec.max_entities,
+        action_spec.min_fleet_size,
+    )
+    if isinstance(action_spec, ActionPureConfig):
+        return _encoded_observation_to_batch(encoded, still_playing=still_playing)
 
     (
         planets,
@@ -386,15 +399,110 @@ def encode_python_observation(
     source_target_can_act = source_can_act[:, :, None] & target_exists[None, None, :]
     source_indexes = np.arange(ACTION_ENTITY_SLOTS)
     source_target_can_act[:, source_indexes, source_indexes] = False
-    return (
-        planets,
-        orbiting_planets,
-        fleets,
-        comets,
-        entity_mask,
-        global_features,
-        source_target_can_act,
-        max_launch,
+    return _encoded_observation_to_batch(
+        (
+            planets,
+            orbiting_planets,
+            fleets,
+            comets,
+            entity_mask,
+            global_features,
+            source_target_can_act,
+            max_launch,
+        ),
+        still_playing=still_playing,
+    )
+
+
+def actions_to_kaggle(
+    obs: dict[str, Any],
+    player: int,
+    launch: np.ndarray | torch.Tensor,
+    action_value: np.ndarray | torch.Tensor,
+    ships: np.ndarray | torch.Tensor,
+    *,
+    action_spec: ActionConfig,
+) -> list[list[float]]:
+    (
+        planets_in,
+        initial_planets_in,
+        fleets_in,
+        comet_planet_ids,
+        comet_path_indices,
+        comet_path_lengths,
+        comet_paths,
+        angular_velocity,
+        step,
+        episode_steps,
+    ) = _observation_arrays(obs)
+    launch_array = _actions_to_numpy(
+        "launch", launch, dtype=np.bool_, torch_dtype=torch.bool
+    )
+    ship_array = _actions_to_numpy(
+        "ships", ships, dtype=np.int64, torch_dtype=torch.int64
+    )
+    expected_batched_shape = (
+        1,
+        OUTER_PLAYER_SLOTS,
+        ACTION_ENTITY_SLOTS,
+        action_spec.max_per_planet_launches,
+    )
+    _require_action_shape("launch", launch_array, expected_batched_shape)
+    _require_action_shape("ships", ship_array, expected_batched_shape)
+    launch_array = np.ascontiguousarray(launch_array[0])
+    ship_array = np.ascontiguousarray(ship_array[0])
+
+    if isinstance(action_spec, ActionPureConfig):
+        angle_array = _actions_to_numpy(
+            "angle",
+            action_value,
+            dtype=np.float32,
+            torch_dtype=torch.float32,
+        )
+        _require_action_shape("angle", angle_array, expected_batched_shape)
+        return _pure_actions_to_kaggle(
+            planets_in,
+            initial_planets_in,
+            fleets_in,
+            comet_planet_ids,
+            comet_path_indices,
+            comet_path_lengths,
+            comet_paths,
+            angular_velocity,
+            step,
+            episode_steps,
+            int(player),
+            launch_array,
+            np.ascontiguousarray(angle_array[0]),
+            ship_array,
+            action_spec.max_per_planet_launches,
+            action_spec.min_fleet_size,
+        )
+
+    target_array = _actions_to_numpy(
+        "target",
+        action_value,
+        dtype=np.int64,
+        torch_dtype=torch.int64,
+    )
+    _require_action_shape("target", target_array, expected_batched_shape)
+    return _discrete_target_actions_to_kaggle(
+        planets_in,
+        initial_planets_in,
+        fleets_in,
+        comet_planet_ids,
+        comet_path_indices,
+        comet_path_lengths,
+        comet_paths,
+        angular_velocity,
+        step,
+        episode_steps,
+        int(player),
+        launch_array,
+        np.ascontiguousarray(target_array[0]),
+        ship_array,
+        action_spec.max_per_planet_launches,
+        action_spec.min_fleet_size,
     )
 
 
@@ -423,6 +531,47 @@ def _actions_to_numpy(
     return np.ascontiguousarray(actions)
 
 
+def _encoded_observation_to_batch(
+    encoded: tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+    ],
+    *,
+    still_playing: np.ndarray,
+) -> ObsBatch:
+    (
+        planets,
+        orbiting_planets,
+        fleets,
+        comets,
+        entity_mask,
+        global_features,
+        can_act,
+        max_launch,
+    ) = encoded
+    return ObsBatch(
+        planets=torch.as_tensor(planets, dtype=torch.float32).unsqueeze(0),
+        orbiting_planets=torch.as_tensor(orbiting_planets, dtype=torch.bool).unsqueeze(
+            0
+        ),
+        fleets=torch.as_tensor(fleets, dtype=torch.float32).unsqueeze(0),
+        comets=torch.as_tensor(comets, dtype=torch.float32).unsqueeze(0),
+        entity_mask=torch.as_tensor(entity_mask, dtype=torch.bool).unsqueeze(0),
+        still_playing=torch.as_tensor(still_playing, dtype=torch.bool).unsqueeze(0),
+        global_features=torch.as_tensor(global_features, dtype=torch.float32).unsqueeze(
+            0
+        ),
+        can_act=torch.as_tensor(can_act, dtype=torch.bool).unsqueeze(0),
+        max_launch=torch.as_tensor(max_launch, dtype=torch.int64).unsqueeze(0),
+    )
+
+
 def _require_action_shape(
     name: str, action_array: np.ndarray, expected_shape: tuple[int, ...]
 ) -> None:
@@ -431,6 +580,63 @@ def _require_action_shape(
     raise ValueError(
         f"{name} must have shape {expected_shape}, got {action_array.shape}"
     )
+
+
+def _observation_arrays(
+    obs: dict[str, Any],
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    float,
+    int,
+    int,
+]:
+    comet_planet_ids, comet_path_indices, comet_path_lengths, comet_paths = (
+        _comets_to_arrays(obs["comets"])
+    )
+    return (
+        _rows_to_array(obs["planets"], name="planets"),
+        _rows_to_array(obs["initial_planets"], name="initial_planets"),
+        _rows_to_array(obs["fleets"], name="fleets"),
+        comet_planet_ids,
+        comet_path_indices,
+        comet_path_lengths,
+        comet_paths,
+        float(obs["angular_velocity"]),
+        _require_int(obs["step"], name="step"),
+        _require_int(obs["episode_steps"], name="episode_steps"),
+    )
+
+
+def _require_int(value: Any, *, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"obs['{name}'] must be an integer")
+    return int(value)
+
+
+def _still_playing_from_arrays(
+    planets: np.ndarray,
+    fleets: np.ndarray,
+    *,
+    player: Any,
+) -> np.ndarray:
+    current_player = _require_int(player, name="player")
+    if not 0 <= current_player < OUTER_PLAYER_SLOTS:
+        raise ValueError(f"obs['player'] must be in [0, {OUTER_PLAYER_SLOTS})")
+
+    still_playing = np.zeros((OUTER_PLAYER_SLOTS,), dtype=np.bool_)
+    still_playing[current_player] = True
+    for rows in (planets, fleets):
+        for owner in rows[:, 1]:
+            owner_id = int(owner)
+            if 0 <= owner_id < OUTER_PLAYER_SLOTS:
+                still_playing[owner_id] = True
+    return still_playing
 
 
 def _rows_to_array(rows: Any, *, name: str) -> np.ndarray:
@@ -462,26 +668,34 @@ def _comets_to_arrays(
     for group_index, group in enumerate(comets):
         if not isinstance(group, dict):
             raise TypeError("comet groups must be dicts")
-        raw_planet_ids = group.get("planet_ids", [])
-        raw_paths = group.get("paths", [])
+        raw_planet_ids = group["planet_ids"]
+        raw_paths = group["paths"]
         if not isinstance(raw_planet_ids, list) or not isinstance(raw_paths, list):
             raise TypeError("comet groups need list planet_ids and paths")
-        path_indices[group_index] = float(
-            cast(SupportsFloat, group.get("path_index", -1))
-        )
+        if len(raw_planet_ids) != len(raw_paths):
+            raise ValueError("comet planet_ids and paths must have the same length")
+        if len(raw_planet_ids) > MAX_COMETS:
+            raise ValueError(f"comet groups must have at most {MAX_COMETS} paths")
+        path_indices[group_index] = float(cast(SupportsFloat, group["path_index"]))
 
         for path_offset, (planet_id, raw_path) in enumerate(
             zip(raw_planet_ids, raw_paths, strict=True)
         ):
-            if path_offset >= MAX_COMETS:
-                break
             path_array = np.asarray(raw_path, dtype=np.float64)
             if path_array.ndim != 2 or path_array.shape[1] != 2:
                 raise ValueError("comet paths must have shape (n, 2)")
-            path_len = min(path_array.shape[0], MAX_COMET_PATH_LENGTH)
+            path_len = path_array.shape[0]
+            if path_len > MAX_COMET_PATH_LENGTH:
+                raise ValueError(
+                    f"comet paths must have at most {MAX_COMET_PATH_LENGTH} points"
+                )
             planet_ids[group_index, path_offset] = float(cast(SupportsFloat, planet_id))
             path_lengths[group_index, path_offset] = path_len
             paths[group_index, path_offset, :path_len, :] = path_array[:path_len]
+
+    active_comet_count = int((planet_ids >= 0).sum())
+    if active_comet_count > MAX_COMETS:
+        raise ValueError(f"observations must have at most {MAX_COMETS} active comets")
 
     return (
         np.ascontiguousarray(planet_ids),

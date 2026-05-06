@@ -1,0 +1,50 @@
+from typing import Annotated, Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+KAGGLE_EPISODE_STEPS = 500
+
+Planet = Annotated[
+    tuple[int, int, float, float, float, int, int],
+    Field(min_length=7, max_length=7),
+]
+Fleet = Annotated[
+    tuple[int, int, float, float, float, int, int],
+    Field(min_length=7, max_length=7),
+]
+Point = Annotated[tuple[float, float], Field(min_length=2, max_length=2)]
+
+
+class Comet(BaseModel):
+    planet_ids: list[int]
+    paths: list[list[Point]]
+    path_index: int
+
+
+class KaggleObservation(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    remaining_overage_time: float = Field(alias="remainingOverageTime")
+    step: int = Field(ge=0, lt=KAGGLE_EPISODE_STEPS)
+    planets: list[Planet]
+    initial_planets: list[Planet]
+    fleets: list[Fleet]
+    player: int = Field(ge=0, lt=4)
+    angular_velocity: float
+    comet_planet_ids: list[int]
+    next_fleet_id: int
+    comets: list[Comet]
+
+    def to_rl_observation(self) -> dict[str, Any]:
+        return {
+            "step": self.step,
+            "episode_steps": KAGGLE_EPISODE_STEPS,
+            "planets": self.planets,
+            "initial_planets": self.initial_planets,
+            "fleets": self.fleets,
+            "player": self.player,
+            "angular_velocity": self.angular_velocity,
+            "comet_planet_ids": self.comet_planet_ids,
+            "next_fleet_id": self.next_fleet_id,
+            "comets": [comet.model_dump(mode="json") for comet in self.comets],
+        }
