@@ -22,6 +22,7 @@ from owl.model.actor.discrete_targets import (
 from owl.model.stateless_transformer_v1 import (
     ActorDiscreteTargetsConfig,
     ActorPureConfig,
+    DiscreteActorInputs,
     DiscreteTargetPolicyParams,
     DiscreteTargetsActor,
     FeedForward,
@@ -38,7 +39,6 @@ from owl.model.stateless_transformer_v1 import (
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     MAX_COMETS,
-    MAX_LAUNCH_FEATURES,
     MAX_PLANETS,
     OUTER_PLAYER_SLOTS,
     ActionConfig,
@@ -110,10 +110,6 @@ def _obs_batch(
     max_launch[:, 0, 0] = 5
     max_launch[:, 1, 1] = 3
     max_launch[:, 2, MAX_PLANETS] = 2
-    max_launch_features = torch.zeros(
-        (batch_size, 4, ACTION_ENTITY_SLOTS, MAX_LAUNCH_FEATURES),
-        dtype=torch.float32,
-    )
 
     assert action_spec.max_per_planet_launches >= 1
     return ObsBatch(
@@ -126,7 +122,6 @@ def _obs_batch(
         global_features=global_features,
         can_act=can_act,
         max_launch=max_launch,
-        max_launch_features=max_launch_features,
     )
 
 
@@ -140,6 +135,15 @@ def _model(
         config,
         obs_spec=obs_spec or EntityBasedConfig(),
         action_spec=action_spec or ActionPureConfig(max_per_planet_launches=1),
+    )
+
+
+def _discrete_actor_inputs(
+    source: torch.Tensor,
+    target: torch.Tensor | None = None,
+) -> DiscreteActorInputs:
+    return DiscreteActorInputs(
+        source=source, target=source if target is None else target
     )
 
 
@@ -182,10 +186,10 @@ def test_model_config_loads_actor_subconfig_reference() -> None:
 @pytest.mark.parametrize(
     ("filename", "expected_params"),
     [
-        ("stateless_transformer_tiny.yaml", 1_078_798),
-        ("stateless_transformer_5m.yaml", 5_440_526),
-        ("stateless_transformer_20m.yaml", 20_972_570),
-        ("stateless_transformer_20m_swiglu.yaml", 21_716_762),
+        ("stateless_transformer_tiny.yaml", 1_207_182),
+        ("stateless_transformer_5m.yaml", 5_532_942),
+        ("stateless_transformer_20m.yaml", 20_093_402),
+        ("stateless_transformer_20m_swiglu.yaml", 20_914_202),
     ],
 )
 def test_model_config_file_parameter_count(
@@ -575,10 +579,10 @@ def test_non_flash_encoder_does_not_build_or_pack_sequences(
     monkeypatch.setattr(model_impl, "pack_tensor", fail_pack_tensor)
     monkeypatch.setattr(model_impl, "unpack_sequence", fail_unpack_sequence)
 
-    hidden, mask = model.encode_observations(obs)
+    encoded = model.encode_observations(obs)
 
-    assert hidden.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS, 32)
-    assert mask.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS)
+    assert encoded.hidden.shape == (2, obs_spec.max_entities + 17, 32)
+    assert encoded.token_mask.shape == (2, obs_spec.max_entities + 17)
 
 
 def test_force_flash_encoder_rejects_non_flash_inputs(
@@ -642,10 +646,10 @@ def test_force_flash_encoder_ignores_cpu_inputs(
     monkeypatch.setattr(model_impl, "use_flash_attn", disable_flash_attn)
     monkeypatch.setattr(model_impl, "pack_sequence", fail_pack_sequence)
 
-    hidden, mask = model.encode_observations(obs)
+    encoded = model.encode_observations(obs)
 
-    assert hidden.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS, 32)
-    assert mask.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS)
+    assert encoded.hidden.shape == (2, obs_spec.max_entities + 17, 32)
+    assert encoded.token_mask.shape == (2, obs_spec.max_entities + 17)
 
 
 def test_orbiting_planets_select_separate_planet_projection() -> None:
@@ -674,16 +678,20 @@ def test_orbiting_planets_select_separate_planet_projection() -> None:
             model.comet_proj,
             model.global_proj,
         ):
-            layer.weight.zero_()
-            layer.bias.zero_()
-        model.static_planet_proj.weight[:, 0] = torch.arange(16.0)
-        model.orbit_planet_proj.weight[:, 0] = torch.arange(16.0).flip(0)
+            layer.input.weight.zero_()
+            layer.input.bias.zero_()
+            layer.output.weight.zero_()
+            layer.output.bias.zero_()
+        model.static_planet_proj.input.weight[:16, 0] = torch.arange(16.0)
+        model.static_planet_proj.output.weight[:, :16] = torch.eye(16)
+        model.orbit_planet_proj.input.weight[:16, 0] = torch.arange(16.0).flip(0)
+        model.orbit_planet_proj.output.weight[:, :16] = torch.eye(16)
 
     obs = _obs_batch(batch_size=1, obs_spec=obs_spec, action_spec=action_spec)
     obs.planets[:, 0, 0] = 1.0
-    hidden_without_orbiting, _ = model.encode_observations(obs)
+    hidden_without_orbiting = model.encode_observations(obs).hidden
     obs.orbiting_planets[:, 0] = True
-    hidden_with_orbiting, _ = model.encode_observations(obs)
+    hidden_with_orbiting = model.encode_observations(obs).hidden
 
     assert not torch.allclose(
         hidden_without_orbiting[:, 0],
@@ -746,10 +754,10 @@ def test_flash_encoder_packs_once_before_trunk_and_unpacks_once_after(
     monkeypatch.setattr(model_impl, "unpack_sequence", counted_unpack_sequence)
     monkeypatch.setattr(model_impl, "varlen_attention", fake_varlen_attention)
 
-    hidden, mask = model.encode_observations(obs)
+    encoded = model.encode_observations(obs)
 
-    assert hidden.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS, 32)
-    assert mask.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS)
+    assert encoded.hidden.shape == (2, obs_spec.max_entities + 17, 32)
+    assert encoded.token_mask.shape == (2, obs_spec.max_entities + 17)
     assert pack_calls == 1
     assert unpack_calls == 1
     assert varlen_calls == config.depth
@@ -799,10 +807,10 @@ def test_autocast_encoder_packs_after_appending_player_tokens(
     monkeypatch.setattr(model_impl, "varlen_attention", fake_varlen_attention)
 
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-        hidden, mask = model.encode_observations(obs)
+        encoded = model.encode_observations(obs)
 
-    assert hidden.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS, 32)
-    assert mask.shape == (2, obs_spec.max_entities + OUTER_PLAYER_SLOTS)
+    assert encoded.hidden.shape == (2, obs_spec.max_entities + 17, 32)
+    assert encoded.token_mask.shape == (2, obs_spec.max_entities + 17)
     assert pack_calls == 1
 
 
@@ -825,6 +833,9 @@ def test_model_initialization_sets_stable_rl_priors() -> None:
         if isinstance(module, nn.Linear):
             assert module.bias is not None
             assert torch.allclose(module.bias, torch.zeros_like(module.bias))
+        if isinstance(module, nn.Parameter):
+            assert torch.isfinite(module).all()
+            assert not torch.allclose(module, torch.zeros_like(module))
 
     residual_gain = 1.0 / math.sqrt(2.0 * config.depth)
     for block in model.blocks:
@@ -899,7 +910,7 @@ def test_model_initialization_sets_stable_rl_priors() -> None:
     )
 
 
-def test_observation_encoder_returns_entity_tokens_plus_player_tokens() -> None:
+def test_observation_encoder_returns_structured_token_fields() -> None:
     obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 3)
     config = StatelessTransformerV1Config(
         embed_dim=32,
@@ -914,16 +925,22 @@ def test_observation_encoder_returns_entity_tokens_plus_player_tokens() -> None:
         action_spec=action_spec,
     )
 
-    hidden, mask = model.encode_observations(obs)
+    encoded = model.encode_observations(obs)
 
-    assert hidden.shape == (2, obs_spec.max_entities + 4, 32)
-    assert mask.shape == (2, obs_spec.max_entities + 4)
-    assert mask[:, -4:].all()
-    assert mask[:, :MAX_PLANETS].sum().item() == 4
-    assert mask[:, MAX_PLANETS].all()
+    assert encoded.hidden.shape == (2, obs_spec.max_entities + 17, 32)
+    assert encoded.token_mask.shape == (2, obs_spec.max_entities + 17)
+    assert encoded.action_entity_hidden.shape == (2, ACTION_ENTITY_SLOTS, 32)
+    assert encoded.player_hidden.shape == (2, OUTER_PLAYER_SLOTS, 32)
+    assert encoded.global_feature_hidden.shape == (2, 1, 32)
+    assert encoded.board_hidden.shape == (2, config.n_scratch_tokens, 32)
+    assert encoded.actor_plan_hidden.shape == (2, OUTER_PLAYER_SLOTS, 32)
+    assert encoded.critic_value_hidden.shape == (2, OUTER_PLAYER_SLOTS, 32)
+    assert encoded.token_mask[:, -4:].all()
+    assert encoded.token_mask[:, :MAX_PLANETS].sum().item() == 4
+    assert encoded.token_mask[:, MAX_PLANETS].all()
     assert not torch.allclose(
-        model.player_tokens.weight[0],
-        model.player_tokens.weight[1],
+        model.player_tokens[0],
+        model.player_tokens[1],
     )
 
 
@@ -986,7 +1003,7 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert torch.all(output.winner_probabilities[~obs.still_playing] == 0)
     assert torch.all(output.actions.ships[~output.actions.launch] == 0)
     assert torch.all(output.actions.ships.sum(dim=-1) <= obs.max_launch)
-    assert model.actor.launch_slot_tokens.weight.shape == (1, config.embed_dim)
+    assert model.actor.launch_slot_tokens.shape == (1, config.embed_dim)
     assert model.actor.slot_dynamic_proj.in_features == 9
 
     evaluation = model.evaluate_actions(obs, output.actions)
@@ -1172,6 +1189,55 @@ def test_discrete_targets_output_layers_include_only_second_head_layers() -> Non
         assert id(head.up) not in output_layer_ids
 
 
+def test_learned_token_embeddings_are_input_layers() -> None:
+    pure_config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        actor=ActorPureConfig(),
+    )
+    pure_model = _model(
+        pure_config,
+        action_spec=ActionPureConfig(max_per_planet_launches=3),
+    )
+
+    pure_input_layer_ids = {id(layer) for layer in pure_model.get_input_layers()}
+
+    for layer in (
+        pure_model.player_tokens,
+        pure_model.board_tokens,
+        pure_model.actor_plan_tokens,
+        pure_model.critic_value_tokens,
+        pure_model.actor.launch_slot_tokens,
+    ):
+        assert id(layer) in pure_input_layer_ids
+
+    discrete_config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        actor=ActorDiscreteTargetsConfig(),
+    )
+    discrete_model = _model(
+        discrete_config,
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+
+    discrete_input_layer_ids = {
+        id(layer) for layer in discrete_model.get_input_layers()
+    }
+
+    for layer in (
+        discrete_model.player_tokens,
+        discrete_model.board_tokens,
+        discrete_model.actor_plan_tokens,
+        discrete_model.critic_value_tokens,
+        discrete_model.actor.source_role,
+        discrete_model.actor.target_role,
+    ):
+        assert id(layer) in discrete_input_layer_ids
+
+
 def test_discrete_targets_actor_masks_target_logits_under_bfloat16_autocast() -> None:
     config = StatelessTransformerV1Config(
         actor=ActorDiscreteTargetsConfig(),
@@ -1188,7 +1254,7 @@ def test_discrete_targets_actor_masks_target_logits_under_bfloat16_autocast() ->
     can_act[0, 0, 0, 1] = True
 
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-        selection = actor._selection_params(slot_input, can_act)
+        selection = actor._selection_params(_discrete_actor_inputs(slot_input), can_act)
 
     assert selection.target_logits.dtype == torch.bfloat16
     assert selection.target_logits[0, 0, 0, 0] == torch.finfo(torch.bfloat16).min
@@ -1247,6 +1313,8 @@ def test_discrete_targets_size_log_prob_conditions_on_replayed_target() -> None:
         actor.mean_head.weight[0, 0] = 10.0
         actor.scale_head.weight.zero_()
         actor.scale_head.bias.fill_(-3.0)
+        actor.source_role.zero_()
+        actor.target_role.zero_()
 
     slot_input = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
     slot_input[0, 0, 1] = torch.tensor([2.0, -2.0, 0.0, 0.0])
@@ -1266,7 +1334,7 @@ def test_discrete_targets_size_log_prob_conditions_on_replayed_target() -> None:
 
     actions.target[0, 0, 0, 0] = 1
     target_one_logp, _ = actor.log_prob(
-        slot_input,
+        _discrete_actor_inputs(slot_input),
         can_act,
         max_launch,
         actions,
@@ -1274,7 +1342,7 @@ def test_discrete_targets_size_log_prob_conditions_on_replayed_target() -> None:
     )
     actions.target[0, 0, 0, 0] = 2
     target_two_logp, _ = actor.log_prob(
-        slot_input,
+        _discrete_actor_inputs(slot_input),
         can_act,
         max_launch,
         actions,
@@ -1313,7 +1381,7 @@ def test_discrete_targets_replay_entropy_ignores_no_launch_target_placeholder() 
 
     actions.target[0, 0, 0, 0] = 1
     _logp_one, entropy_one = actor.log_prob(
-        slot_input,
+        _discrete_actor_inputs(slot_input),
         can_act,
         max_launch,
         actions,
@@ -1321,7 +1389,7 @@ def test_discrete_targets_replay_entropy_ignores_no_launch_target_placeholder() 
     )
     actions.target[0, 0, 0, 0] = 2
     _logp_two, entropy_two = actor.log_prob(
-        slot_input,
+        _discrete_actor_inputs(slot_input),
         can_act,
         max_launch,
         actions,
@@ -1653,7 +1721,7 @@ def test_launch_slot_embedding_is_added_to_each_slot_input() -> None:
         include_dynamic_features=False,
     )
 
-    expected_first_slot = actor.launch_slot_tokens.weight[0].view(1, 1, 1, -1)
+    expected_first_slot = actor.launch_slot_tokens[0].view(1, 1, 1, -1)
     assert torch.allclose(first_slot, expected_first_slot.expand_as(first_slot))
     assert not torch.allclose(first_slot, second_slot)
 
@@ -1874,7 +1942,7 @@ def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
     assert all(torch.isfinite(grad).all() for grad in grads)
 
 
-def test_pure_actor_rejects_multi_launch_action_spec() -> None:
+def test_pure_actor_supports_multi_launch_action_spec() -> None:
     obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     action_spec = ActionPureConfig(max_per_planet_launches=3)
     config = StatelessTransformerV1Config(
@@ -1884,8 +1952,18 @@ def test_pure_actor_rejects_multi_launch_action_spec() -> None:
         actor=ActorPureConfig(n_action_mixtures=2),
     )
 
-    with pytest.raises(NotImplementedError, match="max_per_planet_launches > 1"):
-        _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+
+    output = model(obs)
+    assert output.actions.launch.shape == (2, 4, ACTION_ENTITY_SLOTS, 3)
+
+    evaluation = model.evaluate_actions(obs, output.actions)
+    assert evaluation.log_probs.per_player_entity.shape == (
+        2,
+        4,
+        ACTION_ENTITY_SLOTS,
+    )
 
 
 def test_evaluate_actions_rejects_invalid_action_dtypes() -> None:

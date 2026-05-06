@@ -137,8 +137,8 @@ be large.
 
 The current reference episodes are:
 
-- `75601099` (4-player game)
-- `75598045` (2-player 500-step game)
+- `75930761` (2-player game)
+- `75926553` (4-player game)
 
 If fixture files are missing, download them directly into the test fixture
 directory:
@@ -163,8 +163,8 @@ Supported test environment variables:
 
 - `ORBIT_WARS_PARITY_FIXTURE_DIR`: directory containing extracted JSONL parity
   fixtures.
-- `REQUIRE_PARITY_FIXTURES=0`: skip replay and generation parity when fixtures
-  are missing. Missing fixtures fail by default.
+- `REQUIRE_PARITY_FIXTURES=0`: skip replay parity, and skip generation parity
+  only when generation fixtures are missing. Missing fixtures fail by default.
 
 When the upstream rules change, keep the test code stable: download replacement
 episodes as JSONL fixtures, move them into the fixture directory if needed,

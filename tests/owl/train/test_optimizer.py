@@ -1,6 +1,12 @@
 import pytest
 import torch
-from owl.model import BaseModelAPI, ModelActions, ModelEvaluation, ModelOutput
+from owl.model import (
+    BaseModelAPI,
+    InputLayer,
+    ModelActions,
+    ModelEvaluation,
+    ModelOutput,
+)
 from owl.rl import ObsBatch
 from owl.train import (
     AdamWConfig,
@@ -21,6 +27,7 @@ class OptimizerTestModel(BaseModelAPI):
         self.hidden = nn.Linear(4, 4)
         self.output = nn.Linear(4, 2)
         self.norm = nn.LayerNorm(4)
+        self.token_state = nn.Parameter(torch.zeros(4, 4))
 
     def forward(
         self,
@@ -37,8 +44,8 @@ class OptimizerTestModel(BaseModelAPI):
     ) -> ModelEvaluation:
         raise NotImplementedError
 
-    def get_input_layers(self) -> tuple[nn.Module, ...]:
-        return (self.input,)
+    def get_input_layers(self) -> tuple[InputLayer, ...]:
+        return (self.input, self.token_state)
 
     def get_output_layers(self) -> tuple[nn.Module, ...]:
         return (self.output,)
@@ -73,6 +80,7 @@ def test_create_optimizer_supports_adamw_and_muon() -> None:
     assert id(muon_model.hidden.weight) in muon_param_ids
     assert id(muon_model.input.weight) not in muon_param_ids
     assert id(muon_model.output.weight) not in muon_param_ids
+    assert id(muon_model.token_state) not in muon_param_ids
 
 
 def test_composite_optimizer_round_trips_nested_state_dict() -> None:

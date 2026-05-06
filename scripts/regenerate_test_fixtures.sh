@@ -6,7 +6,7 @@ GENERATION_FIXTURE="tests/fixtures/generation/reference_generation.json"
 REPLAY_FIXTURE_PARENT="$(dirname "$REPLAY_FIXTURE_DIR")"
 
 if [ "$#" -eq 0 ]; then
-  EPISODE_IDS=(75601099 75598045)
+  EPISODE_IDS=(75930761 75926553)
 else
   EPISODE_IDS=("$@")
 fi

@@ -15,14 +15,14 @@ use super::state::{
 const DEFAULT_FIXTURE_DIR: &str = "tests/fixtures/orbit_wars_replays";
 const REQUIRED_REPLAY_COVERAGE: [ReplayCoverageRequirement; 2] = [
     ReplayCoverageRequirement {
-        episode_id: 75_598_045,
+        episode_id: 75_930_761,
         players: 2,
-        rows: 499,
+        rows: 103,
     },
     ReplayCoverageRequirement {
-        episode_id: 75_601_099,
+        episode_id: 75_926_553,
         players: 4,
-        rows: 141,
+        rows: 222,
     },
 ];
 
@@ -93,6 +93,10 @@ impl RandomSource for PanicRandom {
 
 #[test]
 fn replay_fixtures_match_reference_transitions() -> Result<(), Box<dyn Error>> {
+    if !require_parity_fixtures()? {
+        return Ok(());
+    }
+
     let fixture_dir = fixture_dir();
     let fixture_paths = fixture_paths(&fixture_dir)?;
     if fixture_paths.is_empty() {

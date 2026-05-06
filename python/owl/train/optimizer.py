@@ -9,7 +9,7 @@ from pydantic import Field
 from torch import nn
 
 from owl.config import BaseConfig
-from owl.model import BaseModelAPI
+from owl.model import BaseModelAPI, InputLayer
 
 OptimizerName = Literal["adamw", "muon"]
 LRScheduleName = Literal["linear_warmup_cosine_decay"]
@@ -223,5 +223,14 @@ def create_optimizer(model: BaseModelAPI, config: OptimizerConfig) -> Optimizer:
 
 
 def _excluded_from_muon_param_ids(model: BaseModelAPI) -> set[int]:
-    excluded_modules = (*model.get_input_layers(), *model.get_output_layers())
-    return {id(param) for module in excluded_modules for param in module.parameters()}
+    return {
+        id(param)
+        for layer in (*model.get_input_layers(), *model.get_output_layers())
+        for param in _layer_parameters(layer)
+    }
+
+
+def _layer_parameters(layer: InputLayer) -> tuple[nn.Parameter, ...]:
+    if isinstance(layer, nn.Parameter):
+        return (layer,)
+    return tuple(layer.parameters())

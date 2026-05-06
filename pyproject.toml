@@ -44,6 +44,7 @@ features = ["extension-module"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
+constraint-dependencies = ["protobuf<7"]
 no-build-isolation-package = ["flash-attn"]
 
 [tool.uv.sources]

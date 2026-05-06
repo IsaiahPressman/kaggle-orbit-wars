@@ -10,7 +10,6 @@ from owl.rl import (
     GLOBAL_CHANNELS,
     MAX_COMET_PATH_LENGTH,
     MAX_COMETS,
-    MAX_LAUNCH_FEATURES,
     MAX_PLANETS,
     PLANET_CHANNELS,
     ActionDiscreteTargetsConfig,
@@ -106,12 +105,6 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     assert obs.still_playing.shape == (2, 4)
     assert obs.can_act.shape == (2, 4, ACTION_ENTITY_SLOTS)
     assert obs.max_launch.shape == (2, 4, ACTION_ENTITY_SLOTS)
-    assert obs.max_launch_features.shape == (
-        2,
-        4,
-        ACTION_ENTITY_SLOTS,
-        MAX_LAUNCH_FEATURES,
-    )
     assert rewards.shape == (2, 4)
     assert dones.shape == (2, 4)
     assert episode_metrics == {}
@@ -418,7 +411,6 @@ def test_min_fleet_size_controls_action_mask_and_validation() -> None:
         _global_features,
         can_act,
         max_launch,
-        _max_launch_features,
     ) = encode_python_observation(
         {
             "step": 0,
@@ -462,7 +454,6 @@ def test_python_observation_encoder_writes_discrete_target_mask() -> None:
         _global_features,
         can_act,
         max_launch,
-        _max_launch_features,
     ) = encode_python_observation(
         {
             "step": 0,
@@ -496,7 +487,6 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
         global_features,
         can_act,
         max_launch,
-        max_launch_features,
     ) = encode_python_observation(
         {
             "step": 50,
@@ -514,7 +504,6 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     assert global_features.shape == (GLOBAL_CHANNELS,)
     assert can_act.shape == (4, ACTION_ENTITY_SLOTS)
     assert max_launch.shape == (4, ACTION_ENTITY_SLOTS)
-    assert max_launch_features.shape == (4, ACTION_ENTITY_SLOTS, MAX_LAUNCH_FEATURES)
     assert PLANET_CHANNELS == 107
     assert FLEET_CHANNELS == 79
     assert COMET_CHANNELS == 330
@@ -596,7 +585,6 @@ def test_encode_entity_based_matches_expected_masks_and_masked_values() -> None:
         global_features,
         can_act,
         max_launch,
-        _max_launch_features,
     ) = encode_entity_based(
         planets_in,
         fleets_in,
@@ -1088,7 +1076,7 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
 ) -> None:
     spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 1)
 
-    _, _, fleets, _, entity_mask, _, _, _, _ = encode_python_observation(
+    _, _, fleets, _, entity_mask, _, _, _ = encode_python_observation(
         {
             "planets": [],
             "fleets": [
@@ -1117,7 +1105,6 @@ def test_python_observation_encoder_writes_comet_future_paths() -> None:
         _global_features,
         can_act,
         max_launch,
-        _max_launch_features,
     ) = encode_python_observation(
         {
             "planets": [[10, 2, 50.0, 50.0, 1.0, 25, 1]],

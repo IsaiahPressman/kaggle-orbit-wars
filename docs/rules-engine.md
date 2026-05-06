@@ -102,7 +102,7 @@ Start with component tests:
 - Action validation and launch side effects.
 - Production.
 - Fleet movement, out-of-bounds removal, sun collision, planet collision.
-- Rotating planet and comet sweep collisions.
+- Simultaneous fleet-vs-planet and fleet-vs-comet swept-pair collisions.
 - Combat resolution, including tied attackers and same-owner reinforcement.
 - Termination and scoring.
 
@@ -128,18 +128,19 @@ Replay parity tests:
 - Replay parity tests discover all `replay-*.jsonl` files in
   `ORBIT_WARS_PARITY_FIXTURE_DIR`, or
   `tests/fixtures/orbit_wars_replays` by default. If no fixtures are present,
-  the test fails by default. Set `REQUIRE_PARITY_FIXTURES=0` to skip
-  fixture-backed parity. When rules change, download new Kaggle episodes as
-  JSONL fixtures, update the episode id list below, and leave the test code
-  unchanged unless the fixture schema itself changes.
+  the test fails by default. Set `REQUIRE_PARITY_FIXTURES=0` to skip replay
+  parity, including when local replay fixtures are present but intentionally
+  stale. When rules change, download new Kaggle episodes as JSONL fixtures,
+  update the episode id list below, and leave the test code unchanged unless
+  the fixture schema itself changes.
 - Replay parity validates the required documented coverage set in
   `src/rules_engine/replay_tests.rs`: episode id, player count, and transition
   row count must match the list below so coverage cannot silently shrink.
 
 The current downloaded reference episodes are:
 
-- `75601099`: 4-player, 141 recorded transitions.
-- `75598045`: 2-player, 499 recorded transitions.
+- `75930761`: 2-player, 103 recorded transitions.
+- `75926553`: 4-player, 222 recorded transitions.
 
 ## Maintenance Rules
 
@@ -170,14 +171,17 @@ The current downloaded reference episodes are:
   violate those bounds.
 - Four-player home assignment chooses among any symmetric group, using the
   reference RNG stream after planet generation.
-- Combat is queued during fleet movement and sweep, then resolved after all
-  movement. `StepResult.fleets_lost_in_combat` counts fleets removed during
-  planet/combat resolution, and `StepResult.ships_lost_in_combat` counts ships
-  destroyed by fleet-vs-fleet and fleet-vs-planet combat resolution; sun and
-  out-of-bounds losses remain in `FleetLossStats`.
-- Fleet movement queues planet collisions before checking out-of-bounds or sun
-  removal, matching the reference behavior for fast fleets that cross multiple
-  collision/removal zones in one step.
+- Planet and comet end-of-tick positions are planned before fleet movement.
+  Fleet collision checks use the reference swept-pair predicate over the fleet
+  segment and the planet/comet segment for that tick, then planet/comet
+  movement is applied and combat is resolved. `StepResult.fleets_lost_in_combat`
+  counts fleets removed during planet/combat resolution, and
+  `StepResult.ships_lost_in_combat` counts ships destroyed by fleet-vs-fleet
+  and fleet-vs-planet combat resolution; sun and out-of-bounds losses remain in
+  `FleetLossStats`.
+- Fleet movement queues swept planet/comet collisions before checking
+  out-of-bounds or sun removal, matching the reference behavior for fast fleets
+  that cross multiple collision/removal zones in one step.
 - Termination happens at `episodeSteps - 2`, which is earlier than the prose
   rule's 500-turn wording suggests.
 - Player 0 observations are the canonical replay observations. Later player

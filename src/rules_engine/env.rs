@@ -9,9 +9,9 @@ use super::state::{
     Point, ResetConfig, State, StepInjections, StepResult, BOARD_SIZE, CENTER, COMET_SPAWN_STEPS,
     MAX_PLAYERS, SUN_RADIUS,
 };
-use super::utils::{fleet_speed, is_orbiting, orbit_position, point_to_segment_distance};
-
-const COLLISION_AABB_SLACK: f64 = 1e-12;
+use super::utils::{
+    fleet_speed, is_orbiting, orbit_position, point_to_segment_distance, swept_pair_hit,
+};
 pub type PlayerAction = Vec<LaunchAction>;
 
 pub fn reset(config: ResetConfig) -> State {
@@ -72,11 +72,14 @@ pub fn step_with_injections(
     spawn_comets(state, rng, injections.comet_spawn);
     process_launches(state, actions);
     produce_ships(state);
-    let (mut combat_lists, fleet_losses) = move_fleets(state);
-    let mut swept_fleets = vec![false; state.fleets.len()];
-    move_planets_and_sweep(state, &mut combat_lists, &mut swept_fleets);
-    move_comets_and_sweep(state, &mut combat_lists, &mut swept_fleets);
-    remove_marked_fleets(state, &combat_lists);
+    let (planet_paths, expired_comet_planet_ids) = compute_planet_paths(state);
+    let (combat_lists, fleet_losses) = move_fleets(state, &planet_paths);
+    apply_planet_paths(state, &planet_paths);
+    if !expired_comet_planet_ids.is_empty() {
+        remove_comet_planets(state, |planet_id| {
+            expired_comet_planet_ids.contains(&planet_id)
+        });
+    }
     let captures = resolve_combats(state, combat_lists);
 
     let player_results = player_results(state);
@@ -239,22 +242,11 @@ impl CombatLists {
         self.bucket_mut(planet_id).push(fleet);
     }
 
-    #[cfg(test)]
-    fn get(&self, planet_id: u32) -> Option<&Vec<Fleet>> {
-        self.buckets
-            .get(planet_id as usize)
-            .and_then(Option::as_ref)
-    }
-
     fn bucket_mut(&mut self, planet_id: u32) -> &mut Vec<Fleet> {
         self.buckets
             .get_mut(planet_id as usize)
             .and_then(Option::as_mut)
             .expect("combat list exists for every planet")
-    }
-
-    fn iter_fleets(&self) -> impl Iterator<Item = &Fleet> {
-        self.buckets.iter().filter_map(Option::as_ref).flatten()
     }
 
     fn into_buckets(self) -> impl Iterator<Item = (u32, Vec<Fleet>)> {
@@ -265,7 +257,71 @@ impl CombatLists {
     }
 }
 
-fn move_fleets(state: &mut State) -> (CombatLists, FleetLossStats) {
+#[derive(Clone, Copy, Debug)]
+struct PlanetPath {
+    old_pos: Point,
+    new_pos: Point,
+    check_collision: bool,
+}
+
+type PlanetPaths = Vec<Option<PlanetPath>>;
+
+fn compute_planet_paths(state: &mut State) -> (PlanetPaths, Vec<u32>) {
+    let comet_ids: HashSet<u32> = state.comet_planet_ids.iter().copied().collect();
+    let mut planet_paths = vec![None; state.planets.slot_len()];
+    let mut expired_comet_planet_ids = Vec::new();
+
+    for planet in state.planets.iter() {
+        if comet_ids.contains(&planet.id) {
+            continue;
+        }
+
+        let old_pos = planet.position();
+        let mut new_pos = old_pos;
+        if let Some(initial_planet) = state.initial_planets.get(planet.id) {
+            if is_orbiting(initial_planet.position(), planet.radius) {
+                new_pos = orbit_position(
+                    initial_planet.position(),
+                    state.angular_velocity,
+                    state.step.into(),
+                );
+            }
+        }
+        planet_paths[planet.id as usize] = Some(PlanetPath {
+            old_pos,
+            new_pos,
+            check_collision: true,
+        });
+    }
+
+    for group in &mut state.comets {
+        group.path_index += 1;
+        let path_index = group.path_index;
+
+        for (path_offset, planet_id) in group.planet_ids.iter().enumerate() {
+            let Some(planet) = state.planets.get(*planet_id) else {
+                continue;
+            };
+            let old_pos = planet.position();
+            let path = &group.paths[path_offset];
+            let (new_pos, check_collision) = if path_index >= path.len() as i32 {
+                expired_comet_planet_ids.push(*planet_id);
+                (old_pos, true)
+            } else {
+                (path[path_index as usize], old_pos.x >= 0.0)
+            };
+            planet_paths[*planet_id as usize] = Some(PlanetPath {
+                old_pos,
+                new_pos,
+                check_collision,
+            });
+        }
+    }
+
+    (planet_paths, expired_comet_planet_ids)
+}
+
+fn move_fleets(state: &mut State, planet_paths: &PlanetPaths) -> (CombatLists, FleetLossStats) {
     let mut combat_lists = CombatLists::for_planets(&state.planets);
     let mut fleets_to_remove = Vec::new();
     let mut losses = FleetLossStats::default();
@@ -279,9 +335,10 @@ fn move_fleets(state: &mut State) -> (CombatLists, FleetLossStats) {
 
         let mut hit_planet = false;
         for planet in state.planets.iter() {
-            let planet_pos = planet.position();
-            if segment_aabb_contains_point(planet_pos, old_pos, new_pos, planet.radius)
-                && point_to_segment_distance(planet_pos, old_pos, new_pos) < planet.radius
+            let Some(path) = planet_paths.get(planet.id as usize).copied().flatten() else {
+                continue;
+            };
+            if path.check_collision && fleet_hits_planet_path(old_pos, new_pos, path, planet.radius)
             {
                 combat_lists.push(planet.id, fleet.clone());
                 fleets_to_remove.push(fleet.id);
@@ -314,141 +371,64 @@ fn move_fleets(state: &mut State) -> (CombatLists, FleetLossStats) {
     (combat_lists, losses)
 }
 
-fn move_planets_and_sweep(
-    state: &mut State,
-    combat_lists: &mut CombatLists,
-    swept_fleets: &mut [bool],
-) {
-    let comet_ids: HashSet<u32> = state.comet_planet_ids.iter().copied().collect();
-    let mut sweep_checks = Vec::new();
+fn apply_planet_paths(state: &mut State, planet_paths: &PlanetPaths) {
     for planet in state.planets.iter_mut() {
-        if comet_ids.contains(&planet.id) {
-            continue;
-        }
-
-        let Some(initial_planet) = state.initial_planets.get(planet.id) else {
-            continue;
-        };
-
-        let old_pos = planet.position();
-
-        if is_orbiting(initial_planet.position(), planet.radius) {
-            let position = orbit_position(
-                initial_planet.position(),
-                state.angular_velocity,
-                state.step.into(),
-            );
-            planet.x = position.x;
-            planet.y = position.y;
-        }
-
-        sweep_checks.push((planet.id, planet.radius, old_pos, planet.position()));
-    }
-
-    for (planet_id, radius, old_pos, new_pos) in sweep_checks {
-        sweep_fleets(
-            state,
-            combat_lists,
-            swept_fleets,
-            planet_id,
-            radius,
-            old_pos,
-            new_pos,
-        );
-    }
-}
-
-fn move_comets_and_sweep(
-    state: &mut State,
-    combat_lists: &mut CombatLists,
-    swept_fleets: &mut [bool],
-) {
-    let mut expired = Vec::new();
-    let mut sweep_checks = Vec::new();
-
-    for group in &mut state.comets {
-        group.path_index += 1;
-        let path_index = group.path_index;
-
-        for (path_offset, planet_id) in group.planet_ids.iter().enumerate() {
-            let Some(planet) = state.planets.get_mut(*planet_id) else {
-                continue;
-            };
-            let path = &group.paths[path_offset];
-
-            if path_index >= path.len() as i32 {
-                expired.push(*planet_id);
-                continue;
-            }
-
-            let old_pos = planet.position();
-            let new_pos = path[path_index as usize];
-            planet.x = new_pos.x;
-            planet.y = new_pos.y;
-
-            if old_pos.x >= 0.0 {
-                sweep_checks.push((planet.id, planet.radius, old_pos, planet.position()));
-            }
-        }
-    }
-
-    if !expired.is_empty() {
-        remove_comet_planets(state, |planet_id| expired.contains(&planet_id));
-    }
-
-    for (planet_id, radius, old_pos, new_pos) in sweep_checks {
-        sweep_fleets(
-            state,
-            combat_lists,
-            swept_fleets,
-            planet_id,
-            radius,
-            old_pos,
-            new_pos,
-        );
-    }
-}
-
-fn sweep_fleets(
-    state: &State,
-    combat_lists: &mut CombatLists,
-    swept_fleets: &mut [bool],
-    planet_id: u32,
-    planet_radius: f64,
-    old_pos: Point,
-    new_pos: Point,
-) {
-    if old_pos == new_pos {
-        return;
-    }
-
-    for (fleet_index, fleet) in state.fleets.iter().enumerate() {
-        if swept_fleets[fleet_index] {
-            continue;
-        }
-        let fleet_pos = fleet.position();
-        if segment_aabb_contains_point(fleet_pos, old_pos, new_pos, planet_radius)
-            && point_to_segment_distance(fleet_pos, old_pos, new_pos) < planet_radius
-        {
-            combat_lists.push(planet_id, fleet.clone());
-            swept_fleets[fleet_index] = true;
+        if let Some(path) = planet_paths.get(planet.id as usize).copied().flatten() {
+            planet.x = path.new_pos.x;
+            planet.y = path.new_pos.y;
         }
     }
 }
 
-fn segment_aabb_contains_point(point: Point, start: Point, end: Point, radius: f64) -> bool {
-    let expanded_radius = radius + COLLISION_AABB_SLACK;
-    let min_x = start.x.min(end.x) - expanded_radius;
-    let max_x = start.x.max(end.x) + expanded_radius;
-    let min_y = start.y.min(end.y) - expanded_radius;
-    let max_y = start.y.max(end.y) + expanded_radius;
+fn fleet_hits_planet_path(
+    fleet_start: Point,
+    fleet_end: Point,
+    planet_path: PlanetPath,
+    radius: f64,
+) -> bool {
+    if !swept_aabb_overlaps(
+        fleet_start,
+        fleet_end,
+        planet_path.old_pos,
+        planet_path.new_pos,
+        radius,
+    ) {
+        return false;
+    }
 
-    !(point.x < min_x || point.x > max_x || point.y < min_y || point.y > max_y)
+    if planet_path.old_pos == planet_path.new_pos {
+        return point_to_segment_distance(planet_path.old_pos, fleet_start, fleet_end) <= radius;
+    }
+
+    swept_pair_hit(
+        fleet_start,
+        fleet_end,
+        planet_path.old_pos,
+        planet_path.new_pos,
+        radius,
+    )
 }
 
-fn remove_marked_fleets(state: &mut State, combat_lists: &CombatLists) {
-    let removed: Vec<u32> = combat_lists.iter_fleets().map(|fleet| fleet.id).collect();
-    state.fleets.retain(|fleet| !removed.contains(&fleet.id));
+fn swept_aabb_overlaps(
+    fleet_start: Point,
+    fleet_end: Point,
+    planet_start: Point,
+    planet_end: Point,
+    radius: f64,
+) -> bool {
+    let fleet_min_x = fleet_start.x.min(fleet_end.x);
+    let fleet_max_x = fleet_start.x.max(fleet_end.x);
+    let fleet_min_y = fleet_start.y.min(fleet_end.y);
+    let fleet_max_y = fleet_start.y.max(fleet_end.y);
+    let planet_min_x = planet_start.x.min(planet_end.x) - radius;
+    let planet_max_x = planet_start.x.max(planet_end.x) + radius;
+    let planet_min_y = planet_start.y.min(planet_end.y) - radius;
+    let planet_max_y = planet_start.y.max(planet_end.y) + radius;
+
+    !(fleet_max_x < planet_min_x
+        || fleet_min_x > planet_max_x
+        || fleet_max_y < planet_min_y
+        || fleet_min_y > planet_max_y)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -660,37 +640,6 @@ mod tests {
         fn uniform(&mut self, low: f64, high: f64) -> f64 {
             low + (high - low) * self.float
         }
-    }
-
-    #[test]
-    fn segment_aabb_keeps_exact_boundary_candidates() {
-        assert!(segment_aabb_contains_point(
-            Point::new(5.0, 1.0),
-            Point::new(0.0, 0.0),
-            Point::new(10.0, 0.0),
-            1.0,
-        ));
-    }
-
-    #[test]
-    fn segment_aabb_keeps_endpoint_collision_candidates() {
-        let point = Point::new(-0.5, 0.5);
-        let start = Point::new(0.0, 0.0);
-        let end = Point::new(10.0, 0.0);
-        let radius = 0.8;
-
-        assert!(point_to_segment_distance(point, start, end) < radius);
-        assert!(segment_aabb_contains_point(point, start, end, radius));
-    }
-
-    #[test]
-    fn segment_aabb_rejects_far_points() {
-        assert!(!segment_aabb_contains_point(
-            Point::new(5.0, 1.1),
-            Point::new(0.0, 0.0),
-            Point::new(10.0, 0.0),
-            1.0,
-        ));
     }
 
     fn base_state(player_count: usize) -> State {
@@ -940,6 +889,7 @@ mod tests {
         let mut state = base_state(2);
         state.planets[1].x = 25.0;
         state.planets[1].ships = 5;
+        state.initial_planets = state.planets.clone();
 
         let result = step(
             &mut state,
@@ -968,6 +918,11 @@ mod tests {
         state.planets[1].x = 25.0;
         state.planets[1].ships = 5;
         state.comet_planet_ids = vec![1];
+        state.comets = vec![CometGroup {
+            planet_ids: vec![1],
+            paths: vec![vec![Point::new(25.0, 20.0)]],
+            path_index: -1,
+        }];
 
         let result = step(
             &mut state,
@@ -1019,6 +974,7 @@ mod tests {
         state.planets[1].y = CENTER;
         state.planets[1].radius = 1.0;
         state.planets[1].ships = 5;
+        state.initial_planets = state.planets.clone();
         state.fleets = vec![Fleet {
             id: 0,
             owner: 0,
@@ -1264,19 +1220,19 @@ mod tests {
     }
 
     #[test]
-    fn exact_boundary_planet_contact_does_not_collide() {
+    fn exact_boundary_planet_contact_collides() {
         let mut state = base_state(2);
         state.planets[0].x = 10.0;
         state.planets[0].y = 10.0;
         state.planets[1].x = 20.5;
-        state.planets[1].y = 21.0;
+        state.planets[1].y = 5.0;
         state.planets[1].radius = 1.0;
         state.initial_planets = state.planets.clone();
         state.fleets = vec![Fleet {
             id: 0,
             owner: 0,
             x: 20.0,
-            y: 20.0,
+            y: 4.0,
             angle: 0.0,
             from_planet_id: 0,
             ships: 1,
@@ -1284,8 +1240,31 @@ mod tests {
 
         step(&mut state, &[vec![], vec![]]);
 
-        assert_eq!(state.fleets.len(), 1);
-        assert_eq!(state.fleets[0].position(), Point::new(21.0, 20.0));
+        assert!(state.fleets.is_empty());
+        assert_eq!(state.planets[1].owner, -1);
+        assert_eq!(state.planets[1].ships, 9);
+    }
+
+    #[test]
+    fn swept_aabb_keeps_endpoint_collision_candidates() {
+        assert!(swept_aabb_overlaps(
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(-0.5, 0.5),
+            Point::new(-0.5, 0.5),
+            0.8,
+        ));
+    }
+
+    #[test]
+    fn swept_aabb_rejects_far_paths() {
+        assert!(!swept_aabb_overlaps(
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(5.0, 2.0),
+            Point::new(5.0, 3.0),
+            1.0,
+        ));
     }
 
     #[test]
@@ -1333,164 +1312,9 @@ mod tests {
     }
 
     #[test]
-    fn sweep_fleets_queues_fleet_once_for_first_sweep_target() {
-        let mut state = base_state(2);
-        state.fleets = vec![Fleet {
-            id: 0,
-            owner: 1,
-            x: 50.0,
-            y: 50.0,
-            angle: 0.0,
-            from_planet_id: 1,
-            ships: 4,
-        }];
-        let mut combat_lists =
-            CombatLists::for_planets(&vec![planet_with_id(10), planet_with_id(11)].into());
-        let mut swept_fleets = vec![false; state.fleets.len()];
-
-        sweep_fleets(
-            &state,
-            &mut combat_lists,
-            &mut swept_fleets,
-            10,
-            2.0,
-            Point::new(48.0, 50.0),
-            Point::new(52.0, 50.0),
-        );
-        sweep_fleets(
-            &state,
-            &mut combat_lists,
-            &mut swept_fleets,
-            11,
-            2.0,
-            Point::new(50.0, 48.0),
-            Point::new(50.0, 52.0),
-        );
-
-        assert_eq!(combat_lists.get(10).unwrap().len(), 1);
-        assert!(combat_lists.get(11).unwrap().is_empty());
-    }
-
-    #[test]
-    fn sweep_fleets_preserves_planet_before_comet_precedence() {
-        let mut state = base_state(2);
-        state.fleets = vec![Fleet {
-            id: 0,
-            owner: 1,
-            x: 50.0,
-            y: 50.0,
-            angle: 0.0,
-            from_planet_id: 1,
-            ships: 4,
-        }];
-        let planet_id = 10;
-        let comet_id = 11;
-        let mut combat_lists = CombatLists::for_planets(
-            &vec![planet_with_id(planet_id), planet_with_id(comet_id)].into(),
-        );
-        let mut swept_fleets = vec![false; state.fleets.len()];
-
-        sweep_fleets(
-            &state,
-            &mut combat_lists,
-            &mut swept_fleets,
-            planet_id,
-            2.0,
-            Point::new(48.0, 50.0),
-            Point::new(52.0, 50.0),
-        );
-        sweep_fleets(
-            &state,
-            &mut combat_lists,
-            &mut swept_fleets,
-            comet_id,
-            2.0,
-            Point::new(50.0, 48.0),
-            Point::new(50.0, 52.0),
-        );
-
-        assert_eq!(combat_lists.get(planet_id).unwrap().len(), 1);
-        assert!(combat_lists.get(comet_id).unwrap().is_empty());
-    }
-
-    #[test]
-    fn sweep_fleets_tracks_duplicate_ids_by_live_fleet_slot() {
-        let mut state = base_state(2);
-        state.fleets = vec![
-            Fleet {
-                id: 0,
-                owner: 1,
-                x: 50.0,
-                y: 50.0,
-                angle: 0.0,
-                from_planet_id: 1,
-                ships: 4,
-            },
-            Fleet {
-                id: 0,
-                owner: 1,
-                x: 50.5,
-                y: 50.0,
-                angle: 0.0,
-                from_planet_id: 1,
-                ships: 5,
-            },
-        ];
-        let mut combat_lists = CombatLists::for_planets(&vec![planet_with_id(10)].into());
-        let mut swept_fleets = vec![false; state.fleets.len()];
-
-        sweep_fleets(
-            &state,
-            &mut combat_lists,
-            &mut swept_fleets,
-            10,
-            2.0,
-            Point::new(48.0, 50.0),
-            Point::new(52.0, 50.0),
-        );
-
-        assert_eq!(
-            combat_lists
-                .get(10)
-                .unwrap()
-                .iter()
-                .map(|fleet| fleet.ships)
-                .collect::<Vec<_>>(),
-            vec![4, 5]
-        );
-    }
-
-    #[test]
     #[should_panic(expected = "planet id must be < 100")]
     fn combat_lists_reject_planet_ids_at_limit() {
         let _combat_lists = CombatLists::for_planets(&vec![planet_with_id(100)].into());
-    }
-
-    #[test]
-    #[should_panic(expected = "combat list exists for every planet")]
-    fn sweep_fleets_panics_for_missing_combat_bucket() {
-        let mut state = base_state(2);
-        state.fleets = vec![Fleet {
-            id: 0,
-            owner: 1,
-            x: 50.0,
-            y: 50.0,
-            angle: 0.0,
-            from_planet_id: 1,
-            ships: 4,
-        }];
-        let mut combat_lists = CombatLists::for_planets(&vec![planet_with_id(10)].into());
-        let mut swept_fleets = vec![false; state.fleets.len()];
-
-        sweep_fleets(
-            &state,
-            &mut combat_lists,
-            &mut swept_fleets,
-            9,
-            2.0,
-            Point::new(48.0, 50.0),
-            Point::new(52.0, 50.0),
-        );
     }
 
     #[test]
@@ -1519,20 +1343,26 @@ mod tests {
             from_planet_id: 0,
             ships: 4,
         }];
-        let mut combat_lists = CombatLists::for_planets(&state.planets);
-        let mut swept_fleets = vec![false; state.fleets.len()];
+        let planet_paths = vec![
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(PlanetPath {
+                old_pos: Point::new(48.0, 50.0),
+                new_pos: Point::new(52.0, 50.0),
+                check_collision: true,
+            }),
+        ];
 
-        sweep_fleets(
-            &state,
-            &mut combat_lists,
-            &mut swept_fleets,
-            10,
-            2.0,
-            Point::new(48.0, 50.0),
-            Point::new(52.0, 50.0),
-        );
+        let (combat_lists, _) = move_fleets(&mut state, &planet_paths);
         remove_comet_planets(&mut state, |planet_id| planet_id == 10);
-        remove_marked_fleets(&mut state, &combat_lists);
         resolve_combats(&mut state, combat_lists);
 
         assert!(state.planets.is_empty());

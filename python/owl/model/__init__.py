@@ -1,5 +1,6 @@
 from owl.model.base import (
     BaseModelAPI,
+    InputLayer,
     ModelActionEntropies,
     ModelActionLogProbs,
     ModelActions,
@@ -18,6 +19,7 @@ __all__ = [
     "ActorDiscreteTargetsConfig",
     "ActorPureConfig",
     "BaseModelAPI",
+    "InputLayer",
     "ModelActionEntropies",
     "ModelActionLogProbs",
     "ModelActions",

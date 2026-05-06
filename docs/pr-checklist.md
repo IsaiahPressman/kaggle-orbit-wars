@@ -5,6 +5,9 @@ to make the final agent review repeatable and repository-owned, following the
 agent workflow guidance in OpenAI's harness-engineering writeup:
 <https://openai.com/index/harness-engineering/>.
 
+When using GitHub CLI commands, run all `gh` commands with elevated permissions;
+they are not allowed in the sandbox.
+
 ## Final Review
 
 1. Inspect the branch state:
@@ -59,6 +62,10 @@ rerun it as `DOCS_CURRENT=1 just prepare`.
 
 9. Summarize residual risk in the final response or PR body. If no meaningful
    risk remains, say so directly.
+
+10. After a successful merge, switch back to the base branch and clean up the
+    merged feature branch locally and remotely, as long as doing so will not
+    disturb unrelated local work.
 
 ## Agent Review Gate
 

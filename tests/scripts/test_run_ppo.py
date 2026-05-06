@@ -313,7 +313,10 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
         assert not torch.is_grad_enabled()
         seen_eval_sizes.append((kwargs["n_games"], kwargs["n_envs"]))
         stats = run_ppo._EvalStats.empty()
-        stats.add_game_result(run_ppo.MODEL_CURRENT)
+        if kwargs["player_count"] == 2:
+            stats.add_game_result(run_ppo.MODEL_CURRENT)
+        else:
+            stats.add_game_result(run_ppo.MODEL_LAST_BEST)
         return (
             stats,
             {
@@ -336,7 +339,9 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
         device=torch.device("cpu"),
     )
 
-    assert metrics["eval/win_rate_against_last_best"] == pytest.approx(1.0)
+    assert metrics["eval/win_rate_against_last_best"] == pytest.approx(0.5)
+    assert metrics["eval/win_rate_against_last_best_2p"] == pytest.approx(1.0)
+    assert metrics["eval/win_rate_against_last_best_4p"] == pytest.approx(0.0)
     assert metrics["eval/game_length_mean"] == pytest.approx(12.0)
     assert metrics["time/eval_seconds"] == pytest.approx(4.0)
     assert metrics["perf/eval_sps"] == pytest.approx(3.0)
@@ -434,7 +439,6 @@ def test_eval_actions_for_assignments_uses_stochastic_model_outputs() -> None:
         global_features=torch.zeros((1, 1)),
         can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
         max_launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
-        max_launch_features=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 28)),
     )
 
     actions = run_ppo._eval_actions_for_assignments(
@@ -462,7 +466,7 @@ def test_create_model_uses_env_owned_specs() -> None:
     assert model.obs_spec == obs_spec
     assert model.action_spec == action_spec
     assert model.fleet_proj.in_features == obs_spec.fleet_channels
-    assert model.actor.launch_slot_tokens.num_embeddings == 1
+    assert model.actor.launch_slot_tokens.shape[0] == 1
 
 
 def test_trainable_parameter_count_ignores_frozen_parameters() -> None:

@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use numpy::ndarray::{Array1, Array2, Array3};
+use numpy::ndarray::{Array1, Array2};
 use numpy::{
-    IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray2,
-    PyReadonlyArray4, PyUntypedArrayMethods,
+    IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray4,
+    PyUntypedArrayMethods,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -20,7 +20,7 @@ use super::action_spec::{
 use super::{
     log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
     DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, MAX_COMETS, MAX_COMET_PATH_LENGTH,
-    MAX_LAUNCH_FEATURES, MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS,
+    MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS,
 };
 
 type EncodedEntityBased<'py> = (
@@ -32,7 +32,6 @@ type EncodedEntityBased<'py> = (
     Bound<'py, PyArray1<f32>>,
     Bound<'py, PyArray2<bool>>,
     Bound<'py, PyArray2<i64>>,
-    Bound<'py, PyArray3<f32>>,
 );
 
 const OWNER_CHANNELS_WITH_NEUTRAL: usize = 5;
@@ -79,7 +78,6 @@ pub(super) fn encode_state(
     global_obs: &mut [f32],
     can_act: &mut [bool],
     max_launch: &mut [i64],
-    max_launch_features: &mut [f32],
     min_fleet_size: i64,
 ) -> usize {
     let mut action_slots = [None; ACTION_ENTITY_SLOTS];
@@ -98,7 +96,6 @@ pub(super) fn encode_state(
         global_obs,
         can_act,
         max_launch,
-        max_launch_features,
         &mut action_slots,
         min_fleet_size,
     )
@@ -120,7 +117,6 @@ pub(super) fn encode_state_with_action_slots(
     global_obs: &mut [f32],
     can_act: &mut [bool],
     max_launch: &mut [i64],
-    max_launch_features: &mut [f32],
     action_slots: &mut ActionEntitySlots,
     min_fleet_size: i64,
 ) -> usize {
@@ -150,7 +146,6 @@ pub(super) fn encode_state_with_action_slots(
     global_obs.fill(0.0);
     can_act.fill(false);
     max_launch.fill(0);
-    max_launch_features.fill(0.0);
 
     let mut fleets = state.fleets.iter().collect::<Vec<_>>();
     let ignored_fleets = fleets.len().saturating_sub(max_fleets);
@@ -267,7 +262,6 @@ pub(super) fn encode_state_with_action_slots(
         max_launch,
         min_fleet_size,
     );
-    encode_max_launch_features(max_launch, max_launch_features);
 
     ignored_fleets
 }
@@ -611,28 +605,6 @@ fn fleet_ship_count_buckets(min_fleet_size: i64, buckets: &mut [i32; 10]) -> usi
     len
 }
 
-fn encode_max_launch_features(max_launch: &[i64], max_launch_features: &mut [f32]) {
-    assert_eq!(
-        max_launch_features.len(),
-        max_launch.len() * MAX_LAUNCH_FEATURES
-    );
-    for (ships, row) in max_launch
-        .iter()
-        .zip(max_launch_features.chunks_exact_mut(MAX_LAUNCH_FEATURES))
-    {
-        encode_action_ship_count_features(row, *ships);
-    }
-}
-
-fn encode_action_ship_count_features(row: &mut [f32], ships: i64) {
-    assert_eq!(row.len(), MAX_LAUNCH_FEATURES);
-    row.fill(0.0);
-    let ships = ships.clamp(0, i64::from(i32::MAX)) as i32;
-    row[0] = normalize_ships(ships);
-    row[1] = normalize_log_ships(ships);
-    encode_ship_count_features(&mut row[2..], ships, &PLANET_SHIP_COUNT_BUCKETS);
-}
-
 #[allow(clippy::too_many_arguments)]
 fn state_from_arrays(
     planets: PyReadonlyArray2<'_, f64>,
@@ -913,8 +885,6 @@ pub fn encode_entity_based<'py>(
     let mut global_obs = Array1::<f32>::zeros(GLOBAL_CHANNELS);
     let mut can_act = Array2::<bool>::from_elem((OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS), false);
     let mut max_launch = Array2::<i64>::zeros((OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS));
-    let mut max_launch_features =
-        Array3::<f32>::zeros((OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS, MAX_LAUNCH_FEATURES));
     let (planet_mask, tail_mask) = entity_mask
         .as_slice_mut()
         .expect("newly allocated entity mask is contiguous")
@@ -950,9 +920,6 @@ pub fn encode_entity_based<'py>(
         max_launch
             .as_slice_mut()
             .expect("newly allocated max_launch array is contiguous"),
-        max_launch_features
-            .as_slice_mut()
-            .expect("newly allocated max_launch_features array is contiguous"),
         min_fleet_size,
     );
     log_ignored_fleets(ignored_fleets);
@@ -966,7 +933,6 @@ pub fn encode_entity_based<'py>(
         global_obs.into_pyarray(py),
         can_act.into_pyarray(py),
         max_launch.into_pyarray(py),
-        max_launch_features.into_pyarray(py),
     ))
 }
 
@@ -1162,8 +1128,6 @@ mod tests {
         let mut global_obs = vec![0.0; GLOBAL_CHANNELS];
         let mut can_act = vec![false; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
         let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
-        let mut max_launch_features =
-            vec![0.0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS * MAX_LAUNCH_FEATURES];
 
         encode_state(
             RlActionSpec::Pure,
@@ -1180,7 +1144,6 @@ mod tests {
             &mut global_obs,
             &mut can_act,
             &mut max_launch,
-            &mut max_launch_features,
             1,
         );
     }
@@ -1226,8 +1189,6 @@ mod tests {
         let mut global_obs = vec![0.0; GLOBAL_CHANNELS];
         let mut can_act = vec![false; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
         let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
-        let mut max_launch_features =
-            vec![0.0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS * MAX_LAUNCH_FEATURES];
 
         encode_state(
             RlActionSpec::Pure,
@@ -1244,7 +1205,6 @@ mod tests {
             &mut global_obs,
             &mut can_act,
             &mut max_launch,
-            &mut max_launch_features,
             1,
         );
 
@@ -1286,8 +1246,6 @@ mod tests {
         let mut global_obs = vec![0.0; GLOBAL_CHANNELS];
         let mut can_act = vec![false; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
         let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
-        let mut max_launch_features =
-            vec![0.0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS * MAX_LAUNCH_FEATURES];
 
         encode_state(
             RlActionSpec::Pure,
@@ -1304,7 +1262,6 @@ mod tests {
             &mut global_obs,
             &mut can_act,
             &mut max_launch,
-            &mut max_launch_features,
             3,
         );
 

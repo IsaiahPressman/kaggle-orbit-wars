@@ -28,6 +28,7 @@ without changing callers that validate config dictionaries through the union.
 | `mlp_ratio` | `4.0` | FFN hidden width multiplier. |
 | `activation` | `"gelu"` | FFN activation: `"gelu"`, `"silu"`, or `"swiglu"`. |
 | `force_flash_attn` | `False` | Require packed varlen flash-attn; raise an error instead of falling back when tensors are not flash-compatible. |
+| `n_scratch_tokens` | `4` | Learned shared scratch tokens appended to the trunk sequence. |
 | `actor` | `{"action_spec": "pure"}` | Discriminated actor-head config. Supported actor specs are `"pure"` and `"discrete_targets"`. |
 
 Actor-specific fields live inside the actor config. `ActorPureConfig` owns
@@ -59,29 +60,42 @@ config presets cannot silently diverge from the environment tensor shapes.
 `StatelessTransformerV1` consumes an `ObsBatch` containing on-device torch tensors
 from `docs/rl-api-specs.md`.
 
-Each observation tensor receives one feedforward projection to `embed_dim`:
+Each observation tensor receives a small MLP stem from raw channels to
+`int(embed_dim * mlp_ratio)` and then to `embed_dim`:
 
 - static planets: `(batch, MAX_PLANETS, 107) -> (batch, MAX_PLANETS, embed_dim)`
 - orbiting planets: `(batch, MAX_PLANETS, 107) -> (batch, MAX_PLANETS, embed_dim)`
 - fleets: `(batch, max_fleets, 79) -> (batch, max_fleets, embed_dim)`
 - comets: `(batch, MAX_COMETS, 330) -> (batch, MAX_COMETS, embed_dim)`
-- globals: `(batch, 3) -> (batch, 1, embed_dim)`
+- globals: `(batch, 3) -> (batch, embed_dim)`
 
 The boolean `orbiting_planets` mask selects the orbiting-planet projection for
 orbiting rows and the static-planet projection for all other planet rows.
 Planet, comet, and fleet tokens are concatenated on the entity axis in that
 order. This keeps the action-origin hidden states contiguous as the first
 `ACTION_ENTITY_SLOTS` tokens. The global projection is added to every entity
-token. Four learned per-player embeddings are then appended for the critic,
-giving:
+token and is also appended as its own global-feature token. The full trunk
+sequence is:
 
 ```text
-(batch, max_entities + 4, embed_dim)
+[planet tokens]
+[comet tokens]
+[fleet tokens]
+[player tokens]
+[global-feature token]
+[board scratch tokens]
+[actor plan tokens]
+[critic value tokens]
 ```
 
-The `entity_mask` uses the same planet, comet, fleet order and is concatenated
-with `still_playing` into one token mask. Masked tokens are excluded from
-attention keys and are zeroed in the returned hidden states.
+With the default four board scratch tokens this gives
+`(batch, max_entities + 17, embed_dim)`. The `entity_mask` uses the same
+planet, comet, fleet order and is concatenated with masks for the learned
+tokens. Player, actor-plan, and critic-value tokens use `still_playing`; the
+global-feature and board scratch tokens are always unmasked. Masked tokens are
+excluded from attention keys and are zeroed in the returned hidden states.
+Downstream code must consume the named `EncodedObservations` fields rather than
+assuming output meaning from positional slices.
 
 ## Transformer Trunk
 
@@ -112,9 +126,13 @@ optimizer assumptions than packing multiple operations into one parameter.
 
 ## Initialization
 
-Linear layers use orthogonal initialization with zero biases. Input projections
-use unit gain, hidden projections use ReLU-style gain, and transformer residual
-output projections are scaled by `1 / sqrt(2 * depth)`.
+Linear layers use orthogonal initialization with zero biases. Only the first
+linear layer in each observation stem is treated as an input projection and
+uses unit gain; hidden projections use ReLU-style gain, and transformer
+residual output projections are scaled by `1 / sqrt(2 * depth)`.
+Learned token state parameters, including player, board scratch, actor-plan,
+critic-value, pure launch-slot, and discrete source/target role tags, are also
+classified as input layers for optimizer grouping so Muon does not update them.
 
 Actor and critic output heads are two-layer MLP projections with hidden width
 `embed_dim`, the configured activation in the middle, and output-specific final
@@ -125,9 +143,9 @@ policy-layer initialization. The critic final output layer uses unit gain.
 
 ## Critic
 
-The critic reads the final four player tokens. A two-layer MLP head produces one
-logit per player, then applies a masked softmax using `obs.still_playing` with
-shape `(batch, 4)`.
+The critic reads the per-player `critic_value_hidden` field from
+`EncodedObservations`. A two-layer MLP head produces one logit per player, then
+applies a masked softmax using `obs.still_playing` with shape `(batch, 4)`.
 
 The resulting winner probabilities are mapped linearly into value targets:
 
@@ -155,7 +173,7 @@ Both actor heads start from the same shared transformer trunk. For each
 
 - source entity hidden state
 - player hidden token
-- Rust-provided `max_launch_features` using the planet ship-count bucket grid
+- the actor plan token for that player, for the discrete-target actor
 
 The final action head is selected by `config.actor.action_spec`. The concrete
 heads live under `python/owl/model/actor/`: `PureActor` for raw angles and
@@ -192,12 +210,9 @@ implementation uses the straightforward sequential recurrence rather than the
 paper's parallel scan variant.
 
 `ActionPureConfig()` defaults to `max_per_planet_launches=3` and
-`min_fleet_size=1`, but the pure actor currently raises `NotImplementedError`
-for `max_per_planet_launches > 1` because launch-budget ship-count features are
-encoded by Rust for the initial launch budget only. PPO model construction uses
-the environment action spec as the source of truth, so the model launch-slot
-count and minimum launched fleet size match the action tensors submitted to the
-environment.
+`min_fleet_size=1`. PPO model construction uses the environment action spec as
+the source of truth, so the model launch-slot count and minimum launched fleet
+size match the action tensors submitted to the environment.
 
 For every slot, the policy emits:
 
@@ -245,12 +260,16 @@ The discrete-target actor supports `ActionDiscreteTargetsConfig` with
 uses a larger per-planet launch count for this actor.
 
 Instead of the pure actor's minGRU, the discrete-target actor uses one
-feedforward action block per source entity. It projects source slots to query,
-key, and value tensors with a single target-selection head independent of the
-shared transformer trunk's attention head count. It computes scaled dot-product
-target logits for every `(source, target)` pair and masks those logits with the
-4-D discrete `can_act` tensor. Fully masked source rows are sanitized to finite
-zero logits and are suppressed by the launch/source mask.
+feedforward action block per source entity. The model constructs separate
+source and target streams for each player/action entity position. Both streams
+receive entity hidden state, player hidden state, and the player's actor plan
+token. The actor adds learned source/target role embeddings before normalizing
+the two streams, then projects source slots to queries and target slots to keys
+and values with a single target-selection head independent of the shared
+transformer trunk's attention head count. It computes scaled dot-product target
+logits for every `(source, target)` pair and masks those logits with the 4-D
+discrete `can_act` tensor. Fully masked source rows are sanitized to finite zero
+logits and are suppressed by the launch/source mask.
 
 After sampling or replaying a target from the masked softmax, the actor gathers
 only the selected target value vector, adds it to the source residual stream,

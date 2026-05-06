@@ -54,9 +54,6 @@ def _obs_batch(*, n_envs: int, obs_spec: EntityBasedConfig) -> ObsBatch:
         ),
         can_act=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
         max_launch=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
-        max_launch_features=torch.zeros(
-            (n_envs, 4, ACTION_ENTITY_SLOTS, obs_spec.max_launch_features),
-        ),
     )
 
 

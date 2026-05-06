@@ -49,6 +49,33 @@ pub fn point_to_segment_distance(point: Point, start: Point, end: Point) -> f64 
     distance(point, projection)
 }
 
+pub fn swept_pair_hit(
+    fleet_start: Point,
+    fleet_end: Point,
+    planet_start: Point,
+    planet_end: Point,
+    radius: f64,
+) -> bool {
+    let d0x = fleet_start.x - planet_start.x;
+    let d0y = fleet_start.y - planet_start.y;
+    let dvx = (fleet_end.x - fleet_start.x) - (planet_end.x - planet_start.x);
+    let dvy = (fleet_end.y - fleet_start.y) - (planet_end.y - planet_start.y);
+    let a = dvx * dvx + dvy * dvy;
+    let b = 2.0 * (d0x * dvx + d0y * dvy);
+    let c = d0x * d0x + d0y * d0y - radius * radius;
+    if a < 1e-12 {
+        return c <= 0.0;
+    }
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant < 0.0 {
+        return false;
+    }
+    let root = discriminant.sqrt();
+    let t1 = (-b - root) / (2.0 * a);
+    let t2 = (-b + root) / (2.0 * a);
+    t2 >= 0.0 && t1 <= 1.0
+}
+
 pub fn fleet_speed(ships: i32, max_speed: f64) -> f64 {
     assert!(ships > 0, "fleet speed requires a positive ship count");
 
@@ -106,6 +133,31 @@ mod tests {
             ),
             5.0,
         );
+    }
+
+    #[test]
+    fn swept_pair_hit_matches_reference_formula_examples() {
+        assert!(swept_pair_hit(
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(5.0, 2.0),
+            Point::new(5.0, -2.0),
+            1.0,
+        ));
+        assert!(swept_pair_hit(
+            Point::new(0.0, 1.0),
+            Point::new(10.0, 1.0),
+            Point::new(5.0, 0.0),
+            Point::new(5.0, 0.0),
+            1.0,
+        ));
+        assert!(!swept_pair_hit(
+            Point::new(0.0, 2.0),
+            Point::new(10.0, 2.0),
+            Point::new(5.0, 0.0),
+            Point::new(5.0, 0.0),
+            1.0,
+        ));
     }
 
     #[test]
