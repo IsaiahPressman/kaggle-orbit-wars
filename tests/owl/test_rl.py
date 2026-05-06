@@ -16,6 +16,7 @@ from owl.rl import (
     ActionPureConfig,
     EntityBasedConfig,
     EnvConfig,
+    ObsBatch,
     VectorizedEnv,
     actions_to_kaggle,
     encode_entity_based,
@@ -37,6 +38,38 @@ def _python_obs(**overrides: object) -> dict[str, object]:
     if "initial_planets" not in overrides:
         obs["initial_planets"] = obs["planets"]
     return obs
+
+
+def _encoded_python_observation(
+    obs: dict[str, object],
+    *,
+    obs_spec: EntityBasedConfig,
+    action_spec: ActionPureConfig | ActionDiscreteTargetsConfig,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    encoded = encode_python_observation(
+        obs,
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    return (
+        encoded.planets[0].numpy(),
+        encoded.orbiting_planets[0].numpy(),
+        encoded.fleets[0].numpy(),
+        encoded.comets[0].numpy(),
+        encoded.entity_mask[0].numpy(),
+        encoded.global_features[0].numpy(),
+        encoded.can_act[0].numpy(),
+        encoded.max_launch[0].numpy(),
+    )
 
 
 def test_vectorized_env_writes_into_preallocated_torch_buffers() -> None:
@@ -480,7 +513,7 @@ def test_min_fleet_size_controls_action_mask_and_validation() -> None:
         _global_features,
         can_act,
         max_launch,
-    ) = encode_python_observation(
+    ) = _encoded_python_observation(
         _python_obs(planets=[[0, 0, 25.0, 75.0, 2.0, 2, 3]]),
         obs_spec=EntityBasedConfig(),
         action_spec=action_spec,
@@ -543,7 +576,7 @@ def test_python_observation_encoder_writes_discrete_target_mask() -> None:
         _global_features,
         can_act,
         max_launch,
-    ) = encode_python_observation(
+    ) = _encoded_python_observation(
         _python_obs(
             planets=[
                 [0, 0, 25.0, 75.0, 2.0, 10, 3],
@@ -564,6 +597,19 @@ def test_python_observation_encoder_writes_discrete_target_mask() -> None:
 
 
 def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
+    encoded = encode_python_observation(
+        _python_obs(
+            step=50,
+            angular_velocity=0.05,
+            planets=[[0, -1, 25.0, 75.0, 2.0, 50, 3]],
+            fleets=[[1, 0, 10.0, 20.0, np.pi / 2, 0, 25]],
+        ),
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionPureConfig(),
+    )
+    assert isinstance(encoded, ObsBatch)
+    assert encoded.planets.shape == (1, MAX_PLANETS, PLANET_CHANNELS)
+
     (
         planets,
         orbiting_planets,
@@ -573,7 +619,7 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
         global_features,
         can_act,
         max_launch,
-    ) = encode_python_observation(
+    ) = _encoded_python_observation(
         _python_obs(
             step=50,
             angular_velocity=0.05,
@@ -1158,7 +1204,7 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
 ) -> None:
     spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 1)
 
-    _, _, fleets, _, entity_mask, _, _, _ = encode_python_observation(
+    _, _, fleets, _, entity_mask, _, _, _ = _encoded_python_observation(
         _python_obs(
             fleets=[
                 [1, 0, 10.0, 20.0, 0.0, 0, 5],
@@ -1187,7 +1233,7 @@ def test_python_observation_encoder_writes_comet_future_paths() -> None:
         _global_features,
         can_act,
         max_launch,
-    ) = encode_python_observation(
+    ) = _encoded_python_observation(
         _python_obs(
             planets=[[10, 2, 50.0, 50.0, 1.0, 25, 1]],
             comets=[

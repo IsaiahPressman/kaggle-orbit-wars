@@ -351,16 +351,7 @@ def encode_python_observation(
     obs: dict[str, Any],
     obs_spec: EntityBasedConfig,
     action_spec: ActionConfig,
-) -> tuple[
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-]:
+) -> ObsBatch:
     (
         planets_in,
         _initial_planets_in,
@@ -387,7 +378,7 @@ def encode_python_observation(
         action_spec.min_fleet_size,
     )
     if isinstance(action_spec, ActionPureConfig):
-        return encoded
+        return _encoded_observation_to_batch(encoded)
 
     (
         planets,
@@ -403,15 +394,17 @@ def encode_python_observation(
     source_target_can_act = source_can_act[:, :, None] & target_exists[None, None, :]
     source_indexes = np.arange(ACTION_ENTITY_SLOTS)
     source_target_can_act[:, source_indexes, source_indexes] = False
-    return (
-        planets,
-        orbiting_planets,
-        fleets,
-        comets,
-        entity_mask,
-        global_features,
-        source_target_can_act,
-        max_launch,
+    return _encoded_observation_to_batch(
+        (
+            planets,
+            orbiting_planets,
+            fleets,
+            comets,
+            entity_mask,
+            global_features,
+            source_target_can_act,
+            max_launch,
+        )
     )
 
 
@@ -530,6 +523,45 @@ def _actions_to_numpy(
     else:
         raise TypeError(f"{name} must be a NumPy array or Torch tensor")
     return np.ascontiguousarray(actions)
+
+
+def _encoded_observation_to_batch(
+    encoded: tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+    ],
+) -> ObsBatch:
+    (
+        planets,
+        orbiting_planets,
+        fleets,
+        comets,
+        entity_mask,
+        global_features,
+        can_act,
+        max_launch,
+    ) = encoded
+    return ObsBatch(
+        planets=torch.as_tensor(planets, dtype=torch.float32).unsqueeze(0),
+        orbiting_planets=torch.as_tensor(orbiting_planets, dtype=torch.bool).unsqueeze(
+            0
+        ),
+        fleets=torch.as_tensor(fleets, dtype=torch.float32).unsqueeze(0),
+        comets=torch.as_tensor(comets, dtype=torch.float32).unsqueeze(0),
+        entity_mask=torch.as_tensor(entity_mask, dtype=torch.bool).unsqueeze(0),
+        still_playing=torch.ones((1, OUTER_PLAYER_SLOTS), dtype=torch.bool),
+        global_features=torch.as_tensor(global_features, dtype=torch.float32).unsqueeze(
+            0
+        ),
+        can_act=torch.as_tensor(can_act, dtype=torch.bool).unsqueeze(0),
+        max_launch=torch.as_tensor(max_launch, dtype=torch.int64).unsqueeze(0),
+    )
 
 
 def _require_action_shape(

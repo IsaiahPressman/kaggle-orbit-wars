@@ -46,5 +46,5 @@ class KaggleObservation(BaseModel):
             "angular_velocity": self.angular_velocity,
             "comet_planet_ids": self.comet_planet_ids,
             "next_fleet_id": self.next_fleet_id,
-            "comets": [comet.model_dump(mode="python") for comet in self.comets],
+            "comets": [comet.model_dump(mode="json") for comet in self.comets],
         }

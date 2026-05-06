@@ -31,6 +31,7 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
             action_spec=action_spec,
         )
     )
+    agent.agent_config = SimpleNamespace(deterministic=False)
     agent.device = torch.device("cpu")
     action_shape = (1, 4, ACTION_ENTITY_SLOTS, action_spec.max_per_planet_launches)
     launch = torch.zeros(action_shape, dtype=torch.bool)
@@ -42,7 +43,7 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
 
     class FakeModel:
         def __call__(self, _obs: object, *, deterministic: bool) -> object:
-            assert deterministic
+            assert not deterministic
             return SimpleNamespace(
                 actions=ModelActions(launch=launch, angle=angle, ships=ships)
             )

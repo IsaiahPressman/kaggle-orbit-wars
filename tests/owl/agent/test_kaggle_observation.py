@@ -22,10 +22,25 @@ def _raw_observation() -> dict[str, object]:
 
 
 def test_kaggle_observation_preserves_row_entities_and_ignores_extra_keys() -> None:
-    observation = KaggleObservation.model_validate(_raw_observation())
+    raw = _raw_observation()
+    raw["comets"] = [
+        {
+            "planet_ids": [10],
+            "paths": [[(0.0, 1.0), (2.0, 3.0)]],
+            "path_index": 0,
+        }
+    ]
+    observation = KaggleObservation.model_validate(raw)
 
     assert observation.planets == [(0, 0, 25.0, 50.0, 2.0, 10, 3)]
     assert observation.to_rl_observation()["episode_steps"] == KAGGLE_EPISODE_STEPS
+    assert observation.to_rl_observation()["comets"] == [
+        {
+            "planet_ids": [10],
+            "paths": [[[0.0, 1.0], [2.0, 3.0]]],
+            "path_index": 0,
+        }
+    ]
 
 
 def test_kaggle_observation_rejects_missing_required_keys() -> None:
