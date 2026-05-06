@@ -32,6 +32,7 @@ def _python_obs(**overrides: object) -> dict[str, object]:
         "planets": [],
         "initial_planets": [],
         "fleets": [],
+        "player": 0,
         "comets": [],
     }
     obs.update(overrides)
@@ -664,6 +665,21 @@ def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
     assert global_features[2] == pytest.approx(1.0)
     assert not can_act.any()
     assert not max_launch.any()
+
+
+def test_python_observation_encoder_marks_only_present_players_still_playing() -> None:
+    encoded = encode_python_observation(
+        _python_obs(
+            planets=[
+                [0, 0, 25.0, 75.0, 2.0, 50, 3],
+                [1, 1, 75.0, 25.0, 2.0, 50, 3],
+            ]
+        ),
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionPureConfig(),
+    )
+
+    assert encoded.still_playing.tolist() == [[True, True, False, False]]
 
 
 def test_encode_entity_based_matches_expected_masks_and_masked_values() -> None:

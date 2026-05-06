@@ -364,6 +364,11 @@ def encode_python_observation(
         step,
         episode_steps,
     ) = _observation_arrays(obs)
+    still_playing = _still_playing_from_arrays(
+        planets_in,
+        fleets_in,
+        player=obs["player"],
+    )
     encoded = encode_entity_based(
         planets_in,
         fleets_in,
@@ -378,7 +383,7 @@ def encode_python_observation(
         action_spec.min_fleet_size,
     )
     if isinstance(action_spec, ActionPureConfig):
-        return _encoded_observation_to_batch(encoded)
+        return _encoded_observation_to_batch(encoded, still_playing=still_playing)
 
     (
         planets,
@@ -404,7 +409,8 @@ def encode_python_observation(
             global_features,
             source_target_can_act,
             max_launch,
-        )
+        ),
+        still_playing=still_playing,
     )
 
 
@@ -536,6 +542,8 @@ def _encoded_observation_to_batch(
         np.ndarray,
         np.ndarray,
     ],
+    *,
+    still_playing: np.ndarray,
 ) -> ObsBatch:
     (
         planets,
@@ -555,7 +563,7 @@ def _encoded_observation_to_batch(
         fleets=torch.as_tensor(fleets, dtype=torch.float32).unsqueeze(0),
         comets=torch.as_tensor(comets, dtype=torch.float32).unsqueeze(0),
         entity_mask=torch.as_tensor(entity_mask, dtype=torch.bool).unsqueeze(0),
-        still_playing=torch.ones((1, OUTER_PLAYER_SLOTS), dtype=torch.bool),
+        still_playing=torch.as_tensor(still_playing, dtype=torch.bool).unsqueeze(0),
         global_features=torch.as_tensor(global_features, dtype=torch.float32).unsqueeze(
             0
         ),
@@ -609,6 +617,26 @@ def _require_int(value: Any, *, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, Integral):
         raise TypeError(f"obs['{name}'] must be an integer")
     return int(value)
+
+
+def _still_playing_from_arrays(
+    planets: np.ndarray,
+    fleets: np.ndarray,
+    *,
+    player: Any,
+) -> np.ndarray:
+    current_player = _require_int(player, name="player")
+    if not 0 <= current_player < OUTER_PLAYER_SLOTS:
+        raise ValueError(f"obs['player'] must be in [0, {OUTER_PLAYER_SLOTS})")
+
+    still_playing = np.zeros((OUTER_PLAYER_SLOTS,), dtype=np.bool_)
+    still_playing[current_player] = True
+    for rows in (planets, fleets):
+        for owner in rows[:, 1]:
+            owner_id = int(owner)
+            if 0 <= owner_id < OUTER_PLAYER_SLOTS:
+                still_playing[owner_id] = True
+    return still_playing
 
 
 def _rows_to_array(rows: Any, *, name: str) -> np.ndarray:

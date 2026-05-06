@@ -45,7 +45,7 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
     class FakeModel:
         def __call__(self, obs: object, *, deterministic: bool) -> object:
             assert not deterministic
-            assert obs.still_playing.tolist() == [[True, True, True, True]]
+            assert obs.still_playing.tolist() == [[True, False, False, False]]
             return SimpleNamespace(
                 actions=ModelActions(launch=launch, angle=angle, ships=ships),
                 values=torch.tensor([[0.25, -0.5, 0.0, 0.75]]),
