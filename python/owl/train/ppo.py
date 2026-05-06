@@ -163,6 +163,7 @@ class PPOCheckpointMetadata:
     env_steps: int
     optimizer_steps: int
     player_step_total: int
+    target_kl_exceeded_total: int
     wandb_run_id: str | None
 
 
@@ -354,6 +355,7 @@ class PPOTrainer:
         self.n_envs = env.n_envs
         self.optimizer_steps = 0
         self.player_step_total = 0
+        self.target_kl_exceeded_total = 0
         self._non_blocking_env_to_device = device.type == "cuda" and getattr(
             env, "pin_memory_enabled", False
         )
@@ -472,6 +474,7 @@ class PPOTrainer:
             "env_steps": env_steps,
             "optimizer_steps": self.optimizer_steps,
             "player_step_total": self.player_step_total,
+            "target_kl_exceeded_total": self.target_kl_exceeded_total,
             "wandb_run_id": wandb_run_id,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -490,6 +493,7 @@ class PPOTrainer:
             "env_steps",
             "optimizer_steps",
             "player_step_total",
+            "target_kl_exceeded_total",
             "wandb_run_id",
         }
         if set(checkpoint) != expected_keys:
@@ -510,6 +514,10 @@ class PPOTrainer:
             checkpoint["player_step_total"],
             name="player_step_total",
         )
+        target_kl_exceeded_total = _checkpoint_nonnegative_int(
+            checkpoint["target_kl_exceeded_total"],
+            name="target_kl_exceeded_total",
+        )
         wandb_run_id = _checkpoint_optional_str(
             checkpoint["wandb_run_id"],
             name="wandb_run_id",
@@ -528,10 +536,12 @@ class PPOTrainer:
             self.lr_scheduler.load_state_dict(scheduler_state)
         self.optimizer_steps = optimizer_steps
         self.player_step_total = player_step_total
+        self.target_kl_exceeded_total = target_kl_exceeded_total
         return PPOCheckpointMetadata(
             env_steps=env_steps,
             optimizer_steps=optimizer_steps,
             player_step_total=player_step_total,
+            target_kl_exceeded_total=target_kl_exceeded_total,
             wandb_run_id=wandb_run_id,
         )
 
@@ -661,7 +671,12 @@ class PPOTrainer:
         if not loss_metrics:
             raise RuntimeError("internal error: PPO update produced no minibatches")
         metrics = _mean_loss_metrics(loss_metrics)
+        if target_kl_exceeded:
+            self.target_kl_exceeded_total += 1
         metrics["policy/target_kl_exceeded"] = float(target_kl_exceeded)
+        metrics["policy/target_kl_exceeded_total"] = float(
+            self.target_kl_exceeded_total
+        )
         metrics["optimizer/grad_norm"] = float(
             self._mean_scalar(torch.stack(grad_norms).mean()).item()
         )

@@ -630,6 +630,7 @@ def _checkpoint_metadata(
         "env_steps",
         "optimizer_steps",
         "player_step_total",
+        "target_kl_exceeded_total",
         "wandb_run_id",
     }
     if set(checkpoint) != expected_keys:
@@ -651,6 +652,11 @@ def _checkpoint_metadata(
         player_step_total=_checkpoint_nonnegative_int(
             checkpoint["player_step_total"],
             name="player_step_total",
+            path=path,
+        ),
+        target_kl_exceeded_total=_checkpoint_nonnegative_int(
+            checkpoint["target_kl_exceeded_total"],
+            name="target_kl_exceeded_total",
             path=path,
         ),
         wandb_run_id=_checkpoint_optional_str(
