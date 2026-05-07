@@ -102,8 +102,14 @@ EOF
 fi
 
 export RUSTFLAGS="${RUSTFLAGS:--C target-cpu=native}"
+uv run python - <<'PY'
+import sys
+
+if sys.version_info[:2] != (3, 11):
+    raise RuntimeError(f"uv must use Python 3.11, found {sys.version}")
+PY
 just build-release
-python - <<'PY'
+uv run python - <<'PY'
 import owl.rs
 
 owl.rs.assert_release_build()
