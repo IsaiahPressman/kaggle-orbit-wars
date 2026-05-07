@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Annotated, Literal, Self, cast
+from typing import Annotated, Literal, Self, TypeAlias, cast
 
 import torch
 import torch.nn.functional as F
@@ -121,7 +121,7 @@ class StatelessTransformerV1Config(BaseConfig):
         return self
 
 
-type ModelConfig = Annotated[
+ModelConfig: TypeAlias = Annotated[
     StatelessTransformerV1Config, Field(discriminator="model_arch")
 ]
 

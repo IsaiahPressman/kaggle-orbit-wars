@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, Protocol, assert_never
+from typing import Literal, Protocol, TypeAlias, assert_never
 
 import torch
 
@@ -12,7 +12,7 @@ from owl.train.utils import (
 )
 
 AdvantageMode = Literal["gae", "puffer_vtrace"]
-type BootstrappedAdvantageMode = Literal["gae"]
+BootstrappedAdvantageMode: TypeAlias = Literal["gae"]
 
 
 class PufferVTraceFn(Protocol):

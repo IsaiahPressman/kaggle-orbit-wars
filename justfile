@@ -11,6 +11,7 @@ py-format:
     uvx ruff format {{all_py_code}}
 [group: 'python']
 py-lint:
+    uv run python scripts/check_python_311_syntax.py
     uvx ruff check {{all_py_code}}
 [group: 'python']
 py-static:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, TypeAlias
 
 from pydantic import Field, model_validator
 
@@ -41,7 +41,7 @@ class ActorDiscreteTargetsConfig(BaseConfig):
         return self
 
 
-type ActorConfig = Annotated[
+ActorConfig: TypeAlias = Annotated[
     ActorPureConfig | ActorDiscreteTargetsConfig,
     Field(discriminator="action_spec"),
 ]

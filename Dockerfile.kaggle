@@ -25,7 +25,7 @@ RUN apt-get update && \
         pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
-RUN python -c 'import sys; assert sys.version_info >= (3, 12), f"Python 3.12+ required, found {sys.version}"'
+RUN python -c 'import sys; assert sys.version_info >= (3, 11), f"Python 3.11+ required, found {sys.version}"'
 
 WORKDIR /workspace/orbit-wars
 

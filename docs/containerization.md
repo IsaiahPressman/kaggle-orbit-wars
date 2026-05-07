@@ -5,12 +5,13 @@ repo-pinned Rust toolchain, Cargo dependencies, Python dependencies, and the
 compiled `maturin` extension.
 
 For Kaggle submission builds, use `Dockerfile.kaggle`. It starts from Kaggle's
-CPU Python image, installs the repo-pinned Rust toolchain, creates a uv build
-venv for `maturin`, compiles the PyO3 extension in release mode with the same
-native CPU optimization used by `just prepare-rl`, and packages the importable
-`owl` package plus the requested model checkpoint and adjacent model config into
-`submission.tar.gz`. The checkpoint is slimmed into a temporary file before
-packaging so the original training checkpoint is not overwritten.
+CPU Python image, verifies the competition Python/package versions, installs the
+repo-pinned Rust toolchain, creates a uv build venv for `maturin`, compiles the
+PyO3 extension in release mode with the same native CPU optimization used by
+`just prepare-rl`, and packages the importable `owl` package plus the requested
+model checkpoint and adjacent model config into `submission.tar.gz`. The
+checkpoint is slimmed into a temporary file before packaging so the original
+training checkpoint is not overwritten.
 
 ## When this helps
 
