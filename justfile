@@ -53,13 +53,27 @@ build-release:
 	RUSTFLAGS="-C target-cpu=native" uv run maturin develop --release
 [group: 'build']
 kaggle-image: prepare
-	docker build --platform linux/amd64 -f Dockerfile.kaggle -t orbit-wars:kaggle .
+	docker buildx build \
+	  --platform linux/amd64 \
+	  -f Dockerfile.kaggle \
+	  --output type=docker,name=orbit-wars:kaggle,compression=zstd,compression-level=1 \
+	  .
 [group: 'build']
-kaggle-submission model output="artifacts/submission.tar.gz": prepare
+kaggle-submission model submission="submission": prepare kaggle-image
 	#!/usr/bin/env bash
 	set -euo pipefail
+	submission="{{submission}}"
+	if [[ -z "$submission" || "$submission" == *"/"* || "$submission" == "." || "$submission" == ".." ]]; then
+	  echo "Submission name must be a non-empty file name, not a path: $submission" >&2
+	  exit 2
+	fi
 	model_abs="$(cd "$(dirname "{{model}}")" && pwd)/$(basename "{{model}}")"
-	output_abs="$(mkdir -p "$(dirname "{{output}}")" && cd "$(dirname "{{output}}")" && pwd)/$(basename "{{output}}")"
+	if [[ "$submission" == *.tar.gz ]]; then
+	  output="artifacts/${submission}"
+	else
+	  output="artifacts/${submission}.tar.gz"
+	fi
+	output_abs="$(mkdir -p "$(dirname "$output")" && cd "$(dirname "$output")" && pwd)/$(basename "$output")"
 	docker run --rm \
 	  -v "$(dirname "$model_abs"):/model:ro" \
 	  -v "$(dirname "$output_abs"):/artifacts" \
