@@ -2,12 +2,12 @@ from pathlib import Path
 from time import perf_counter
 
 import torch
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from owl.config import BaseConfig
 from owl.model import ModelConfig, StatelessTransformerV1
 from owl.rl import (
-    ActionDiscreteTargetsConfig,
+    EntityBasedConfig,
     EnvConfig,
     ObsBatch,
     actions_to_kaggle,
@@ -20,6 +20,8 @@ from .kaggle_observation import KaggleObservation
 
 class AgentConfig(BaseConfig):
     deterministic: bool
+    max_entities_override: int | None = None
+    min_overage_time: float = Field(default=0.0, ge=0.0, le=60.0)
 
 
 class AgentCheckpointConfig(BaseConfig):
@@ -49,42 +51,45 @@ class Agent:
         if not self.agent_config_path.is_file():
             raise ValueError(f"expected agent config at {self.agent_config_path}")
 
-        self.agent_config = AgentConfig.from_file(self.agent_config_path)
-
-        self.config = AgentCheckpointConfig.from_file(self.config_path)
-        if (
-            isinstance(self.config.env.action_spec, ActionDiscreteTargetsConfig)
-            and self.config.env.action_spec.max_per_planet_launches != 1
-        ):
-            raise ValueError(
-                "Kaggle discrete_targets checkpoints must use max_per_planet_launches=1"
-            )
+        self.config = AgentConfig.from_file(self.agent_config_path)
+        self.checkpoint_config = AgentCheckpointConfig.from_file(self.config_path)
+        self.checkpoint_config = _apply_max_entities_override(
+            self.checkpoint_config,
+            self.config.max_entities_override,
+        )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = StatelessTransformerV1(
-            self.config.model,
-            obs_spec=self.config.env.obs_spec,
-            action_spec=self.config.env.action_spec,
+            self.checkpoint_config.model,
+            obs_spec=self.checkpoint_config.env.obs_spec,
+            action_spec=self.checkpoint_config.env.action_spec,
         ).to(self.device)
         checkpoint = torch.load(
             self.checkpoint_path,
             map_location=self.device,
             weights_only=True,
         )
-        if not isinstance(checkpoint, dict):
-            raise ValueError(f"checkpoint must be a dictionary: {self.checkpoint_path}")
+        if not isinstance(checkpoint, dict) or "model" not in checkpoint:
+            raise ValueError(
+                f"checkpoint must be a dictionary with key 'model': "
+                f"{self.checkpoint_path}"
+            )
+
         self.model.load_state_dict(checkpoint["model"])
         self.model.eval()
 
     @torch.inference_mode()
     def act(self, observation: KaggleObservation) -> list[list[float]]:
+        if observation.remaining_overage_time < self.config.min_overage_time:
+            return []
+
         total_start = perf_counter()
 
         encode_start = perf_counter()
         obs_dict = observation.to_rl_observation()
         obs = encode_python_observation(
             obs_dict,
-            obs_spec=self.config.env.obs_spec,
-            action_spec=self.config.env.action_spec,
+            obs_spec=self.checkpoint_config.env.obs_spec,
+            action_spec=self.checkpoint_config.env.action_spec,
         )
         device_obs = self._obs_to_device(obs)
         self._synchronize_device()
@@ -93,7 +98,7 @@ class Agent:
         inference_start = perf_counter()
         output = self.model(
             device_obs,
-            deterministic=self.agent_config.deterministic,
+            deterministic=self.config.deterministic,
         )
         self._synchronize_device()
         values = output.values.detach().cpu()[0]
@@ -103,10 +108,10 @@ class Agent:
         actions = actions_to_kaggle(
             obs_dict,
             observation.player,
-            output.actions.launch.detach().cpu(),
-            output.actions.action_value().detach().cpu(),
-            output.actions.ships.detach().cpu(),
-            action_spec=self.config.env.action_spec,
+            output.actions.launch.cpu(),
+            output.actions.action_value().cpu(),
+            output.actions.ships.cpu(),
+            action_spec=self.checkpoint_config.env.action_spec,
         )
         conversion_ms = _elapsed_ms(conversion_start)
         total_ms = _elapsed_ms(total_start)
@@ -162,3 +167,28 @@ class Agent:
 
 def _elapsed_ms(start: float) -> int:
     return round((perf_counter() - start) * 1000)
+
+
+def _apply_max_entities_override(
+    config: AgentCheckpointConfig,
+    max_entities_override: int | None,
+) -> AgentCheckpointConfig:
+    if max_entities_override is None:
+        return config
+
+    obs_spec = config.env.obs_spec
+    if not isinstance(obs_spec, EntityBasedConfig):
+        raise TypeError(
+            "max_entities_override requires entity_based obs_spec, "
+            f"got {type(obs_spec).__name__}"
+        )
+
+    override_obs_spec = EntityBasedConfig.model_validate(
+        {**obs_spec.model_dump(mode="python"), "max_entities": max_entities_override}
+    )
+    env = config.env.model_copy(
+        update={
+            "obs_spec": override_obs_spec,
+        }
+    )
+    return config.model_copy(update={"env": env})

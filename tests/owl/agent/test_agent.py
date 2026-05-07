@@ -4,11 +4,21 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from owl.agent import Agent, KaggleObservation
-from owl.agent.agent import AgentCheckpointConfig
-from owl.model import ModelActions
-from owl.rl import ACTION_ENTITY_SLOTS, ActionPureConfig, EntityBasedConfig
+from owl.agent.agent import (
+    AgentCheckpointConfig,
+    AgentConfig,
+    _apply_max_entities_override,
+)
+from owl.model import ModelActions, StatelessTransformerV1Config
+from owl.rl import (
+    ACTION_ENTITY_SLOTS,
+    ActionPureConfig,
+    EntityBasedConfig,
+    EnvConfig,
+)
 from owl.train.config import FullConfig
 
 _ASSERT_AGENT_IMPORT_ISOLATED = Path(__file__).with_name(
@@ -35,6 +45,31 @@ def test_agent_checkpoint_config_fields_exist_on_full_config() -> None:
     assert set(AgentCheckpointConfig.model_fields) <= set(FullConfig.model_fields)
 
 
+def test_agent_config_max_entities_override_updates_checkpoint_obs_spec() -> None:
+    config = AgentCheckpointConfig(
+        env=EnvConfig(obs_spec=EntityBasedConfig(max_entities=128)),
+        model=StatelessTransformerV1Config(),
+    )
+
+    overridden = _apply_max_entities_override(config, 256)
+
+    assert config.env.obs_spec.max_entities == 128
+    assert overridden.env.obs_spec.max_entities == 256
+
+
+def test_agent_config_max_entities_override_uses_obs_spec_validation() -> None:
+    config = AgentCheckpointConfig(
+        env=EnvConfig(obs_spec=EntityBasedConfig(max_entities=128)),
+        model=StatelessTransformerV1Config(),
+    )
+
+    with pytest.raises(ValueError, match="greater than 44"):
+        _apply_max_entities_override(
+            config,
+            2,
+        )
+
+
 def _raw_observation() -> dict[str, object]:
     planet = [0, 0, 25.0, 50.0, 2.0, 10, 3]
     return {
@@ -54,13 +89,13 @@ def _raw_observation() -> dict[str, object]:
 def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
     action_spec = ActionPureConfig(max_per_planet_launches=1)
     agent = Agent.__new__(Agent)
-    agent.config = SimpleNamespace(
+    agent.checkpoint_config = SimpleNamespace(
         env=SimpleNamespace(
             obs_spec=EntityBasedConfig(),
             action_spec=action_spec,
         )
     )
-    agent.agent_config = SimpleNamespace(deterministic=False)
+    agent.config = AgentConfig(deterministic=False)
     agent.device = torch.device("cpu")
     action_shape = (1, 4, ACTION_ENTITY_SLOTS, action_spec.max_per_planet_launches)
     launch = torch.zeros(action_shape, dtype=torch.bool)
@@ -106,13 +141,13 @@ def test_agent_log_prints_one_line_with_metrics(capsys) -> None:
 def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
     action_spec = ActionPureConfig(max_per_planet_launches=1)
     agent = Agent.__new__(Agent)
-    agent.config = SimpleNamespace(
+    agent.checkpoint_config = SimpleNamespace(
         env=SimpleNamespace(
             obs_spec=EntityBasedConfig(),
             action_spec=action_spec,
         )
     )
-    agent.agent_config = SimpleNamespace(deterministic=False)
+    agent.config = AgentConfig(deterministic=False)
     agent.device = torch.device("cpu")
     action_shape = (1, 4, ACTION_ENTITY_SLOTS, action_spec.max_per_planet_launches)
 
