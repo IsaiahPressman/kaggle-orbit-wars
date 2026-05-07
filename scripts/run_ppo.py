@@ -124,6 +124,9 @@ def main() -> None:
             obs_spec=cfg.env.obs_spec,
             action_spec=cfg.env.action_spec,
         ).to(device)
+        if isinstance(launch, FreshLaunch):
+            model.reset_parameters()
+
         trainable_parameters = _trainable_parameter_count(model)
         optimizer = create_optimizer(model, cfg.optimizer)
         lr_scheduler = create_lr_scheduler(optimizer, cfg.optimizer.lr_schedule)

@@ -1,26 +1,27 @@
-from pathlib import Path
+# ruff: noqa: E402
+import os
 from typing import Any
 
-from owl.agent import Agent, KaggleObservation
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-AGENT: Agent | None = None
-ROOT = Path(__file__).resolve().parent
+import torch
+
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+
+from owl import OWL_ROOT
+from owl.agent import Agent, KaggleObservation, find_checkpoint_path
+from owl.rs import assert_release_build
+
+assert_release_build()
+ROOT = OWL_ROOT.parent
 CONFIG_PATH = ROOT / "config.yaml"
-
-
-def _checkpoint_path() -> Path:
-    checkpoint_paths = sorted(ROOT.glob("*.pt"))
-    if len(checkpoint_paths) != 1:
-        raise ValueError(
-            f"expected exactly one .pt checkpoint adjacent to main.py, "
-            f"found {len(checkpoint_paths)} in {ROOT}"
-        )
-    return checkpoint_paths[0]
+AGENT = Agent(
+    checkpoint_config_path=CONFIG_PATH,
+    checkpoint_path=find_checkpoint_path(ROOT),
+)
 
 
 def agent_fn(observation: Any) -> list[list[float]]:
-    global AGENT
-    if AGENT is None:
-        AGENT = Agent(config_path=CONFIG_PATH, checkpoint_path=_checkpoint_path())
-
     return AGENT.act(KaggleObservation.model_validate(observation))

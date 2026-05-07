@@ -219,8 +219,6 @@ class StatelessTransformerV1(BaseModelAPI):
                 transformer_config=self.config,
             )
 
-        self.reset_parameters()
-
     def reset_parameters(self) -> None:
         self.apply(_init_module)
         for layer in self.get_input_layers():

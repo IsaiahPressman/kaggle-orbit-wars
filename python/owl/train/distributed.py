@@ -232,6 +232,9 @@ class DistributedModelAdapter(BaseModelAPI):
     def compute_value(self, obs: ObsBatch) -> torch.Tensor:
         return cast(torch.Tensor, self._ddp("compute_value", obs, None, False))
 
+    def reset_parameters(self) -> None:
+        self.wrapped_model.reset_parameters()
+
     def get_input_layers(self) -> tuple[InputLayer, ...]:
         return self.wrapped_model.get_input_layers()
 

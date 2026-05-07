@@ -66,6 +66,12 @@ class _TinyModel(BaseModelAPI):
             winner_probabilities=torch.softmax(values, dim=-1),
         )
 
+    def compute_value(self, obs: ObsBatch) -> torch.Tensor:
+        return self.weight.expand(obs.global_features.shape[0], 4)
+
+    def reset_parameters(self) -> None:
+        torch.nn.init.ones_(self.weight)
+
     def get_input_layers(self) -> tuple[torch.nn.Module, ...]:
         return ()
 

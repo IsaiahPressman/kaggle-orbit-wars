@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-ARG KAGGLE_IMAGE=gcr.io/kaggle-images/python:v168
+# This is gcr.io/kaggle-images/python-simulations:latest as of 5/7/26
+ARG KAGGLE_IMAGE=gcr.io/kaggle-images/python-simulations@sha256:53e8066187b5f46dfebf2a5b05bd5913e23c6c54a688e03700da3cb9da38ec76
 FROM --platform=linux/amd64 ${KAGGLE_IMAGE}
 
 ARG TARGETPLATFORM
@@ -43,6 +44,10 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     uv venv --system-site-packages "${VIRTUAL_ENV}" && \
     uv pip install --python "${VIRTUAL_ENV}/bin/python" "maturin>=1.13.1,<2.0"
 
+ENV UV_PYTHON=/opt/kaggle-build-venv/bin/python \
+    UV_NO_MANAGED_PYTHON=1 \
+    PYO3_PYTHON=/opt/kaggle-build-venv/bin/python
+
 COPY Cargo.toml Cargo.lock pyproject.toml rustfmt.toml ./
 COPY .cargo/ .cargo/
 COPY src/lib.rs src/lib.rs
@@ -56,8 +61,9 @@ COPY . .
 RUN --mount=type=cache,target=/opt/cargo/registry \
     --mount=type=cache,target=/opt/cargo/git \
     --mount=type=cache,target=/workspace/orbit-wars/target \
-    just build-release && \
-    python -c 'import owl.rs; owl.rs.assert_release_build()'
+    uv run --active python -c 'import os, sys; assert sys.version_info[:2] == (3, 11), f"uv must use Python 3.11, found {sys.version} at {sys.executable}"; expected = os.path.realpath(os.path.join(os.environ["VIRTUAL_ENV"], "bin", "python")); actual = os.path.realpath(sys.executable); assert actual == expected, f"uv must use Kaggle venv Python at {expected}, found {actual}"' && \
+    uv run --active maturin develop --release && \
+    uv run --active python -c 'import owl.rs; owl.rs.assert_release_build()'
 
 ENTRYPOINT ["scripts/build_kaggle_submission.sh"]
 CMD ["--help"]

@@ -8,37 +8,6 @@ from owl.model.attn import (
 )
 
 
-def test_varlen_attention_cpu_matches_torch_sdpa_per_sequence() -> None:
-    cu_seqlens = torch.tensor([0, 1, 4, 6], dtype=torch.int32)
-    q = torch.zeros((6, 2, 2), dtype=torch.float32)
-    k = torch.zeros((6, 2, 2), dtype=torch.float32)
-    v = torch.tensor(
-        [
-            [[1.0, 3.0], [2.0, 4.0]],
-            [[4.0, 6.0], [8.0, 10.0]],
-            [[10.0, 20.0], [30.0, 40.0]],
-            [[16.0, 22.0], [36.0, 44.0]],
-            [[100.0, 200.0], [300.0, 400.0]],
-            [[300.0, 400.0], [500.0, 600.0]],
-        ],
-        dtype=torch.float32,
-    )
-
-    actual = varlen_attention(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=3)
-    expected = torch.stack(
-        (
-            v[0],
-            v[1:4].mean(dim=0),
-            v[1:4].mean(dim=0),
-            v[1:4].mean(dim=0),
-            v[4:6].mean(dim=0),
-            v[4:6].mean(dim=0),
-        )
-    )
-
-    assert torch.allclose(actual, expected)
-
-
 @pytest.mark.parametrize(
     ("device_type", "dtype", "has_flash_attn", "expected"),
     [
@@ -106,3 +75,39 @@ def test_varlen_attention_flash_backend() -> None:
     assert actual.dtype == q.dtype
     assert actual.device.type == "cuda"
     assert torch.allclose(actual, expected, atol=2e-3, rtol=2e-3)
+
+
+@pytest.mark.skipif(
+    not flash_attn_available() or not torch.cuda.is_available(),
+    reason="flash-attn CUDA backend is not available",
+)
+def test_varlen_attention_matches_torch_sdpa_per_sequence() -> None:
+    cu_seqlens = torch.tensor([0, 1, 4, 6], dtype=torch.int32, device="cuda")
+    q = torch.zeros((6, 2, 2), dtype=torch.bfloat16, device="cuda")
+    k = torch.zeros((6, 2, 2), dtype=torch.bfloat16, device="cuda")
+    v = torch.tensor(
+        [
+            [[1.0, 3.0], [2.0, 4.0]],
+            [[4.0, 6.0], [8.0, 10.0]],
+            [[10.0, 20.0], [30.0, 40.0]],
+            [[16.0, 22.0], [36.0, 44.0]],
+            [[100.0, 200.0], [300.0, 400.0]],
+            [[300.0, 400.0], [500.0, 600.0]],
+        ],
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+
+    actual = varlen_attention(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=3)
+    expected = torch.stack(
+        (
+            v[0],
+            v[1:4].mean(dim=0),
+            v[1:4].mean(dim=0),
+            v[1:4].mean(dim=0),
+            v[4:6].mean(dim=0),
+            v[4:6].mean(dim=0),
+        )
+    )
+
+    assert torch.allclose(actual, expected)

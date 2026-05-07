@@ -126,6 +126,10 @@ optimizer assumptions than packing multiple operations into one parameter.
 
 ## Initialization
 
+Models expose `reset_parameters()` through `BaseModelAPI`. Fresh training calls
+this method explicitly before optimizer construction; checkpoint-loading paths
+construct the module and load saved weights without resetting first.
+
 Linear layers use orthogonal initialization with zero biases. Only the first
 linear layer in each observation stem is treated as an input projection and
 uses unit gain; hidden projections use ReLU-style gain, and transformer

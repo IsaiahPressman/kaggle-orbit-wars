@@ -44,6 +44,16 @@ class OptimizerTestModel(BaseModelAPI):
     ) -> ModelEvaluation:
         raise NotImplementedError
 
+    def compute_value(self, obs: ObsBatch) -> torch.Tensor:
+        raise NotImplementedError
+
+    def reset_parameters(self) -> None:
+        self.input.reset_parameters()
+        self.hidden.reset_parameters()
+        self.output.reset_parameters()
+        self.norm.reset_parameters()
+        nn.init.zeros_(self.token_state)
+
     def get_input_layers(self) -> tuple[InputLayer, ...]:
         return (self.input, self.token_state)
 

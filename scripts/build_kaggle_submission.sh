@@ -101,9 +101,35 @@ EOF
   exit 1
 fi
 
-export RUSTFLAGS="${RUSTFLAGS:--C target-cpu=native}"
-just build-release
-python - <<'PY'
+uv_run=(uv run)
+if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+  export UV_PYTHON="${UV_PYTHON:-$VIRTUAL_ENV/bin/python}"
+  export UV_NO_MANAGED_PYTHON="${UV_NO_MANAGED_PYTHON:-1}"
+  export PYO3_PYTHON="${PYO3_PYTHON:-$VIRTUAL_ENV/bin/python}"
+  uv_run=(uv run --active)
+fi
+
+"${uv_run[@]}" python - <<'PY'
+import os
+import sys
+from pathlib import Path
+
+if sys.version_info[:2] != (3, 11):
+    raise RuntimeError(
+        f"uv must use Python 3.11, found {sys.version} at {sys.executable}"
+    )
+
+if virtual_env := os.environ.get("VIRTUAL_ENV"):
+    expected_python = Path(virtual_env, "bin", "python").resolve()
+    actual_python = Path(sys.executable).resolve()
+    if actual_python != expected_python:
+        raise RuntimeError(
+            "uv must use the active Kaggle venv Python, "
+            f"expected {expected_python}, found {actual_python}"
+        )
+PY
+"${uv_run[@]}" maturin develop --release
+"${uv_run[@]}" python - <<'PY'
 import owl.rs
 
 owl.rs.assert_release_build()
@@ -115,7 +141,7 @@ find "$stage_dir/submission" -type d -name "__pycache__" -prune -exec rm -rf {} 
 find "$stage_dir/submission" -type f -name "*.pyc" -delete
 
 slim_checkpoint_path="$stage_dir/$(basename "$checkpoint_path")"
-python scripts/extract_model_weights.py "$checkpoint_path" "$slim_checkpoint_path"
+"${uv_run[@]}" python scripts/extract_model_weights.py "$checkpoint_path" "$slim_checkpoint_path"
 cp "$slim_checkpoint_path" "$stage_dir/submission/$(basename "$checkpoint_path")"
 cp "$model_config_path" "$stage_dir/submission/config.yaml"
 cp "$entrypoint_path" "$stage_dir/submission/main.py"
