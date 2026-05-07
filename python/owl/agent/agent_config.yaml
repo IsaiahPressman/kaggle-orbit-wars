@@ -1,1 +1,3 @@
 deterministic: true
+max_entities_override: null
+min_overage_time: 1.0

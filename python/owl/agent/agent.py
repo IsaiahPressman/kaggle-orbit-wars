@@ -13,7 +13,6 @@ from owl.rl import (
     actions_to_kaggle,
     encode_python_observation,
 )
-from owl.rs import assert_release_build
 
 from .kaggle_observation import KaggleObservation
 
@@ -42,7 +41,7 @@ class Agent:
         checkpoint_config_path: Path,
         checkpoint_path: Path,
     ) -> None:
-        assert_release_build()
+        init_start = perf_counter()
         if not checkpoint_config_path.is_file():
             raise ValueError(f"expected Kaggle config at {checkpoint_config_path}")
 
@@ -73,6 +72,7 @@ class Agent:
 
         self.model.load_state_dict(checkpoint["model"])
         self.model.eval()
+        print(f"init_s={perf_counter() - init_start:.2f} - ", end="", flush=True)
 
     @torch.inference_mode()
     def act(self, observation: KaggleObservation) -> list[list[float]]:
@@ -123,6 +123,8 @@ class Agent:
             entity_count=int(obs.entity_mask.sum().item()),
             remaining_overage_time=observation.remaining_overage_time,
         )
+        # TODO: Remove this statement once finished debugging submission
+        actions.clear()
         return actions
 
     def _obs_to_device(self, obs: ObsBatch) -> ObsBatch:
@@ -158,7 +160,8 @@ class Agent:
             f"value_self={self_value:.3f} - "
             f"values=[{values}] - "
             f"entities={entity_count} - "
-            f"remaining_overage_s={remaining_overage_time:.1f}"
+            f"remaining_overage_s={remaining_overage_time:.1f}",
+            flush=True,
         )
 
 
