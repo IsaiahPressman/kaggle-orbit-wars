@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "IsaiahPressman" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "kaggle-environments>=1.28.0",
     "numpy>=2.4.4",
@@ -74,6 +74,7 @@ flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }
 
 [tool.ruff]
 line-length = 88
+target-version = "py311"
 
 [tool.ruff.lint]
 select = [

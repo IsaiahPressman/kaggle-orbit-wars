@@ -31,18 +31,26 @@ patterns.
 
 ## Kaggle submission build
 
-Build a Kaggle-compatible image and create `artifacts/submission.tar.gz` with:
+Build a Kaggle-compatible image from the current worktree and create
+`artifacts/submission.tar.gz` with:
 
 ```sh
-just kaggle-image
 just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt
 ```
 
-The submission builder compiles the Rust extension inside Kaggle's Python image
-and packages `python/owl`, `python/main.py` or `main.py`, the requested model,
-and the model's adjacent `config.yaml` at the archive root. The packaged
-checkpoint keeps the original filename but contains only the model weights
-needed by the Kaggle agent.
+Pass a submission name to write `artifacts/<name>.tar.gz` instead:
+
+```sh
+just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt my-run
+```
+
+The submission recipe runs `just prepare`, rebuilds the `orbit-wars:kaggle`
+image with Buildx zstd layer compression, compiles the Rust extension inside
+Kaggle's Python image, and packages `python/owl`, `python/main.py` or `main.py`,
+the requested model, and the model's adjacent `config.yaml` at the archive root.
+Rebuilding the image during submission generation keeps the packaged Python code
+aligned with the current checkout. The packaged checkpoint keeps the original
+filename but contains only the model weights needed by the Kaggle agent.
 
 ## Orbit Wars reference
 

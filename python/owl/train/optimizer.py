@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from math import cos, pi
-from typing import Annotated, Any, Literal, Protocol, assert_never
+from typing import Annotated, Any, Literal, Protocol, TypeAlias, assert_never
 
 import torch
 from pydantic import Field
@@ -13,7 +13,7 @@ from owl.model import BaseModelAPI, InputLayer
 
 OptimizerName = Literal["adamw", "muon"]
 LRScheduleName = Literal["linear_warmup_cosine_decay"]
-type StateDict = dict[str, Any]
+StateDict: TypeAlias = dict[str, Any]
 
 
 class LRScheduleConfig(BaseConfig):
@@ -62,7 +62,7 @@ class MuonConfig(BaseConfig):
     lr_schedule: LRScheduleConfig | None = None
 
 
-type OptimizerConfig = Annotated[
+OptimizerConfig: TypeAlias = Annotated[
     AdamWConfig | MuonConfig, Field(discriminator="optimizer")
 ]
 

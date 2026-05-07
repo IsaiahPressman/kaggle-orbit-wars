@@ -13,9 +13,9 @@ extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 numpy = "0.28.0"
-# "abi3-py312" tells pyo3 (and maturin) to build using the stable ABI with
-# minimum Python version 3.12, matching pyproject.toml.
-pyo3 = { version = "0.28.2", features = ["abi3-py312"] }
+# "abi3-py311" tells pyo3 (and maturin) to build using the stable ABI with
+# minimum Python version 3.11, matching the Kaggle competition runtime.
+pyo3 = { version = "0.28.2", features = ["abi3-py311"] }
 rand = "0.10.1"
 rayon = "1.12.0"
 

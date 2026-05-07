@@ -1,10 +1,38 @@
 import re
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 from owl.agent import Agent, KaggleObservation
+from owl.agent.agent import AgentCheckpointConfig
 from owl.model import ModelActions
 from owl.rl import ACTION_ENTITY_SLOTS, ActionPureConfig, EntityBasedConfig
+from owl.train.config import FullConfig
+
+_ASSERT_AGENT_IMPORT_ISOLATED = Path(__file__).with_name(
+    "assert_agent_import_isolated.py"
+)
+
+
+def test_agent_import_does_not_load_training_modules() -> None:
+    # Import isolation has to be verified in a fresh interpreter
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_ASSERT_AGENT_IMPORT_ISOLATED),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_agent_checkpoint_config_fields_exist_on_full_config() -> None:
+    assert set(AgentCheckpointConfig.model_fields) <= set(FullConfig.model_fields)
 
 
 def _raw_observation() -> dict[str, object]:

@@ -2,23 +2,31 @@ from pathlib import Path
 from time import perf_counter
 
 import torch
+from pydantic import ConfigDict
 
 from owl.config import BaseConfig
-from owl.model import StatelessTransformerV1
+from owl.model import ModelConfig, StatelessTransformerV1
 from owl.rl import (
     ActionDiscreteTargetsConfig,
+    EnvConfig,
     ObsBatch,
     actions_to_kaggle,
     encode_python_observation,
 )
 from owl.rs import assert_release_build
-from owl.train.config import FullConfig
 
 from .kaggle_observation import KaggleObservation
 
 
 class AgentConfig(BaseConfig):
     deterministic: bool
+
+
+class AgentCheckpointConfig(BaseConfig):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    env: EnvConfig
+    model: ModelConfig
 
 
 class Agent:
@@ -43,7 +51,7 @@ class Agent:
 
         self.agent_config = AgentConfig.from_file(self.agent_config_path)
 
-        self.config = FullConfig.from_file(self.config_path)
+        self.config = AgentCheckpointConfig.from_file(self.config_path)
         if (
             isinstance(self.config.env.action_spec, ActionDiscreteTargetsConfig)
             and self.config.env.action_spec.max_per_planet_launches != 1

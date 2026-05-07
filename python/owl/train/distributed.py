@@ -4,7 +4,7 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Self, cast
+from typing import Self, TypeVar, cast
 
 import torch
 import torch.distributed as dist
@@ -19,6 +19,8 @@ from owl.model import (
     ModelOutput,
 )
 from owl.rl import ActionConfig, ObsBatch
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -108,7 +110,7 @@ def distributed_session() -> Iterator[DistributedContext]:
             dist.destroy_process_group()
 
 
-def broadcast_object[T](
+def broadcast_object(
     value: T | None,
     context: DistributedContext,
     *,
@@ -120,7 +122,7 @@ def broadcast_object[T](
     return cast(T, values[0])
 
 
-def all_gather_object[T](value: T, context: DistributedContext) -> list[T]:
+def all_gather_object(value: T, context: DistributedContext) -> list[T]:
     if not context.initialized:
         return [value]
     values: list[object | None] = [None for _ in range(context.world_size)]

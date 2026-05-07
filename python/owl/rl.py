@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from numbers import Integral
-from typing import Annotated, Any, Literal, SupportsFloat, cast
+from typing import Annotated, Any, Literal, SupportsFloat, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -97,8 +97,8 @@ class ActionDiscreteTargetsConfig(BaseConfig):
     min_fleet_size: int = Field(default=6, ge=1)
 
 
-type ObsConfig = Annotated[EntityBasedConfig, Field(discriminator="obs_spec")]
-type ActionConfig = Annotated[
+ObsConfig: TypeAlias = Annotated[EntityBasedConfig, Field(discriminator="obs_spec")]
+ActionConfig: TypeAlias = Annotated[
     ActionPureConfig | ActionDiscreteTargetsConfig,
     Field(discriminator="action_spec"),
 ]
