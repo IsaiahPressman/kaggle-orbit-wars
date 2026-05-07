@@ -50,7 +50,7 @@ build:
 	uv run maturin develop
 [group: 'build']
 build-release:
-	RUSTFLAGS="-C target-cpu=native" uv run maturin develop --release
+	uv run maturin develop --release
 [group: 'build']
 kaggle-image: prepare
 	docker buildx build \
@@ -91,4 +91,5 @@ prepare-container: _prepare_base build-release
 clean:
     cargo clean
     rm -rf .mypy_cache .pytest_cache .ruff_cache .venv/
-    rm tests/fixtures/**/*.{json,jsonl}
+    rm -f python/owl/rs*.so
+    rm -f tests/fixtures/**/*.{json,jsonl}
