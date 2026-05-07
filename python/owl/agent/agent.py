@@ -125,8 +125,6 @@ class Agent:
             entity_count=int(obs.entity_mask.sum().item()),
             remaining_overage_time=observation.remaining_overage_time,
         )
-        # TODO: Remove this statement once finished debugging submission
-        actions.clear()
         return actions
 
     def _obs_to_device(self, obs: ObsBatch) -> ObsBatch:

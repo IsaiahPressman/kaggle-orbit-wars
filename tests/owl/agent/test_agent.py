@@ -142,7 +142,6 @@ def _raw_observation() -> dict[str, object]:
     }
 
 
-@pytest.mark.xfail(reason="Debugging - not submitting real actions")
 def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
     action_spec = ActionPureConfig(max_per_planet_launches=1)
     agent = Agent.__new__(Agent)
