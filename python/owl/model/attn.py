@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
 
 def _load_flash_attn_varlen() -> Any | None:
@@ -51,43 +50,17 @@ def varlen_attention(
     cu_seqlens: torch.Tensor,
     max_seqlen: int,
 ) -> torch.Tensor:
-    if use_flash_attn(q):
-        if _FLASH_ATTN_VARLEN_FUNC is None:
-            raise RuntimeError("internal error: flash-attn backend is unavailable")
-        return _FLASH_ATTN_VARLEN_FUNC(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=max_seqlen,
-            max_seqlen_k=max_seqlen,
-            dropout_p=0.0,
-            causal=False,
-        )
+    if _FLASH_ATTN_VARLEN_FUNC is None:
+        raise RuntimeError("internal error: flash-attn backend is unavailable")
 
-    return _varlen_attention_sdpa(q, k, v, cu_seqlens=cu_seqlens)
-
-
-def _varlen_attention_sdpa(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    *,
-    cu_seqlens: torch.Tensor,
-) -> torch.Tensor:
-    outputs = []
-    for start, end in zip(
-        cu_seqlens[:-1].tolist(),
-        cu_seqlens[1:].tolist(),
-        strict=True,
-    ):
-        attn = F.scaled_dot_product_attention(
-            q[start:end].transpose(0, 1).unsqueeze(0),
-            k[start:end].transpose(0, 1).unsqueeze(0),
-            v[start:end].transpose(0, 1).unsqueeze(0),
-            dropout_p=0.0,
-        )
-        outputs.append(attn.squeeze(0).transpose(0, 1))
-
-    return torch.cat(outputs, dim=0)
+    return _FLASH_ATTN_VARLEN_FUNC(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        max_seqlen_q=max_seqlen,
+        max_seqlen_k=max_seqlen,
+        dropout_p=0.0,
+        causal=False,
+    )
