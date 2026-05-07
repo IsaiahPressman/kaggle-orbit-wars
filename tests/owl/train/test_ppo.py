@@ -255,6 +255,18 @@ class TinyOrbitModel(BaseModelAPI):
             winner_probabilities=torch.softmax(values, dim=-1),
         )
 
+    def compute_value(self, obs: ObsBatch) -> torch.Tensor:
+        hidden = torch.tanh(
+            self.hidden(torch.tanh(self.input_proj(obs.global_features)))
+        )
+        return self.value(hidden)
+
+    def reset_parameters(self) -> None:
+        self.input_proj.reset_parameters()
+        self.hidden.reset_parameters()
+        self.policy.reset_parameters()
+        self.value.reset_parameters()
+
     def get_input_layers(self) -> tuple[nn.Module, ...]:
         return (self.input_proj,)
 
@@ -345,6 +357,12 @@ class TinyDiscreteTargetModel(BaseModelAPI):
             winner_probabilities=torch.softmax(values, dim=-1),
         )
 
+    def compute_value(self, obs: ObsBatch) -> torch.Tensor:
+        return self.value.expand(obs.global_features.shape[0], 4)
+
+    def reset_parameters(self) -> None:
+        nn.init.zeros_(self.value)
+
     def get_input_layers(self) -> tuple[nn.Module, ...]:
         return ()
 
@@ -417,6 +435,12 @@ class FixedEvaluationModel(BaseModelAPI):
             values=values,
             winner_probabilities=torch.softmax(values, dim=-1),
         )
+
+    def compute_value(self, obs: ObsBatch) -> torch.Tensor:
+        return self.value.expand(obs.global_features.shape[0], 4)
+
+    def reset_parameters(self) -> None:
+        return None
 
     def get_input_layers(self) -> tuple[nn.Module, ...]:
         return ()
@@ -1838,6 +1862,7 @@ def test_discrete_target_transformer_train_iteration_keeps_parameters_finite() -
         obs_spec=obs_spec,
         action_spec=action_spec,
     )
+    model.reset_parameters()
     trainer = ppo.PPOTrainer(
         env=env,
         model=model,

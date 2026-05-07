@@ -131,11 +131,13 @@ def _model(
     obs_spec: EntityBasedConfig | None = None,
     action_spec: ActionConfig | None = None,
 ) -> StatelessTransformerV1:
-    return StatelessTransformerV1(
+    model = StatelessTransformerV1(
         config,
         obs_spec=obs_spec or EntityBasedConfig(),
         action_spec=action_spec or ActionPureConfig(max_per_planet_launches=1),
     )
+    model.reset_parameters()
+    return model
 
 
 def _discrete_actor_inputs(

@@ -76,8 +76,11 @@ class BaseModelAPI(nn.Module, ABC):
         actions: ModelActions,
     ) -> ModelEvaluation: ...
 
-    def compute_value(self, obs: ObsBatch) -> torch.Tensor:
-        return self(obs, deterministic=True).values
+    @abstractmethod
+    def compute_value(self, obs: ObsBatch) -> torch.Tensor: ...
+
+    @abstractmethod
+    def reset_parameters(self) -> None: ...
 
     @abstractmethod
     def get_input_layers(self) -> tuple[InputLayer, ...]: ...

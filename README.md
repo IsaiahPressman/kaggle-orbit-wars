@@ -75,6 +75,9 @@ Training presets live in `configs/`:
 
 The training entrypoint configures PyTorch for TF32 matmul/conv precision and
 cuDNN benchmarking before constructing the environment, model, and optimizer.
+Fresh launches explicitly reset model parameters before optimizer construction;
+resume launches load checkpoint weights and optimizer state without resetting
+the model first.
 Training `EnvConfig.n_envs` must be even so periodic checkpoint evaluation can
 split evaluation games across 2-player and 4-player batches. In distributed PPO
 launches, `EnvConfig.n_envs`, rollout horizon, and minibatch segment width are
