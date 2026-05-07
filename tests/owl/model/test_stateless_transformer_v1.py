@@ -252,6 +252,119 @@ def test_model_config_rejects_env_owned_specs(field_name: str) -> None:
         )
 
 
+def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    model = _model(
+        StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 4),
+        action_spec=action_spec,
+    )
+    model.eval()
+    compact = _obs_batch(
+        batch_size=1,
+        obs_spec=EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 1),
+        action_spec=action_spec,
+    )
+    compact.fleets[0, 0, 0] = 1.0
+    compact.fleets[0, 0, 3] = 0.25
+    compact.entity_mask[0, ACTION_ENTITY_SLOTS] = True
+    padded = ObsBatch(
+        planets=compact.planets,
+        orbiting_planets=compact.orbiting_planets,
+        fleets=torch.cat(
+            (
+                compact.fleets,
+                torch.full(
+                    (1, 3, compact.fleets.shape[-1]),
+                    123.0,
+                    dtype=compact.fleets.dtype,
+                ),
+            ),
+            dim=1,
+        ),
+        comets=compact.comets,
+        entity_mask=torch.cat(
+            (
+                compact.entity_mask,
+                torch.zeros((1, 3), dtype=compact.entity_mask.dtype),
+            ),
+            dim=1,
+        ),
+        still_playing=compact.still_playing,
+        global_features=compact.global_features,
+        can_act=compact.can_act,
+        max_launch=compact.max_launch,
+    )
+
+    with torch.inference_mode():
+        compact_output = model(compact, deterministic=True)
+        padded_output = model(padded, deterministic=True)
+
+    torch.testing.assert_close(
+        compact_output.values, padded_output.values, atol=1e-6, rtol=0
+    )
+    torch.testing.assert_close(
+        compact_output.winner_probabilities,
+        padded_output.winner_probabilities,
+        atol=1e-6,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        compact_output.actions.launch,
+        padded_output.actions.launch,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        compact_output.actions.angle,
+        padded_output.actions.angle,
+        atol=1e-6,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        compact_output.actions.ships,
+        padded_output.actions.ships,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        compact_output.log_probs.launch,
+        padded_output.log_probs.launch,
+        atol=1e-6,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        compact_output.log_probs.angle_and_size,
+        padded_output.log_probs.angle_and_size,
+        atol=1e-6,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        compact_output.log_probs.per_player_entity,
+        padded_output.log_probs.per_player_entity,
+        atol=1e-6,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        compact_output.entropies.launch,
+        padded_output.entropies.launch,
+        atol=1e-6,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        compact_output.entropies.angle_and_size,
+        padded_output.entropies.angle_and_size,
+        atol=1e-6,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        compact_output.entropies.per_player_entity,
+        padded_output.entropies.per_player_entity,
+        atol=1e-6,
+        rtol=0,
+    )
+
+
 def test_model_constructor_does_not_require_flash_attn_on_cuda_hosts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

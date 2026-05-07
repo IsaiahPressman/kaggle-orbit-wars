@@ -7,6 +7,7 @@ from pydantic import ConfigDict, Field
 from owl.config import BaseConfig
 from owl.model import ModelConfig, StatelessTransformerV1
 from owl.rl import (
+    ACTION_ENTITY_SLOTS,
     EntityBasedConfig,
     EnvConfig,
     ObsBatch,
@@ -88,6 +89,7 @@ class Agent:
             obs_spec=self.checkpoint_config.env.obs_spec,
             action_spec=self.checkpoint_config.env.action_spec,
         )
+        obs = compact_entities(obs)
         device_obs = self._obs_to_device(obs)
         self._synchronize_device()
         encode_ms = _elapsed_ms(encode_start)
@@ -167,6 +169,38 @@ class Agent:
 
 def _elapsed_ms(start: float) -> int:
     return round((perf_counter() - start) * 1000)
+
+
+def compact_entities(obs: ObsBatch) -> ObsBatch:
+    """Drop inactive fleet rows from a single-row observation batch."""
+    batch_size = obs.entity_mask.shape[0]
+    if batch_size != 1:
+        raise ValueError(
+            f"runtime entity compaction requires batch size 1, got {batch_size}"
+        )
+
+    fleet_mask = obs.entity_mask[0, ACTION_ENTITY_SLOTS:]
+    active_fleet_indexes = torch.nonzero(fleet_mask, as_tuple=True)[0]
+    if active_fleet_indexes.numel() == obs.fleets.shape[1]:
+        return obs
+
+    return ObsBatch(
+        planets=obs.planets,
+        orbiting_planets=obs.orbiting_planets,
+        fleets=obs.fleets[:, active_fleet_indexes, :],
+        comets=obs.comets,
+        entity_mask=torch.cat(
+            (
+                obs.entity_mask[:, :ACTION_ENTITY_SLOTS],
+                obs.entity_mask[:, ACTION_ENTITY_SLOTS:][:, active_fleet_indexes],
+            ),
+            dim=1,
+        ),
+        still_playing=obs.still_playing,
+        global_features=obs.global_features,
+        can_act=obs.can_act,
+        max_launch=obs.max_launch,
+    )
 
 
 def apply_max_entities_override(
