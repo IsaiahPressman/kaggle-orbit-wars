@@ -8,9 +8,10 @@ import pytest
 import torch
 from owl.agent import Agent, KaggleObservation
 from owl.agent.agent import (
+    AGENT_CONFIG_PATH,
     AgentCheckpointConfig,
     AgentConfig,
-    _apply_max_entities_override,
+    apply_max_entities_override,
 )
 from owl.model import ModelActions, StatelessTransformerV1Config
 from owl.rl import (
@@ -41,6 +42,10 @@ def test_agent_import_does_not_load_training_modules() -> None:
     assert result.returncode == 0, result.stdout
 
 
+def test_agent_config_path_valid() -> None:
+    _ = AgentConfig.from_file(AGENT_CONFIG_PATH)
+
+
 def test_agent_checkpoint_config_fields_exist_on_full_config() -> None:
     assert set(AgentCheckpointConfig.model_fields) <= set(FullConfig.model_fields)
 
@@ -51,7 +56,7 @@ def test_agent_config_max_entities_override_updates_checkpoint_obs_spec() -> Non
         model=StatelessTransformerV1Config(),
     )
 
-    overridden = _apply_max_entities_override(config, 256)
+    overridden = apply_max_entities_override(config, 256)
 
     assert config.env.obs_spec.max_entities == 128
     assert overridden.env.obs_spec.max_entities == 256
@@ -64,7 +69,7 @@ def test_agent_config_max_entities_override_uses_obs_spec_validation() -> None:
     )
 
     with pytest.raises(ValueError, match="greater than 44"):
-        _apply_max_entities_override(
+        apply_max_entities_override(
             config,
             2,
         )

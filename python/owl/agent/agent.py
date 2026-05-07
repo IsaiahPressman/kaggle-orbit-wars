@@ -17,8 +17,12 @@ from owl.rs import assert_release_build
 
 from .kaggle_observation import KaggleObservation
 
+AGENT_CONFIG_PATH = Path(__file__).with_name("agent_config.yaml")
+
 
 class AgentConfig(BaseConfig):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     deterministic: bool
     max_entities_override: int | None = None
     min_overage_time: float = Field(default=0.0, ge=0.0, le=60.0)
@@ -35,25 +39,19 @@ class Agent:
     def __init__(
         self,
         *,
-        config_path: Path,
+        checkpoint_config_path: Path,
         checkpoint_path: Path,
     ) -> None:
         assert_release_build()
-        self.config_path = config_path
-        if not self.config_path.is_file():
-            raise ValueError(f"expected Kaggle config at {self.config_path}")
+        if not checkpoint_config_path.is_file():
+            raise ValueError(f"expected Kaggle config at {checkpoint_config_path}")
 
-        self.checkpoint_path = checkpoint_path
-        if not self.checkpoint_path.is_file():
-            raise ValueError(f"expected Kaggle checkpoint at {self.checkpoint_path}")
+        if not checkpoint_path.is_file():
+            raise ValueError(f"expected Kaggle checkpoint at {checkpoint_path}")
 
-        self.agent_config_path = Path(__file__).with_name("agent_config.yaml")
-        if not self.agent_config_path.is_file():
-            raise ValueError(f"expected agent config at {self.agent_config_path}")
-
-        self.config = AgentConfig.from_file(self.agent_config_path)
-        self.checkpoint_config = AgentCheckpointConfig.from_file(self.config_path)
-        self.checkpoint_config = _apply_max_entities_override(
+        self.config = AgentConfig.from_file(AGENT_CONFIG_PATH)
+        self.checkpoint_config = AgentCheckpointConfig.from_file(checkpoint_config_path)
+        self.checkpoint_config = apply_max_entities_override(
             self.checkpoint_config,
             self.config.max_entities_override,
         )
@@ -64,14 +62,13 @@ class Agent:
             action_spec=self.checkpoint_config.env.action_spec,
         ).to(self.device)
         checkpoint = torch.load(
-            self.checkpoint_path,
+            checkpoint_path,
             map_location=self.device,
             weights_only=True,
         )
         if not isinstance(checkpoint, dict) or "model" not in checkpoint:
             raise ValueError(
-                f"checkpoint must be a dictionary with key 'model': "
-                f"{self.checkpoint_path}"
+                f"checkpoint must be a dictionary with key 'model': {checkpoint_path}"
             )
 
         self.model.load_state_dict(checkpoint["model"])
@@ -169,7 +166,7 @@ def _elapsed_ms(start: float) -> int:
     return round((perf_counter() - start) * 1000)
 
 
-def _apply_max_entities_override(
+def apply_max_entities_override(
     config: AgentCheckpointConfig,
     max_entities_override: int | None,
 ) -> AgentCheckpointConfig:

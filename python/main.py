@@ -1,7 +1,22 @@
+import os
 from pathlib import Path
 from typing import Any
 
-from owl.agent import Agent, KaggleObservation
+for _thread_env_var in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ[_thread_env_var] = "1"
+
+import torch  # noqa: E402
+
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+
+from owl.agent import Agent, KaggleObservation  # noqa: E402
 
 AGENT: Agent | None = None
 ROOT = Path(__file__).resolve().parent
@@ -21,6 +36,8 @@ def _checkpoint_path() -> Path:
 def agent_fn(observation: Any) -> list[list[float]]:
     global AGENT
     if AGENT is None:
-        AGENT = Agent(config_path=CONFIG_PATH, checkpoint_path=_checkpoint_path())
+        AGENT = Agent(
+            checkpoint_config_path=CONFIG_PATH, checkpoint_path=_checkpoint_path()
+        )
 
     return AGENT.act(KaggleObservation.model_validate(observation))
