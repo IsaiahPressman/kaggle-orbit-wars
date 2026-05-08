@@ -346,6 +346,17 @@ pub(super) fn decode_discrete_target_bin_actions(
             if source.owner != internal_player as i32 || i64::from(source.ships) < min_fleet_size {
                 continue;
             }
+            let fleet_bin = fleet_bin[action_index];
+            if !(0..n_bins as i64).contains(&fleet_bin) {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} fleet_bin must be in [0, {n_bins})"
+                ));
+            }
+            let fleet_bin = fleet_bin as usize;
+            let ship_count = fleet_bin_to_ships(fleet_bin, i64::from(source.ships), n_bins);
+            if ship_count == 0 {
+                continue;
+            }
             let target_index = target[action_index];
             if !(0..ACTION_ENTITY_SLOTS as i64).contains(&target_index) {
                 return Err(format!(
@@ -368,17 +379,6 @@ pub(super) fn decode_discrete_target_bin_actions(
                     "player {outer_player} entity slot {entity_index} cannot target stale action entity slot {target_index}"
                 ));
             };
-            let fleet_bin = fleet_bin[action_index];
-            if !(0..n_bins as i64).contains(&fleet_bin) {
-                return Err(format!(
-                    "player {outer_player} entity slot {entity_index} fleet_bin must be in [0, {n_bins})"
-                ));
-            }
-            let fleet_bin = fleet_bin as usize;
-            let ship_count = fleet_bin_to_ships(fleet_bin, i64::from(source.ships), n_bins);
-            if ship_count == 0 {
-                continue;
-            }
             if ship_count < min_fleet_size {
                 return Err(format!(
                     "player {outer_player} entity slot {entity_index} fleet_bin {fleet_bin} maps to {ship_count} ships, below min_fleet_size {min_fleet_size}"
