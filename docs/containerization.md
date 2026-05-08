@@ -206,13 +206,28 @@ sbatch --partition=gpu --account=ACCOUNT --time=24:00:00 \
   scripts/slurm/launch-train.sbatch
 ```
 
-Arguments after the batch script path are forwarded to `scripts/run_ppo.py`, so
-use that position for training CLI flags:
+With no positional arguments, the batch script starts a fresh run from
+`ORBIT_WARS_CONFIG` and writes under `/runs`. Arguments beginning with `-` are
+forwarded as additional `scripts/run_ppo.py` flags for that default fresh run:
 
 ```sh
 sbatch --exclude=gpu-node-01 scripts/slurm/launch-train.sbatch \
   --overrides env.n_envs=1024 rl.horizon=256
 ```
+
+When the first batch-script argument is a positional target, the arguments after
+the batch script use the same shape as `scripts/run_ppo.py`, with default
+`--log-mode` and `--max-runtime-hours` supplied by the wrapper:
+
+```sh
+sbatch scripts/slurm/launch-train.sbatch /runs/20260505-120000
+sbatch scripts/slurm/launch-train.sbatch \
+  /runs/20260505-120000/checkpoint_00_020_000_000.pt --max-runtime-hours 12
+```
+
+Resume targets may also use a host path under `ORBIT_WARS_OUTPUT_DIR`; the
+wrapper maps that first path into the container's `/runs` mount before launching
+training.
 
 For production jobs, point at `configs/baseline.yaml` or another checked-in
 config, and mount any external data or required settings.

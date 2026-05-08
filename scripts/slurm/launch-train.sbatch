@@ -18,6 +18,14 @@ LOG_MODE="${ORBIT_WARS_LOG_MODE:-wandb}"
 MAX_RUNTIME_HOURS="${ORBIT_WARS_MAX_RUNTIME_HOURS:-23.5}"
 CONFIG_MOUNT_TARGET="/config"
 CONFIG_MOUNT_DIR=""
+RUN_ARGS=("$@")
+USE_DEFAULT_FRESH_LAUNCH=0
+
+if [[ "${#RUN_ARGS[@]}" -eq 0 ]]; then
+    USE_DEFAULT_FRESH_LAUNCH=1
+elif [[ "${RUN_ARGS[0]}" == -* ]]; then
+    USE_DEFAULT_FRESH_LAUNCH=1
+fi
 
 if [[ ! -f "$WANDB_ENV_FILE" ]]; then
     echo "Missing environment file: $WANDB_ENV_FILE" >&2
@@ -25,21 +33,56 @@ if [[ ! -f "$WANDB_ENV_FILE" ]]; then
     exit 1
 fi
 
-if [[ -f "$CONFIG" ]]; then
-    CONFIG_MOUNT_DIR="$(cd "$(dirname "$CONFIG")" && pwd)"
-    CONFIG="$CONFIG_MOUNT_TARGET/$(basename "$CONFIG")"
-elif [[ "$CONFIG" = /* ]]; then
-    if [[ ! -f "$CONFIG" ]]; then
+mkdir -p "$OUTPUT_DIR"
+
+if [[ "$USE_DEFAULT_FRESH_LAUNCH" -eq 1 ]]; then
+    if [[ -f "$CONFIG" ]]; then
+        CONFIG_MOUNT_DIR="$(cd "$(dirname "$CONFIG")" && pwd)"
+        CONFIG="$CONFIG_MOUNT_TARGET/$(basename "$CONFIG")"
+    elif [[ "$CONFIG" = /* ]]; then
+        if [[ ! -f "$CONFIG" ]]; then
+            echo "Missing config file: $CONFIG" >&2
+            exit 1
+        fi
+    else
         echo "Missing config file: $CONFIG" >&2
+        echo "Run from the repository root or set ORBIT_WARS_CONFIG to a host config file." >&2
         exit 1
     fi
-else
-    echo "Missing config file: $CONFIG" >&2
-    echo "Run from the repository root or set ORBIT_WARS_CONFIG to a host config file." >&2
-    exit 1
 fi
 
-mkdir -p "$OUTPUT_DIR"
+map_output_path() {
+    local path="$1"
+    local output_dir_abs
+    local path_abs
+
+    if [[ "$path" == "/runs" || "$path" == /runs/* ]]; then
+        printf '%s\n' "$path"
+        return
+    fi
+
+    output_dir_abs="$(cd "$OUTPUT_DIR" && pwd)"
+    if [[ "$path" = /* ]]; then
+        path_abs="$path"
+    elif [[ -e "$path" ]]; then
+        path_abs="$(cd "$(dirname "$path")" && pwd)/$(basename "$path")"
+    else
+        printf '%s\n' "$path"
+        return
+    fi
+
+    if [[ "$path_abs" == "$output_dir_abs" ]]; then
+        printf '/runs\n'
+    elif [[ "$path_abs" == "$output_dir_abs"/* ]]; then
+        printf '/runs/%s\n' "${path_abs#"$output_dir_abs"/}"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
+if [[ "$USE_DEFAULT_FRESH_LAUNCH" -eq 0 ]]; then
+    RUN_ARGS[0]="$(map_output_path "${RUN_ARGS[0]}")"
+fi
 
 set -a
 # shellcheck disable=SC1090
@@ -61,17 +104,19 @@ train_cmd=(
     --nnodes=1
     --nproc-per-node="${ORBIT_WARS_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-1}}"
     scripts/run_ppo.py
-    "$CONFIG"
-    /runs
     --log-mode "$LOG_MODE"
 )
+
+if [[ "$USE_DEFAULT_FRESH_LAUNCH" -eq 1 ]]; then
+    train_cmd+=("$CONFIG" /runs)
+fi
 
 if [[ -n "$MAX_RUNTIME_HOURS" ]]; then
     train_cmd+=(--max-runtime-hours "$MAX_RUNTIME_HOURS")
 fi
 
-if [[ "$#" -gt 0 ]]; then
-    train_cmd+=("$@")
+if [[ "${#RUN_ARGS[@]}" -gt 0 ]]; then
+    train_cmd+=("${RUN_ARGS[@]}")
 fi
 
 CONTAINER_MOUNTS="$OUTPUT_DIR:/runs"
