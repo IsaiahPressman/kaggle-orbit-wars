@@ -6,11 +6,12 @@ use super::generation::{
 };
 use super::state::{
     CometSpawnInjection, Fleet, FleetLossStats, LaunchAction, OrbitPath, Planet, PlanetVector,
-    PlayerResult, Point, ResetConfig, State, StepInjections, StepResult, BOARD_SIZE, CENTER,
-    COMET_SPAWN_STEPS, MAX_PLAYERS, SUN_RADIUS,
+    PlayerResult, Point, ResetConfig, State, StaticTargetCache, StepInjections, StepResult,
+    BOARD_SIZE, CENTER, COMET_SPAWN_STEPS, MAX_PLANET_ID, MAX_PLAYERS, SUN_RADIUS,
 };
 use super::utils::{
-    fleet_speed, is_orbiting, orbit_position, point_to_segment_distance, swept_pair_hit,
+    best_static_target_angle, fleet_speed, is_orbiting, orbit_position, point_to_segment_distance,
+    swept_pair_hit,
 };
 pub type PlayerAction = Vec<LaunchAction>;
 
@@ -37,6 +38,7 @@ pub fn reset_with_rng(config: ResetConfig, rng: &mut impl RandomSource) -> State
         angular_velocity,
         config.sim.episode_steps,
     );
+    let static_target_cache = precompute_static_target_cache(&planet_vector, &initial_planets);
 
     State {
         config: config.sim,
@@ -49,6 +51,7 @@ pub fn reset_with_rng(config: ResetConfig, rng: &mut impl RandomSource) -> State
         comets: Vec::new(),
         comet_planet_ids: Vec::new(),
         orbit_paths,
+        static_target_cache,
     }
 }
 
@@ -77,6 +80,37 @@ fn precompute_orbit_paths(
             })
         })
         .collect()
+}
+
+fn precompute_static_target_cache(
+    planets: &PlanetVector,
+    initial_planets: &PlanetVector,
+) -> StaticTargetCache {
+    let mut cache = StaticTargetCache::new(MAX_PLANET_ID as usize);
+    let static_planets = planets
+        .iter()
+        .filter(|planet| {
+            initial_planets
+                .get(planet.id)
+                .is_none_or(|initial| !is_orbiting(initial.position(), planet.radius))
+        })
+        .collect::<Vec<_>>();
+
+    for source in &static_planets {
+        for target in &static_planets {
+            if source.id == target.id {
+                continue;
+            }
+            let blockers = static_planets
+                .iter()
+                .copied()
+                .filter(|planet| planet.id != source.id && planet.id != target.id);
+            if let Some(angle) = best_static_target_angle(source, target, blockers) {
+                cache.set(source.id, target.id, angle);
+            }
+        }
+    }
+    cache
 }
 
 pub fn step(state: &mut State, actions: &[PlayerAction]) -> StepResult {

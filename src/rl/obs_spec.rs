@@ -1,15 +1,16 @@
 use std::collections::HashSet;
 
-use numpy::ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView4};
+use numpy::ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView4};
 use numpy::{
-    IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray4,
-    PyReadonlyArrayDyn, PyUntypedArrayMethods,
+    IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray1, PyReadonlyArray2,
+    PyReadonlyArray4, PyReadonlyArrayDyn, PyUntypedArrayMethods,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::rules_engine::state::{
-    CometGroup, Fleet, Planet, Point, SimConfig, State, BOARD_SIZE, COMET_SPAWN_STEPS,
+    CometGroup, Fleet, Planet, Point, SimConfig, State, StaticTargetCache, BOARD_SIZE,
+    COMET_SPAWN_STEPS,
 };
 use crate::rules_engine::utils::{fleet_speed, is_orbiting};
 
@@ -31,6 +32,7 @@ type EncodedEntityBased<'py> = (
     Bound<'py, PyArray1<bool>>,
     Bound<'py, PyArray1<f32>>,
     Bound<'py, PyArray2<bool>>,
+    Bound<'py, PyArray3<bool>>,
     Bound<'py, PyArray2<i64>>,
 );
 
@@ -606,32 +608,6 @@ fn fleet_ship_count_buckets(min_fleet_size: i64, buckets: &mut [i32; 10]) -> usi
 }
 
 #[allow(clippy::too_many_arguments)]
-fn state_from_arrays(
-    planets: PyReadonlyArray2<'_, f64>,
-    fleets: PyReadonlyArray2<'_, f64>,
-    comet_planet_ids: PyReadonlyArray2<'_, f64>,
-    comet_path_indices: PyReadonlyArray1<'_, f64>,
-    comet_path_lengths: PyReadonlyArray2<'_, f64>,
-    comet_paths: PyReadonlyArray4<'_, f64>,
-    angular_velocity: f64,
-    step: u32,
-    episode_steps: u32,
-) -> PyResult<State> {
-    state_from_array_views(
-        planets.as_array(),
-        None,
-        fleets.as_array(),
-        comet_planet_ids.as_array(),
-        comet_path_indices.as_array(),
-        comet_path_lengths.as_array(),
-        comet_paths.as_array(),
-        angular_velocity,
-        step,
-        episode_steps,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn state_from_arrays_with_initial_planets(
     planets: PyReadonlyArray2<'_, f64>,
     initial_planets: PyReadonlyArray2<'_, f64>,
@@ -747,6 +723,7 @@ fn state_from_array_views(
         comets,
         comet_planet_ids: flattened_comet_planet_ids,
         orbit_paths: Vec::new(),
+        static_target_cache: StaticTargetCache::empty(),
     })
 }
 
@@ -864,6 +841,7 @@ fn require_shape_suffix(name: &str, actual: &[usize], expected_last_dim: usize) 
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (
     planets,
+    initial_planets,
     fleets,
     comet_planet_ids,
     comet_path_indices,
@@ -878,6 +856,7 @@ fn require_shape_suffix(name: &str, actual: &[usize], expected_last_dim: usize) 
 pub fn encode_entity_based<'py>(
     py: Python<'py>,
     planets: PyReadonlyArray2<'py, f64>,
+    initial_planets: PyReadonlyArray2<'py, f64>,
     fleets: PyReadonlyArray2<'py, f64>,
     comet_planet_ids: PyReadonlyArray2<'py, f64>,
     comet_path_indices: PyReadonlyArray1<'py, f64>,
@@ -901,6 +880,7 @@ pub fn encode_entity_based<'py>(
         ));
     }
     require_shape_suffix("planets", planets.shape(), 7)?;
+    require_shape_suffix("initial_planets", initial_planets.shape(), 7)?;
     require_shape_suffix("fleets", fleets.shape(), 7)?;
     let comet_group_count = comet_planet_ids.shape()[0];
     require_shape(
@@ -924,8 +904,9 @@ pub fn encode_entity_based<'py>(
         &[comet_group_count, MAX_COMETS, MAX_COMET_PATH_LENGTH, 2],
     )?;
 
-    let state = state_from_arrays(
+    let state = state_from_arrays_with_initial_planets(
         planets,
+        initial_planets,
         fleets,
         comet_planet_ids,
         comet_path_indices,
@@ -943,6 +924,10 @@ pub fn encode_entity_based<'py>(
     let mut entity_mask = Array1::<bool>::from_elem(max_entities, false);
     let mut global_obs = Array1::<f32>::zeros(GLOBAL_CHANNELS);
     let mut can_act = Array2::<bool>::from_elem((OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS), false);
+    let mut target_can_act = Array3::<bool>::from_elem(
+        (OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
+        false,
+    );
     let mut max_launch = Array2::<i64>::zeros((OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS));
     let (planet_mask, tail_mask) = entity_mask
         .as_slice_mut()
@@ -981,6 +966,18 @@ pub fn encode_entity_based<'py>(
             .expect("newly allocated max_launch array is contiguous"),
         min_fleet_size,
     );
+    let mut target_max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+    encode_action_spec(
+        RlActionSpec::DiscreteTargets,
+        &state,
+        &PlayerMap::identity(),
+        &action_entity_slots(&state),
+        target_can_act
+            .as_slice_mut()
+            .expect("newly allocated target_can_act array is contiguous"),
+        &mut target_max_launch,
+        min_fleet_size,
+    );
     log_ignored_fleets(ignored_fleets);
 
     Ok((
@@ -991,6 +988,7 @@ pub fn encode_entity_based<'py>(
         entity_mask.into_pyarray(py),
         global_obs.into_pyarray(py),
         can_act.into_pyarray(py),
+        target_can_act.into_pyarray(py),
         max_launch.into_pyarray(py),
     ))
 }
@@ -1231,7 +1229,7 @@ fn player_actions_to_kaggle(actions: &[crate::rules_engine::state::LaunchAction]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules_engine::state::{Fleet, Planet, SimConfig, State};
+    use crate::rules_engine::state::{Fleet, Planet, SimConfig, State, StaticTargetCache};
 
     fn assert_close(actual: f32, expected: f32) {
         assert!(
@@ -1410,6 +1408,7 @@ mod tests {
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
             orbit_paths: Vec::new(),
+            static_target_cache: StaticTargetCache::empty(),
         };
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
         let mut orbiting_planet_obs = vec![false; MAX_PLANETS];
@@ -1471,6 +1470,7 @@ mod tests {
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
             orbit_paths: Vec::new(),
+            static_target_cache: StaticTargetCache::empty(),
         };
         let player_map = PlayerMap::from_outer_slots(2, [3, 1, 0, 2]);
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
@@ -1530,6 +1530,7 @@ mod tests {
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
             orbit_paths: Vec::new(),
+            static_target_cache: StaticTargetCache::empty(),
         };
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
         let mut orbiting_planet_obs = vec![false; MAX_PLANETS];

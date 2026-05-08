@@ -354,7 +354,7 @@ def encode_python_observation(
 ) -> ObsBatch:
     (
         planets_in,
-        _initial_planets_in,
+        initial_planets_in,
         fleets_in,
         comet_planet_ids,
         comet_path_indices,
@@ -371,6 +371,7 @@ def encode_python_observation(
     )
     encoded = encode_entity_based(
         planets_in,
+        initial_planets_in,
         fleets_in,
         comet_planet_ids,
         comet_path_indices,
@@ -382,9 +383,6 @@ def encode_python_observation(
         obs_spec.max_entities,
         action_spec.min_fleet_size,
     )
-    if isinstance(action_spec, ActionPureConfig):
-        return _encoded_observation_to_batch(encoded, still_playing=still_playing)
-
     (
         planets,
         orbiting_planets,
@@ -393,12 +391,24 @@ def encode_python_observation(
         entity_mask,
         global_features,
         source_can_act,
+        source_target_can_act,
         max_launch,
     ) = encoded
-    target_exists = entity_mask[:ACTION_ENTITY_SLOTS]
-    source_target_can_act = source_can_act[:, :, None] & target_exists[None, None, :]
-    source_indexes = np.arange(ACTION_ENTITY_SLOTS)
-    source_target_can_act[:, source_indexes, source_indexes] = False
+    if isinstance(action_spec, ActionPureConfig):
+        return _encoded_observation_to_batch(
+            (
+                planets,
+                orbiting_planets,
+                fleets,
+                comets,
+                entity_mask,
+                global_features,
+                source_can_act,
+                max_launch,
+            ),
+            still_playing=still_playing,
+        )
+    target_max_launch = np.where(source_target_can_act.any(axis=-1), max_launch, 0)
     return _encoded_observation_to_batch(
         (
             planets,
@@ -408,7 +418,7 @@ def encode_python_observation(
             entity_mask,
             global_features,
             source_target_can_act,
-            max_launch,
+            target_max_launch,
         ),
         still_playing=still_playing,
     )
