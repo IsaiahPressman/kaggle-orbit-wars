@@ -18,6 +18,7 @@ from owl.model import (
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
+    ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
     EntityBasedConfig,
@@ -60,8 +61,14 @@ def _obs_batch(*, n_envs: int, obs_spec: EntityBasedConfig) -> ObsBatch:
 def _actions(
     n_envs: int,
     max_launches: int = ActionPureConfig().max_per_planet_launches,
-    kind: Literal["pure", "discrete_targets"] = "pure",
+    kind: Literal["pure", "discrete_targets", "discrete_target_bins"] = "pure",
 ) -> ModelActions:
+    if kind == "discrete_target_bins":
+        shape = (n_envs, 4, ACTION_ENTITY_SLOTS)
+        return ModelActions(
+            target=torch.zeros(shape, dtype=torch.int64),
+            fleet_bin=torch.zeros(shape, dtype=torch.int64),
+        )
     shape = (n_envs, 4, ACTION_ENTITY_SLOTS, max_launches)
     return ModelActions(
         launch=torch.zeros(shape, dtype=torch.bool),
@@ -1797,6 +1804,61 @@ def test_discrete_target_rollout_buffer_and_policy_mask() -> None:
     )
     assert segments.actions.target is not None
     assert segments.actions.target.shape == (3, 2, 4, ACTION_ENTITY_SLOTS, 1)
+    policy_mask = ppo._policy_mask(segments.obs)
+    assert policy_mask.shape == (3, 2, 4)
+    assert policy_mask[:, 0, 0].all()
+    assert not policy_mask[:, 0, 1:].any()
+
+
+def test_discrete_target_bin_rollout_buffer_and_policy_mask() -> None:
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
+    action_spec = ActionDiscreteTargetBinsConfig(n_bins=7)
+    buffer = ppo.PPORolloutBuffer(
+        horizon=2,
+        n_envs=3,
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+        device=torch.device("cpu"),
+    )
+    obs = _obs_batch(n_envs=3, obs_spec=obs_spec)
+    obs.max_launch = None
+    obs.can_act = torch.zeros(
+        (3, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS, 7),
+        dtype=torch.bool,
+    )
+    obs.can_act[:, 0, 0, 1, [0, 6]] = True
+    actions = _actions(3, kind="discrete_target_bins")
+    assert actions.target is not None
+    assert actions.fleet_bin is not None
+    actions.target[:, 0, 0] = 1
+    actions.fleet_bin[:, 0, 0] = 6
+
+    buffer.write_step(
+        0,
+        obs=obs,
+        actions=actions,
+        logp=torch.zeros((3, 4)),
+        values=torch.zeros((3, 4)),
+        rewards=torch.zeros((3, 4)),
+        dones=torch.zeros((3, 4), dtype=torch.bool),
+    )
+    segments = buffer.segment_major()
+
+    assert segments.obs.max_launch is None
+    assert segments.obs.can_act.shape == (
+        3,
+        2,
+        4,
+        ACTION_ENTITY_SLOTS,
+        ACTION_ENTITY_SLOTS,
+        7,
+    )
+    assert segments.actions.launch is None
+    assert segments.actions.ships is None
+    assert segments.actions.target is not None
+    assert segments.actions.fleet_bin is not None
+    assert segments.actions.target.shape == (3, 2, 4, ACTION_ENTITY_SLOTS)
+    assert segments.actions.fleet_bin.shape == (3, 2, 4, ACTION_ENTITY_SLOTS)
     policy_mask = ppo._policy_mask(segments.obs)
     assert policy_mask.shape == (3, 2, 4)
     assert policy_mask[:, 0, 0].all()

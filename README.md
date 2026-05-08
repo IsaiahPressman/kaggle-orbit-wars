@@ -83,9 +83,10 @@ split evaluation games across 2-player and 4-player batches. In distributed PPO
 launches, `EnvConfig.n_envs`, rollout horizon, and minibatch segment width are
 per GPU. Checkpoint cadence, `--max-env-steps`, W&B step values, and
 `train/env_steps` are counted across all ranks.
-PPO supports both `pure` and `discrete_targets` action specs when the
-`StatelessTransformerV1` actor discriminator matches the environment action
-spec. The current discrete-target actor requires `max_per_planet_launches: 1`.
+PPO supports `pure`, `discrete_targets`, and `discrete_target_bins` action specs
+when the `StatelessTransformerV1` actor discriminator matches the environment
+action spec. The current discrete-target actor requires
+`max_per_planet_launches: 1`; the target-bin actor requires matching `n_bins`.
 
 Run a preset with:
 

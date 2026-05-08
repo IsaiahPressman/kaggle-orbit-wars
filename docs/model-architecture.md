@@ -29,7 +29,7 @@ without changing callers that validate config dictionaries through the union.
 | `activation` | `"gelu"` | FFN activation: `"gelu"`, `"silu"`, or `"swiglu"`. |
 | `force_flash_attn` | `False` | Require packed varlen flash-attn; raise an error instead of falling back when tensors are not flash-compatible. |
 | `n_scratch_tokens` | `4` | Learned shared scratch tokens appended to the trunk sequence. |
-| `actor` | `{"action_spec": "pure"}` | Discriminated actor-head config. Supported actor specs are `"pure"` and `"discrete_targets"`. |
+| `actor` | `{"action_spec": "pure"}` | Discriminated actor-head config. Supported actor specs are `"pure"`, `"discrete_targets"`, and `"discrete_target_bins"`. |
 
 Actor-specific fields live inside the actor config. `ActorPureConfig` owns
 pure-head fields such as `n_action_mixtures`, `kappa_min`, `kappa_max`,
@@ -38,6 +38,8 @@ pure-head fields such as `n_action_mixtures`, `kappa_min`, `kappa_max`,
 `n_action_mixtures`, `max_ship_normalizer=500.0`, `entropy_ship_quantiles=16`,
 and the logistic-mixture scale parameters `scale_min=0.10`,
 `scale_max_frac=0.5`, and `scale_max_abs_floor=8.0`.
+`ActorDiscreteTargetBinsConfig` owns `n_bins`, which must match the
+environment's `ActionDiscreteTargetBinsConfig.n_bins`.
 `kappa_max` may be `None`; when set, `kappa_min` must be less than or equal to
 `kappa_max`.
 Model YAML files can reference actor presets by name through adjacent
@@ -233,18 +235,20 @@ shifted beta-binomial size distribution emits ships in
 `min_fleet_size..remaining`, and the accumulated sampled ships are capped by
 `max_launch`.
 
-The model returns decomposed action tensors. The `launch` tensor always keeps
-the final launch-slot dimension expected by the Rust API:
+The model returns decomposed action tensors. Pure and discrete-target actions
+keep the final launch-slot dimension expected by their Rust API paths:
 
 - `launch`: bool, `(batch, 4, 44, max_per_planet_launches)`
 - `ships`: int64, `(batch, 4, 44, max_per_planet_launches)`
 - `angle`: float32, same shape, pure actor only
 - `target`: int64, same shape, discrete-target actor only
+- `target`: int64, `(batch, 4, 44)`, discrete target-bin actor only
+- `fleet_bin`: int64, `(batch, 4, 44)`, discrete target-bin actor only
 
 It also returns decomposed log-prob and entropy tensors for launch gates and
 target or angle/size events, plus per-player action-entity totals with shape
-`(batch, 4, 44)`. PPO asks the action container for the submitted action-value
-tensor, so the trainer does not branch on action-spec-specific tensor names.
+`(batch, 4, 44)`. PPO submits the typed action container to the environment so
+action-spec-specific payloads such as `fleet_bin` are preserved.
 Entropy outputs also carry policy-specific component names for logging, such as
 `launch`, `target`, `fleet_size_full`, `fleet_size_mixture`,
 `fleet_size_logistic`, or `angle_and_size`.
@@ -316,6 +320,25 @@ rounded integer ship counts, very narrow scales can produce a negative size
 entropy term; the PPO bonus still encourages broader size distributions, but
 the logged value should be interpreted as an exploration heuristic rather than a
 non-negative discrete entropy.
+
+### Discrete Target Bins Actor
+
+The discrete target-bin actor supports `ActionDiscreteTargetBinsConfig`. It uses
+the same source/target stream construction and target-selection logits as the
+discrete-target actor, but the environment supplies a 5-D mask
+`(batch, 4, 44, 44, n_bins)` and no `max_launch` tensor.
+
+For each active source, the actor samples target first from target slots with at
+least one valid bin, then samples `fleet_bin` from categorical logits
+conditioned on the selected target value. It returns only `target` and
+`fleet_bin` action tensors. The environment decodes bin `0` as no-op and
+nonzero bins as rounded ship counts, using the same target-to-angle decoder as
+`discrete_targets`.
+
+Replay log-probability follows the same factorization:
+`log p(target) + log p(fleet_bin | target)`. Entropy logging exposes `target`
+and `fleet_bin` components; the shared `angle_and_size` field carries the
+fleet-bin term for compatibility with PPO loss aggregation.
 
 ## Log-Prob Replay
 

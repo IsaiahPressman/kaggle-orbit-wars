@@ -3,6 +3,7 @@ import json
 import numpy as np
 import pytest
 import torch
+from owl.model import ModelActions
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     COMET_CHANNELS,
@@ -12,6 +13,7 @@ from owl.rl import (
     MAX_COMETS,
     MAX_PLANETS,
     PLANET_CHANNELS,
+    ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
     EntityBasedConfig,
@@ -45,7 +47,9 @@ def _encoded_python_observation(
     obs: dict[str, object],
     *,
     obs_spec: EntityBasedConfig,
-    action_spec: ActionPureConfig | ActionDiscreteTargetsConfig,
+    action_spec: ActionPureConfig
+    | ActionDiscreteTargetsConfig
+    | ActionDiscreteTargetBinsConfig,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -54,7 +58,7 @@ def _encoded_python_observation(
     np.ndarray,
     np.ndarray,
     np.ndarray,
-    np.ndarray,
+    np.ndarray | None,
 ]:
     encoded = encode_python_observation(
         obs,
@@ -69,7 +73,7 @@ def _encoded_python_observation(
         encoded.entity_mask[0].numpy(),
         encoded.global_features[0].numpy(),
         encoded.can_act[0].numpy(),
-        encoded.max_launch[0].numpy(),
+        None if encoded.max_launch is None else encoded.max_launch[0].numpy(),
     )
 
 
@@ -451,6 +455,65 @@ def test_discrete_targets_step_uses_int_target_tensor() -> None:
         env.step(launch, target.astype(np.float32), ships)
 
 
+def test_discrete_target_bins_config_and_env_shapes() -> None:
+    config = EnvConfig.model_validate(
+        {
+            "n_envs": 2,
+            "action_spec": {
+                "action_spec": "discrete_target_bins",
+                "min_fleet_size": 4,
+                "n_bins": 11,
+            },
+            "pin_memory": False,
+        }
+    )
+    assert isinstance(config.action_spec, ActionDiscreteTargetBinsConfig)
+    assert config.action_spec.min_fleet_size == 4
+    assert config.action_spec.n_bins == 11
+
+    env = VectorizedEnv(
+        n_envs=2,
+        obs_spec=EntityBasedConfig(),
+        action_spec=config.action_spec,
+        pin_memory=False,
+    )
+    obs = env.reset()
+
+    assert obs.can_act.shape == (2, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS, 11)
+    assert obs.max_launch is None
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        ActionDiscreteTargetBinsConfig(n_bins=11, max_per_planet_launches=1)  # type: ignore[call-arg]
+
+
+def test_discrete_target_bins_step_uses_target_and_fleet_bin_bundle() -> None:
+    action_spec = ActionDiscreteTargetBinsConfig(n_bins=8)
+    env = VectorizedEnv(
+        n_envs=2,
+        obs_spec=EntityBasedConfig(),
+        action_spec=action_spec,
+        pin_memory=False,
+    )
+    env.reset()
+    shape = (2, 4, ACTION_ENTITY_SLOTS)
+    actions = ModelActions(
+        target=torch.zeros(shape, dtype=torch.int64),
+        fleet_bin=torch.zeros(shape, dtype=torch.int64),
+    )
+
+    obs, rewards, dones, episode_metrics = env.step(actions)
+
+    assert obs.can_act.shape == (2, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS, 8)
+    assert obs.max_launch is None
+    assert rewards.shape == (2, 4)
+    assert dones.shape == (2, 4)
+    assert episode_metrics == {}
+
+    actions.fleet_bin = actions.fleet_bin.to(torch.float32)
+    with pytest.raises(ValueError, match=r"fleet_bin must have dtype torch\.int64"):
+        env.step(actions)
+
+
 def test_actions_to_kaggle_converts_pure_model_actions() -> None:
     action_spec = ActionPureConfig(max_per_planet_launches=1)
     shape = (1, 4, ACTION_ENTITY_SLOTS, action_spec.max_per_planet_launches)
@@ -501,6 +564,34 @@ def test_actions_to_kaggle_converts_discrete_target_model_actions() -> None:
     assert actions[0][0] == 0.0
     assert np.isfinite(actions[0][1])
     assert actions[0][2] == float(action_spec.min_fleet_size)
+
+
+def test_actions_to_kaggle_converts_discrete_target_bin_actions() -> None:
+    action_spec = ActionDiscreteTargetBinsConfig(n_bins=11)
+    shape = (1, 4, ACTION_ENTITY_SLOTS)
+    actions = ModelActions(
+        target=torch.zeros(shape, dtype=torch.int64),
+        fleet_bin=torch.zeros(shape, dtype=torch.int64),
+    )
+    actions.target[0, 0, 0] = 1
+    actions.fleet_bin[0, 0, 0] = 10
+
+    kaggle_actions = actions_to_kaggle(
+        _python_obs(
+            planets=[
+                [0, 0, 25.0, 80.0, 2.0, 10, 3],
+                [1, -1, 75.0, 80.0, 2.0, 10, 3],
+            ]
+        ),
+        0,
+        actions,
+        action_spec=action_spec,
+    )
+
+    assert len(kaggle_actions) == 1
+    assert kaggle_actions[0][0] == 0.0
+    assert np.isfinite(kaggle_actions[0][1])
+    assert kaggle_actions[0][2] == 10.0
 
 
 def test_min_fleet_size_controls_action_mask_and_validation() -> None:
@@ -595,6 +686,35 @@ def test_python_observation_encoder_writes_discrete_target_mask() -> None:
     assert can_act[0, 0, 1]
     assert not can_act[0, 0, 2]
     assert max_launch[0, 0] == 10
+
+
+def test_python_observation_encoder_writes_discrete_target_bin_mask() -> None:
+    (
+        _planets,
+        _orbiting_planets,
+        _fleets,
+        _comets,
+        entity_mask,
+        _global_features,
+        can_act,
+        max_launch,
+    ) = _encoded_python_observation(
+        _python_obs(
+            planets=[
+                [0, 0, 25.0, 75.0, 2.0, 5, 3],
+                [1, -1, 75.0, 75.0, 2.0, 10, 3],
+            ]
+        ),
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionDiscreteTargetBinsConfig(n_bins=11),
+    )
+
+    assert entity_mask[:2].tolist() == [True, True]
+    assert can_act.shape == (4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS, 11)
+    assert max_launch is None
+    assert np.nonzero(can_act[0, 0, 1])[0].tolist() == [0, 2, 4, 6, 8, 10]
+    assert not can_act[0, 0, 0].any()
+    assert not can_act[0, 0, 2].any()
 
 
 def test_python_observation_encoder_masks_statically_obstructed_targets() -> None:

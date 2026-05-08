@@ -412,6 +412,59 @@ the same selected-ray sun/out-of-bounds cancellation. Submitted discrete-target
 launches that cannot produce an allowed ray are treated as no-ops and counted
 in `launch_failures_per_game`.
 
+## Discrete Target Bins Action Spec
+
+Config:
+
+```python
+{"action_spec": "discrete_target_bins", "min_fleet_size": 1, "n_bins": 11}
+```
+
+`ActionDiscreteTargetBinsConfig` uses the same target-slot eligibility as
+`discrete_targets`, but fleet size is selected as a categorical bin instead of
+an integer ship count. `n_bins` is the total action count, including no-op, and
+must be at least `2`.
+
+### Discrete Target Bins Output Tensors
+
+| Tensor | dtype | Shape | Meaning |
+| --- | --- | --- | --- |
+| `can_act` | `bool` | `(n_envs, 4, 44, 44, n_bins)` | whether a player can choose a source, target, and fleet-size bin |
+| `max_launch` | omitted/`None` | n/a | not used by this action spec |
+
+For valid source-target pairs, bin `0` is always available and decodes as
+no-op. Bins `1..n_bins-1` map to:
+
+```text
+round_half_up(bin * available_ships / (n_bins - 1))
+```
+
+Bin `n_bins - 1` maps to all available source ships. Launch bins that would
+produce fewer than `min_fleet_size` ships are masked. If multiple bins round to
+the same ship count, only the highest bin for that ship count remains
+available. For example, with `available_ships=5`, `n_bins=11`, and
+`min_fleet_size=1`, the available bins are `0, 2, 4, 6, 8, 10`.
+
+### Discrete Target Bins Submitted Actions
+
+Call:
+
+```python
+obs, rewards, dones, episode_metrics = env.step(actions)
+```
+
+where `actions` carries:
+
+| Tensor | dtype | Shape | Meaning |
+| --- | --- | --- | --- |
+| `target` | `int64` | `(n_envs, 4, 44)` | target action entity slot index in `[0, 44)` |
+| `fleet_bin` | `int64` | `(n_envs, 4, 44)` | fleet-size action bin in `[0, n_bins)` |
+
+Bin `0` ignores the target value and emits no launch. Nonzero bins validate the
+selected source-target-bin tuple against `can_act`, decode the bin to a ship
+count, then use the same target-to-angle decoder and launch-failure accounting
+as `discrete_targets`.
+
 ## Replay Snapshots
 
 `VectorizedEnv.state_snapshot(env_index)` returns a JSON-serializable snapshot

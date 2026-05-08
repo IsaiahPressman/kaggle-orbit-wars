@@ -216,6 +216,37 @@ def test_full_config_accepts_discrete_target_model_action_spec() -> None:
     assert config.model.actor.action_spec == "discrete_targets"
 
 
+def test_full_config_accepts_discrete_target_bins_model_action_spec() -> None:
+    config = FullConfig.model_validate(
+        {
+            "env": {
+                "n_envs": 2,
+                "action_spec": {
+                    "action_spec": "discrete_target_bins",
+                    "n_bins": 11,
+                },
+            },
+            "model": {
+                "model_arch": "stateless_transformer_v1",
+                "actor": {"action_spec": "discrete_target_bins", "n_bins": 11},
+                "embed_dim": 32,
+                "depth": 1,
+                "n_heads": 4,
+            },
+            "optimizer": {
+                "optimizer": "adamw",
+                "learning_rate": 0.001,
+            },
+            "rl": {
+                "horizon": 4,
+            },
+        }
+    )
+
+    assert config.env.action_spec.action_spec == "discrete_target_bins"
+    assert config.model.actor.action_spec == "discrete_target_bins"
+
+
 def test_full_config_rejects_rl_env_count() -> None:
     with pytest.raises(
         ValueError,

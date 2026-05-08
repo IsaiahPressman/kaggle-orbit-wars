@@ -20,6 +20,7 @@ from owl.model.actor.discrete_targets import (
     ship_support,
 )
 from owl.model.stateless_transformer_v1 import (
+    ActorDiscreteTargetBinsConfig,
     ActorDiscreteTargetsConfig,
     ActorPureConfig,
     DiscreteActorInputs,
@@ -42,6 +43,7 @@ from owl.rl import (
     MAX_PLANETS,
     OUTER_PLAYER_SLOTS,
     ActionConfig,
+    ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
     EntityBasedConfig,
@@ -81,15 +83,29 @@ def _obs_batch(
         (batch_size, obs_spec.global_channels),
         dtype=torch.float32,
     )
-    can_act = (
-        torch.zeros((batch_size, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool)
-        if isinstance(action_spec, ActionPureConfig)
-        else torch.zeros(
+    if isinstance(action_spec, ActionPureConfig):
+        can_act = torch.zeros((batch_size, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool)
+    elif isinstance(action_spec, ActionDiscreteTargetsConfig):
+        can_act = torch.zeros(
             (batch_size, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
             dtype=torch.bool,
         )
+    else:
+        can_act = torch.zeros(
+            (
+                batch_size,
+                4,
+                ACTION_ENTITY_SLOTS,
+                ACTION_ENTITY_SLOTS,
+                action_spec.n_bins,
+            ),
+            dtype=torch.bool,
+        )
+    max_launch = (
+        None
+        if isinstance(action_spec, ActionDiscreteTargetBinsConfig)
+        else torch.zeros((batch_size, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
     )
-    max_launch = torch.zeros((batch_size, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
 
     planets[:, 0, 0] = 1.0
     planets[:, 0, 15] = 0.08
@@ -102,16 +118,21 @@ def _obs_batch(
         can_act[:, 0, 0] = True
         can_act[:, 1, 1] = True
         can_act[:, 2, MAX_PLANETS] = True
-    else:
+    elif isinstance(action_spec, ActionDiscreteTargetsConfig):
         can_act[:, 0, 0, 1] = True
         can_act[:, 0, 0, MAX_PLANETS] = True
         can_act[:, 1, 1, 0] = True
         can_act[:, 2, MAX_PLANETS, 0] = True
-    max_launch[:, 0, 0] = 5
-    max_launch[:, 1, 1] = 3
-    max_launch[:, 2, MAX_PLANETS] = 2
+    else:
+        can_act[:, 0, 0, 1, [0, action_spec.n_bins - 1]] = True
+        can_act[:, 0, 0, MAX_PLANETS, [0, 2]] = True
+        can_act[:, 1, 1, 0, [0, action_spec.n_bins - 1]] = True
+        can_act[:, 2, MAX_PLANETS, 0, [0, 1]] = True
+    if max_launch is not None:
+        max_launch[:, 0, 0] = 5
+        max_launch[:, 1, 1] = 3
+        max_launch[:, 2, MAX_PLANETS] = 2
 
-    assert action_spec.max_per_planet_launches >= 1
     return ObsBatch(
         planets=planets,
         orbiting_planets=orbiting_planets,
@@ -1276,6 +1297,64 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
         evaluation.entropies.components["fleet_size_logistic"],
         output.entropies.components["fleet_size_logistic"],
     )
+
+
+def test_discrete_target_bins_actor_outputs_bins_and_replays_log_probs() -> None:
+    torch.manual_seed(17)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionDiscreteTargetBinsConfig(n_bins=7)
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetBinsConfig(n_bins=7),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+
+    output = model(obs)
+
+    expected_action_shape = (2, 4, ACTION_ENTITY_SLOTS)
+    assert output.actions.launch is None
+    assert output.actions.ships is None
+    assert output.actions.angle is None
+    assert output.actions.target is not None
+    assert output.actions.fleet_bin is not None
+    assert output.actions.target.shape == expected_action_shape
+    assert output.actions.fleet_bin.shape == expected_action_shape
+    source_active = obs.can_act.flatten(start_dim=-2).any(dim=-1)
+    batch_index = torch.arange(2)[:, None, None]
+    player_index = torch.arange(4)[None, :, None]
+    source_index = torch.arange(ACTION_ENTITY_SLOTS)[None, None, :]
+    selected = obs.can_act[
+        batch_index,
+        player_index,
+        source_index,
+        output.actions.target,
+        output.actions.fleet_bin,
+    ]
+    assert torch.all(selected[source_active])
+    assert set(output.entropies.components) == {"target", "fleet_bin"}
+
+    evaluation = model.evaluate_actions(obs, output.actions)
+    assert torch.allclose(evaluation.log_probs.target, output.log_probs.target)
+    assert torch.allclose(
+        evaluation.log_probs.angle_and_size,
+        output.log_probs.angle_and_size,
+    )
+    assert torch.allclose(
+        evaluation.log_probs.per_player_entity,
+        output.log_probs.per_player_entity,
+    )
+
+    invalid = ModelActions(
+        target=output.actions.target.clone(),
+        fleet_bin=output.actions.fleet_bin.clone(),
+    )
+    invalid.fleet_bin[0, 0, 0] = 1
+    obs.can_act[0, 0, 0, :, 1] = False
+    with pytest.raises(ValueError, match="valid target-bin pair"):
+        model.evaluate_actions(obs, invalid)
 
 
 def test_discrete_targets_output_layers_include_only_second_head_layers() -> None:
