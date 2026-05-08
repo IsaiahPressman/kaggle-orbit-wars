@@ -15,21 +15,53 @@ const QUADRATIC_EPS: f64 = 1e-12;
 pub(super) enum RlActionSpec {
     Pure,
     DiscreteTargets,
+    DiscreteTargetBins { n_bins: usize },
 }
 
 impl RlActionSpec {
-    pub(super) fn parse(value: &str) -> Option<Self> {
+    pub(super) fn parse(value: &str, n_bins: usize) -> Result<Self, String> {
         match value {
-            "pure" => Some(Self::Pure),
-            "discrete_targets" => Some(Self::DiscreteTargets),
-            _ => None,
+            "pure" => Ok(Self::Pure),
+            "discrete_targets" => Ok(Self::DiscreteTargets),
+            "discrete_target_bins" => {
+                if n_bins < 2 {
+                    return Err("n_bins must be >= 2 for action_spec \"discrete_target_bins\""
+                        .to_string());
+                }
+                let spec = Self::DiscreteTargetBins { n_bins };
+                spec.checked_can_act_len().ok_or_else(|| {
+                    "n_bins is too large for the discrete_target_bins can_act shape".to_string()
+                })?;
+                Ok(spec)
+            },
+            _ => Err(format!(
+                "unsupported action_spec {value:?}; expected \"pure\", \"discrete_targets\", or \"discrete_target_bins\""
+            )),
         }
     }
 
-    pub(super) const fn can_act_len(self) -> usize {
+    pub(super) fn can_act_len(self) -> usize {
+        self.checked_can_act_len()
+            .expect("validated action spec can_act shape should fit in usize")
+    }
+
+    fn checked_can_act_len(self) -> Option<usize> {
         match self {
-            Self::Pure => OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS,
-            Self::DiscreteTargets => OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS * ACTION_ENTITY_SLOTS,
+            Self::Pure => OUTER_PLAYER_SLOTS.checked_mul(ACTION_ENTITY_SLOTS),
+            Self::DiscreteTargets => OUTER_PLAYER_SLOTS
+                .checked_mul(ACTION_ENTITY_SLOTS)?
+                .checked_mul(ACTION_ENTITY_SLOTS),
+            Self::DiscreteTargetBins { n_bins } => OUTER_PLAYER_SLOTS
+                .checked_mul(ACTION_ENTITY_SLOTS)?
+                .checked_mul(ACTION_ENTITY_SLOTS)?
+                .checked_mul(n_bins),
+        }
+    }
+
+    pub(super) const fn max_launch_len(self) -> usize {
+        match self {
+            Self::Pure | Self::DiscreteTargets => OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS,
+            Self::DiscreteTargetBins { .. } => 0,
         }
     }
 }
@@ -45,6 +77,34 @@ pub(super) type ActionEntitySlots = [Option<ActionEntitySlot>; ACTION_ENTITY_SLO
 pub(super) struct DecodedDiscreteTargetActions {
     pub(super) actions: Vec<PlayerAction>,
     pub(super) launch_failures: u32,
+}
+
+pub(super) fn fleet_bin_to_ships(fleet_bin: usize, available_ships: i64, n_bins: usize) -> i64 {
+    debug_assert!(n_bins >= 2);
+    if fleet_bin == 0 || available_ships <= 0 {
+        return 0;
+    }
+    let numerator = fleet_bin as u128 * available_ships as u128;
+    let denominator = (n_bins - 1) as u128;
+    ((numerator * 2 + denominator) / (2 * denominator)) as i64
+}
+
+#[cfg(test)]
+fn ships_to_fleet_bin(ships: i64, available_ships: i64, n_bins: usize) -> usize {
+    debug_assert!(n_bins >= 2);
+    if ships <= 0 || available_ships <= 0 {
+        return 0;
+    }
+    let clamped_ships = ships.min(available_ships) as u128;
+    let numerator = clamped_ships * (n_bins - 1) as u128;
+    let denominator = available_ships as u128;
+    ((numerator * 2 + denominator) / (2 * denominator)) as usize
+}
+
+fn fleet_bin_keeps_ship_count(fleet_bin: usize, available_ships: i64, n_bins: usize) -> bool {
+    let ship_count = fleet_bin_to_ships(fleet_bin, available_ships, n_bins);
+    (fleet_bin + 1..n_bins)
+        .all(|later_bin| fleet_bin_to_ships(later_bin, available_ships, n_bins) != ship_count)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -251,6 +311,113 @@ pub(super) fn decode_discrete_target_actions(
     })
 }
 
+pub(super) fn decode_discrete_target_bin_actions(
+    state: &State,
+    player_map: &PlayerMap,
+    entities: &ActionEntitySlots,
+    target: &[i64],
+    fleet_bin: &[i64],
+    n_bins: usize,
+    min_fleet_size: i64,
+) -> Result<DecodedDiscreteTargetActions, String> {
+    if n_bins < 2 {
+        return Err("n_bins must be >= 2".to_string());
+    }
+    let mut actions = vec![Vec::new(); state.config.player_count];
+    let mut launch_failures = 0_u32;
+    let mut orbit_target_cache = OrbitTargetCache::new(state, entities, min_fleet_size);
+    for outer_player in 0..OUTER_PLAYER_SLOTS {
+        let player_offset = outer_player * ACTION_ENTITY_SLOTS;
+        let Some(internal_player) = player_map
+            .outer_to_internal(outer_player)
+            .filter(|player| *player < state.config.player_count)
+        else {
+            continue;
+        };
+        let player_actions = &mut actions[internal_player];
+        for (entity_index, source_slot) in entities.iter().enumerate() {
+            let action_index = player_offset + entity_index;
+            let Some(source_slot) = source_slot else {
+                continue;
+            };
+            let Some(source) = planet_for_slot(state, *source_slot) else {
+                continue;
+            };
+            if source.owner != internal_player as i32 || i64::from(source.ships) < min_fleet_size {
+                continue;
+            }
+            let target_index = target[action_index];
+            if !(0..ACTION_ENTITY_SLOTS as i64).contains(&target_index) {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} target must be in [0, {ACTION_ENTITY_SLOTS})"
+                ));
+            }
+            let target_index = target_index as usize;
+            if target_index == entity_index {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} cannot target itself"
+                ));
+            }
+            let Some(target_slot) = entities[target_index] else {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} cannot target empty action entity slot {target_index}"
+                ));
+            };
+            let Some(target_planet) = planet_for_slot(state, target_slot) else {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} cannot target stale action entity slot {target_index}"
+                ));
+            };
+            let fleet_bin = fleet_bin[action_index];
+            if !(0..n_bins as i64).contains(&fleet_bin) {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} fleet_bin must be in [0, {n_bins})"
+                ));
+            }
+            let fleet_bin = fleet_bin as usize;
+            let ship_count = fleet_bin_to_ships(fleet_bin, i64::from(source.ships), n_bins);
+            if ship_count == 0 {
+                continue;
+            }
+            if ship_count < min_fleet_size {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} fleet_bin {fleet_bin} maps to {ship_count} ships, below min_fleet_size {min_fleet_size}"
+                ));
+            }
+            if ship_count > i64::from(i32::MAX) {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} fleet_bin {fleet_bin} maps to ships that must fit in i32"
+                ));
+            }
+            if !fleet_bin_keeps_ship_count(fleet_bin, i64::from(source.ships), n_bins) {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} fleet_bin {fleet_bin} duplicates a higher bin"
+                ));
+            }
+            let Some(angle) = target_angle(
+                state,
+                source,
+                target_planet,
+                ship_count as i32,
+                &mut orbit_target_cache,
+            )?
+            else {
+                launch_failures += 1;
+                continue;
+            };
+            player_actions.push(LaunchAction {
+                from_planet_id: source.id,
+                angle,
+                ships: ship_count as i32,
+            });
+        }
+    }
+    Ok(DecodedDiscreteTargetActions {
+        actions,
+        launch_failures,
+    })
+}
+
 pub(super) fn encode_action_spec(
     action_spec: RlActionSpec,
     state: &State,
@@ -262,7 +429,10 @@ pub(super) fn encode_action_spec(
 ) {
     let mut entity_planets = [None; ACTION_ENTITY_SLOTS];
     let mut entity_static = [false; ACTION_ENTITY_SLOTS];
-    if action_spec == RlActionSpec::DiscreteTargets {
+    if matches!(
+        action_spec,
+        RlActionSpec::DiscreteTargets | RlActionSpec::DiscreteTargetBins { .. }
+    ) {
         for (entity_index, slot) in entities.iter().enumerate() {
             if let Some(planet) = slot.and_then(|slot| planet_for_slot(state, slot)) {
                 entity_planets[entity_index] = Some(planet);
@@ -321,8 +491,49 @@ pub(super) fn encode_action_spec(
                     source_can_act |= eligible;
                 }
             },
+            RlActionSpec::DiscreteTargetBins { n_bins } => {
+                let target_base = (player_map.internal_to_outer(player) * ACTION_ENTITY_SLOTS
+                    + entity_index)
+                    * ACTION_ENTITY_SLOTS
+                    * n_bins;
+                let source_static = entity_static[entity_index];
+                for target_index in 0..ACTION_ENTITY_SLOTS {
+                    let eligible = if target_index == entity_index {
+                        false
+                    } else {
+                        entity_planets[target_index].is_some_and(|target| {
+                            if entity_static[target_index] {
+                                if source_static && !state.static_target_cache.is_empty() {
+                                    state
+                                        .static_target_cache
+                                        .get(planet.id, target.id)
+                                        .is_some()
+                                } else {
+                                    best_live_static_target_angle(state, planet, target).is_some()
+                                }
+                            } else {
+                                true
+                            }
+                        })
+                    };
+                    let bin_base = target_base + target_index * n_bins;
+                    can_act[bin_base] = eligible;
+                    for fleet_bin in 1..n_bins {
+                        let ship_count =
+                            fleet_bin_to_ships(fleet_bin, i64::from(planet.ships), n_bins);
+                        can_act[bin_base + fleet_bin] = eligible
+                            && ship_count >= min_fleet_size
+                            && fleet_bin_keeps_ship_count(
+                                fleet_bin,
+                                i64::from(planet.ships),
+                                n_bins,
+                            );
+                    }
+                    source_can_act |= eligible;
+                }
+            },
         }
-        if source_can_act {
+        if source_can_act && action_spec.max_launch_len() > 0 {
             let index = player_map.internal_to_outer(player) * ACTION_ENTITY_SLOTS + entity_index;
             max_launch[index] = i64::from(planet.ships);
         }
@@ -1141,6 +1352,99 @@ mod tests {
             can_act[2],
             "unobstructed static target should remain eligible"
         );
+    }
+
+    #[test]
+    fn fleet_bin_mapping_uses_half_up_rounding() {
+        let ships = (0..5)
+            .map(|fleet_bin| fleet_bin_to_ships(fleet_bin, 10, 5))
+            .collect::<Vec<_>>();
+        assert_eq!(ships, vec![0, 3, 5, 8, 10]);
+        assert_eq!(ships_to_fleet_bin(3, 10, 5), 1);
+        assert_eq!(ships_to_fleet_bin(8, 10, 5), 3);
+    }
+
+    #[test]
+    fn discrete_target_bins_mask_keeps_only_higher_duplicate_bins() {
+        let state = state_from_planets(vec![
+            planet(0, 0, 10.0, 80.0, 2.0, 3),
+            planet(1, -1, 70.0, 80.0, 3.0, 10),
+        ]);
+        let entities = action_entity_slots(&state);
+        let spec = RlActionSpec::DiscreteTargetBins { n_bins: 8 };
+        let mut can_act = vec![false; spec.can_act_len()];
+        let mut max_launch = Vec::new();
+
+        encode_action_spec(
+            spec,
+            &state,
+            &PlayerMap::identity(),
+            &entities,
+            &mut can_act,
+            &mut max_launch,
+            1,
+        );
+
+        let base = 8;
+        assert_eq!(
+            &can_act[base..base + 8],
+            &[true, false, false, true, false, true, false, true]
+        );
+    }
+
+    #[test]
+    fn discrete_target_bins_decode_target_and_fleet_bin() {
+        let state = state_from_planets(vec![
+            planet(0, 0, 10.0, 80.0, 2.0, 10),
+            planet(1, -1, 70.0, 80.0, 3.0, 10),
+        ]);
+        let entities = action_entity_slots(&state);
+        let mut targets = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut fleet_bins = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        targets[0] = 1;
+        fleet_bins[0] = 2;
+
+        let decoded = decode_discrete_target_bin_actions(
+            &state,
+            &PlayerMap::identity(),
+            &entities,
+            &targets,
+            &fleet_bins,
+            5,
+            1,
+        )
+        .expect("valid target-bin action should decode");
+
+        assert_eq!(decoded.launch_failures, 0);
+        assert_eq!(decoded.actions[0].len(), 1);
+        assert_eq!(decoded.actions[0][0].from_planet_id, 0);
+        assert_eq!(decoded.actions[0][0].ships, 5);
+    }
+
+    #[test]
+    fn discrete_target_bins_zero_bin_decodes_as_no_launch() {
+        let state = state_from_planets(vec![
+            planet(0, 0, 10.0, 80.0, 2.0, 10),
+            planet(1, -1, 70.0, 80.0, 3.0, 10),
+        ]);
+        let entities = action_entity_slots(&state);
+        let mut targets = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let fleet_bins = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        targets[0] = 1;
+
+        let decoded = decode_discrete_target_bin_actions(
+            &state,
+            &PlayerMap::identity(),
+            &entities,
+            &targets,
+            &fleet_bins,
+            5,
+            1,
+        )
+        .expect("zero fleet bin should decode as a no-op");
+
+        assert_eq!(decoded.launch_failures, 0);
+        assert!(decoded.actions.iter().all(Vec::is_empty));
     }
 
     #[test]
