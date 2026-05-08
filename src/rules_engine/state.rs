@@ -303,6 +303,8 @@ pub struct State {
     pub comets: Vec<CometGroup>,
     pub comet_planet_ids: Vec<u32>,
     pub orbit_paths: Vec<OrbitPath>,
+    pub static_planet_ids: Vec<u32>,
+    pub static_planet_mask: Vec<bool>,
     pub static_target_cache: StaticTargetCache,
 }
 

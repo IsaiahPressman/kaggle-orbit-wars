@@ -313,6 +313,8 @@ fn state_from_observation(row: &FixtureRow) -> Result<State, String> {
         comets: row.before.comets.iter().map(comet_from_fixture).collect(),
         comet_planet_ids: row.before.comet_planet_ids.clone(),
         orbit_paths: Vec::new(),
+        static_planet_ids: Vec::new(),
+        static_planet_mask: Vec::new(),
         static_target_cache: StaticTargetCache::empty(),
     })
 }
@@ -425,6 +427,8 @@ fn python_validated_actions_does_not_truncate_planet_ids() -> Result<(), String>
         comets: Vec::new(),
         comet_planet_ids: Vec::new(),
         orbit_paths: Vec::new(),
+        static_planet_ids: Vec::new(),
+        static_planet_mask: Vec::new(),
         static_target_cache: StaticTargetCache::empty(),
     };
     let actions = python_validated_actions(
@@ -487,6 +491,8 @@ fn replay_skip_spawn_injection_does_not_request_rng() {
         comets: Vec::new(),
         comet_planet_ids: Vec::new(),
         orbit_paths: Vec::new(),
+        static_planet_ids: Vec::new(),
+        static_planet_mask: Vec::new(),
         static_target_cache: StaticTargetCache::empty(),
     };
     let mut rng = PanicRandom;

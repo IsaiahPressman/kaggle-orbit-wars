@@ -832,6 +832,8 @@ mod tests {
             comets: Vec::new(),
             comet_planet_ids: case.before.comet_planet_ids,
             orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
             static_target_cache: StaticTargetCache::empty(),
         };
 

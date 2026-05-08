@@ -38,7 +38,9 @@ pub fn reset_with_rng(config: ResetConfig, rng: &mut impl RandomSource) -> State
         angular_velocity,
         config.sim.episode_steps,
     );
-    let static_target_cache = precompute_static_target_cache(&planet_vector, &initial_planets);
+    let static_planet_ids = precompute_static_planet_ids(&planet_vector, &initial_planets);
+    let static_planet_mask = precompute_static_planet_mask(&static_planet_ids);
+    let static_target_cache = precompute_static_target_cache(&planet_vector, &static_planet_ids);
 
     State {
         config: config.sim,
@@ -51,6 +53,8 @@ pub fn reset_with_rng(config: ResetConfig, rng: &mut impl RandomSource) -> State
         comets: Vec::new(),
         comet_planet_ids: Vec::new(),
         orbit_paths,
+        static_planet_ids,
+        static_planet_mask,
         static_target_cache,
     }
 }
@@ -84,26 +88,23 @@ fn precompute_orbit_paths(
 
 fn precompute_static_target_cache(
     planets: &PlanetVector,
-    initial_planets: &PlanetVector,
+    static_planet_ids: &[u32],
 ) -> StaticTargetCache {
     let mut cache = StaticTargetCache::new(MAX_PLANET_ID as usize);
-    let static_planets = planets
-        .iter()
-        .filter(|planet| {
-            initial_planets
-                .get(planet.id)
-                .is_none_or(|initial| !is_orbiting(initial.position(), planet.radius))
-        })
-        .collect::<Vec<_>>();
-
-    for source in &static_planets {
-        for target in &static_planets {
+    for source_id in static_planet_ids {
+        let source = planets
+            .get(*source_id)
+            .expect("static planet id should exist");
+        for target_id in static_planet_ids {
+            let target = planets
+                .get(*target_id)
+                .expect("static planet id should exist");
             if source.id == target.id {
                 continue;
             }
-            let blockers = static_planets
+            let blockers = static_planet_ids
                 .iter()
-                .copied()
+                .filter_map(|planet_id| planets.get(*planet_id))
                 .filter(|planet| planet.id != source.id && planet.id != target.id);
             if let Some(angle) = best_static_target_angle(source, target, blockers) {
                 cache.set(source.id, target.id, angle);
@@ -111,6 +112,29 @@ fn precompute_static_target_cache(
         }
     }
     cache
+}
+
+fn precompute_static_planet_ids(
+    planets: &PlanetVector,
+    initial_planets: &PlanetVector,
+) -> Vec<u32> {
+    planets
+        .iter()
+        .filter(|planet| {
+            initial_planets
+                .get(planet.id)
+                .is_none_or(|initial| !is_orbiting(initial.position(), planet.radius))
+        })
+        .map(|planet| planet.id)
+        .collect()
+}
+
+fn precompute_static_planet_mask(static_planet_ids: &[u32]) -> Vec<bool> {
+    let mut mask = vec![false; MAX_PLANET_ID as usize];
+    for planet_id in static_planet_ids {
+        mask[*planet_id as usize] = true;
+    }
+    mask
 }
 
 pub fn step(state: &mut State, actions: &[PlayerAction]) -> StepResult {

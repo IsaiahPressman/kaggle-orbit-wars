@@ -259,6 +259,17 @@ pub(super) fn encode_action_spec(
     max_launch: &mut [i64],
     min_fleet_size: i64,
 ) {
+    let mut entity_planets = [None; ACTION_ENTITY_SLOTS];
+    let mut entity_static = [false; ACTION_ENTITY_SLOTS];
+    if action_spec == RlActionSpec::DiscreteTargets {
+        for (entity_index, slot) in entities.iter().enumerate() {
+            if let Some(planet) = slot.and_then(|slot| planet_for_slot(state, slot)) {
+                entity_planets[entity_index] = Some(planet);
+                entity_static[entity_index] = is_static_planet_cached(state, planet);
+            }
+        }
+    }
+
     for (entity_index, slot) in entities.iter().enumerate() {
         let Some(slot) = slot else {
             continue;
@@ -285,13 +296,26 @@ pub(super) fn encode_action_spec(
                 let base = (player_map.internal_to_outer(player) * ACTION_ENTITY_SLOTS
                     + entity_index)
                     * ACTION_ENTITY_SLOTS;
-                for (target_index, target_slot) in entities.iter().enumerate() {
-                    let eligible = target_slot
-                        .and_then(|target_slot| planet_for_slot(state, target_slot))
-                        .is_some_and(|target| {
-                            target_index != entity_index
-                                && target_is_eligible(state, planet, target)
-                        });
+                let source_static = entity_static[entity_index];
+                for target_index in 0..ACTION_ENTITY_SLOTS {
+                    let eligible = if target_index == entity_index {
+                        false
+                    } else {
+                        entity_planets[target_index].is_some_and(|target| {
+                            if entity_static[target_index] {
+                                if source_static && !state.static_target_cache.is_empty() {
+                                    state
+                                        .static_target_cache
+                                        .get(planet.id, target.id)
+                                        .is_some()
+                                } else {
+                                    best_live_static_target_angle(state, planet, target).is_some()
+                                }
+                            } else {
+                                true
+                            }
+                        })
+                    };
                     can_act[base + target_index] = eligible;
                     source_can_act |= eligible;
                 }
@@ -425,22 +449,6 @@ impl<'a> OrbitTargetCache<'a> {
     }
 }
 
-fn target_is_eligible(state: &State, source: &Planet, target: &Planet) -> bool {
-    if source.id == target.id {
-        return false;
-    }
-    if is_dynamic_planet(state, target) {
-        return true;
-    }
-    if is_dynamic_planet(state, source) || state.static_target_cache.is_empty() {
-        return best_live_static_target_angle(state, source, target).is_some();
-    }
-    state
-        .static_target_cache
-        .get(source.id, target.id)
-        .is_some()
-}
-
 fn target_angle(
     state: &State,
     source: &Planet,
@@ -449,11 +457,11 @@ fn target_angle(
     orbit_target_cache: &mut OrbitTargetCache<'_>,
 ) -> Option<f64> {
     let speed = fleet_speed(ships, state.config.ship_speed);
-    if is_dynamic_planet(state, target) {
+    if is_dynamic_planet_cached(state, target) {
         return dynamic_target_angle(state, source, target, speed, orbit_target_cache);
     }
 
-    if !is_dynamic_planet(state, source) && !state.static_target_cache.is_empty() {
+    if !is_dynamic_planet_cached(state, source) && !state.static_target_cache.is_empty() {
         return Some(
             state
                 .static_target_cache
@@ -488,7 +496,29 @@ fn dynamic_target_angle(
 }
 
 fn best_live_static_target_angle(state: &State, source: &Planet, target: &Planet) -> Option<f64> {
-    best_static_target_angle(source, target, static_blockers(state, source.id, target.id))
+    if !state.static_planet_ids.is_empty() {
+        return best_static_target_angle(
+            source,
+            target,
+            state
+                .static_planet_ids
+                .iter()
+                .filter_map(|planet_id| state.planets.get(*planet_id))
+                .filter(|planet| planet.id != source.id && planet.id != target.id),
+        );
+    }
+
+    let blockers = state
+        .planets
+        .iter()
+        .filter(|planet| {
+            planet.id != source.id
+                && planet.id != target.id
+                && !state.comet_planet_ids.contains(&planet.id)
+                && !is_orbiting_planet(state, planet)
+        })
+        .collect::<Vec<_>>();
+    best_static_target_angle(source, target, blockers.iter().copied())
 }
 
 fn orbiting_target_candidates(
@@ -741,16 +771,24 @@ fn hits_static_blocker(
     target: &Planet,
     candidate: TargetCandidate,
 ) -> bool {
-    let comet_ids = state
-        .comet_planet_ids
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
     let start = launch_start(source, candidate.angle);
+    if !state.static_planet_ids.is_empty() {
+        return state
+            .static_planet_ids
+            .iter()
+            .filter_map(|planet_id| state.planets.get(*planet_id))
+            .any(|planet| {
+                planet.id != source.id
+                    && planet.id != target.id
+                    && point_to_segment_distance(planet.position(), start, candidate.end)
+                        < planet.radius
+            });
+    }
+
     state.planets.iter().any(|planet| {
         planet.id != source.id
             && planet.id != target.id
-            && !comet_ids.contains(&planet.id)
+            && !state.comet_planet_ids.contains(&planet.id)
             && !is_orbiting(
                 state
                     .initial_planets
@@ -762,26 +800,15 @@ fn hits_static_blocker(
     })
 }
 
-fn static_blockers(state: &State, source_id: u32, target_id: u32) -> Vec<&Planet> {
-    let comet_ids = state
-        .comet_planet_ids
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    state
-        .planets
-        .iter()
-        .filter(|planet| {
-            planet.id != source_id
-                && planet.id != target_id
-                && !comet_ids.contains(&planet.id)
-                && !is_orbiting_planet(state, planet)
-        })
-        .collect()
+fn is_dynamic_planet_cached(state: &State, planet: &Planet) -> bool {
+    !is_static_planet_cached(state, planet)
 }
 
-fn is_dynamic_planet(state: &State, planet: &Planet) -> bool {
-    state.comet_planet_ids.contains(&planet.id) || is_orbiting_planet(state, planet)
+fn is_static_planet_cached(state: &State, planet: &Planet) -> bool {
+    if let Some(is_static) = state.static_planet_mask.get(planet.id as usize) {
+        return *is_static;
+    }
+    !state.comet_planet_ids.contains(&planet.id) && !is_orbiting_planet(state, planet)
 }
 
 fn is_orbiting_planet(state: &State, planet: &Planet) -> bool {
@@ -850,6 +877,8 @@ mod tests {
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
             orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
             static_target_cache: StaticTargetCache::empty(),
         }
     }
@@ -866,6 +895,8 @@ mod tests {
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
             orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
             static_target_cache: StaticTargetCache::empty(),
         }
     }

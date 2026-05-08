@@ -868,6 +868,8 @@ impl StateSnapshot {
     ) -> Self {
         let mut state = state.clone();
         state.orbit_paths.clear();
+        state.static_planet_ids.clear();
+        state.static_planet_mask.clear();
         state.static_target_cache = StaticTargetCache::empty();
         Self {
             state,
@@ -1576,6 +1578,8 @@ mod tests {
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
             orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
             static_target_cache: StaticTargetCache::empty(),
         }
     }
@@ -1630,6 +1634,8 @@ mod tests {
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
             orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
             static_target_cache: StaticTargetCache::empty(),
         }
     }
@@ -1655,6 +1661,8 @@ mod tests {
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
             orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
             static_target_cache: StaticTargetCache::empty(),
         }
     }

@@ -723,6 +723,8 @@ fn state_from_array_views(
         comets,
         comet_planet_ids: flattened_comet_planet_ids,
         orbit_paths: Vec::new(),
+        static_planet_ids: Vec::new(),
+        static_planet_mask: Vec::new(),
         static_target_cache: StaticTargetCache::empty(),
     })
 }
@@ -1408,6 +1410,8 @@ mod tests {
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
             orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
             static_target_cache: StaticTargetCache::empty(),
         };
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
@@ -1470,6 +1474,8 @@ mod tests {
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
             orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
             static_target_cache: StaticTargetCache::empty(),
         };
         let player_map = PlayerMap::from_outer_slots(2, [3, 1, 0, 2]);
@@ -1530,6 +1536,8 @@ mod tests {
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
             orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
             static_target_cache: StaticTargetCache::empty(),
         };
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];

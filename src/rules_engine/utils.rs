@@ -95,18 +95,20 @@ pub fn static_target_rays(source: &Planet, target: &Planet) -> Vec<StaticTargetR
     rays
 }
 
-pub fn best_static_target_angle<'a>(
+pub fn best_static_target_angle<'a, I>(
     source: &Planet,
     target: &Planet,
-    static_blockers: impl IntoIterator<Item = &'a Planet>,
-) -> Option<f64> {
+    static_blockers: I,
+) -> Option<f64>
+where
+    I: Iterator<Item = &'a Planet> + Clone,
+{
     let rays = static_target_rays(source, target);
-    let blockers = static_blockers.into_iter().collect::<Vec<_>>();
     rays.into_iter()
         .find(|ray| {
             !static_ray_hits_sun(source, *ray)
-                && !blockers
-                    .iter()
+                && !static_blockers
+                    .clone()
                     .any(|blocker| static_ray_hits_planet(source, *ray, blocker))
         })
         .map(|ray| ray.angle)
