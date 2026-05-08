@@ -538,6 +538,7 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
     metrics = ppo._mean_env_metrics(
         {
             "game_length_mean": [10.0, 14.0],
+            "total_games_played": [1.0, 1.0],
             "full_length_rate": [1.0, 0.0],
             "terminal_ship_count": [20.0, 40.0],
             "launches_per_game": [3.0, 7.0],
@@ -551,6 +552,7 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
     )
 
     assert metrics["train/game_length_mean"] == 12.0
+    assert metrics["train/total_games_played"] == 2.0
     assert metrics["train/full_length_rate"] == 0.5
     assert metrics["train/terminal_ship_count"] == 30.0
     assert metrics["train/launches_per_game"] == 5.0
@@ -577,9 +579,12 @@ def test_distributed_env_metrics_reduce_matching_global_keys(
         value: set[str],
         _context: ppo.DistributedContext,
     ) -> list[set[str]]:
-        assert value == {"z_metric"}
+        assert value == {"total_games_played", "z_metric"}
         assert _context is context
-        return [{"z_metric"}, {"a_metric", "z_metric"}]
+        return [
+            {"total_games_played", "z_metric"},
+            {"a_metric", "total_games_played", "z_metric"},
+        ]
 
     def fake_all_reduce_sum(
         tensor: torch.Tensor,
@@ -589,12 +594,12 @@ def test_distributed_env_metrics_reduce_matching_global_keys(
         assert torch.equal(
             tensor,
             torch.tensor(
-                [[0.0, 0.0], [6.0, 2.0]],
+                [[0.0, 0.0], [2.0, 2.0], [6.0, 2.0]],
                 dtype=torch.float64,
             ),
         )
         return torch.tensor(
-            [[10.0, 2.0], [36.0, 5.0]],
+            [[10.0, 2.0], [4.0, 4.0], [36.0, 5.0]],
             dtype=torch.float64,
         )
 
@@ -602,13 +607,14 @@ def test_distributed_env_metrics_reduce_matching_global_keys(
     monkeypatch.setattr(ppo, "all_reduce_sum", fake_all_reduce_sum)
 
     metrics = ppo._mean_env_metrics(
-        {"z_metric": [2.0, 4.0]},
+        {"total_games_played": [1.0, 1.0], "z_metric": [2.0, 4.0]},
         context=context,
         device=torch.device("cpu"),
     )
 
     assert metrics == {
         "train/a_metric": 5.0,
+        "train/total_games_played": 4.0,
         "train/z_metric": 7.2,
     }
 

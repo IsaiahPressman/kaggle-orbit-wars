@@ -439,6 +439,7 @@ Terminal episode metrics:
 
 | Key | Meaning |
 | --- | --- |
+| `total_games_played` | Count marker emitted once per terminal episode. Python training sums this as `train/total_games_played` across the rollout instead of averaging it. |
 | `max_entities_exceeded_per_game` | Count of post-step turns where active fleets exceeded `max_fleets`. |
 | `game_length_mean` | Terminal game step count. |
 | `full_length_rate` | `1.0` when a game reaches the configured episode horizon, otherwise `0.0`. |

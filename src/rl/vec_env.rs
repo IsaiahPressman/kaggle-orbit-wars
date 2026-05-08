@@ -1158,6 +1158,7 @@ impl EpisodeStats {
             "terminal_planet_occupancy_rate_4p"
         };
         let mut values = vec![
+            ("total_games_played", 1.0),
             (
                 "max_entities_exceeded_per_game",
                 f64::from(self.max_entities_exceeded_turns),
@@ -1784,6 +1785,7 @@ mod tests {
         assert_eq!(rewards, vec![-0.5; 4]);
         assert_eq!(dones, vec![true; 4]);
         assert_eq!(metrics["game_length_mean"], vec![499.0]);
+        assert_eq!(metrics["total_games_played"], vec![1.0]);
         assert_eq!(metrics["full_length_rate"], vec![1.0]);
         assert_eq!(metrics["terminal_ship_count"], vec![44.0]);
         assert_eq!(metrics["launches_per_game"], vec![0.0]);
