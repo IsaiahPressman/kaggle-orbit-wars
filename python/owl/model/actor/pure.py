@@ -257,8 +257,11 @@ class PureActor(nn.Module):
                 self.max_per_planet_launches,
             ),
         )
-        if actions.angle is None:
-            raise ValueError("pure actions require actions.angle")
+        if actions.launch is None or actions.angle is None or actions.ships is None:
+            raise ValueError("pure actions require launch, angle, and ships")
+        action_launch = actions.launch
+        action_angle = actions.angle
+        action_ships = actions.ships
 
         launch_log_slots: list[torch.Tensor] = []
         event_log_slots: list[torch.Tensor] = []
@@ -294,9 +297,9 @@ class PureActor(nn.Module):
                 hidden_state,
             )
             params = self.actor_heads(slot_hidden).to_distribution_dtype()
-            launch = actions.launch[..., slot]
-            angle = actions.angle[..., slot]
-            ships = actions.ships[..., slot]
+            launch = action_launch[..., slot]
+            angle = action_angle[..., slot]
+            ships = action_ships[..., slot]
             event_mask = active & launch
             _require_valid_action_slot(
                 launch,
@@ -801,12 +804,14 @@ def _require_actions_shape(
             )
     if actions.target is not None:
         raise ValueError("pure actions must not include actions.target")
+    if actions.fleet_bin is not None:
+        raise ValueError("pure actions must not include actions.fleet_bin")
+    if actions.launch is None or actions.angle is None or actions.ships is None:
+        raise ValueError("pure actions require launch, angle, and ships")
     if actions.launch.dtype != torch.bool:
         raise ValueError(
             f"actions.launch must have dtype torch.bool, got {actions.launch.dtype}"
         )
-    if actions.angle is None:
-        raise ValueError("pure actions require actions.angle")
     if actions.angle.dtype != torch.float32:
         raise ValueError(
             f"actions.angle must have dtype torch.float32, got {actions.angle.dtype}"

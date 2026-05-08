@@ -220,11 +220,16 @@ class DiscreteTargetsActor(nn.Module):
         )
         if actions.target is None:
             raise ValueError("discrete target actions require actions.target")
+        if actions.launch is None or actions.ships is None:
+            raise ValueError("discrete target actions require launch and ships")
+        action_launch = actions.launch
+        action_target = actions.target
+        action_ships = actions.ships
         selection = self._selection_params(actor_inputs, can_act)
         source_active = can_act.any(dim=-1) & (max_launch >= min_fleet_size)
-        launch = actions.launch[..., 0]
-        target = actions.target[..., 0]
-        ships = actions.ships[..., 0]
+        launch = action_launch[..., 0]
+        target = action_target[..., 0]
+        ships = action_ships[..., 0]
         _require_valid_discrete_action_slot(
             launch,
             target,
@@ -787,14 +792,16 @@ def _require_discrete_actions_shape(
             )
     if actions.angle is not None:
         raise ValueError("discrete target actions must not include actions.angle")
+    if actions.fleet_bin is not None:
+        raise ValueError("discrete target actions must not include actions.fleet_bin")
     if expected_shape[-1] != 1:
         raise ValueError("discrete target actions require one launch slot")
+    if actions.launch is None or actions.target is None or actions.ships is None:
+        raise ValueError("discrete target actions require launch, target, and ships")
     if actions.launch.dtype != torch.bool:
         raise ValueError(
             f"actions.launch must have dtype torch.bool, got {actions.launch.dtype}"
         )
-    if actions.target is None:
-        raise ValueError("discrete target actions require actions.target")
     if actions.target.dtype != torch.int64:
         raise ValueError(
             f"actions.target must have dtype torch.int64, got {actions.target.dtype}"
