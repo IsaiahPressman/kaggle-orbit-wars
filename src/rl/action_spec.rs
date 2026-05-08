@@ -231,7 +231,8 @@ pub(super) fn decode_discrete_target_actions(
                     target_planet,
                     ship_count as i32,
                     &mut orbit_target_cache,
-                ) else {
+                )?
+                else {
                     launch_failures += 1;
                     continue;
                 };
@@ -455,27 +456,32 @@ fn target_angle(
     target: &Planet,
     ships: i32,
     orbit_target_cache: &mut OrbitTargetCache<'_>,
-) -> Option<f64> {
+) -> Result<Option<f64>, String> {
     let speed = fleet_speed(ships, state.config.ship_speed);
     if is_dynamic_planet_cached(state, target) {
-        return dynamic_target_angle(state, source, target, speed, orbit_target_cache);
+        return Ok(dynamic_target_angle(
+            state,
+            source,
+            target,
+            speed,
+            orbit_target_cache,
+        ));
     }
 
     if !is_dynamic_planet_cached(state, source) && !state.static_target_cache.is_empty() {
-        return Some(
-            state
-                .static_target_cache
-                .get(source.id, target.id)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "static source {} cannot target statically obstructed planet {}",
-                        source.id, target.id
-                    )
-                }),
-        );
+        return state
+            .static_target_cache
+            .get(source.id, target.id)
+            .ok_or_else(|| {
+                format!(
+                    "static source {} cannot target masked static planet {}",
+                    source.id, target.id
+                )
+            })
+            .map(Some);
     }
 
-    best_live_static_target_angle(state, source, target)
+    Ok(best_live_static_target_angle(state, source, target))
 }
 
 fn dynamic_target_angle(
@@ -1222,6 +1228,41 @@ mod tests {
 
         assert_eq!(decoded.launch_failures, 1);
         assert!(decoded.actions.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn masked_static_target_launch_returns_decode_error() {
+        let planets = vec![
+            planet(0, 0, 0.0, 50.0, 2.0, 100),
+            planet(1, -1, 100.0, 50.0, 2.0, 20),
+            planet(2, -1, 100.0, 80.0, 2.0, 20),
+        ];
+        let mut config = ResetConfig::new(4);
+        config.planets = Some(planets.clone());
+        config.initial_planets = Some(planets);
+        config.angular_velocity = Some(0.025);
+        let state = reset(config);
+        let entities = action_entity_slots(&state);
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+        let mut targets = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        targets[0] = 1;
+        ships[0] = 100;
+
+        let err = decode_discrete_target_actions(
+            &state,
+            &PlayerMap::identity(),
+            &entities,
+            &launch,
+            &targets,
+            &ships,
+            1,
+            1,
+        )
+        .expect_err("masked static target should fail fast");
+
+        assert_eq!(err, "static source 0 cannot target masked static planet 1");
     }
 
     #[test]
