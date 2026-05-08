@@ -8,7 +8,8 @@ use rayon::prelude::*;
 
 use crate::rules_engine::env::{reset, step, PlayerAction};
 use crate::rules_engine::state::{
-    FleetLossStats, PlayerResult, ResetConfig, State, BOARD_SIZE, CENTER, SUN_RADIUS,
+    FleetLossStats, PlayerResult, ResetConfig, State, StaticTargetCache, BOARD_SIZE, CENTER,
+    SUN_RADIUS,
 };
 
 use super::action_spec::{
@@ -662,7 +663,7 @@ impl PyRlVecEnv {
                         min_fleet_size,
                     )
                     .map_err(|err| format!("env {env_index}: {err}"))?;
-                    episode_stats.record_comet_launch_failures(decoded.comet_launch_failures);
+                    episode_stats.record_launch_failures(decoded.launch_failures);
                     let terminal = step_one_env(
                         state,
                         player_map,
@@ -832,7 +833,7 @@ struct EpisodeStats {
     ships_per_launch_sum: i64,
     ships_per_launch_squared_sum: i64,
     launch_count: u32,
-    comet_launch_failures: u32,
+    launch_failures: u32,
     turn_count: u32,
     max_fleet_size: i32,
     min_fleet_size: Option<i32>,
@@ -865,8 +866,13 @@ impl StateSnapshot {
         action_slots: &ActionEntitySlots,
         player_finished: &[bool],
     ) -> Self {
+        let mut state = state.clone();
+        state.orbit_paths.clear();
+        state.static_planet_ids.clear();
+        state.static_planet_mask.clear();
+        state.static_target_cache = StaticTargetCache::empty();
         Self {
-            state: state.clone(),
+            state,
             player_map: *player_map,
             action_slots: *action_slots,
             player_finished: player_finished.to_vec(),
@@ -1128,8 +1134,8 @@ impl EpisodeStats {
         self.fleets_lost_in_combat += fleets_lost_in_combat;
     }
 
-    fn record_comet_launch_failures(&mut self, comet_launch_failures: u32) {
-        self.comet_launch_failures += comet_launch_failures;
+    fn record_launch_failures(&mut self, launch_failures: u32) {
+        self.launch_failures += launch_failures;
     }
 
     fn terminal_metrics(
@@ -1152,6 +1158,7 @@ impl EpisodeStats {
             "terminal_planet_occupancy_rate_4p"
         };
         let mut values = vec![
+            ("total_games_played", 1.0),
             (
                 "max_entities_exceeded_per_game",
                 f64::from(self.max_entities_exceeded_turns),
@@ -1165,10 +1172,7 @@ impl EpisodeStats {
             ),
             ("comets_captured_per_game", f64::from(self.comets_captured)),
             ("launches_per_game", f64::from(self.launch_count)),
-            (
-                "comet_launch_failures_per_game",
-                f64::from(self.comet_launch_failures),
-            ),
+            ("launch_failures_per_game", f64::from(self.launch_failures)),
             (
                 "launches_per_turn",
                 mean_or_zero(
@@ -1532,7 +1536,7 @@ fn player_reward_done(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules_engine::state::{LaunchAction, Planet, SimConfig};
+    use crate::rules_engine::state::{LaunchAction, Planet, SimConfig, StaticTargetCache};
 
     fn state_with_player_three_eliminated() -> State {
         let planets = vec![
@@ -1574,6 +1578,10 @@ mod tests {
             next_fleet_id: 0,
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
+            orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
+            static_target_cache: StaticTargetCache::empty(),
         }
     }
 
@@ -1626,6 +1634,10 @@ mod tests {
             next_fleet_id: 0,
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
+            orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
+            static_target_cache: StaticTargetCache::empty(),
         }
     }
 
@@ -1649,6 +1661,10 @@ mod tests {
             next_fleet_id: 0,
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
+            orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
+            static_target_cache: StaticTargetCache::empty(),
         }
     }
 
@@ -1769,10 +1785,11 @@ mod tests {
         assert_eq!(rewards, vec![-0.5; 4]);
         assert_eq!(dones, vec![true; 4]);
         assert_eq!(metrics["game_length_mean"], vec![499.0]);
+        assert_eq!(metrics["total_games_played"], vec![1.0]);
         assert_eq!(metrics["full_length_rate"], vec![1.0]);
         assert_eq!(metrics["terminal_ship_count"], vec![44.0]);
         assert_eq!(metrics["launches_per_game"], vec![0.0]);
-        assert_eq!(metrics["comet_launch_failures_per_game"], vec![0.0]);
+        assert_eq!(metrics["launch_failures_per_game"], vec![0.0]);
         assert_eq!(metrics["win_rate_player_0"], vec![1.0]);
         assert_eq!(metrics["win_rate_player_3"], vec![1.0]);
         assert_eq!(metrics["terminal_planet_occupancy_rate_4p"], vec![1.0]);
@@ -1868,7 +1885,7 @@ mod tests {
         let mut episode_stats = EpisodeStats::default();
 
         episode_stats.record_turn(&state, &actions);
-        episode_stats.record_comet_launch_failures(3);
+        episode_stats.record_launch_failures(3);
         episode_stats.record_step_result(
             &state,
             FleetLossStats {
@@ -1934,7 +1951,7 @@ mod tests {
 
         assert_eq!(collected["ships_per_launch_mean"], vec![4.0]);
         assert_eq!(collected["launches_per_game"], vec![2.0, 0.0]);
-        assert_eq!(collected["comet_launch_failures_per_game"], vec![3.0, 0.0]);
+        assert_eq!(collected["launch_failures_per_game"], vec![3.0, 0.0]);
         assert_eq!(collected["ships_lost_in_combat_per_game"], vec![11.0, 90.0]);
         assert_eq!(collected["fleets_lost_in_combat_per_game"], vec![4.0, 9.0]);
         assert_eq!(collected["ships_lost_per_game_mean"], vec![20.0, 100.0]);

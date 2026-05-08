@@ -1,4 +1,12 @@
-use super::state::{Point, BOARD_SIZE, CENTER, ROTATION_RADIUS_LIMIT};
+use super::state::{Planet, Point, BOARD_SIZE, CENTER, ROTATION_RADIUS_LIMIT, SUN_RADIUS};
+
+const TARGET_EPS: f64 = 1e-6;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StaticTargetRay {
+    pub angle: f64,
+    pub end: Point,
+}
 
 pub fn distance(a: Point, b: Point) -> f64 {
     let dx = a.x - b.x;
@@ -47,6 +55,96 @@ pub fn point_to_segment_distance(point: Point, start: Point, end: Point) -> f64 
         start.y + t * (end.y - start.y),
     );
     distance(point, projection)
+}
+
+pub fn angle_between(start: Point, end: Point) -> f64 {
+    (end.y - start.y).atan2(end.x - start.x)
+}
+
+pub fn point_along(start: Point, angle: f64, distance: f64) -> Point {
+    Point::new(
+        start.x + angle.cos() * distance,
+        start.y + angle.sin() * distance,
+    )
+}
+
+pub fn launch_start(source: &Planet, angle: f64) -> Point {
+    point_along(source.position(), angle, source.radius + 0.1)
+}
+
+pub fn static_target_rays(source: &Planet, target: &Planet) -> Vec<StaticTargetRay> {
+    let source_pos = source.position();
+    let target_pos = target.position();
+    let base_angle = angle_between(source_pos, target_pos);
+    let mut rays = vec![static_target_ray_for_angle(source, target, base_angle)];
+    let distance_to_target = distance(source_pos, target_pos);
+    let radius = (target.radius - TARGET_EPS).max(0.0);
+    if distance_to_target > radius && radius > 0.0 {
+        let half_angle = (radius / distance_to_target).asin();
+        rays.push(static_target_ray_for_angle(
+            source,
+            target,
+            base_angle + half_angle,
+        ));
+        rays.push(static_target_ray_for_angle(
+            source,
+            target,
+            base_angle - half_angle,
+        ));
+    }
+    rays
+}
+
+pub fn best_static_target_angle<'a, I>(
+    source: &Planet,
+    target: &Planet,
+    static_blockers: I,
+) -> Option<f64>
+where
+    I: Iterator<Item = &'a Planet> + Clone,
+{
+    let rays = static_target_rays(source, target);
+    rays.into_iter()
+        .find(|ray| {
+            !static_ray_hits_sun(source, *ray)
+                && !static_blockers
+                    .clone()
+                    .any(|blocker| static_ray_hits_planet(source, *ray, blocker))
+        })
+        .map(|ray| ray.angle)
+}
+
+pub fn static_ray_hits_sun(source: &Planet, ray: StaticTargetRay) -> bool {
+    point_to_segment_distance(
+        Point::new(CENTER, CENTER),
+        launch_start(source, ray.angle),
+        ray.end,
+    ) < SUN_RADIUS
+}
+
+pub fn static_ray_hits_planet(source: &Planet, ray: StaticTargetRay, planet: &Planet) -> bool {
+    point_to_segment_distance(planet.position(), launch_start(source, ray.angle), ray.end)
+        < planet.radius
+}
+
+fn static_target_ray_for_angle(source: &Planet, target: &Planet, angle: f64) -> StaticTargetRay {
+    let start = launch_start(source, angle);
+    let dir = Point::new(angle.cos(), angle.sin());
+    let target_pos = target.position();
+    let to_target = Point::new(target_pos.x - start.x, target_pos.y - start.y);
+    let projection = to_target.x * dir.x + to_target.y * dir.y;
+    let perpendicular_squared =
+        (to_target.x * to_target.x + to_target.y * to_target.y) - projection * projection;
+    let hit_distance = if perpendicular_squared < target.radius * target.radius {
+        projection - (target.radius * target.radius - perpendicular_squared.max(0.0)).sqrt()
+    } else {
+        projection
+    }
+    .max(0.0);
+    StaticTargetRay {
+        angle,
+        end: point_along(start, angle, hit_distance),
+    }
 }
 
 pub fn swept_pair_hit(

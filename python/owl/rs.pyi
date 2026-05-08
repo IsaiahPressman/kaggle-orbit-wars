@@ -86,6 +86,7 @@ def assert_release_build() -> None: ...
 def rl_obs_constants() -> tuple[int, int, int, int, int, int, int, int, int]: ...
 def encode_entity_based(
     planets: np.ndarray,
+    initial_planets: np.ndarray,
     fleets: np.ndarray,
     comet_planet_ids: np.ndarray,
     comet_path_indices: np.ndarray,
@@ -97,6 +98,7 @@ def encode_entity_based(
     max_entities: int = ...,
     min_fleet_size: int = ...,
 ) -> tuple[
+    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,

@@ -486,8 +486,8 @@ def test_actions_to_kaggle_converts_discrete_target_model_actions() -> None:
     actions = actions_to_kaggle(
         _python_obs(
             planets=[
-                [0, 0, 25.0, 50.0, 2.0, 10, 3],
-                [1, -1, 75.0, 50.0, 2.0, 10, 3],
+                [0, 0, 25.0, 80.0, 2.0, 10, 3],
+                [1, -1, 75.0, 80.0, 2.0, 10, 3],
             ]
         ),
         0,
@@ -595,6 +595,58 @@ def test_python_observation_encoder_writes_discrete_target_mask() -> None:
     assert can_act[0, 0, 1]
     assert not can_act[0, 0, 2]
     assert max_launch[0, 0] == 10
+
+
+def test_python_observation_encoder_masks_statically_obstructed_targets() -> None:
+    (
+        _planets,
+        _orbiting_planets,
+        _fleets,
+        _comets,
+        _entity_mask,
+        _global_features,
+        can_act,
+        max_launch,
+    ) = _encoded_python_observation(
+        _python_obs(
+            planets=[
+                [0, 0, 0.0, 50.0, 2.0, 10, 3],
+                [1, -1, 100.0, 50.0, 2.0, 10, 3],
+                [2, -1, 100.0, 80.0, 2.0, 10, 3],
+            ]
+        ),
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionDiscreteTargetsConfig(),
+    )
+
+    assert not can_act[0, 0, 1]
+    assert can_act[0, 0, 2]
+    assert max_launch[0, 0] == 10
+
+
+def test_python_discrete_observation_clears_max_launch_without_targets() -> None:
+    (
+        _planets,
+        _orbiting_planets,
+        _fleets,
+        _comets,
+        _entity_mask,
+        _global_features,
+        can_act,
+        max_launch,
+    ) = _encoded_python_observation(
+        _python_obs(
+            planets=[
+                [0, 0, 0.0, 50.0, 2.0, 10, 3],
+                [1, -1, 100.0, 50.0, 2.0, 10, 3],
+            ]
+        ),
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionDiscreteTargetsConfig(),
+    )
+
+    assert not can_act[0, 0].any()
+    assert max_launch[0, 0] == 0
 
 
 def test_python_observation_encoder_matches_rl_schema_and_masks() -> None:
@@ -733,8 +785,10 @@ def test_encode_entity_based_matches_expected_masks_and_masked_values() -> None:
         entity_mask,
         global_features,
         can_act,
+        target_can_act,
         max_launch,
     ) = encode_entity_based(
+        planets_in,
         planets_in,
         fleets_in,
         comet_planet_ids,
@@ -1181,6 +1235,8 @@ def test_encode_entity_based_matches_expected_masks_and_masked_values() -> None:
     expected_max_launch[2, MAX_PLANETS] = 125
     expected_max_launch[1, MAX_PLANETS + 1] = 30
     np.testing.assert_array_equal(can_act, expected_can_act)
+    assert target_can_act.shape == (4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS)
+    assert not target_can_act[0, 0, 0]
     np.testing.assert_array_equal(max_launch, expected_max_launch)
 
 

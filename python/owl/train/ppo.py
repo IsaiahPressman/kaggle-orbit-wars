@@ -1504,7 +1504,10 @@ def _mean_env_metrics(
         )
         if local[1].item() == 0:
             continue
-        logged[f"train/{key}"] = float((local[0] / local[1]).item())
+        if key == "total_games_played":
+            logged[f"train/{key}"] = float(local[0].item())
+        else:
+            logged[f"train/{key}"] = float((local[0] / local[1]).item())
     return logged
 
 
@@ -1529,7 +1532,10 @@ def _distributed_mean_env_metrics(
     for key, total in zip(keys, totals, strict=True):
         if total[1].item() == 0:
             continue
-        logged[f"train/{key}"] = float((total[0] / total[1]).item())
+        if key == "total_games_played":
+            logged[f"train/{key}"] = float(total[0].item())
+        else:
+            logged[f"train/{key}"] = float((total[0] / total[1]).item())
     return logged
 
 

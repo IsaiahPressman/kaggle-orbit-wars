@@ -364,8 +364,12 @@ train against this action spec when the model actor config also uses
 
 `can_act[player, source, target]` is true when the source entity is owned by
 that outer player slot, has at least `min_fleet_size` ships, the target slot
-exists, and `source != target`. Neutral, enemy, owned, planet, and comet targets
-are all legal if they exist.
+exists, `source != target`, and the target passes the simulator's eligibility
+filter. Static-source to static-target pairs use the reset-time cached
+unobstructed 3-ray result. Dynamic-source to static-target pairs recompute the
+same 3-ray sun/static-blocker check for the current step. Dynamic targets
+remain eligible in the mask because full obstruction checks are deferred until
+the selected launch is decoded.
 
 ### Discrete Targets Submitted Actions
 
@@ -390,22 +394,23 @@ uses the Rust target decoder to convert discrete target slots into submitted
 
 ### Targeting Rules
 
-For static planets, decoding first tries the centerline. If that path is blocked
-by the sun or another static planet, it tries both edge paths using
-`target_radius - eps`, then prefers an unobstructed path, then a path that avoids
-the sun, and finally the centerline if every candidate hits the sun.
+For static planets, the 3-ray check tries the centerline plus both edge paths
+using `target_radius - eps`, then selects the first ray unobstructed by the sun
+and other static planets. Reset precomputes this best angle for every
+static-source/static-target planet ID pair in a contiguous cache and reuses the
+cached angle during discrete target decoding. Dynamic-source/static-target pairs
+run the same check live.
 
-For orbiting non-comet planets, decoding computes a single centerline
-time-of-impact trajectory against the analytic orbit curve. It first uses the
-orbit radius to bound the possible impact interval, then uses monotonic bisection
-when the fleet is faster than the target's tangential speed, otherwise a capped
-coarse scan followed by bisection. This fast orbiting path does not validate sun
-or planet obstruction before emitting the launch angle. For comets, decoding
-solves analytic centerline intercepts against each stored linear path segment,
-then applies the existing sun and static-planet blocker preference over the
-resulting candidates. If no comet intercept exists within the known future path,
-the submitted launch is treated as a no-op and counted in
-`comet_launch_failures_per_game`.
+For orbiting non-comet planets, reset caches future tick positions across the
+episode horizon, and decoding solves inflated-radius intercepts against the
+cached linear segments for the selected target. Manually reconstructed states
+without that cache build the selected target path lazily during decode. This
+fast orbiting path checks the selected ray for sun crossing and out-of-bounds
+impact before emitting the launch angle. For comets, decoding solves
+inflated-radius intercepts against each stored linear path segment, then applies
+the same selected-ray sun/out-of-bounds cancellation. Submitted discrete-target
+launches that cannot produce an allowed ray are treated as no-ops and counted
+in `launch_failures_per_game`.
 
 ## Replay Snapshots
 
@@ -434,13 +439,14 @@ Terminal episode metrics:
 
 | Key | Meaning |
 | --- | --- |
+| `total_games_played` | Count marker emitted once per terminal episode. Python training sums this as `train/total_games_played` across the rollout instead of averaging it. |
 | `max_entities_exceeded_per_game` | Count of post-step turns where active fleets exceeded `max_fleets`. |
 | `game_length_mean` | Terminal game step count. |
 | `full_length_rate` | `1.0` when a game reaches the configured episode horizon, otherwise `0.0`. |
 | `terminal_ship_count` | Total ships on planets and in active fleets at terminal. |
 | `planets_captured_per_game` | Total planet captures over the episode, counting repeat captures. |
 | `comets_captured_per_game` | Total comet planet captures over the episode, counting repeat captures. |
-| `comet_launch_failures_per_game` | Submitted discrete-target comet launches skipped because no intercept exists before the comet leaves its known path. Python training logs this as `train/comet_launch_failures_per_game`. |
+| `launch_failures_per_game` | Submitted discrete-target launches skipped because no valid selected ray exists, including dynamic targets with no intercept, sun-crossing rays, or out-of-bounds impact points. Python training logs this as `train/launch_failures_per_game`. |
 | `launches_per_turn` | Mean launches per player per turn. |
 | `fleet_size_max` | Largest fleet launched during the episode. |
 | `fleet_size_min` | Smallest fleet launched during the episode, or `0.0` when no fleets launched. |

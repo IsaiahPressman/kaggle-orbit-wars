@@ -189,6 +189,57 @@ pub struct CometGroup {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct OrbitPath {
+    pub planet_id: u32,
+    pub points: Vec<Point>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StaticTargetCache {
+    side: usize,
+    angles: Vec<Option<f64>>,
+}
+
+impl StaticTargetCache {
+    pub fn empty() -> Self {
+        Self {
+            side: 0,
+            angles: Vec::new(),
+        }
+    }
+
+    pub fn new(side: usize) -> Self {
+        Self {
+            side,
+            angles: vec![None; side * side],
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.angles.is_empty()
+    }
+
+    pub fn get(&self, source_id: u32, target_id: u32) -> Option<f64> {
+        self.index(source_id, target_id)
+            .and_then(|index| self.angles[index])
+    }
+
+    pub fn set(&mut self, source_id: u32, target_id: u32, angle: f64) {
+        let index = self
+            .index(source_id, target_id)
+            .expect("static target cache ids must be in bounds");
+        self.angles[index] = Some(angle);
+    }
+
+    fn index(&self, source_id: u32, target_id: u32) -> Option<usize> {
+        let source_id = source_id as usize;
+        let target_id = target_id as usize;
+        (source_id < self.side && target_id < self.side)
+            .then_some(source_id * self.side + target_id)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct LaunchAction {
     pub from_planet_id: u32,
     pub angle: f64,
@@ -251,6 +302,10 @@ pub struct State {
     pub next_fleet_id: u32,
     pub comets: Vec<CometGroup>,
     pub comet_planet_ids: Vec<u32>,
+    pub orbit_paths: Vec<OrbitPath>,
+    pub static_planet_ids: Vec<u32>,
+    pub static_planet_mask: Vec<bool>,
+    pub static_target_cache: StaticTargetCache,
 }
 
 #[derive(Clone, Debug, PartialEq)]

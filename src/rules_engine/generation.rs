@@ -389,7 +389,9 @@ fn comet_path_is_valid(
 mod tests {
     use super::*;
     use crate::rules_engine::env::{reset_with_rng, step};
-    use crate::rules_engine::state::{PlayerResult, ResetConfig, SimConfig, State};
+    use crate::rules_engine::state::{
+        PlayerResult, ResetConfig, SimConfig, State, StaticTargetCache,
+    };
 
     use serde::Deserialize;
 
@@ -829,6 +831,10 @@ mod tests {
             next_fleet_id: case.before.next_fleet_id,
             comets: Vec::new(),
             comet_planet_ids: case.before.comet_planet_ids,
+            orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
+            static_target_cache: StaticTargetCache::empty(),
         };
 
         let result = step(&mut state, &vec![Vec::new(); case.players]);
