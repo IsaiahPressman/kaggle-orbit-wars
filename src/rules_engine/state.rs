@@ -189,6 +189,12 @@ pub struct CometGroup {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct OrbitPath {
+    pub planet_id: u32,
+    pub points: Vec<Point>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct LaunchAction {
     pub from_planet_id: u32,
     pub angle: f64,
@@ -251,6 +257,7 @@ pub struct State {
     pub next_fleet_id: u32,
     pub comets: Vec<CometGroup>,
     pub comet_planet_ids: Vec<u32>,
+    pub orbit_paths: Vec<OrbitPath>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

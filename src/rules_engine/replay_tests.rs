@@ -312,6 +312,7 @@ fn state_from_observation(row: &FixtureRow) -> Result<State, String> {
         next_fleet_id: row.before.next_fleet_id,
         comets: row.before.comets.iter().map(comet_from_fixture).collect(),
         comet_planet_ids: row.before.comet_planet_ids.clone(),
+        orbit_paths: Vec::new(),
     })
 }
 
@@ -422,6 +423,7 @@ fn python_validated_actions_does_not_truncate_planet_ids() -> Result<(), String>
         next_fleet_id: 0,
         comets: Vec::new(),
         comet_planet_ids: Vec::new(),
+        orbit_paths: Vec::new(),
     };
     let actions = python_validated_actions(
         &state,
@@ -482,6 +484,7 @@ fn replay_skip_spawn_injection_does_not_request_rng() {
         next_fleet_id: 0,
         comets: Vec::new(),
         comet_planet_ids: Vec::new(),
+        orbit_paths: Vec::new(),
     };
     let mut rng = PanicRandom;
 

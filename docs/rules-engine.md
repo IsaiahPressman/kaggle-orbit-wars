@@ -35,7 +35,11 @@ count, generation constants, and ids needed for deterministic progression.
 Planets and initial planets are stored in ID-indexed slots (`PlanetVector`,
 backed by `Vec<Option<Planet>>`) so direct ID lookup is the normal path.
 Planet IDs must be unique and less than `MAX_PLANET_ID = 100`; removed comet
-planets leave empty slots.
+planets leave empty slots. Generated/reset states also cache orbiting planet
+positions across the episode horizon for RL target decoding; manually
+constructed or replay-loaded states may leave that cache empty because core
+rules progression still derives orbit positions from `initial_planets`,
+`angular_velocity`, and `step`.
 
 `StepResult` returns one result per actual player: active, won, or lost. It also
 returns auxiliary counters for fleets and ships removed by the sun or by leaving

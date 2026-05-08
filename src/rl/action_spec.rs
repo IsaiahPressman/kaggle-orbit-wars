@@ -11,10 +11,6 @@ use super::{PlayerMap, ACTION_ENTITY_SLOTS, MAX_COMETS, MAX_PLANETS, OUTER_PLAYE
 const TARGET_EPS: f64 = 1e-6;
 const ROOT_EPS: f64 = 1e-7;
 const QUADRATIC_EPS: f64 = 1e-12;
-const ORBIT_SCAN_SAMPLES_PER_PERIOD: f64 = 64.0;
-const ORBIT_MIN_SCAN_SAMPLES: usize = 16;
-const ORBIT_MAX_SCAN_SAMPLES: usize = 512;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RlActionSpec {
     Pure,
@@ -149,6 +145,7 @@ pub(super) fn decode_discrete_target_actions(
 ) -> Result<DecodedDiscreteTargetActions, String> {
     let mut actions = vec![Vec::new(); state.config.player_count];
     let mut comet_launch_failures = 0_u32;
+    let mut orbit_target_cache = OrbitTargetCache::new(state, entities, min_fleet_size);
     for outer_player in 0..OUTER_PLAYER_SLOTS {
         let player_offset = outer_player * ACTION_ENTITY_SLOTS * max_per_planet_launches;
         let Some(internal_player) = player_map
@@ -228,8 +225,13 @@ pub(super) fn decode_discrete_target_actions(
                         spent_ships + ship_count
                     ));
                 }
-                let Some(angle) = target_angle(state, source, target_planet, ship_count as i32)
-                else {
+                let Some(angle) = target_angle(
+                    state,
+                    source,
+                    target_planet,
+                    ship_count as i32,
+                    &mut orbit_target_cache,
+                ) else {
                     comet_launch_failures += 1;
                     continue;
                 };
@@ -341,7 +343,85 @@ struct TargetCandidate {
     time: f64,
 }
 
-fn target_angle(state: &State, source: &Planet, target: &Planet, ships: i32) -> Option<f64> {
+struct OrbitTargetCache<'a> {
+    state: &'a State,
+    entities: &'a ActionEntitySlots,
+    min_fleet_size: i32,
+    sources: Option<Vec<&'a Planet>>,
+    min_speed: f64,
+    paths: Vec<(u32, Vec<Point>)>,
+}
+
+impl<'a> OrbitTargetCache<'a> {
+    fn new(state: &'a State, entities: &'a ActionEntitySlots, min_fleet_size: i64) -> Self {
+        let min_fleet_size = min_fleet_size.clamp(1, i64::from(i32::MAX)) as i32;
+        Self {
+            state,
+            entities,
+            min_fleet_size,
+            sources: None,
+            min_speed: fleet_speed(min_fleet_size, state.config.ship_speed),
+            paths: Vec::new(),
+        }
+    }
+
+    fn path_for(&mut self, target: &Planet) -> Option<&[Point]> {
+        if let Some(index) = self.paths.iter().position(|(id, _)| *id == target.id) {
+            return Some(self.paths[index].1.as_slice());
+        }
+
+        if let Some(path) = self
+            .state
+            .orbit_paths
+            .iter()
+            .find(|path| path.planet_id == target.id)
+        {
+            let start = self.state.step.saturating_sub(1) as usize;
+            if self.state.step == 0 && path.points.len() >= 2 {
+                let mut points = Vec::with_capacity(path.points.len() + 1);
+                points.push(target.position());
+                points.push(target.position());
+                points.extend_from_slice(&path.points[1..]);
+                self.paths.push((target.id, points));
+                return self.paths.last().map(|(_, path)| path.as_slice());
+            }
+            if start < path.points.len() {
+                return Some(&path.points[start..]);
+            }
+        }
+
+        let initial_target = self.state.initial_planets.get(target.id)?;
+        if self.sources.is_none() {
+            self.sources = Some(
+                self.entities
+                    .iter()
+                    .filter_map(|slot| slot.and_then(|slot| planet_for_slot(self.state, slot)))
+                    .filter(|planet| planet.owner >= 0 && planet.ships >= self.min_fleet_size)
+                    .collect(),
+            );
+        }
+        let max_time = self
+            .sources
+            .as_ref()?
+            .iter()
+            .map(|source| orbit_time_bounds(source, initial_target, target, self.min_speed).1)
+            .fold(0.0, f64::max);
+        let point_count = max_time.ceil().max(1.0) as usize + 1;
+        let path = (0..point_count)
+            .map(|tick| orbit_target_at(self.state, initial_target, target, tick as f64))
+            .collect::<Vec<_>>();
+        self.paths.push((target.id, path));
+        self.paths.last().map(|(_, path)| path.as_slice())
+    }
+}
+
+fn target_angle(
+    state: &State,
+    source: &Planet,
+    target: &Planet,
+    ships: i32,
+    orbit_target_cache: &mut OrbitTargetCache<'_>,
+) -> Option<f64> {
     let speed = fleet_speed(ships, state.config.ship_speed);
     if state.comet_planet_ids.contains(&target.id) {
         let candidates = comet_target_candidates(state, source, target, speed)?;
@@ -357,10 +437,11 @@ fn target_angle(state: &State, source: &Planet, target: &Planet, ships: i32) -> 
         target.radius,
     ) {
         return Some(
-            orbiting_target_candidate(state, source, target, speed).map_or_else(
-                || angle_between(source.position(), target.position()),
-                |candidate| candidate.angle,
-            ),
+            orbiting_target_candidate(state, source, target, speed, orbit_target_cache)
+                .map_or_else(
+                    || angle_between(source.position(), target.position()),
+                    |candidate| candidate.angle,
+                ),
         );
     }
 
@@ -411,98 +492,53 @@ fn orbiting_target_candidate(
     source: &Planet,
     target: &Planet,
     speed: f64,
+    orbit_target_cache: &mut OrbitTargetCache<'_>,
 ) -> Option<TargetCandidate> {
     let initial_target = state.initial_planets.get(target.id)?;
-    let source_pos = source.position();
+    let path = orbit_target_cache.path_for(target)?;
+    let (min_time, max_time) = orbit_time_bounds(source, initial_target, target, speed);
+    piecewise_linear_target_candidates_in_time_range(
+        source,
+        target.radius,
+        speed,
+        path,
+        min_time,
+        max_time,
+    )
+    .into_iter()
+    .next()
+}
+
+fn orbit_target_at(state: &State, initial_target: &Planet, target: &Planet, time: f64) -> Point {
+    if time == 0.0 {
+        target.position()
+    } else {
+        // Post-reset observations store orbiting planets at the phase from
+        // the previous completed simulator step.
+        orbit_position(
+            initial_target.position(),
+            state.angular_velocity,
+            state.step.saturating_sub(1) as f64 + time,
+        )
+    }
+}
+
+fn orbit_time_bounds(
+    source: &Planet,
+    initial_target: &Planet,
+    target: &Planet,
+    speed: f64,
+) -> (f64, f64) {
     let center = Point::new(CENTER, CENTER);
     let orbit_radius = distance(initial_target.position(), center);
-    if speed <= 0.0 || orbit_radius <= 0.0 {
-        return None;
-    }
-    let target_at = |time: f64| {
-        if time == 0.0 {
-            target.position()
-        } else {
-            // Post-reset observations store orbiting planets at the phase from
-            // the previous completed simulator step.
-            orbit_position(
-                initial_target.position(),
-                state.angular_velocity,
-                state.step.saturating_sub(1) as f64 + time,
-            )
-        }
-    };
-    let source_orbit_distance = distance(source_pos, center);
+    let source_orbit_distance = distance(source.position(), center);
     let min_distance = (source_orbit_distance - orbit_radius).abs();
     let max_distance = source_orbit_distance + orbit_radius;
     let clearance = source.radius + 0.1 + target.radius;
-    let min_time = ((min_distance - clearance) / speed).max(0.0);
-    let max_time = ((max_distance - clearance) / speed).max(0.0);
-    let impact = |time: f64| distance(target_at(time), source_pos) - clearance - speed * time;
-    let candidate_at = |time: f64| {
-        let target_pos = target_at(time);
-        let angle = angle_between(source_pos, target_pos);
-        TargetCandidate {
-            angle,
-            end: point_along(launch_start(source, angle), angle, speed * time),
-            time,
-        }
-    };
-
-    if max_time <= min_time {
-        return (impact(min_time) <= ROOT_EPS).then(|| candidate_at(min_time));
-    }
-
-    let min_value = impact(min_time);
-    if min_value <= ROOT_EPS {
-        return Some(candidate_at(min_time));
-    }
-
-    let max_value = impact(max_time);
-    if speed > state.angular_velocity.abs() * orbit_radius {
-        if max_value > ROOT_EPS {
-            return None;
-        }
-        return Some(candidate_at(bisect_root(&impact, min_time, max_time)));
-    }
-
-    let sample_count = orbit_scan_sample_count(min_time, max_time, state.angular_velocity);
-    let step = (max_time - min_time) / sample_count as f64;
-    let mut prev_time = min_time;
-    let mut prev_value = min_value;
-    for sample_index in 1..=sample_count {
-        let time = if sample_index == sample_count {
-            max_time
-        } else {
-            min_time + step * sample_index as f64
-        };
-        let value = impact(time);
-        if value <= ROOT_EPS {
-            let root_time = if prev_value.signum() != value.signum() {
-                bisect_root(&impact, prev_time, time)
-            } else {
-                time
-            };
-            return Some(candidate_at(root_time));
-        }
-        prev_time = time;
-        prev_value = value;
-    }
-    None
-}
-
-fn orbit_scan_sample_count(min_time: f64, max_time: f64, angular_velocity: f64) -> usize {
-    let span = max_time - min_time;
-    if span <= 0.0 {
-        return 1;
-    }
-    let samples = if angular_velocity.abs() > f64::EPSILON {
-        let period = std::f64::consts::TAU / angular_velocity.abs();
-        (span / period * ORBIT_SCAN_SAMPLES_PER_PERIOD).ceil() as usize
-    } else {
-        ORBIT_MIN_SCAN_SAMPLES
-    };
-    samples.clamp(ORBIT_MIN_SCAN_SAMPLES, ORBIT_MAX_SCAN_SAMPLES)
+    (
+        ((min_distance - clearance) / speed).max(0.0),
+        ((max_distance - clearance) / speed).max(0.0),
+    )
 }
 
 fn comet_target_candidates(
@@ -534,6 +570,24 @@ fn piecewise_linear_target_candidates(
     speed: f64,
     path: &[Point],
 ) -> Vec<TargetCandidate> {
+    piecewise_linear_target_candidates_in_time_range(
+        source,
+        radius,
+        speed,
+        path,
+        0.0,
+        f64::INFINITY,
+    )
+}
+
+fn piecewise_linear_target_candidates_in_time_range(
+    source: &Planet,
+    radius: f64,
+    speed: f64,
+    path: &[Point],
+    min_time: f64,
+    max_time: f64,
+) -> Vec<TargetCandidate> {
     let mut candidates = Vec::new();
     if path.len() < 2 || speed <= 0.0 {
         return candidates;
@@ -541,7 +595,11 @@ fn piecewise_linear_target_candidates(
 
     let source_pos = source.position();
     let clearance = source.radius + 0.1 + radius;
-    for (segment_index, segment) in path.windows(2).enumerate() {
+    let first_segment = min_time.floor().max(0.0) as usize;
+    let last_segment = max_time.ceil().max(1.0) as usize;
+    let last_segment = last_segment.min(path.len().saturating_sub(1));
+    for segment_index in first_segment..last_segment {
+        let segment = [path[segment_index], path[segment_index + 1]];
         let start = segment[0];
         let end = segment[1];
         let segment_time = segment_index as f64;
@@ -564,6 +622,9 @@ fn piecewise_linear_target_candidates(
             segment_time,
         ) {
             let time = segment_time + fraction;
+            if time + ROOT_EPS < min_time || time - ROOT_EPS > max_time {
+                continue;
+            }
             let target_pos = lerp(start, end, fraction);
             let angle = angle_between(source_pos, target_pos);
             candidates.push(TargetCandidate {
@@ -716,6 +777,7 @@ fn candidate_for_angle(
     }
 }
 
+#[cfg(test)]
 fn bisect_root(f: &impl Fn(f64) -> f64, mut left: f64, mut right: f64) -> f64 {
     let mut left_value = f(left);
     for _ in 0..64 {
@@ -760,7 +822,8 @@ fn lerp(start: Point, end: Point, fraction: f64) -> Point {
 mod tests {
     use super::*;
     use crate::rules_engine::env::step;
-    use crate::rules_engine::state::{CometGroup, SimConfig};
+    use crate::rules_engine::state::{CometGroup, OrbitPath, SimConfig};
+    use crate::rules_engine::utils::swept_pair_hit;
 
     fn one_planet_state() -> State {
         let planets = vec![Planet {
@@ -782,6 +845,7 @@ mod tests {
             next_fleet_id: 0,
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
+            orbit_paths: Vec::new(),
         }
     }
 
@@ -796,6 +860,7 @@ mod tests {
             next_fleet_id: 0,
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
+            orbit_paths: Vec::new(),
         }
     }
 
@@ -891,6 +956,79 @@ mod tests {
             prev_value = value;
         }
         None
+    }
+
+    fn cached_orbiting_target_candidate(
+        state: &State,
+        source: &Planet,
+        target: &Planet,
+        speed: f64,
+    ) -> Option<TargetCandidate> {
+        let entities = action_entity_slots(state);
+        let mut cache = OrbitTargetCache::new(state, &entities, 1);
+        orbiting_target_candidate(state, source, target, speed, &mut cache)
+    }
+
+    fn assert_candidate_hits_swept_segment(
+        source: &Planet,
+        target_radius: f64,
+        path: &[Point],
+        speed: f64,
+        candidate: TargetCandidate,
+    ) {
+        assert!(
+            candidate_hits_swept_segment(source, target_radius, path, speed, candidate),
+            "candidate at time {} did not hit a swept target segment",
+            candidate.time,
+        );
+    }
+
+    fn candidate_hits_swept_segment(
+        source: &Planet,
+        target_radius: f64,
+        path: &[Point],
+        speed: f64,
+        candidate: TargetCandidate,
+    ) -> bool {
+        assert!(
+            path.len() >= 2,
+            "candidate validation requires a path segment"
+        );
+        let segment = (candidate.time.floor() as usize).min(path.len() - 2);
+        let segment_time = segment as f64;
+        let fleet_start = point_along(
+            launch_start(source, candidate.angle),
+            candidate.angle,
+            speed * segment_time,
+        );
+        let fleet_end = point_along(
+            launch_start(source, candidate.angle),
+            candidate.angle,
+            speed * (segment_time + 1.0),
+        );
+
+        swept_pair_hit(
+            fleet_start,
+            fleet_end,
+            path[segment],
+            path[segment + 1],
+            target_radius,
+        )
+    }
+
+    fn test_orbit_path(target: &Planet, angular_velocity: f64, point_count: u32) -> OrbitPath {
+        OrbitPath {
+            planet_id: target.id,
+            points: (0..point_count)
+                .map(|tick| {
+                    if tick == 0 {
+                        target.position()
+                    } else {
+                        orbit_position(target.position(), angular_velocity, f64::from(tick))
+                    }
+                })
+                .collect(),
+        }
     }
 
     #[test]
@@ -1033,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn orbiting_target_candidate_solves_centerline_intercept() {
+    fn orbiting_target_candidate_solves_inflated_radius_intercept() {
         let state = state_from_planets(vec![
             planet(0, 0, 97.0, 50.0, 3.0, 500),
             planet(1, -1, 50.0, 20.0, 3.0, 100),
@@ -1042,7 +1180,7 @@ mod tests {
         let target = state.planets.get(1).expect("target");
         let speed = fleet_speed(300, state.config.ship_speed);
 
-        let candidate = orbiting_target_candidate(&state, source, target, speed)
+        let candidate = cached_orbiting_target_candidate(&state, source, target, speed)
             .expect("orbiting target should have an intercept");
         let initial_target = state.initial_planets.get(1).expect("initial target");
         let target_pos = orbit_position(
@@ -1053,8 +1191,8 @@ mod tests {
         let clearance = source.radius + 0.1 + target.radius;
         let residual = distance(target_pos, source.position()) - clearance - speed * candidate.time;
 
-        assert!(residual.abs() <= 1e-5, "residual {residual}");
-        assert!((candidate.angle - angle_between(source.position(), target_pos)).abs() <= 1e-12);
+        assert!(residual.abs() <= 1e-3, "residual {residual}");
+        assert!((candidate.angle - angle_between(source.position(), target_pos)).abs() <= 1e-3);
     }
 
     #[test]
@@ -1073,7 +1211,7 @@ mod tests {
                 <= state.angular_velocity.abs()
                     * distance(target.position(), Point::new(CENTER, CENTER))
         );
-        assert!(orbiting_target_candidate(&state, source, target, speed).is_some());
+        assert!(cached_orbiting_target_candidate(&state, source, target, speed).is_some());
     }
 
     #[test]
@@ -1092,7 +1230,7 @@ mod tests {
             let target = state.planets.get(1).expect("target");
             let speed = fleet_speed(ships, state.config.ship_speed);
 
-            let fast = orbiting_target_candidate(&state, source, target, speed)
+            let fast = cached_orbiting_target_candidate(&state, source, target, speed)
                 .expect("fast solver should find an intercept");
             let dense = dense_orbiting_target_candidate(&state, source, target, speed)
                 .expect("dense solver should find an intercept");
@@ -1150,7 +1288,7 @@ mod tests {
         let target = state.planets.get(1).expect("target");
         let speed = fleet_speed(40, state.config.ship_speed);
 
-        let fast = orbiting_target_candidate(&state, source, target, speed)
+        let fast = cached_orbiting_target_candidate(&state, source, target, speed)
             .expect("fast solver should find an intercept");
         let dense = dense_orbiting_target_candidate(&state, source, target, speed)
             .expect("dense solver should find an intercept");
@@ -1190,6 +1328,239 @@ mod tests {
 
         assert!(residual.abs() <= 1e-5, "residual {residual}");
         assert!((candidate.angle - angle_between(source.position(), target_pos)).abs() <= 1e-12);
+    }
+
+    #[test]
+    fn piecewise_linear_comet_candidates_hit_swept_segments() {
+        let sources = [
+            planet(0, 0, 10.0, 80.0, 2.0, 500),
+            planet(1, 0, 90.0, 20.0, 3.0, 500),
+            planet(2, 0, 50.0, 50.0, 1.5, 500),
+        ];
+        let speeds = [
+            fleet_speed(6, 6.0),
+            fleet_speed(40, 6.0),
+            fleet_speed(500, 6.0),
+        ];
+        let paths = [
+            (0..35)
+                .map(|index| Point::new(35.0 + f64::from(index) * 1.7, 80.0))
+                .collect::<Vec<_>>(),
+            (0..35)
+                .map(|index| {
+                    Point::new(80.0 - f64::from(index) * 1.5, 15.0 + f64::from(index) * 1.3)
+                })
+                .collect::<Vec<_>>(),
+            (0..35)
+                .map(|index| {
+                    let time = f64::from(index);
+                    Point::new(20.0 + time * 2.0, 70.0 - time * 0.8)
+                })
+                .collect::<Vec<_>>(),
+        ];
+
+        let mut checked = 0;
+        for source in sources {
+            for speed in speeds {
+                for path in &paths {
+                    for candidate in piecewise_linear_target_candidates(&source, 1.25, speed, path)
+                    {
+                        assert_candidate_hits_swept_segment(&source, 1.25, path, speed, candidate);
+                        checked += 1;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            checked > 10,
+            "test cases should produce meaningful comet candidates"
+        );
+    }
+
+    #[test]
+    fn piecewise_linear_orbiting_candidates_hit_swept_segments() {
+        let target_positions = [
+            Point::new(50.0, 20.0),
+            Point::new(78.0, 50.0),
+            Point::new(35.0, 76.0),
+        ];
+        let sources = [
+            planet(0, 0, 12.0, 50.0, 2.0, 500),
+            planet(1, 0, 88.0, 18.0, 3.0, 500),
+            planet(2, 0, 45.0, 88.0, 1.5, 500),
+        ];
+        let speeds = [
+            fleet_speed(6, 6.0),
+            fleet_speed(40, 6.0),
+            fleet_speed(500, 6.0),
+        ];
+
+        let mut checked = 0;
+        for (target_index, target_pos) in target_positions.into_iter().enumerate() {
+            let target = planet(
+                10 + target_index as u32,
+                -1,
+                target_pos.x,
+                target_pos.y,
+                1.25,
+                100,
+            );
+            let orbit_path = test_orbit_path(&target, 0.035, 120);
+            let mut state = state_from_planets(vec![target.clone()]);
+            state.step = 1;
+            state.angular_velocity = 0.035;
+            state.orbit_paths = vec![orbit_path];
+
+            for source in &sources {
+                for speed in speeds {
+                    let (min_time, max_time) = orbit_time_bounds(source, &target, &target, speed);
+                    let path = &state.orbit_paths[0].points;
+                    for candidate in piecewise_linear_target_candidates_in_time_range(
+                        source,
+                        target.radius,
+                        speed,
+                        path,
+                        min_time,
+                        max_time,
+                    ) {
+                        assert_candidate_hits_swept_segment(
+                            source,
+                            target.radius,
+                            path,
+                            speed,
+                            candidate,
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            checked > 10,
+            "test cases should produce meaningful orbiting candidates"
+        );
+    }
+
+    #[test]
+    fn cached_orbit_path_matches_step_zero_swept_phase() {
+        let source = planet(0, 0, 12.0, 50.0, 2.0, 500);
+        let target = planet(1, -1, 50.0, 20.0, 1.25, 100);
+        let mut state = state_from_planets(vec![source.clone(), target.clone()]);
+        state.step = 0;
+        state.angular_velocity = 0.035;
+        state.orbit_paths = vec![test_orbit_path(&target, state.angular_velocity, 120)];
+        let speed = fleet_speed(500, state.config.ship_speed);
+
+        let candidate = cached_orbiting_target_candidate(&state, &source, &target, speed)
+            .expect("cached step-zero orbit path should have an intercept");
+        let mut simulator_path = Vec::with_capacity(state.orbit_paths[0].points.len() + 1);
+        simulator_path.push(target.position());
+        simulator_path.push(target.position());
+        simulator_path.extend_from_slice(&state.orbit_paths[0].points[1..]);
+
+        assert_candidate_hits_swept_segment(
+            &source,
+            target.radius,
+            &simulator_path,
+            speed,
+            candidate,
+        );
+    }
+
+    #[test]
+    fn analytic_orbiting_candidates_are_compared_to_swept_segments() {
+        let sources = [
+            planet(0, 0, 12.0, 50.0, 2.0, 500),
+            planet(1, 0, 88.0, 18.0, 3.0, 500),
+            planet(2, 0, 45.0, 88.0, 1.5, 500),
+            planet(3, 0, 20.0, 20.0, 2.5, 500),
+            planet(4, 0, 80.0, 80.0, 2.0, 500),
+        ];
+        let speeds = [
+            fleet_speed(6, 6.0),
+            fleet_speed(40, 6.0),
+            fleet_speed(500, 6.0),
+        ];
+        let angular_velocities = [0.025, 0.035, 0.05];
+        let target_angles: [f64; 9] = [0.0, 0.7, 1.4, 2.1, 2.8, 3.5, 4.2, 4.9, 5.6];
+
+        let mut analytic_checked = 0;
+        let mut analytic_hits = 0;
+        let mut piecewise_checked = 0;
+        let mut piecewise_hits = 0;
+
+        for angular_velocity in angular_velocities {
+            for target_angle in target_angles {
+                let target = planet(
+                    10,
+                    -1,
+                    CENTER + target_angle.cos() * 30.0,
+                    CENTER + target_angle.sin() * 30.0,
+                    1.25,
+                    100,
+                );
+                let orbit_path = test_orbit_path(&target, angular_velocity, 120);
+                let mut state = state_from_planets(vec![target.clone()]);
+                state.step = 1;
+                state.angular_velocity = angular_velocity;
+                state.orbit_paths = vec![orbit_path];
+                let path = &state.orbit_paths[0].points;
+
+                for source in &sources {
+                    for speed in speeds {
+                        if let Some(candidate) =
+                            dense_orbiting_target_candidate(&state, source, &target, speed)
+                        {
+                            analytic_checked += 1;
+                            if candidate_hits_swept_segment(
+                                source,
+                                target.radius,
+                                path,
+                                speed,
+                                candidate,
+                            ) {
+                                analytic_hits += 1;
+                            }
+                        }
+
+                        let (min_time, max_time) =
+                            orbit_time_bounds(source, &target, &target, speed);
+                        if let Some(candidate) = piecewise_linear_target_candidates_in_time_range(
+                            source,
+                            target.radius,
+                            speed,
+                            path,
+                            min_time,
+                            max_time,
+                        )
+                        .into_iter()
+                        .next()
+                        {
+                            piecewise_checked += 1;
+                            if candidate_hits_swept_segment(
+                                source,
+                                target.radius,
+                                path,
+                                speed,
+                                candidate,
+                            ) {
+                                piecewise_hits += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        println!(
+            "analytic swept hits: {analytic_hits}/{analytic_checked}; piecewise swept hits: {piecewise_hits}/{piecewise_checked}",
+        );
+        assert!(analytic_checked > 100);
+        assert!(piecewise_checked > 100);
+        assert_eq!(analytic_hits, analytic_checked);
+        assert_eq!(piecewise_hits, piecewise_checked);
     }
 
     #[test]

@@ -865,8 +865,10 @@ impl StateSnapshot {
         action_slots: &ActionEntitySlots,
         player_finished: &[bool],
     ) -> Self {
+        let mut state = state.clone();
+        state.orbit_paths.clear();
         Self {
-            state: state.clone(),
+            state,
             player_map: *player_map,
             action_slots: *action_slots,
             player_finished: player_finished.to_vec(),
@@ -1574,6 +1576,7 @@ mod tests {
             next_fleet_id: 0,
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
+            orbit_paths: Vec::new(),
         }
     }
 
@@ -1626,6 +1629,7 @@ mod tests {
             next_fleet_id: 0,
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
+            orbit_paths: Vec::new(),
         }
     }
 
@@ -1649,6 +1653,7 @@ mod tests {
             next_fleet_id: 0,
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
+            orbit_paths: Vec::new(),
         }
     }
 

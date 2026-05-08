@@ -395,13 +395,13 @@ by the sun or another static planet, it tries both edge paths using
 `target_radius - eps`, then prefers an unobstructed path, then a path that avoids
 the sun, and finally the centerline if every candidate hits the sun.
 
-For orbiting non-comet planets, decoding computes a single centerline
-time-of-impact trajectory against the analytic orbit curve. It first uses the
-orbit radius to bound the possible impact interval, then uses monotonic bisection
-when the fleet is faster than the target's tangential speed, otherwise a capped
-coarse scan followed by bisection. This fast orbiting path does not validate sun
-or planet obstruction before emitting the launch angle. For comets, decoding
-solves analytic centerline intercepts against each stored linear path segment,
+For orbiting non-comet planets, reset caches future tick positions across the
+episode horizon, and decoding solves inflated-radius intercepts against the
+cached linear segments for the selected target. Manually reconstructed states
+without that cache build the selected target path lazily during decode. This
+fast orbiting path does not validate sun or planet obstruction before emitting
+the launch angle. For comets, decoding
+solves inflated-radius intercepts against each stored linear path segment,
 then applies the existing sun and static-planet blocker preference over the
 resulting candidates. If no comet intercept exists within the known future path,
 the submitted launch is treated as a no-op and counted in

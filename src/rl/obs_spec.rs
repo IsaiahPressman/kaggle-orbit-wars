@@ -746,6 +746,7 @@ fn state_from_array_views(
         next_fleet_id: 0,
         comets,
         comet_planet_ids: flattened_comet_planet_ids,
+        orbit_paths: Vec::new(),
     })
 }
 
@@ -1408,6 +1409,7 @@ mod tests {
             next_fleet_id: 0,
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
+            orbit_paths: Vec::new(),
         };
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
         let mut orbiting_planet_obs = vec![false; MAX_PLANETS];
@@ -1468,6 +1470,7 @@ mod tests {
             next_fleet_id: 1,
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
+            orbit_paths: Vec::new(),
         };
         let player_map = PlayerMap::from_outer_slots(2, [3, 1, 0, 2]);
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
@@ -1526,6 +1529,7 @@ mod tests {
             next_fleet_id: 0,
             comets: Vec::new(),
             comet_planet_ids: Vec::new(),
+            orbit_paths: Vec::new(),
         };
         let mut planet_obs = vec![0.0; MAX_PLANETS * PLANET_CHANNELS];
         let mut orbiting_planet_obs = vec![false; MAX_PLANETS];

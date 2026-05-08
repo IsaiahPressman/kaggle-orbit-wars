@@ -829,6 +829,7 @@ mod tests {
             next_fleet_id: case.before.next_fleet_id,
             comets: Vec::new(),
             comet_planet_ids: case.before.comet_planet_ids,
+            orbit_paths: Vec::new(),
         };
 
         let result = step(&mut state, &vec![Vec::new(); case.players]);
