@@ -41,7 +41,12 @@ class ActorDiscreteTargetsConfig(BaseConfig):
         return self
 
 
+class ActorDiscreteTargetBinsConfig(BaseConfig):
+    action_spec: Literal["discrete_target_bins"] = "discrete_target_bins"
+    n_bins: int = Field(ge=2)
+
+
 ActorConfig: TypeAlias = Annotated[
-    ActorPureConfig | ActorDiscreteTargetsConfig,
+    ActorPureConfig | ActorDiscreteTargetsConfig | ActorDiscreteTargetBinsConfig,
     Field(discriminator="action_spec"),
 ]

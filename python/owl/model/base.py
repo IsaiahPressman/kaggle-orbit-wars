@@ -13,10 +13,11 @@ InputLayer = nn.Module | nn.Parameter
 
 @dataclass
 class ModelActions:
-    launch: torch.Tensor
-    ships: torch.Tensor
+    launch: torch.Tensor | None = None
+    ships: torch.Tensor | None = None
     angle: torch.Tensor | None = None
     target: torch.Tensor | None = None
+    fleet_bin: torch.Tensor | None = None
 
     def action_value(self) -> torch.Tensor:
         if self.angle is not None and self.target is None:

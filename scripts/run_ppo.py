@@ -852,11 +852,7 @@ def _evaluate_player_count(
             config=cfg.rl,
             device=device,
         )
-        obs, rewards, dones, _step_env_metrics = env.step(
-            actions.launch,
-            actions.action_value(),
-            actions.ships,
-        )
+        obs, rewards, dones, _step_env_metrics = env.step(actions)
         steps += n_envs
         terminal_envs = torch.nonzero(dones.all(dim=1), as_tuple=False).flatten()
         terminal_env_set = {int(env_index.item()) for env_index in terminal_envs}
@@ -1021,9 +1017,13 @@ def _eval_actions_for_assignments(
 def _obs_to_device(obs: ObsBatch, device: torch.device) -> ObsBatch:
     return ObsBatch(
         **{
-            field: getattr(obs, field).to(
-                device=device,
-                non_blocking=device.type == "cuda",
+            field: (
+                None
+                if getattr(obs, field) is None
+                else getattr(obs, field).to(
+                    device=device,
+                    non_blocking=device.type == "cuda",
+                )
             )
             for field in ObsBatch.model_fields
         }
@@ -1037,10 +1037,15 @@ def _select_actions(
 ) -> ModelActions:
     action_mask = use_a[:, :, None, None]
     return ModelActions(
-        launch=torch.where(action_mask, actions_a.launch, actions_b.launch).cpu(),
-        ships=torch.where(action_mask, actions_a.ships, actions_b.ships).cpu(),
+        launch=_select_optional_action(actions_a.launch, actions_b.launch, action_mask),
+        ships=_select_optional_action(actions_a.ships, actions_b.ships, action_mask),
         angle=_select_optional_action(actions_a.angle, actions_b.angle, action_mask),
         target=_select_optional_action(actions_a.target, actions_b.target, action_mask),
+        fleet_bin=_select_optional_action(
+            actions_a.fleet_bin,
+            actions_b.fleet_bin,
+            use_a[:, :, None],
+        ),
     )
 
 
@@ -1053,6 +1058,8 @@ def _select_optional_action(
         return None
     if tensor_a is None or tensor_b is None:
         raise ValueError("checkpoint action value tensors must have matching kinds")
+    while mask.ndim < tensor_a.ndim:
+        mask = mask.unsqueeze(-1)
     return torch.where(mask, tensor_a, tensor_b).cpu()
 
 

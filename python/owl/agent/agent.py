@@ -107,9 +107,7 @@ class Agent:
         actions = actions_to_kaggle(
             obs_dict,
             observation.player,
-            output.actions.launch.cpu(),
-            output.actions.action_value().cpu(),
-            output.actions.ships.cpu(),
+            output.actions,
             action_spec=self.checkpoint_config.env.action_spec,
         )
         conversion_ms = _elapsed_ms(conversion_start)
@@ -130,7 +128,11 @@ class Agent:
     def _obs_to_device(self, obs: ObsBatch) -> ObsBatch:
         return ObsBatch(
             **{
-                field: getattr(obs, field).to(device=self.device)
+                field: (
+                    None
+                    if getattr(obs, field) is None
+                    else getattr(obs, field).to(device=self.device)
+                )
                 for field in ObsBatch.model_fields
             }
         )

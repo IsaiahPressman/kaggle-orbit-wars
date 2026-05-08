@@ -8,6 +8,7 @@ from owl.model.base import (
     ModelOutput,
 )
 from owl.model.stateless_transformer_v1 import (
+    ActorDiscreteTargetBinsConfig,
     ActorDiscreteTargetsConfig,
     ActorPureConfig,
     ModelConfig,
@@ -16,6 +17,7 @@ from owl.model.stateless_transformer_v1 import (
 )
 
 __all__ = [
+    "ActorDiscreteTargetBinsConfig",
     "ActorDiscreteTargetsConfig",
     "ActorPureConfig",
     "BaseModelAPI",
