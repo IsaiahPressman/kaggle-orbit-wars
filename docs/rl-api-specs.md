@@ -407,11 +407,6 @@ resulting candidates. If no comet intercept exists within the known future path,
 the submitted launch is treated as a no-op and counted in
 `comet_launch_failures_per_game`.
 
-`episode_metrics` is a `dict[str, list[float]]` populated only for sub-envs that
-terminated during this step. Empty steps return `{}`. Each list contains one
-value per terminal episode for that metric, so Python training can aggregate
-across the rollout before logging W&B scalars under `train/`.
-
 ## Replay Snapshots
 
 `VectorizedEnv.state_snapshot(env_index)` returns a JSON-serializable snapshot
@@ -427,6 +422,13 @@ count, owner IDs remapped into outer player slots, the internal/outer player map
 outer-slot `player_finished`, action entity slot planet IDs, planets, fleets,
 comet groups, and comet paths. Neutral ownership remains `-1`, and each planet
 or fleet also includes `internal_owner` when the engine-owned ID is needed.
+
+## Episode Metrics
+
+`episode_metrics` is a `dict[str, list[float]]` populated only for sub-envs that
+terminated during this step. Empty steps return `{}`. Each list contains one
+value per terminal episode for that metric, so Python training can aggregate
+across the rollout before logging W&B scalars under `train/`.
 
 Terminal episode metrics:
 

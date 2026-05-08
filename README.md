@@ -148,7 +148,8 @@ Policy logs include total entropy plus policy-specific component means such as
 `--replay-dir`, defaulting to `replays/benchmark_checkpoints`.
 Each sampled benchmark game is written as its own JSONL file.
 Open `tools/orbit_wars_replay_viewer.html` in a browser and choose
-a saved `.jsonl` file to play back a sampled game.
+a saved `.jsonl` file or Kaggle episode replay `.json` file to play back a
+game.
 
 Replay rows contain raw Rust environment snapshots for one completed game:
 board constants, step/config values, outer-slot owner IDs, player maps, action

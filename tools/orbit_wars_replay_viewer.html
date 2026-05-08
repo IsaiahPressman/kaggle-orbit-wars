@@ -375,7 +375,7 @@
     <div class="topbar">
       <input id="fileInput" type="file" accept=".jsonl,.json,application/json" />
       <select id="episodeSelect" class="hidden" aria-label="Episode"></select>
-      <div class="status" id="fileStatus">No replay loaded</div>
+      <div class="status" id="fileStatus">Open replay JSON or JSONL</div>
     </div>
 
     <div class="content-shell">
@@ -500,12 +500,70 @@
       function parseReplayText(text) {
         const trimmed = text.trim();
         if (!trimmed) return [];
-        if (trimmed.startsWith("[")) return JSON.parse(trimmed);
-        if (trimmed.startsWith("{") && !trimmed.includes("\n")) return [JSON.parse(trimmed)];
+        if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+          try {
+            return normalizeReplayRows(JSON.parse(trimmed));
+          } catch (error) {
+            if (!trimmed.includes("\n")) throw error;
+          }
+        }
         return trimmed
           .split(/\r?\n/)
           .filter(Boolean)
           .map((line) => JSON.parse(line));
+      }
+
+      function normalizeReplayRows(parsed) {
+        const rows = Array.isArray(parsed) ? parsed : [parsed];
+        return rows.map((row) => (isKaggleReplay(row) ? kaggleReplayToEpisode(row) : row));
+      }
+
+      function isKaggleReplay(row) {
+        return row && Array.isArray(row.steps) && row.configuration && row.info;
+      }
+
+      function kaggleReplayToEpisode(replay) {
+        const steps = replay.steps || [];
+        const playerCount = steps[0]?.length || 0;
+        const playerNames =
+          replay.info?.TeamNames || replay.info?.Agents?.map((agent) => agent.Name) || [];
+        const frames = [];
+        for (const step of steps) {
+          const playerRows = Array.isArray(step) ? step : [];
+          const observation = playerRows[0]?.observation;
+          if (!observation?.planets) continue;
+          frames.push({
+            ...observation,
+            terminal:
+              playerRows.length > 0 &&
+              playerRows.every((row) => row.status && row.status !== "ACTIVE"),
+            rewards: playerRows.map((row) => row.reward),
+            dones: playerRows.map((row) => row.status && row.status !== "ACTIVE"),
+            statuses: playerRows.map((row) => row.status),
+          });
+        }
+        if (frames.length) frames[frames.length - 1].terminal = true;
+        return {
+          schema_version: 1,
+          source: "kaggle",
+          player_count: playerCount,
+          game_ordinal: replay.info?.EpisodeId ?? replay.id ?? 0,
+          model_assignments: Array.from(
+            { length: Math.max(4, playerCount) },
+            (_, index) => index,
+          ),
+          start_mask: Array.from(
+            { length: Math.max(4, playerCount) },
+            (_, index) => index < playerCount,
+          ),
+          player_names: playerNames,
+          metadata: {
+            configuration: replay.configuration,
+            episode_id: replay.info?.EpisodeId ?? replay.id,
+            seed: replay.info?.seed,
+          },
+          frames,
+        };
       }
 
       function episodeLabel(row, index) {
@@ -572,6 +630,8 @@
       }
 
       function playerName(row, slot) {
+        const name = row?.player_names?.[slot];
+        if (name) return name;
         const assignment = row?.model_assignments?.[slot];
         const label = modelLabel(assignment, row?.source);
         return `${label} P${slot}`;
@@ -695,7 +755,7 @@
           c.font = "12px Inter, sans-serif";
           c.textAlign = "center";
           c.textBaseline = "middle";
-          c.fillText("Open a replay to plot turns", width / 2, height / 2);
+          c.fillText("Open replay JSON or JSONL to plot turns", width / 2, height / 2);
           return;
         }
 
@@ -861,7 +921,7 @@
           c.font = `bold ${Math.max(12, scale * 2)}px Inter, sans-serif`;
           c.textAlign = "center";
           c.textBaseline = "middle";
-          c.fillText("Open a replay JSONL", w / 2, w / 2);
+          c.fillText("Open replay JSON or JSONL", w / 2, w / 2);
           return;
         }
 
