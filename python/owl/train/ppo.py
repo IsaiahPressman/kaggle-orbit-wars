@@ -384,6 +384,7 @@ class PPOTrainer:
         rollout_elapsed = max(perf_counter() - rollout_start, 1e-12)
         env_metrics = self._last_env_metrics
         segments = self.rollout.segment_major()
+        max_entities_seen = segments.obs.entity_mask.sum(dim=-1).max()
         value_mask = segments.obs.still_playing
         policy_mask = _policy_mask(segments.obs)
         ratios = (
@@ -435,6 +436,9 @@ class PPOTrainer:
         )
         metrics["train/advantage_std"] = float(
             self._masked_std(advantages, policy_mask).item()
+        )
+        metrics["train/max_entities"] = float(
+            self._masked_max(max_entities_seen).item()
         )
         self.player_step_total += self._sum_int(value_mask.sum())
         metrics["train/player_step_total"] = float(self.player_step_total)

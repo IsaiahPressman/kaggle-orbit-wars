@@ -961,10 +961,11 @@ def _assign_eval_models(
             f"for env {env_index}"
         )
 
-    pattern = _eval_assignment_pattern(player_count)
+    pattern = torch.tensor(_eval_assignment_pattern(player_count), dtype=torch.int64)
+    pattern = pattern[torch.randperm(pattern.numel())]
     assignments[env_index].fill_(-1)
     for slot, model_index in zip(active, pattern, strict=True):
-        assignments[env_index, slot] = model_index
+        assignments[env_index, slot] = int(model_index.item())
 
 
 def _eval_assignment_pattern(player_count: int) -> tuple[int, ...]:

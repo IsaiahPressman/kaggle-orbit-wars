@@ -116,7 +116,8 @@ simulator snapshots. Periodic checkpoint names use grouped zero-padded
 environment-step labels such as `checkpoint_00_022_000_000.pt`. At each
 periodic checkpoint, the
 current model is evaluated against the last-best model snapshot using
-sampled policy actions and logs
+sampled policy actions, with current and last-best seats randomly shuffled
+across active player slots for each eval game, and logs
 `eval/win_rate_against_last_best` plus terminal environment metrics under
 `eval/`. When the current model reaches at least 70% eval win rate, the
 last-best snapshot is replaced and also saved as `checkpoint_last_best.pt`.

@@ -884,6 +884,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "train/policy_active_ratio",
         "train/advantage_mean",
         "train/advantage_std",
+        "train/max_entities",
         "train/player_step_total",
         "sampling/priority_mean",
         "sampling/priority_entropy",
@@ -901,6 +902,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
     assert metrics["policy/launch_entropy"] == pytest.approx(metrics["policy/entropy"])
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(0.0)
     assert metrics["policy/target_kl_exceeded_total"] == pytest.approx(0.0)
+    assert metrics["train/max_entities"] == pytest.approx(2.0)
     assert metrics["train/player_step_total"] == pytest.approx(80.0)
     assert metrics["optimizer/steps"] == pytest.approx(2.0)
     assert metrics["optimizer/learning_rate"] == pytest.approx(0.05)

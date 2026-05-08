@@ -90,8 +90,14 @@ class _FakeLogger:
 
 
 class _FakeTrainer:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        metrics: dict[str, float] | None = None,
+    ) -> None:
         self.fail = fail
+        self.metrics = {"loss": 1.0} if metrics is None else metrics
         self.checkpoints: list[tuple[Path, int, str | None]] = []
         self.iterations = 0
         self.model = torch.nn.Linear(1, 1)
@@ -101,7 +107,7 @@ class _FakeTrainer:
         self.iterations += 1
         if self.fail:
             raise RuntimeError("training failed")
-        return {"loss": 1.0}
+        return dict(self.metrics)
 
     def write_checkpoint(
         self,
@@ -410,6 +416,46 @@ def test_record_eval_terminal_result_counts_team_ties_as_half_win() -> None:
     assert stats.win_rate(run_ppo.MODEL_CURRENT) == pytest.approx(0.5)
 
 
+def test_assign_eval_models_randomizes_active_player_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assignments = torch.full((2, 4), -1, dtype=torch.int64)
+    permutations = iter(
+        [
+            torch.tensor([1, 0]),
+            torch.tensor([3, 0, 2, 1]),
+        ]
+    )
+
+    monkeypatch.setattr(run_ppo.torch, "randperm", lambda _n: next(permutations))
+
+    run_ppo._assign_eval_models(
+        assignments,
+        0,
+        active_slots=torch.tensor([True, True, False, False]),
+        player_count=2,
+    )
+    run_ppo._assign_eval_models(
+        assignments,
+        1,
+        active_slots=torch.tensor([True, True, True, True]),
+        player_count=4,
+    )
+
+    assert assignments[0].tolist() == [
+        run_ppo.MODEL_LAST_BEST,
+        run_ppo.MODEL_CURRENT,
+        -1,
+        -1,
+    ]
+    assert assignments[1].tolist() == [
+        run_ppo.MODEL_CURRENT,
+        run_ppo.MODEL_CURRENT,
+        run_ppo.MODEL_LAST_BEST,
+        run_ppo.MODEL_LAST_BEST,
+    ]
+
+
 def test_eval_actions_for_assignments_uses_stochastic_model_outputs() -> None:
     class FakeModel:
         def __init__(self, *, launch_value: bool, ship_value: int) -> None:
@@ -506,7 +552,18 @@ def test_run_training_loop_writes_periodic_checkpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg = _full_config(checkpoint_freq=1000)
-    trainer = _FakeTrainer()
+    cfg = cfg.model_copy(
+        update={
+            "env": cfg.env.model_copy(
+                update={
+                    "obs_spec": EntityBasedConfig(
+                        max_entities=MAX_PLANETS + MAX_COMETS + 3
+                    ),
+                },
+            ),
+        },
+    )
+    trainer = _FakeTrainer(metrics={"loss": 1.0, "train/max_entities": 17.0})
     logger = _FakeLogger()
     eval_calls = 0
 
@@ -537,6 +594,8 @@ def test_run_training_loop_writes_periodic_checkpoints(
         (tmp_path / "checkpoint_00_000_001_600.pt", 1600, None)
     ]
     assert [step for _metrics, step in logger.logged] == [800, 1600, 1600]
+    assert logger.logged[0][0]["train/max_entities"] == pytest.approx(17.0)
+    assert logger.logged[1][0]["train/max_entities"] == pytest.approx(17.0)
     assert logger.logged[-1][0] == {"eval/win_rate_against_last_best": 0.25}
     assert eval_calls == 1
     assert "model/trainable_parameters" not in logger.logged[0][0]
