@@ -19,9 +19,8 @@ from owl.model.base import (
     InputLayer,
     ModelActionEntropies,
     ModelActionLogProbs,
-    ModelActions,
 )
-from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS
+from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS, PureActions
 
 
 @dataclass(frozen=True)
@@ -92,7 +91,7 @@ class PureActor(nn.Module):
         *,
         min_fleet_size: int,
         deterministic: bool,
-    ) -> tuple[ModelActions, ModelActionLogProbs, ModelActionEntropies]:
+    ) -> tuple[PureActions, ModelActionLogProbs, ModelActionEntropies]:
         max_slots = self.max_per_planet_launches
         launch_slots: list[torch.Tensor] = []
         angle_slots: list[torch.Tensor] = []
@@ -218,23 +217,23 @@ class PureActor(nn.Module):
         )
 
         return (
-            ModelActions(
+            PureActions(
                 launch=launch_tensor,
                 angle=angle_tensor,
                 ships=ship_tensor,
             ),
             ModelActionLogProbs(
                 launch=launch_log_tensor,
-                angle_and_size=event_log_tensor,
+                event=event_log_tensor,
                 per_player_entity=per_player_entity_log_prob,
             ),
             ModelActionEntropies(
                 launch=launch_entropy_tensor,
-                angle_and_size=event_entropy_tensor,
+                event=event_entropy_tensor,
                 per_player_entity=per_player_entity_entropy,
                 components={
                     "launch": launch_entropy_tensor.sum(dim=-1),
-                    "angle_and_size": event_entropy_tensor.sum(dim=-1),
+                    "event": event_entropy_tensor.sum(dim=-1),
                 },
             ),
         )
@@ -244,7 +243,7 @@ class PureActor(nn.Module):
         slot_input: torch.Tensor,
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
-        actions: ModelActions,
+        actions: PureActions,
         *,
         min_fleet_size: int,
     ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
@@ -257,8 +256,9 @@ class PureActor(nn.Module):
                 self.max_per_planet_launches,
             ),
         )
-        if actions.angle is None:
-            raise ValueError("pure actions require actions.angle")
+        action_launch = actions.launch
+        action_angle = actions.angle
+        action_ships = actions.ships
 
         launch_log_slots: list[torch.Tensor] = []
         event_log_slots: list[torch.Tensor] = []
@@ -294,9 +294,9 @@ class PureActor(nn.Module):
                 hidden_state,
             )
             params = self.actor_heads(slot_hidden).to_distribution_dtype()
-            launch = actions.launch[..., slot]
-            angle = actions.angle[..., slot]
-            ships = actions.ships[..., slot]
+            launch = action_launch[..., slot]
+            angle = action_angle[..., slot]
+            ships = action_ships[..., slot]
             event_mask = active & launch
             _require_valid_action_slot(
                 launch,
@@ -369,16 +369,16 @@ class PureActor(nn.Module):
         return (
             ModelActionLogProbs(
                 launch=launch_log_tensor,
-                angle_and_size=event_log_tensor,
+                event=event_log_tensor,
                 per_player_entity=per_player_entity_log_prob,
             ),
             ModelActionEntropies(
                 launch=launch_entropy_tensor,
-                angle_and_size=event_entropy_tensor,
+                event=event_entropy_tensor,
                 per_player_entity=per_player_entity_entropy,
                 components={
                     "launch": launch_entropy_tensor.sum(dim=-1),
-                    "angle_and_size": event_entropy_tensor.sum(dim=-1),
+                    "event": event_entropy_tensor.sum(dim=-1),
                 },
             ),
         )
@@ -785,7 +785,7 @@ def _per_player_action_entity_log_prob(
 
 
 def _require_actions_shape(
-    actions: ModelActions,
+    actions: PureActions,
     expected_shape: tuple[int, int, int, int],
 ) -> None:
     for name, tensor in (
@@ -793,20 +793,14 @@ def _require_actions_shape(
         ("angle", actions.angle),
         ("ships", actions.ships),
     ):
-        if tensor is None:
-            raise ValueError(f"actions.{name} is required for pure actions")
         if tensor.shape != expected_shape:
             raise ValueError(
                 f"actions.{name} must have shape {expected_shape}, got {tensor.shape}"
             )
-    if actions.target is not None:
-        raise ValueError("pure actions must not include actions.target")
     if actions.launch.dtype != torch.bool:
         raise ValueError(
             f"actions.launch must have dtype torch.bool, got {actions.launch.dtype}"
         )
-    if actions.angle is None:
-        raise ValueError("pure actions require actions.angle")
     if actions.angle.dtype != torch.float32:
         raise ValueError(
             f"actions.angle must have dtype torch.float32, got {actions.angle.dtype}"

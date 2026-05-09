@@ -14,9 +14,22 @@ from typing import Any, assert_never
 
 import torch
 import yaml
-from owl.model import BaseModelAPI, ModelActions, ModelConfig, StatelessTransformerV1
+from owl.model import BaseModelAPI, ModelConfig, StatelessTransformerV1
 from owl.replay import ReplayRecorder
-from owl.rl import ActionConfig, ObsBatch, ObsConfig, VectorizedEnv
+from owl.rl import (
+    ActionBundle,
+    ActionConfig,
+    ActionMask,
+    DiscreteTargetActionMask,
+    DiscreteTargetActions,
+    DiscreteTargetBinActionMask,
+    DiscreteTargetBinActions,
+    ObsBatch,
+    ObsConfig,
+    PureActionMask,
+    PureActions,
+    VectorizedEnv,
+)
 from owl.rs import assert_release_build
 from owl.train import FullConfig, PPOCheckpointMetadata, PPOTrainer, configure_torch
 from owl.train.distributed import (
@@ -852,11 +865,7 @@ def _evaluate_player_count(
             config=cfg.rl,
             device=device,
         )
-        obs, rewards, dones, _step_env_metrics = env.step(
-            actions.launch,
-            actions.action_value(),
-            actions.ships,
-        )
+        obs, rewards, dones, _step_env_metrics = env.step(actions)
         steps += n_envs
         terminal_envs = torch.nonzero(dones.all(dim=1), as_tuple=False).flatten()
         terminal_env_set = {int(env_index.item()) for env_index in terminal_envs}
@@ -1007,7 +1016,7 @@ def _eval_actions_for_assignments(
     last_best_model: BaseModelAPI,
     config: DTypeConfig,
     device: torch.device,
-) -> ModelActions:
+) -> ActionBundle:
     device_obs = _obs_to_device(obs, device)
     with autocast_context(config, device):
         current_output = current_model(device_obs, deterministic=False)
@@ -1026,33 +1035,90 @@ def _obs_to_device(obs: ObsBatch, device: torch.device) -> ObsBatch:
                 non_blocking=device.type == "cuda",
             )
             for field in ObsBatch.model_fields
-        }
+            if field != "action_mask"
+        },
+        action_mask=_action_mask_to_device(obs, device),
+    )
+
+
+def _action_mask_to_device(obs: ObsBatch, device: torch.device) -> ActionMask:
+    if isinstance(obs.action_mask, PureActionMask):
+        return PureActionMask(
+            can_act=obs.action_mask.can_act.to(
+                device=device,
+                non_blocking=device.type == "cuda",
+            ),
+            max_launch=obs.action_mask.max_launch.to(
+                device=device,
+                non_blocking=device.type == "cuda",
+            ),
+        )
+    if isinstance(obs.action_mask, DiscreteTargetActionMask):
+        return DiscreteTargetActionMask(
+            can_act=obs.action_mask.can_act.to(
+                device=device,
+                non_blocking=device.type == "cuda",
+            ),
+            max_launch=obs.action_mask.max_launch.to(
+                device=device,
+                non_blocking=device.type == "cuda",
+            ),
+        )
+    return DiscreteTargetBinActionMask(
+        can_act=obs.action_mask.can_act.to(
+            device=device,
+            non_blocking=device.type == "cuda",
+        )
     )
 
 
 def _select_actions(
-    actions_a: ModelActions,
-    actions_b: ModelActions,
+    actions_a: ActionBundle,
+    actions_b: ActionBundle,
     use_a: torch.Tensor,
-) -> ModelActions:
-    action_mask = use_a[:, :, None, None]
-    return ModelActions(
-        launch=torch.where(action_mask, actions_a.launch, actions_b.launch).cpu(),
-        ships=torch.where(action_mask, actions_a.ships, actions_b.ships).cpu(),
-        angle=_select_optional_action(actions_a.angle, actions_b.angle, action_mask),
-        target=_select_optional_action(actions_a.target, actions_b.target, action_mask),
-    )
+) -> ActionBundle:
+    if type(actions_a) is not type(actions_b):
+        raise ValueError("checkpoint action bundles must have matching kinds")
+    if isinstance(actions_a, PureActions) and isinstance(actions_b, PureActions):
+        action_mask = use_a[:, :, None, None]
+        return PureActions(
+            launch=_select_action(actions_a.launch, actions_b.launch, action_mask),
+            angle=_select_action(actions_a.angle, actions_b.angle, action_mask),
+            ships=_select_action(actions_a.ships, actions_b.ships, action_mask),
+        )
+    if isinstance(actions_a, DiscreteTargetActions) and isinstance(
+        actions_b,
+        DiscreteTargetActions,
+    ):
+        action_mask = use_a[:, :, None, None]
+        return DiscreteTargetActions(
+            launch=_select_action(actions_a.launch, actions_b.launch, action_mask),
+            target=_select_action(actions_a.target, actions_b.target, action_mask),
+            ships=_select_action(actions_a.ships, actions_b.ships, action_mask),
+        )
+    if isinstance(actions_a, DiscreteTargetBinActions) and isinstance(
+        actions_b,
+        DiscreteTargetBinActions,
+    ):
+        action_mask = use_a[:, :, None]
+        return DiscreteTargetBinActions(
+            target=_select_action(actions_a.target, actions_b.target, action_mask),
+            fleet_bin=_select_action(
+                actions_a.fleet_bin,
+                actions_b.fleet_bin,
+                action_mask,
+            ),
+        )
+    raise ValueError("unsupported checkpoint action bundle kind")
 
 
-def _select_optional_action(
-    tensor_a: torch.Tensor | None,
-    tensor_b: torch.Tensor | None,
+def _select_action(
+    tensor_a: torch.Tensor,
+    tensor_b: torch.Tensor,
     mask: torch.Tensor,
-) -> torch.Tensor | None:
-    if tensor_a is None and tensor_b is None:
-        return None
-    if tensor_a is None or tensor_b is None:
-        raise ValueError("checkpoint action value tensors must have matching kinds")
+) -> torch.Tensor:
+    while mask.ndim < tensor_a.ndim:
+        mask = mask.unsqueeze(-1)
     return torch.where(mask, tensor_a, tensor_b).cpu()
 
 

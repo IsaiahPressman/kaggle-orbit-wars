@@ -61,8 +61,8 @@ environment returns an `ObsBatch` with these tensors:
 | `entity_mask` | `bool` | `(n_envs, max_entities)` |
 | `still_playing` | `bool` | `(n_envs, 4)` |
 | `global_features` | `float32` | `(n_envs, 3)` |
-| `can_act` | `bool` | action-spec dependent |
-| `max_launch` | `int64` | `(n_envs, 4, ACTION_ENTITY_SLOTS)` |
+| `action_mask.can_act` | `bool` | action-spec dependent |
+| `action_mask.max_launch` | `int64` | pure and discrete-target masks only; `(n_envs, 4, ACTION_ENTITY_SLOTS)` |
 
 All reused buffers are fully overwritten on each observation write. Inactive
 rows are zero-filled and their `entity_mask` slots are set to `False`.
@@ -80,6 +80,9 @@ fixed outer-slot policies in evaluation and benchmarking code, so callers do not
 need to rotate policy-to-slot assignments themselves. After a terminal
 auto-reset, `still_playing` describes the returned reset observation, while
 `dones` still describes the transition that just finished.
+`ObsBatch.can_act` and `ObsBatch.max_launch` remain read-only compatibility
+properties. For target-bin observations, `ObsBatch.max_launch` is `None`;
+`DiscreteTargetBinActionMask` itself has no `max_launch` member.
 
 ### Normalization
 
@@ -305,7 +308,8 @@ outer player slots are active for the episode and the other two are inactive.
 Call:
 
 ```python
-obs, rewards, dones, episode_metrics = env.step(launch, angle, ships)
+actions = PureActions(launch=launch, angle=angle, ships=ships)
+obs, rewards, dones, episode_metrics = env.step(actions)
 ```
 
 `rewards` and `dones` have shape `(n_envs, 4)`. Inactive player slots are
@@ -334,8 +338,8 @@ env, other sub-envs may have advanced before the error is returned.
 For each player and source entity, decoding stops at the first `False` launch
 slot, so later slots for that source are ignored.
 
-For Kaggle submissions, `actions_to_kaggle(obs, player, launch, angle, ships,
-action_spec=...)` accepts a single batched model output with shape
+For Kaggle submissions, `actions_to_kaggle(obs, player, actions, action_spec=...)`
+accepts a `PureActions` bundle with single batched tensors shaped
 `(1, 4, 44, max_per_planet_launches)` and returns the selected player's
 `list[list[float]]` action triples. Pure triples are
 `[from_planet_id, angle, ships]` and use the same Rust validation path as
@@ -376,7 +380,8 @@ the selected launch is decoded.
 Call:
 
 ```python
-obs, rewards, dones, episode_metrics = env.step(launch, target, ships)
+actions = DiscreteTargetActions(launch=launch, target=target, ships=ships)
+obs, rewards, dones, episode_metrics = env.step(actions)
 ```
 
 | Tensor | dtype | Shape | Meaning |
@@ -411,6 +416,60 @@ inflated-radius intercepts against each stored linear path segment, then applies
 the same selected-ray sun/out-of-bounds cancellation. Submitted discrete-target
 launches that cannot produce an allowed ray are treated as no-ops and counted
 in `launch_failures_per_game`.
+
+## Discrete Target Bins Action Spec
+
+Config:
+
+```python
+{"action_spec": "discrete_target_bins", "min_fleet_size": 1, "n_bins": 11}
+```
+
+`ActionDiscreteTargetBinsConfig` uses the same target-slot eligibility as
+`discrete_targets`, but fleet size is selected as a categorical bin instead of
+an integer ship count. `n_bins` is the total action count, including no-op, and
+must be at least `2`.
+
+### Discrete Target Bins Output Tensors
+
+| Tensor | dtype | Shape | Meaning |
+| --- | --- | --- | --- |
+| `can_act` | `bool` | `(n_envs, 4, 44, 44, n_bins)` | whether a player can choose a source, target, and fleet-size bin |
+| `max_launch` | omitted/`None` | n/a | not used by this action spec |
+
+For valid source-target pairs, bin `0` is always available and decodes as
+no-op. Bins `1..n_bins-1` map to:
+
+```text
+round_half_up(bin * available_ships / (n_bins - 1))
+```
+
+Bin `n_bins - 1` maps to all available source ships. Launch bins that would
+produce fewer than `min_fleet_size` ships are masked. If multiple bins round to
+the same ship count, only the highest bin for that ship count remains
+available. For example, with `available_ships=5`, `n_bins=11`, and
+`min_fleet_size=1`, the available bins are `0, 2, 4, 6, 8, 10`.
+
+### Discrete Target Bins Submitted Actions
+
+Call:
+
+```python
+actions = DiscreteTargetBinActions(target=target, fleet_bin=fleet_bin)
+obs, rewards, dones, episode_metrics = env.step(actions)
+```
+
+where `actions` carries:
+
+| Tensor | dtype | Shape | Meaning |
+| --- | --- | --- | --- |
+| `target` | `int64` | `(n_envs, 4, 44)` | target action entity slot index in `[0, 44)` |
+| `fleet_bin` | `int64` | `(n_envs, 4, 44)` | fleet-size action bin in `[0, n_bins)` |
+
+Bin `0` ignores the target value and emits no launch. Nonzero bins validate the
+selected source-target-bin tuple against `can_act`, decode the bin to a ship
+count, then use the same target-to-angle decoder and launch-failure accounting
+as `discrete_targets`.
 
 ## Replay Snapshots
 

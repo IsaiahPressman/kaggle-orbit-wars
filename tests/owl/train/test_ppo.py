@@ -10,7 +10,6 @@ from owl.model import (
     BaseModelAPI,
     ModelActionEntropies,
     ModelActionLogProbs,
-    ModelActions,
     ModelEvaluation,
     ModelOutput,
     StatelessTransformerV1,
@@ -18,10 +17,17 @@ from owl.model import (
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
+    ActionBundle,
+    ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
+    DiscreteTargetActionMask,
+    DiscreteTargetActions,
+    DiscreteTargetBinActionMask,
+    DiscreteTargetBinActions,
     EntityBasedConfig,
     ObsBatch,
+    PureActions,
     VectorizedEnv,
 )
 from owl.train import ppo
@@ -60,26 +66,36 @@ def _obs_batch(*, n_envs: int, obs_spec: EntityBasedConfig) -> ObsBatch:
 def _actions(
     n_envs: int,
     max_launches: int = ActionPureConfig().max_per_planet_launches,
-    kind: Literal["pure", "discrete_targets"] = "pure",
-) -> ModelActions:
+    kind: Literal["pure", "discrete_targets", "discrete_target_bins"] = "pure",
+) -> ActionBundle:
+    if kind == "discrete_target_bins":
+        shape = (n_envs, 4, ACTION_ENTITY_SLOTS)
+        return DiscreteTargetBinActions(
+            target=torch.zeros(shape, dtype=torch.int64),
+            fleet_bin=torch.zeros(shape, dtype=torch.int64),
+        )
     shape = (n_envs, 4, ACTION_ENTITY_SLOTS, max_launches)
-    return ModelActions(
+    if kind == "pure":
+        return PureActions(
+            launch=torch.zeros(shape, dtype=torch.bool),
+            angle=torch.zeros(shape, dtype=torch.float32),
+            ships=torch.zeros(shape, dtype=torch.int64),
+        )
+    return DiscreteTargetActions(
         launch=torch.zeros(shape, dtype=torch.bool),
+        target=torch.zeros(shape, dtype=torch.int64),
         ships=torch.zeros(shape, dtype=torch.int64),
-        angle=(torch.zeros(shape, dtype=torch.float32) if kind == "pure" else None),
-        target=(
-            torch.zeros(shape, dtype=torch.int64)
-            if kind == "discrete_targets"
-            else None
-        ),
     )
 
 
 def _discrete_obs_batch(*, n_envs: int, obs_spec: EntityBasedConfig) -> ObsBatch:
     obs = _obs_batch(n_envs=n_envs, obs_spec=obs_spec)
-    obs.can_act = torch.zeros(
-        (n_envs, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
-        dtype=torch.bool,
+    obs.action_mask = DiscreteTargetActionMask(
+        can_act=torch.zeros(
+            (n_envs, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
+            dtype=torch.bool,
+        ),
+        max_launch=obs.action_mask.max_launch,
     )
     return obs
 
@@ -107,12 +123,12 @@ class TinyOrbitEnv:
 
     def step(
         self,
-        launch: torch.Tensor,
-        angle: torch.Tensor,  # noqa: ARG002
-        ships: torch.Tensor,  # noqa: ARG002
+        actions: ActionBundle,
     ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor]:
+        if not isinstance(actions, PureActions):
+            raise TypeError("TinyOrbitEnv requires PureActions")
         active = self._still_playing()
-        player_launch = launch[:, :, 0, 0].to(dtype=torch.float32)
+        player_launch = actions.launch[:, :, 0, 0].to(dtype=torch.float32)
         reward = torch.where(player_launch.eq(self._targets[:, None]), 1.0, -0.25)
         reward = torch.where(active, reward, torch.zeros_like(reward))
         self._steps += 1
@@ -153,15 +169,18 @@ class TinyDiscreteTargetEnv:
 
     def step(
         self,
-        launch: torch.Tensor,
-        target: torch.Tensor,
-        ships: torch.Tensor,
+        actions: ActionBundle,
     ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor]:
-        assert target.dtype == torch.int64
-        self.last_target = target.clone()
-        rewards = launch[:, :, 0, 0].to(torch.float32) + ships[:, :, 0, 0].to(
-            torch.float32
-        )
+        if not isinstance(actions, DiscreteTargetActions):
+            raise TypeError("TinyDiscreteTargetEnv requires DiscreteTargetActions")
+        assert actions.target.dtype == torch.int64
+        self.last_target = actions.target.clone()
+        rewards = actions.launch[:, :, 0, 0].to(torch.float32) + actions.ships[
+            :,
+            :,
+            0,
+            0,
+        ].to(torch.float32)
         dones = torch.zeros((self.n_envs, 4), dtype=torch.bool)
         return self._obs(), rewards, dones
 
@@ -239,7 +258,7 @@ class TinyOrbitModel(BaseModelAPI):
     def evaluate_actions(
         self,
         obs: ObsBatch,
-        actions: ModelActions,
+        actions: ActionBundle,
     ) -> ModelEvaluation:
         hidden = torch.tanh(
             self.hidden(torch.tanh(self.input_proj(obs.global_features)))
@@ -278,7 +297,7 @@ class TinyOrbitModel(BaseModelAPI):
         n_envs = per_player.shape[0]
         action_shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
         launch = torch.zeros(action_shape, dtype=per_player.dtype)
-        angle_and_size = torch.zeros_like(launch)
+        event = torch.zeros_like(launch)
         per_player_entity = torch.zeros(
             (n_envs, 4, ACTION_ENTITY_SLOTS), dtype=per_player.dtype
         )
@@ -286,7 +305,7 @@ class TinyOrbitModel(BaseModelAPI):
         per_player_entity[:, :, 0] = per_player
         return ModelActionLogProbs(
             launch=launch,
-            angle_and_size=angle_and_size,
+            event=event,
             per_player_entity=per_player_entity,
         )
 
@@ -295,7 +314,7 @@ class TinyOrbitModel(BaseModelAPI):
         n_envs = per_player.shape[0]
         action_shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
         launch = torch.zeros(action_shape, dtype=per_player.dtype)
-        angle_and_size = torch.zeros_like(launch)
+        event = torch.zeros_like(launch)
         per_player_entity = torch.zeros(
             (n_envs, 4, ACTION_ENTITY_SLOTS), dtype=per_player.dtype
         )
@@ -303,7 +322,7 @@ class TinyOrbitModel(BaseModelAPI):
         per_player_entity[:, :, 0] = per_player
         return ModelActionEntropies(
             launch=launch,
-            angle_and_size=angle_and_size,
+            event=event,
             per_player_entity=per_player_entity,
             components={"launch": per_player_entity},
         )
@@ -345,7 +364,7 @@ class TinyDiscreteTargetModel(BaseModelAPI):
     def evaluate_actions(
         self,
         obs: ObsBatch,
-        actions: ModelActions,  # noqa: ARG002
+        actions: ActionBundle,  # noqa: ARG002
     ) -> ModelEvaluation:
         values = self.value.expand(obs.global_features.shape[0], 4)
         log_probs = TinyOrbitModel._log_probs(torch.zeros_like(values))
@@ -391,7 +410,7 @@ class AutocastRecordingModel(TinyOrbitModel):
     def evaluate_actions(
         self,
         obs: ObsBatch,
-        actions: ModelActions,
+        actions: ActionBundle,
     ) -> ModelEvaluation:
         self.evaluate_autocast_enabled.append(
             torch.is_autocast_enabled(self.device_type)
@@ -424,7 +443,7 @@ class FixedEvaluationModel(BaseModelAPI):
     def evaluate_actions(
         self,
         obs: ObsBatch,
-        actions: ModelActions,  # noqa: ARG002
+        actions: ActionBundle,  # noqa: ARG002
     ) -> ModelEvaluation:
         values = self.value.expand(obs.global_features.shape[0], 4)
         log_probs = TinyOrbitModel._log_probs(torch.zeros_like(values))
@@ -1803,6 +1822,58 @@ def test_discrete_target_rollout_buffer_and_policy_mask() -> None:
     assert not policy_mask[:, 0, 1:].any()
 
 
+def test_discrete_target_bin_rollout_buffer_and_policy_mask() -> None:
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
+    action_spec = ActionDiscreteTargetBinsConfig(n_bins=7)
+    buffer = ppo.PPORolloutBuffer(
+        horizon=2,
+        n_envs=3,
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+        device=torch.device("cpu"),
+    )
+    obs = _obs_batch(n_envs=3, obs_spec=obs_spec)
+    obs.action_mask = DiscreteTargetBinActionMask(
+        can_act=torch.zeros(
+            (3, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS, 7),
+            dtype=torch.bool,
+        )
+    )
+    obs.can_act[:, 0, 0, 1, [0, 6]] = True
+    actions = _actions(3, kind="discrete_target_bins")
+    assert actions.fleet_bin is not None
+    actions.target[:, 0, 0] = 1
+    actions.fleet_bin[:, 0, 0] = 6
+
+    buffer.write_step(
+        0,
+        obs=obs,
+        actions=actions,
+        logp=torch.zeros((3, 4)),
+        values=torch.zeros((3, 4)),
+        rewards=torch.zeros((3, 4)),
+        dones=torch.zeros((3, 4), dtype=torch.bool),
+    )
+    segments = buffer.segment_major()
+
+    assert segments.obs.max_launch is None
+    assert segments.obs.can_act.shape == (
+        3,
+        2,
+        4,
+        ACTION_ENTITY_SLOTS,
+        ACTION_ENTITY_SLOTS,
+        7,
+    )
+    assert isinstance(segments.actions, DiscreteTargetBinActions)
+    assert segments.actions.target.shape == (3, 2, 4, ACTION_ENTITY_SLOTS)
+    assert segments.actions.fleet_bin.shape == (3, 2, 4, ACTION_ENTITY_SLOTS)
+    policy_mask = ppo._policy_mask(segments.obs)
+    assert policy_mask.shape == (3, 2, 4)
+    assert policy_mask[:, 0, 0].all()
+    assert not policy_mask[:, 0, 1:].any()
+
+
 def test_step_env_passes_discrete_target_tensor() -> None:
     env = TinyDiscreteTargetEnv(n_envs=2)
     actions = _actions(2, max_launches=1, kind="discrete_targets")
@@ -1892,7 +1963,7 @@ def test_discrete_target_transformer_train_iteration_keeps_parameters_finite() -
     )
     assert "policy/fleet_size_mixture_entropy" in metrics
     assert "policy/fleet_size_logistic_entropy" in metrics
-    assert "policy/angle_and_size_entropy" not in metrics
+    assert "policy/event_entropy" not in metrics
     for parameter in model.parameters():
         assert torch.isfinite(parameter).all()
         if parameter.grad is not None:

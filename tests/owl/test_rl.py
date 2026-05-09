@@ -12,11 +12,15 @@ from owl.rl import (
     MAX_COMETS,
     MAX_PLANETS,
     PLANET_CHANNELS,
+    ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
+    DiscreteTargetActions,
+    DiscreteTargetBinActions,
     EntityBasedConfig,
     EnvConfig,
     ObsBatch,
+    PureActions,
     VectorizedEnv,
     actions_to_kaggle,
     encode_entity_based,
@@ -45,7 +49,9 @@ def _encoded_python_observation(
     obs: dict[str, object],
     *,
     obs_spec: EntityBasedConfig,
-    action_spec: ActionPureConfig | ActionDiscreteTargetsConfig,
+    action_spec: ActionPureConfig
+    | ActionDiscreteTargetsConfig
+    | ActionDiscreteTargetBinsConfig,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -54,7 +60,7 @@ def _encoded_python_observation(
     np.ndarray,
     np.ndarray,
     np.ndarray,
-    np.ndarray,
+    np.ndarray | None,
 ]:
     encoded = encode_python_observation(
         obs,
@@ -69,7 +75,7 @@ def _encoded_python_observation(
         encoded.entity_mask[0].numpy(),
         encoded.global_features[0].numpy(),
         encoded.can_act[0].numpy(),
-        encoded.max_launch[0].numpy(),
+        None if encoded.max_launch is None else encoded.max_launch[0].numpy(),
     )
 
 
@@ -144,7 +150,9 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
 
     env.rewards.fill_(123)
     env.dones.fill_(True)
-    obs, rewards, dones, episode_metrics = env.step(launch, angle, ships)
+    obs, rewards, dones, episode_metrics = env.step(
+        PureActions(launch=launch, angle=angle, ships=ships)
+    )
 
     assert rewards.data_ptr() == reward_ptr
     assert dones.data_ptr() == done_ptr
@@ -189,7 +197,7 @@ def test_step_rejects_wrong_numpy_action_dtypes(
     ships = np.zeros(shape, dtype=ships_dtype)
 
     with pytest.raises(ValueError, match=message):
-        env.step(launch, angle, ships)
+        env.step(PureActions(launch=launch, angle=angle, ships=ships))
 
 
 @pytest.mark.parametrize(
@@ -223,7 +231,7 @@ def test_step_rejects_wrong_torch_action_dtypes(
     ships = torch.zeros(shape, dtype=ships_dtype)
 
     with pytest.raises(ValueError, match=message):
-        env.step(launch, angle, ships)
+        env.step(PureActions(launch=launch, angle=angle, ships=ships))
 
 
 @pytest.mark.parametrize(
@@ -253,7 +261,7 @@ def test_step_rejects_invalid_launched_action_values(
     ships[env_index, player, entity, 0] = ship_count
 
     with pytest.raises(ValueError, match=message):
-        env.step(launch, angle, ships)
+        env.step(PureActions(launch=launch, angle=angle, ships=ships))
 
 
 def test_reset_writes_still_playing_from_rust_env_state() -> None:
@@ -327,7 +335,9 @@ def test_vectorized_env_terminal_snapshot_preserves_pre_reset_state() -> None:
 
     terminal_snapshot = None
     for _ in range(600):
-        obs, _rewards, dones, _episode_metrics = env.step(launch, angle, ships)
+        obs, _rewards, dones, _episode_metrics = env.step(
+            PureActions(launch=launch, angle=angle, ships=ships)
+        )
         if bool(dones.all()):
             terminal_snapshot = env.terminal_snapshot(0)
             break
@@ -357,7 +367,9 @@ def test_two_player_sample_marks_unused_player_slots_done() -> None:
     angle = np.zeros(action_shape, dtype=np.float32)
     ships = np.zeros(action_shape, dtype=np.int64)
 
-    _, rewards, dones, episode_metrics = env.step(launch, angle, ships)
+    _, rewards, dones, episode_metrics = env.step(
+        PureActions(launch=launch, angle=angle, ships=ships)
+    )
 
     assert torch.equal(rewards, torch.zeros_like(rewards))
     assert episode_metrics == {}
@@ -440,7 +452,9 @@ def test_discrete_targets_step_uses_int_target_tensor() -> None:
     target = np.zeros(shape, dtype=np.int64)
     ships = np.zeros(shape, dtype=np.int64)
 
-    obs, rewards, dones, episode_metrics = env.step(launch, target, ships)
+    obs, rewards, dones, episode_metrics = env.step(
+        DiscreteTargetActions(launch=launch, target=target, ships=ships)
+    )
 
     assert obs.can_act.shape == (1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS)
     assert rewards.shape == (1, 4)
@@ -448,7 +462,75 @@ def test_discrete_targets_step_uses_int_target_tensor() -> None:
     assert episode_metrics == {}
 
     with pytest.raises(ValueError, match="target must have dtype int64"):
-        env.step(launch, target.astype(np.float32), ships)
+        env.step(
+            DiscreteTargetActions(
+                launch=launch,
+                target=target.astype(np.float32),
+                ships=ships,
+            )
+        )
+
+
+def test_discrete_target_bins_config_and_env_shapes() -> None:
+    config = EnvConfig.model_validate(
+        {
+            "n_envs": 2,
+            "action_spec": {
+                "action_spec": "discrete_target_bins",
+                "min_fleet_size": 4,
+                "n_bins": 11,
+            },
+            "pin_memory": False,
+        }
+    )
+    assert isinstance(config.action_spec, ActionDiscreteTargetBinsConfig)
+    assert config.action_spec.min_fleet_size == 4
+    assert config.action_spec.n_bins == 11
+
+    env = VectorizedEnv(
+        n_envs=2,
+        obs_spec=EntityBasedConfig(),
+        action_spec=config.action_spec,
+        pin_memory=False,
+    )
+    obs = env.reset()
+
+    assert obs.can_act.shape == (2, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS, 11)
+    assert obs.max_launch is None
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        ActionDiscreteTargetBinsConfig(n_bins=11, max_per_planet_launches=1)  # type: ignore[call-arg]
+
+
+def test_discrete_target_bins_step_uses_target_and_fleet_bin_bundle() -> None:
+    action_spec = ActionDiscreteTargetBinsConfig(n_bins=8)
+    env = VectorizedEnv(
+        n_envs=2,
+        obs_spec=EntityBasedConfig(),
+        action_spec=action_spec,
+        pin_memory=False,
+    )
+    env.reset()
+    shape = (2, 4, ACTION_ENTITY_SLOTS)
+    actions = DiscreteTargetBinActions(
+        target=torch.zeros(shape, dtype=torch.int64),
+        fleet_bin=torch.zeros(shape, dtype=torch.int64),
+    )
+
+    obs, rewards, dones, episode_metrics = env.step(actions)
+
+    assert obs.can_act.shape == (2, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS, 8)
+    assert obs.max_launch is None
+    assert rewards.shape == (2, 4)
+    assert dones.shape == (2, 4)
+    assert episode_metrics == {}
+
+    invalid_actions = DiscreteTargetBinActions(
+        target=actions.target,
+        fleet_bin=actions.fleet_bin.to(torch.float32),
+    )
+    with pytest.raises(ValueError, match=r"fleet_bin must have dtype torch\.int64"):
+        env.step(invalid_actions)
 
 
 def test_actions_to_kaggle_converts_pure_model_actions() -> None:
@@ -464,9 +546,7 @@ def test_actions_to_kaggle_converts_pure_model_actions() -> None:
     actions = actions_to_kaggle(
         _python_obs(planets=[[0, 0, 25.0, 50.0, 2.0, 10, 3]]),
         0,
-        launch,
-        angle,
-        ships,
+        PureActions(launch=launch, angle=angle, ships=ships),
         action_spec=action_spec,
     )
 
@@ -491,9 +571,7 @@ def test_actions_to_kaggle_converts_discrete_target_model_actions() -> None:
             ]
         ),
         0,
-        launch,
-        target,
-        ships,
+        DiscreteTargetActions(launch=launch, target=target, ships=ships),
         action_spec=action_spec,
     )
 
@@ -501,6 +579,34 @@ def test_actions_to_kaggle_converts_discrete_target_model_actions() -> None:
     assert actions[0][0] == 0.0
     assert np.isfinite(actions[0][1])
     assert actions[0][2] == float(action_spec.min_fleet_size)
+
+
+def test_actions_to_kaggle_converts_discrete_target_bin_actions() -> None:
+    action_spec = ActionDiscreteTargetBinsConfig(n_bins=11)
+    shape = (1, 4, ACTION_ENTITY_SLOTS)
+    actions = DiscreteTargetBinActions(
+        target=torch.zeros(shape, dtype=torch.int64),
+        fleet_bin=torch.zeros(shape, dtype=torch.int64),
+    )
+    actions.target[0, 0, 0] = 1
+    actions.fleet_bin[0, 0, 0] = 10
+
+    kaggle_actions = actions_to_kaggle(
+        _python_obs(
+            planets=[
+                [0, 0, 25.0, 80.0, 2.0, 10, 3],
+                [1, -1, 75.0, 80.0, 2.0, 10, 3],
+            ]
+        ),
+        0,
+        actions,
+        action_spec=action_spec,
+    )
+
+    assert len(kaggle_actions) == 1
+    assert kaggle_actions[0][0] == 0.0
+    assert np.isfinite(kaggle_actions[0][1])
+    assert kaggle_actions[0][2] == 10.0
 
 
 def test_min_fleet_size_controls_action_mask_and_validation() -> None:
@@ -539,7 +645,7 @@ def test_min_fleet_size_controls_action_mask_and_validation() -> None:
     ships[env_index, player, entity, 0] = action_spec.min_fleet_size - 1
 
     with pytest.raises(ValueError, match="ships must be >= 3"):
-        env.step(launch, angle, ships)
+        env.step(PureActions(launch=launch, angle=angle, ships=ships))
 
 
 def test_python_observation_encoder_requires_missing_keys() -> None:
@@ -595,6 +701,35 @@ def test_python_observation_encoder_writes_discrete_target_mask() -> None:
     assert can_act[0, 0, 1]
     assert not can_act[0, 0, 2]
     assert max_launch[0, 0] == 10
+
+
+def test_python_observation_encoder_writes_discrete_target_bin_mask() -> None:
+    (
+        _planets,
+        _orbiting_planets,
+        _fleets,
+        _comets,
+        entity_mask,
+        _global_features,
+        can_act,
+        max_launch,
+    ) = _encoded_python_observation(
+        _python_obs(
+            planets=[
+                [0, 0, 25.0, 75.0, 2.0, 5, 3],
+                [1, -1, 75.0, 75.0, 2.0, 10, 3],
+            ]
+        ),
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionDiscreteTargetBinsConfig(n_bins=11),
+    )
+
+    assert entity_mask[:2].tolist() == [True, True]
+    assert can_act.shape == (4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS, 11)
+    assert max_launch is None
+    assert np.nonzero(can_act[0, 0, 1])[0].tolist() == [0, 2, 4, 6, 8, 10]
+    assert not can_act[0, 0, 0].any()
+    assert not can_act[0, 0, 2].any()
 
 
 def test_python_observation_encoder_masks_statically_obstructed_targets() -> None:

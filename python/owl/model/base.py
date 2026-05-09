@@ -2,34 +2,21 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import TypeAlias
 
 import torch
 from torch import nn
 
-from owl.rl import ObsBatch
+from owl.rl import ActionBundle, ObsBatch
 
 InputLayer = nn.Module | nn.Parameter
-
-
-@dataclass
-class ModelActions:
-    launch: torch.Tensor
-    ships: torch.Tensor
-    angle: torch.Tensor | None = None
-    target: torch.Tensor | None = None
-
-    def action_value(self) -> torch.Tensor:
-        if self.angle is not None and self.target is None:
-            return self.angle
-        if self.target is not None and self.angle is None:
-            return self.target
-        raise ValueError("exactly one of actions.angle or actions.target must be set")
+ModelActions: TypeAlias = ActionBundle
 
 
 @dataclass
 class ModelActionLogProbs:
     launch: torch.Tensor
-    angle_and_size: torch.Tensor
+    event: torch.Tensor
     per_player_entity: torch.Tensor
     target: torch.Tensor | None = None
 
@@ -37,7 +24,7 @@ class ModelActionLogProbs:
 @dataclass
 class ModelActionEntropies:
     launch: torch.Tensor
-    angle_and_size: torch.Tensor
+    event: torch.Tensor
     per_player_entity: torch.Tensor
     target: torch.Tensor | None = None
     components: dict[str, torch.Tensor] = field(default_factory=dict)

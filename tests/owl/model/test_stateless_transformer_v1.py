@@ -8,7 +8,6 @@ import pytest
 import torch
 import torch.nn.functional as F
 from owl.model import (
-    ModelActions,
     ModelConfig,
     StatelessTransformerV1,
     StatelessTransformerV1Config,
@@ -20,6 +19,7 @@ from owl.model.actor.discrete_targets import (
     ship_support,
 )
 from owl.model.stateless_transformer_v1 import (
+    ActorDiscreteTargetBinsConfig,
     ActorDiscreteTargetsConfig,
     ActorPureConfig,
     DiscreteActorInputs,
@@ -42,10 +42,14 @@ from owl.rl import (
     MAX_PLANETS,
     OUTER_PLAYER_SLOTS,
     ActionConfig,
+    ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
+    DiscreteTargetActions,
+    DiscreteTargetBinActions,
     EntityBasedConfig,
     ObsBatch,
+    PureActions,
 )
 from pydantic import TypeAdapter
 from torch import nn
@@ -81,15 +85,29 @@ def _obs_batch(
         (batch_size, obs_spec.global_channels),
         dtype=torch.float32,
     )
-    can_act = (
-        torch.zeros((batch_size, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool)
-        if isinstance(action_spec, ActionPureConfig)
-        else torch.zeros(
+    if isinstance(action_spec, ActionPureConfig):
+        can_act = torch.zeros((batch_size, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool)
+    elif isinstance(action_spec, ActionDiscreteTargetsConfig):
+        can_act = torch.zeros(
             (batch_size, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
             dtype=torch.bool,
         )
+    else:
+        can_act = torch.zeros(
+            (
+                batch_size,
+                4,
+                ACTION_ENTITY_SLOTS,
+                ACTION_ENTITY_SLOTS,
+                action_spec.n_bins,
+            ),
+            dtype=torch.bool,
+        )
+    max_launch = (
+        None
+        if isinstance(action_spec, ActionDiscreteTargetBinsConfig)
+        else torch.zeros((batch_size, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
     )
-    max_launch = torch.zeros((batch_size, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
 
     planets[:, 0, 0] = 1.0
     planets[:, 0, 15] = 0.08
@@ -102,16 +120,21 @@ def _obs_batch(
         can_act[:, 0, 0] = True
         can_act[:, 1, 1] = True
         can_act[:, 2, MAX_PLANETS] = True
-    else:
+    elif isinstance(action_spec, ActionDiscreteTargetsConfig):
         can_act[:, 0, 0, 1] = True
         can_act[:, 0, 0, MAX_PLANETS] = True
         can_act[:, 1, 1, 0] = True
         can_act[:, 2, MAX_PLANETS, 0] = True
-    max_launch[:, 0, 0] = 5
-    max_launch[:, 1, 1] = 3
-    max_launch[:, 2, MAX_PLANETS] = 2
+    else:
+        can_act[:, 0, 0, 1, [0, action_spec.n_bins - 1]] = True
+        can_act[:, 0, 0, MAX_PLANETS, [0, 2]] = True
+        can_act[:, 1, 1, 0, [0, action_spec.n_bins - 1]] = True
+        can_act[:, 2, MAX_PLANETS, 0, [0, 1]] = True
+    if max_launch is not None:
+        max_launch[:, 0, 0] = 5
+        max_launch[:, 1, 1] = 3
+        max_launch[:, 2, MAX_PLANETS] = 2
 
-    assert action_spec.max_per_planet_launches >= 1
     return ObsBatch(
         planets=planets,
         orbiting_planets=orbiting_planets,
@@ -334,8 +357,8 @@ def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
         rtol=0,
     )
     torch.testing.assert_close(
-        compact_output.log_probs.angle_and_size,
-        padded_output.log_probs.angle_and_size,
+        compact_output.log_probs.event,
+        padded_output.log_probs.event,
         atol=1e-6,
         rtol=0,
     )
@@ -352,8 +375,8 @@ def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
         rtol=0,
     )
     torch.testing.assert_close(
-        compact_output.entropies.angle_and_size,
-        padded_output.entropies.angle_and_size,
+        compact_output.entropies.event,
+        padded_output.entropies.event,
         atol=1e-6,
         rtol=0,
     )
@@ -1078,40 +1101,39 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     output = model(obs)
 
     expected_action_shape = (2, 4, ACTION_ENTITY_SLOTS, 1)
+    assert isinstance(output.actions, PureActions)
     assert output.actions.launch.shape == expected_action_shape
     assert output.actions.launch.dtype == torch.bool
-    assert output.actions.angle is not None
     assert output.actions.angle.shape == expected_action_shape
     assert output.actions.angle.dtype == torch.float32
-    assert output.actions.target is None
     assert output.actions.ships.shape == expected_action_shape
     assert output.actions.ships.dtype == torch.int64
     assert output.log_probs.launch.shape == expected_action_shape
-    assert output.log_probs.angle_and_size.shape == expected_action_shape
+    assert output.log_probs.event.shape == expected_action_shape
     assert output.log_probs.per_player_entity.shape == (2, 4, ACTION_ENTITY_SLOTS)
     assert output.entropies.launch.shape == expected_action_shape
-    assert output.entropies.angle_and_size.shape == expected_action_shape
+    assert output.entropies.event.shape == expected_action_shape
     assert output.entropies.per_player_entity.shape == (2, 4, ACTION_ENTITY_SLOTS)
     assert torch.allclose(
         output.log_probs.per_player_entity,
-        (output.log_probs.launch + output.log_probs.angle_and_size).sum(dim=-1),
+        (output.log_probs.launch + output.log_probs.event).sum(dim=-1),
     )
     assert torch.allclose(
         output.entropies.per_player_entity,
-        (output.entropies.launch + output.entropies.angle_and_size).sum(dim=-1),
+        (output.entropies.launch + output.entropies.event).sum(dim=-1),
     )
-    assert set(output.entropies.components) == {"launch", "angle_and_size"}
+    assert set(output.entropies.components) == {"launch", "event"}
     assert torch.allclose(
         output.entropies.components["launch"],
         output.entropies.launch.sum(dim=-1),
     )
     assert torch.allclose(
-        output.entropies.components["angle_and_size"],
-        output.entropies.angle_and_size.sum(dim=-1),
+        output.entropies.components["event"],
+        output.entropies.event.sum(dim=-1),
     )
     assert torch.isfinite(output.entropies.per_player_entity).all()
     assert torch.all(output.entropies.launch >= 0)
-    assert torch.all(output.entropies.angle_and_size >= 0)
+    assert torch.all(output.entropies.event >= 0)
     assert output.values.shape == (2, 4)
     assert output.winner_probabilities.shape == (2, 4)
     assert torch.allclose(output.winner_probabilities.sum(dim=1), torch.ones(2))
@@ -1124,8 +1146,8 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     evaluation = model.evaluate_actions(obs, output.actions)
     assert torch.allclose(evaluation.log_probs.launch, output.log_probs.launch)
     assert torch.allclose(
-        evaluation.log_probs.angle_and_size,
-        output.log_probs.angle_and_size,
+        evaluation.log_probs.event,
+        output.log_probs.event,
     )
     assert torch.allclose(
         evaluation.log_probs.per_player_entity,
@@ -1133,21 +1155,21 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     )
     assert torch.allclose(evaluation.entropies.launch, output.entropies.launch)
     assert torch.allclose(
-        evaluation.entropies.angle_and_size,
-        output.entropies.angle_and_size,
+        evaluation.entropies.event,
+        output.entropies.event,
     )
     assert torch.allclose(
         evaluation.entropies.per_player_entity,
         output.entropies.per_player_entity,
     )
-    assert set(evaluation.entropies.components) == {"launch", "angle_and_size"}
+    assert set(evaluation.entropies.components) == {"launch", "event"}
     assert torch.allclose(
         evaluation.entropies.components["launch"],
         output.entropies.components["launch"],
     )
     assert torch.allclose(
-        evaluation.entropies.components["angle_and_size"],
-        output.entropies.components["angle_and_size"],
+        evaluation.entropies.components["event"],
+        output.entropies.components["event"],
     )
     assert torch.allclose(evaluation.values, output.values)
     assert torch.allclose(evaluation.winner_probabilities, output.winner_probabilities)
@@ -1193,9 +1215,8 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     output = model(obs)
 
     expected_action_shape = (2, 4, ACTION_ENTITY_SLOTS, 1)
+    assert isinstance(output.actions, DiscreteTargetActions)
     assert output.actions.launch.shape == expected_action_shape
-    assert output.actions.angle is None
-    assert output.actions.target is not None
     assert output.actions.target.shape == expected_action_shape
     assert output.actions.target.dtype == torch.int64
     assert output.actions.ships.shape == expected_action_shape
@@ -1219,7 +1240,7 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     )
     assert torch.allclose(
         output.entropies.components["fleet_size_full"],
-        output.entropies.angle_and_size.squeeze(-1),
+        output.entropies.event.squeeze(-1),
     )
     assert output.entropies.components["fleet_size_mixture"].shape == (
         2,
@@ -1242,8 +1263,8 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     assert torch.allclose(evaluation.log_probs.launch, output.log_probs.launch)
     assert torch.allclose(evaluation.log_probs.target, output.log_probs.target)
     assert torch.allclose(
-        evaluation.log_probs.angle_and_size,
-        output.log_probs.angle_and_size,
+        evaluation.log_probs.event,
+        output.log_probs.event,
     )
     assert torch.allclose(
         evaluation.log_probs.per_player_entity,
@@ -1276,6 +1297,60 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
         evaluation.entropies.components["fleet_size_logistic"],
         output.entropies.components["fleet_size_logistic"],
     )
+
+
+def test_discrete_target_bins_actor_outputs_bins_and_replays_log_probs() -> None:
+    torch.manual_seed(17)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionDiscreteTargetBinsConfig(n_bins=7)
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetBinsConfig(n_bins=7),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+
+    output = model(obs)
+
+    expected_action_shape = (2, 4, ACTION_ENTITY_SLOTS)
+    assert isinstance(output.actions, DiscreteTargetBinActions)
+    assert output.actions.target.shape == expected_action_shape
+    assert output.actions.fleet_bin.shape == expected_action_shape
+    source_active = obs.can_act.flatten(start_dim=-2).any(dim=-1)
+    batch_index = torch.arange(2)[:, None, None]
+    player_index = torch.arange(4)[None, :, None]
+    source_index = torch.arange(ACTION_ENTITY_SLOTS)[None, None, :]
+    selected = obs.can_act[
+        batch_index,
+        player_index,
+        source_index,
+        output.actions.target,
+        output.actions.fleet_bin,
+    ]
+    assert torch.all(selected[source_active])
+    assert set(output.entropies.components) == {"target", "fleet_bin"}
+
+    evaluation = model.evaluate_actions(obs, output.actions)
+    assert torch.allclose(evaluation.log_probs.target, output.log_probs.target)
+    assert torch.allclose(
+        evaluation.log_probs.event,
+        output.log_probs.event,
+    )
+    assert torch.allclose(
+        evaluation.log_probs.per_player_entity,
+        output.log_probs.per_player_entity,
+    )
+
+    invalid = DiscreteTargetBinActions(
+        target=output.actions.target.clone(),
+        fleet_bin=output.actions.fleet_bin.clone(),
+    )
+    invalid.fleet_bin[0, 0, 0] = 1
+    obs.can_act[0, 0, 0, :, 1] = False
+    with pytest.raises(ValueError, match="valid target-bin pair"):
+        model.evaluate_actions(obs, invalid)
 
 
 def test_discrete_targets_output_layers_include_only_second_head_layers() -> None:
@@ -1439,7 +1514,7 @@ def test_discrete_targets_size_log_prob_conditions_on_replayed_target() -> None:
     can_act[0, 0, 0, 2] = True
     max_launch = torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
     max_launch[0, 0, 0] = 10
-    actions = ModelActions(
+    actions = DiscreteTargetActions(
         launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.bool),
         target=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
         ships=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
@@ -1465,8 +1540,8 @@ def test_discrete_targets_size_log_prob_conditions_on_replayed_target() -> None:
     )
 
     assert not torch.allclose(
-        target_one_logp.angle_and_size[0, 0, 0],
-        target_two_logp.angle_and_size[0, 0, 0],
+        target_one_logp.event[0, 0, 0],
+        target_two_logp.event[0, 0, 0],
     )
 
 
@@ -1488,7 +1563,7 @@ def test_discrete_targets_replay_entropy_ignores_no_launch_target_placeholder() 
     can_act[0, 0, 0, 2] = True
     max_launch = torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
     max_launch[0, 0, 0] = 30
-    actions = ModelActions(
+    actions = DiscreteTargetActions(
         launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.bool),
         target=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
         ships=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
@@ -1513,7 +1588,7 @@ def test_discrete_targets_replay_entropy_ignores_no_launch_target_placeholder() 
 
     assert torch.allclose(entropy_one.launch, entropy_two.launch)
     assert torch.allclose(entropy_one.target, entropy_two.target)
-    assert torch.allclose(entropy_one.angle_and_size, entropy_two.angle_and_size)
+    assert torch.allclose(entropy_one.event, entropy_two.event)
     assert torch.allclose(entropy_one.per_player_entity, entropy_two.per_player_entity)
 
 
@@ -1775,8 +1850,8 @@ def test_min_fleet_size_masks_and_shifts_ship_distribution() -> None:
 
     evaluation = model.evaluate_actions(obs, output.actions)
     assert torch.allclose(
-        evaluation.log_probs.angle_and_size,
-        output.log_probs.angle_and_size,
+        evaluation.log_probs.event,
+        output.log_probs.event,
     )
 
     output.actions.launch.zero_()
@@ -1927,10 +2002,10 @@ def test_actor_distribution_outputs_remain_fp32_under_cpu_bf16_autocast() -> Non
     assert output.actions.ships.dtype == torch.int64
     for tensors in (output.log_probs, output.entropies, evaluation.log_probs):
         assert tensors.launch.dtype == torch.float32
-        assert tensors.angle_and_size.dtype == torch.float32
+        assert tensors.event.dtype == torch.float32
         assert tensors.per_player_entity.dtype == torch.float32
         assert torch.isfinite(tensors.launch).all()
-        assert torch.isfinite(tensors.angle_and_size).all()
+        assert torch.isfinite(tensors.event).all()
         assert torch.isfinite(tensors.per_player_entity).all()
 
 

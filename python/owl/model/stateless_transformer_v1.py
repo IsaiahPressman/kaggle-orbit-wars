@@ -12,8 +12,10 @@ from torch import nn
 from owl.config import BaseConfig
 from owl.model.actor import (
     ActorConfig,
+    ActorDiscreteTargetBinsConfig,
     ActorDiscreteTargetsConfig,
     ActorPureConfig,
+    DiscreteTargetBinsActor,
     DiscreteTargetsActor,
     MinGRUCell,
     PureActor,
@@ -42,25 +44,35 @@ from owl.model.base import (
     InputLayer,
     ModelActionEntropies,
     ModelActionLogProbs,
-    ModelActions,
     ModelEvaluation,
     ModelOutput,
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     OUTER_PLAYER_SLOTS,
+    ActionBundle,
     ActionConfig,
+    ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
+    ActionMask,
     ActionPureConfig,
+    DiscreteTargetActionMask,
+    DiscreteTargetActions,
+    DiscreteTargetBinActionMask,
+    DiscreteTargetBinActions,
     EntityBasedConfig,
     ObsBatch,
+    PureActionMask,
+    PureActions,
 )
 
 __all__ = [
     "STATELESS_TRANSFORMER_V1",
+    "ActorDiscreteTargetBinsConfig",
     "ActorDiscreteTargetsConfig",
     "ActorPureConfig",
     "DiscreteActorInputs",
+    "DiscreteTargetBinsActor",
     "DiscreteTargetPolicyParams",
     "DiscreteTargetSizeParams",
     "DiscreteTargetsActor",
@@ -166,6 +178,10 @@ class StatelessTransformerV1(BaseModelAPI):
             raise ValueError(
                 "discrete_targets actor requires max_per_planet_launches=1"
             )
+        if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
+            actor_config = cast(ActorDiscreteTargetBinsConfig, config.actor)
+            if actor_config.n_bins != action_spec.n_bins:
+                raise ValueError("model actor n_bins must match env action_spec n_bins")
         self.config = config
         self.obs_spec = obs_spec
         self.action_spec = action_spec
@@ -202,7 +218,7 @@ class StatelessTransformerV1(BaseModelAPI):
         self.pure_actor_input_proj: nn.Linear | None = None
         self.source_actor_input_proj: nn.Linear | None = None
         self.target_actor_input_proj: nn.Linear | None = None
-        self.actor: PureActor | DiscreteTargetsActor
+        self.actor: PureActor | DiscreteTargetsActor | DiscreteTargetBinsActor
         if isinstance(action_spec, ActionPureConfig):
             self.pure_actor_input_proj = nn.Linear(dim * 2, dim)
             self.actor = PureActor(
@@ -211,11 +227,18 @@ class StatelessTransformerV1(BaseModelAPI):
                 max_per_planet_launches=action_spec.max_per_planet_launches,
                 activation=self.config.activation,
             )
-        else:
+        elif isinstance(action_spec, ActionDiscreteTargetsConfig):
             self.source_actor_input_proj = nn.Linear(dim * 3, dim)
             self.target_actor_input_proj = nn.Linear(dim * 3, dim)
             self.actor = DiscreteTargetsActor(
                 cast(ActorDiscreteTargetsConfig, self.config.actor),
+                transformer_config=self.config,
+            )
+        else:
+            self.source_actor_input_proj = nn.Linear(dim * 3, dim)
+            self.target_actor_input_proj = nn.Linear(dim * 3, dim)
+            self.actor = DiscreteTargetBinsActor(
+                cast(ActorDiscreteTargetBinsConfig, self.config.actor),
                 transformer_config=self.config,
             )
 
@@ -367,8 +390,7 @@ class StatelessTransformerV1(BaseModelAPI):
         values, winner_probabilities = self._value_from_encoded(encoded, obs)
         actions, log_probs, entropies = self._actor(
             encoded,
-            obs.can_act,
-            obs.max_launch,
+            obs.action_mask,
             deterministic=deterministic,
         )
         return ModelOutput(
@@ -382,14 +404,13 @@ class StatelessTransformerV1(BaseModelAPI):
     def evaluate_actions(
         self,
         obs: ObsBatch,
-        actions: ModelActions,
+        actions: ActionBundle,
     ) -> ModelEvaluation:
         encoded = self.encode_observations(obs)
         values, winner_probabilities = self._value_from_encoded(encoded, obs)
         log_probs, entropies = self._actor_log_prob(
             encoded,
-            obs.can_act,
-            obs.max_launch,
+            obs.action_mask,
             actions,
         )
         return ModelEvaluation(
@@ -491,23 +512,38 @@ class StatelessTransformerV1(BaseModelAPI):
     def _actor(
         self,
         encoded: EncodedObservations,
-        can_act: torch.Tensor,
-        max_launch: torch.Tensor,
+        action_mask: ActionMask,
         *,
         deterministic: bool,
-    ) -> tuple[ModelActions, ModelActionLogProbs, ModelActionEntropies]:
-        if isinstance(self.actor, DiscreteTargetsActor):
+    ) -> tuple[ActionBundle, ModelActionLogProbs, ModelActionEntropies]:
+        if isinstance(self.actor, DiscreteTargetBinsActor):
+            if not isinstance(action_mask, DiscreteTargetBinActionMask):
+                raise RuntimeError(
+                    "discrete_target_bins actor requires a target-bin action mask"
+                )
             return self.actor(
                 self._discrete_actor_inputs(encoded),
-                can_act,
-                max_launch,
+                action_mask.can_act,
+                deterministic=deterministic,
+            )
+        if isinstance(self.actor, DiscreteTargetsActor):
+            if not isinstance(action_mask, DiscreteTargetActionMask):
+                raise RuntimeError(
+                    "discrete_targets actor requires a discrete-target action mask"
+                )
+            return self.actor(
+                self._discrete_actor_inputs(encoded),
+                action_mask.can_act,
+                action_mask.max_launch,
                 min_fleet_size=self.action_spec.min_fleet_size,
                 deterministic=deterministic,
             )
+        if not isinstance(action_mask, PureActionMask):
+            raise RuntimeError("pure actor requires a pure action mask")
         return self.actor(
             self._pure_actor_inputs(encoded),
-            can_act,
-            max_launch,
+            action_mask.can_act,
+            action_mask.max_launch,
             min_fleet_size=self.action_spec.min_fleet_size,
             deterministic=deterministic,
         )
@@ -515,22 +551,47 @@ class StatelessTransformerV1(BaseModelAPI):
     def _actor_log_prob(
         self,
         encoded: EncodedObservations,
-        can_act: torch.Tensor,
-        max_launch: torch.Tensor,
-        actions: ModelActions,
+        action_mask: ActionMask,
+        actions: ActionBundle,
     ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
-        if isinstance(self.actor, DiscreteTargetsActor):
+        if isinstance(self.actor, DiscreteTargetBinsActor):
+            if not isinstance(action_mask, DiscreteTargetBinActionMask):
+                raise RuntimeError(
+                    "discrete_target_bins actor requires a target-bin action mask"
+                )
+            if not isinstance(actions, DiscreteTargetBinActions):
+                raise ValueError(
+                    "discrete_target_bins actor requires DiscreteTargetBinActions"
+                )
             return self.actor.log_prob(
                 self._discrete_actor_inputs(encoded),
-                can_act,
-                max_launch,
+                action_mask.can_act,
+                actions,
+            )
+        if isinstance(self.actor, DiscreteTargetsActor):
+            if not isinstance(action_mask, DiscreteTargetActionMask):
+                raise RuntimeError(
+                    "discrete_targets actor requires a discrete-target action mask"
+                )
+            if not isinstance(actions, DiscreteTargetActions):
+                raise ValueError(
+                    "discrete_targets actor requires DiscreteTargetActions"
+                )
+            return self.actor.log_prob(
+                self._discrete_actor_inputs(encoded),
+                action_mask.can_act,
+                action_mask.max_launch,
                 actions,
                 min_fleet_size=self.action_spec.min_fleet_size,
             )
+        if not isinstance(action_mask, PureActionMask):
+            raise RuntimeError("pure actor requires a pure action mask")
+        if not isinstance(actions, PureActions):
+            raise ValueError("pure actor requires PureActions")
         return self.actor.log_prob(
             self._pure_actor_inputs(encoded),
-            can_act,
-            max_launch,
+            action_mask.can_act,
+            action_mask.max_launch,
             actions,
             min_fleet_size=self.action_spec.min_fleet_size,
         )

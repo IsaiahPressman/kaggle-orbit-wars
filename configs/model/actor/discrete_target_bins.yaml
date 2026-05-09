@@ -1,0 +1,2 @@
+action_spec: discrete_target_bins
+n_bins: 11

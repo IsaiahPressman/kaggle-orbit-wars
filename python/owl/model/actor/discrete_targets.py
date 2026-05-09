@@ -20,9 +20,8 @@ from owl.model.base import (
     InputLayer,
     ModelActionEntropies,
     ModelActionLogProbs,
-    ModelActions,
 )
-from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS
+from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS, DiscreteTargetActions
 
 
 @dataclass(frozen=True)
@@ -111,7 +110,7 @@ class DiscreteTargetsActor(nn.Module):
         *,
         min_fleet_size: int,
         deterministic: bool,
-    ) -> tuple[ModelActions, ModelActionLogProbs, ModelActionEntropies]:
+    ) -> tuple[DiscreteTargetActions, ModelActionLogProbs, ModelActionEntropies]:
         selection = self._selection_params(actor_inputs, can_act)
         source_active = can_act.any(dim=-1) & (max_launch >= min_fleet_size)
         launch = sample_launch(
@@ -174,7 +173,7 @@ class DiscreteTargetsActor(nn.Module):
         per_player_entity_entropy = launch_entropy + target_entropy + size_entropy
 
         return (
-            ModelActions(
+            DiscreteTargetActions(
                 launch=launch.unsqueeze(-1),
                 target=target.unsqueeze(-1),
                 ships=ships.unsqueeze(-1),
@@ -182,13 +181,13 @@ class DiscreteTargetsActor(nn.Module):
             ModelActionLogProbs(
                 launch=launch_log_prob.unsqueeze(-1),
                 target=target_log_prob.unsqueeze(-1),
-                angle_and_size=size_log_prob.unsqueeze(-1),
+                event=size_log_prob.unsqueeze(-1),
                 per_player_entity=per_player_entity_log_prob,
             ),
             ModelActionEntropies(
                 launch=launch_entropy.unsqueeze(-1),
                 target=target_entropy.unsqueeze(-1),
-                angle_and_size=size_entropy.unsqueeze(-1),
+                event=size_entropy.unsqueeze(-1),
                 per_player_entity=per_player_entity_entropy,
                 components={
                     "launch": launch_entropy,
@@ -205,7 +204,7 @@ class DiscreteTargetsActor(nn.Module):
         actor_inputs: DiscreteActorInputs,
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
-        actions: ModelActions,
+        actions: DiscreteTargetActions,
         *,
         min_fleet_size: int,
     ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
@@ -218,13 +217,14 @@ class DiscreteTargetsActor(nn.Module):
                 1,
             ),
         )
-        if actions.target is None:
-            raise ValueError("discrete target actions require actions.target")
+        action_launch = actions.launch
+        action_target = actions.target
+        action_ships = actions.ships
         selection = self._selection_params(actor_inputs, can_act)
         source_active = can_act.any(dim=-1) & (max_launch >= min_fleet_size)
-        launch = actions.launch[..., 0]
-        target = actions.target[..., 0]
-        ships = actions.ships[..., 0]
+        launch = action_launch[..., 0]
+        target = action_target[..., 0]
+        ships = action_ships[..., 0]
         _require_valid_discrete_action_slot(
             launch,
             target,
@@ -276,13 +276,13 @@ class DiscreteTargetsActor(nn.Module):
             ModelActionLogProbs(
                 launch=launch_log_prob.unsqueeze(-1),
                 target=target_log_prob.unsqueeze(-1),
-                angle_and_size=size_log_prob.unsqueeze(-1),
+                event=size_log_prob.unsqueeze(-1),
                 per_player_entity=per_player_entity_log_prob,
             ),
             ModelActionEntropies(
                 launch=launch_entropy.unsqueeze(-1),
                 target=target_entropy.unsqueeze(-1),
-                angle_and_size=size_entropy.unsqueeze(-1),
+                event=size_entropy.unsqueeze(-1),
                 per_player_entity=per_player_entity_entropy,
                 components={
                     "launch": launch_entropy,
@@ -771,7 +771,7 @@ def truncated_logistic_mixture_entropy(
 
 
 def _require_discrete_actions_shape(
-    actions: ModelActions,
+    actions: DiscreteTargetActions,
     expected_shape: tuple[int, int, int, int],
 ) -> None:
     for name, tensor in (
@@ -779,22 +779,16 @@ def _require_discrete_actions_shape(
         ("target", actions.target),
         ("ships", actions.ships),
     ):
-        if tensor is None:
-            raise ValueError(f"actions.{name} is required for discrete target actions")
         if tensor.shape != expected_shape:
             raise ValueError(
                 f"actions.{name} must have shape {expected_shape}, got {tensor.shape}"
             )
-    if actions.angle is not None:
-        raise ValueError("discrete target actions must not include actions.angle")
     if expected_shape[-1] != 1:
         raise ValueError("discrete target actions require one launch slot")
     if actions.launch.dtype != torch.bool:
         raise ValueError(
             f"actions.launch must have dtype torch.bool, got {actions.launch.dtype}"
         )
-    if actions.target is None:
-        raise ValueError("discrete target actions require actions.target")
     if actions.target.dtype != torch.int64:
         raise ValueError(
             f"actions.target must have dtype torch.int64, got {actions.target.dtype}"

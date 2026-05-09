@@ -8,7 +8,10 @@ use rand::RngExt;
 
 use crate::rules_engine::state::MAX_PLAYERS;
 
-use obs_spec::{discrete_target_actions_to_kaggle, encode_entity_based, pure_actions_to_kaggle};
+use obs_spec::{
+    discrete_target_actions_to_kaggle, discrete_target_bin_actions_to_kaggle, encode_entity_based,
+    pure_actions_to_kaggle,
+};
 use vec_env::PyRlVecEnv;
 
 pub const MAX_PLANETS: usize = 40;
@@ -171,5 +174,6 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(encode_entity_based, m)?)?;
     m.add_function(wrap_pyfunction!(pure_actions_to_kaggle, m)?)?;
     m.add_function(wrap_pyfunction!(discrete_target_actions_to_kaggle, m)?)?;
+    m.add_function(wrap_pyfunction!(discrete_target_bin_actions_to_kaggle, m)?)?;
     Ok(())
 }

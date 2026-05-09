@@ -6,11 +6,16 @@ from owl.model import (
     BaseModelAPI,
     ModelActionEntropies,
     ModelActionLogProbs,
-    ModelActions,
     ModelEvaluation,
     ModelOutput,
 )
-from owl.rl import ACTION_ENTITY_SLOTS, ActionPureConfig, ObsBatch
+from owl.rl import (
+    ACTION_ENTITY_SLOTS,
+    ActionBundle,
+    ActionPureConfig,
+    ObsBatch,
+    PureActions,
+)
 from owl.train import distributed as distributed_module
 from owl.train.distributed import (
     DistributedContext,
@@ -54,7 +59,7 @@ class _TinyModel(BaseModelAPI):
     def evaluate_actions(
         self,
         obs: ObsBatch,
-        actions: ModelActions,  # noqa: ARG002
+        actions: ActionBundle,  # noqa: ARG002
     ) -> ModelEvaluation:
         values = self.weight.expand(obs.global_features.shape[0], 4)
         log_probs = _log_probs(torch.zeros_like(values))
@@ -96,12 +101,12 @@ class _FakeDDP(torch.nn.Module):
         return self.module(*args)
 
 
-def _actions(n_envs: int) -> ModelActions:
+def _actions(n_envs: int) -> PureActions:
     shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
-    return ModelActions(
+    return PureActions(
         launch=torch.zeros(shape, dtype=torch.bool),
-        ships=torch.zeros(shape, dtype=torch.int64),
         angle=torch.zeros(shape, dtype=torch.float32),
+        ships=torch.zeros(shape, dtype=torch.int64),
     )
 
 
@@ -110,7 +115,7 @@ def _log_probs(per_player: torch.Tensor) -> ModelActionLogProbs:
     action_shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
     return ModelActionLogProbs(
         launch=torch.zeros(action_shape),
-        angle_and_size=torch.zeros(action_shape),
+        event=torch.zeros(action_shape),
         per_player_entity=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS)),
     )
 
@@ -120,7 +125,7 @@ def _entropies(per_player: torch.Tensor) -> ModelActionEntropies:
     action_shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
     return ModelActionEntropies(
         launch=torch.zeros(action_shape),
-        angle_and_size=torch.zeros(action_shape),
+        event=torch.zeros(action_shape),
         per_player_entity=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS)),
     )
 

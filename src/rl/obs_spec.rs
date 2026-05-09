@@ -15,8 +15,9 @@ use crate::rules_engine::state::{
 use crate::rules_engine::utils::{fleet_speed, is_orbiting};
 
 use super::action_spec::{
-    action_entity_slots, decode_discrete_target_actions, decode_pure_actions, encode_action_spec,
-    sorted_comet_planet_ids, ActionEntitySlots, RlActionSpec,
+    action_entity_slots, decode_discrete_target_actions, decode_discrete_target_bin_actions,
+    decode_pure_actions, encode_action_spec, sorted_comet_planet_ids, ActionEntitySlots,
+    RlActionSpec,
 };
 use super::{
     log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
@@ -79,7 +80,7 @@ pub(super) fn encode_state(
     comet_mask: &mut [bool],
     global_obs: &mut [f32],
     can_act: &mut [bool],
-    max_launch: &mut [i64],
+    max_launch: Option<&mut [i64]>,
     min_fleet_size: i64,
 ) -> usize {
     let mut action_slots = [None; ACTION_ENTITY_SLOTS];
@@ -118,7 +119,7 @@ pub(super) fn encode_state_with_action_slots(
     comet_mask: &mut [bool],
     global_obs: &mut [f32],
     can_act: &mut [bool],
-    max_launch: &mut [i64],
+    mut max_launch: Option<&mut [i64]>,
     action_slots: &mut ActionEntitySlots,
     min_fleet_size: i64,
 ) -> usize {
@@ -147,7 +148,9 @@ pub(super) fn encode_state_with_action_slots(
     comet_mask.fill(false);
     global_obs.fill(0.0);
     can_act.fill(false);
-    max_launch.fill(0);
+    if let Some(max_launch) = max_launch.as_deref_mut() {
+        max_launch.fill(0);
+    }
 
     let mut fleets = state.fleets.iter().collect::<Vec<_>>();
     let ignored_fleets = fleets.len().saturating_sub(max_fleets);
@@ -963,9 +966,11 @@ pub fn encode_entity_based<'py>(
         can_act
             .as_slice_mut()
             .expect("newly allocated can_act array is contiguous"),
-        max_launch
-            .as_slice_mut()
-            .expect("newly allocated max_launch array is contiguous"),
+        Some(
+            max_launch
+                .as_slice_mut()
+                .expect("newly allocated max_launch array is contiguous"),
+        ),
         min_fleet_size,
     );
     let mut target_max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
@@ -977,7 +982,7 @@ pub fn encode_entity_based<'py>(
         target_can_act
             .as_slice_mut()
             .expect("newly allocated target_can_act array is contiguous"),
-        &mut target_max_launch,
+        Some(&mut target_max_launch),
         min_fleet_size,
     );
     log_ignored_fleets(ignored_fleets);
@@ -1163,6 +1168,82 @@ pub fn discrete_target_actions_to_kaggle(
     Ok(player_actions_to_kaggle(&decoded.actions[player]))
 }
 
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (
+    planets,
+    initial_planets,
+    fleets,
+    comet_planet_ids,
+    comet_path_indices,
+    comet_path_lengths,
+    comet_paths,
+    angular_velocity,
+    step,
+    episode_steps,
+    player,
+    target,
+    fleet_bin,
+    min_fleet_size,
+    n_bins
+))]
+pub fn discrete_target_bin_actions_to_kaggle(
+    planets: PyReadonlyArray2<'_, f64>,
+    initial_planets: PyReadonlyArray2<'_, f64>,
+    fleets: PyReadonlyArray2<'_, f64>,
+    comet_planet_ids: PyReadonlyArray2<'_, f64>,
+    comet_path_indices: PyReadonlyArray1<'_, f64>,
+    comet_path_lengths: PyReadonlyArray2<'_, f64>,
+    comet_paths: PyReadonlyArray4<'_, f64>,
+    angular_velocity: f64,
+    step: u32,
+    episode_steps: u32,
+    player: usize,
+    target: PyReadonlyArrayDyn<'_, i64>,
+    fleet_bin: PyReadonlyArrayDyn<'_, i64>,
+    min_fleet_size: i64,
+    n_bins: usize,
+) -> PyResult<Vec<Vec<f64>>> {
+    require_kaggle_target_bin_action_args(player, min_fleet_size, n_bins)?;
+    let action_shape = [OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS];
+    require_shape("target", target.shape(), &action_shape)?;
+    require_shape("fleet_bin", fleet_bin.shape(), &action_shape)?;
+    require_shape_suffix("planets", planets.shape(), 7)?;
+    require_shape_suffix("initial_planets", initial_planets.shape(), 7)?;
+    require_shape_suffix("fleets", fleets.shape(), 7)?;
+    require_comet_shapes(
+        &comet_planet_ids,
+        &comet_path_indices,
+        &comet_path_lengths,
+        &comet_paths,
+    )?;
+
+    let state = state_from_arrays_with_initial_planets(
+        planets,
+        initial_planets,
+        fleets,
+        comet_planet_ids,
+        comet_path_indices,
+        comet_path_lengths,
+        comet_paths,
+        angular_velocity,
+        step,
+        episode_steps,
+    )?;
+    let action_slots = action_entity_slots(&state);
+    let decoded = decode_discrete_target_bin_actions(
+        &state,
+        &PlayerMap::identity(),
+        &action_slots,
+        target.as_slice()?,
+        fleet_bin.as_slice()?,
+        n_bins,
+        min_fleet_size,
+    )
+    .map_err(PyValueError::new_err)?;
+    Ok(player_actions_to_kaggle(&decoded.actions[player]))
+}
+
 fn require_comet_shapes(
     comet_planet_ids: &PyReadonlyArray2<'_, f64>,
     comet_path_indices: &PyReadonlyArray1<'_, f64>,
@@ -1211,6 +1292,27 @@ fn require_kaggle_action_args(
         return Err(PyValueError::new_err(
             "min_fleet_size must be between 1 and i32::MAX",
         ));
+    }
+    Ok(())
+}
+
+fn require_kaggle_target_bin_action_args(
+    player: usize,
+    min_fleet_size: i64,
+    n_bins: usize,
+) -> PyResult<()> {
+    if player >= OUTER_PLAYER_SLOTS {
+        return Err(PyValueError::new_err(format!(
+            "player must be < {OUTER_PLAYER_SLOTS}"
+        )));
+    }
+    if min_fleet_size < 1 || min_fleet_size > i64::from(i32::MAX) {
+        return Err(PyValueError::new_err(
+            "min_fleet_size must be between 1 and i32::MAX",
+        ));
+    }
+    if n_bins < 2 {
+        return Err(PyValueError::new_err("n_bins must be >= 2"));
     }
     Ok(())
 }
@@ -1439,7 +1541,7 @@ mod tests {
             &mut comet_mask,
             &mut global_obs,
             &mut can_act,
-            &mut max_launch,
+            Some(&mut max_launch),
             1,
         );
     }
@@ -1504,7 +1606,7 @@ mod tests {
             &mut comet_mask,
             &mut global_obs,
             &mut can_act,
-            &mut max_launch,
+            Some(&mut max_launch),
             1,
         );
 
@@ -1565,7 +1667,7 @@ mod tests {
             &mut comet_mask,
             &mut global_obs,
             &mut can_act,
-            &mut max_launch,
+            Some(&mut max_launch),
             3,
         );
 

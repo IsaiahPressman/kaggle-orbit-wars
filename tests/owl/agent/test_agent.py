@@ -14,7 +14,7 @@ from owl.agent.agent import (
     apply_max_entities_override,
     compact_entities,
 )
-from owl.model import ModelActions, StatelessTransformerV1Config
+from owl.model import StatelessTransformerV1Config
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     COMET_CHANNELS,
@@ -27,6 +27,7 @@ from owl.rl import (
     EntityBasedConfig,
     EnvConfig,
     ObsBatch,
+    PureActions,
 )
 from owl.train.config import FullConfig
 
@@ -166,7 +167,7 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
             assert not deterministic
             assert obs.still_playing.tolist() == [[True, False, False, False]]
             return SimpleNamespace(
-                actions=ModelActions(launch=launch, angle=angle, ships=ships),
+                actions=PureActions(launch=launch, angle=angle, ships=ships),
                 values=torch.tensor([[0.25, -0.5, 0.0, 0.75]]),
             )
 
@@ -175,6 +176,65 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
     actions = agent.act(KaggleObservation.model_validate(_raw_observation()))
 
     assert actions == [[0.0, 0.5, 1.0]]
+
+
+def test_agent_act_moves_action_bundle_to_cpu_before_kaggle_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    agent = Agent.__new__(Agent)
+    agent.checkpoint_config = SimpleNamespace(
+        env=SimpleNamespace(
+            obs_spec=EntityBasedConfig(),
+            action_spec=action_spec,
+        )
+    )
+    agent.config = AgentConfig(deterministic=False)
+    agent.device = torch.device("cpu")
+    converted: list[str] = []
+
+    class FakeActionTensor:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def cpu(self) -> str:
+            converted.append(self.name)
+            return f"cpu:{self.name}"
+
+    class FakeModel:
+        def __call__(self, _obs: object, *, deterministic: bool) -> object:
+            assert not deterministic
+            return SimpleNamespace(
+                actions=PureActions(
+                    launch=FakeActionTensor("launch"),  # type: ignore[arg-type]
+                    angle=FakeActionTensor("angle"),  # type: ignore[arg-type]
+                    ships=FakeActionTensor("ships"),  # type: ignore[arg-type]
+                ),
+                values=torch.tensor([[0.25, -0.5, 0.0, 0.75]]),
+            )
+
+    def fake_actions_to_kaggle(
+        obs: dict[str, object],
+        player: int,
+        actions: PureActions,
+        *,
+        action_spec: ActionPureConfig,
+    ) -> list[list[float]]:
+        assert obs["player"] == 0
+        assert player == 0
+        assert action_spec == agent.checkpoint_config.env.action_spec
+        assert actions.launch == "cpu:launch"
+        assert actions.angle == "cpu:angle"
+        assert actions.ships == "cpu:ships"
+        return []
+
+    agent.model = FakeModel()
+    monkeypatch.setattr("owl.agent.agent.actions_to_kaggle", fake_actions_to_kaggle)
+
+    actions = agent.act(KaggleObservation.model_validate(_raw_observation()))
+
+    assert actions == []
+    assert converted == ["launch", "angle", "ships"]
 
 
 def test_agent_log_prints_one_line_with_metrics(capsys) -> None:
@@ -214,7 +274,7 @@ def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
             assert obs.entity_mask.shape == (1, ACTION_ENTITY_SLOTS)
             assert obs.fleets.shape[1] == 0
             return SimpleNamespace(
-                actions=ModelActions(
+                actions=PureActions(
                     launch=torch.zeros(action_shape, dtype=torch.bool),
                     angle=torch.zeros(action_shape, dtype=torch.float32),
                     ships=torch.zeros(action_shape, dtype=torch.int64),
