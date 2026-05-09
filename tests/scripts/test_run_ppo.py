@@ -470,7 +470,7 @@ def test_eval_actions_for_assignments_uses_stochastic_model_outputs() -> None:
         ) -> SimpleNamespace:
             assert not deterministic
             shape = (1, 4, ACTION_ENTITY_SLOTS, 1)
-            actions = run_ppo.ModelActions(
+            actions = run_ppo.PureActions(
                 launch=torch.full(shape, self.launch_value, dtype=torch.bool),
                 ships=torch.full(shape, self.ship_value, dtype=torch.int64),
                 angle=torch.zeros(shape, dtype=torch.float32),
@@ -500,6 +500,52 @@ def test_eval_actions_for_assignments_uses_stochastic_model_outputs() -> None:
 
     assert actions.launch[0, :, 0, 0].tolist() == [True, False, True, False]
     assert actions.ships[0, :, 0, 0].tolist() == [3, 7, 3, 7]
+
+
+def test_select_actions_handles_discrete_target_bundles() -> None:
+    shape = (1, 4, ACTION_ENTITY_SLOTS, 1)
+    actions_a = run_ppo.DiscreteTargetActions(
+        launch=torch.full(shape, True, dtype=torch.bool),
+        target=torch.full(shape, 3, dtype=torch.int64),
+        ships=torch.full(shape, 5, dtype=torch.int64),
+    )
+    actions_b = run_ppo.DiscreteTargetActions(
+        launch=torch.full(shape, False, dtype=torch.bool),
+        target=torch.full(shape, 7, dtype=torch.int64),
+        ships=torch.full(shape, 11, dtype=torch.int64),
+    )
+
+    selected = run_ppo._select_actions(
+        actions_a,
+        actions_b,
+        torch.tensor([[True, False, True, False]]),
+    )
+
+    assert isinstance(selected, run_ppo.DiscreteTargetActions)
+    assert selected.target[0, :, 0, 0].tolist() == [3, 7, 3, 7]
+    assert selected.ships[0, :, 0, 0].tolist() == [5, 11, 5, 11]
+
+
+def test_select_actions_handles_discrete_target_bin_bundles() -> None:
+    shape = (1, 4, ACTION_ENTITY_SLOTS)
+    actions_a = run_ppo.DiscreteTargetBinActions(
+        target=torch.full(shape, 2, dtype=torch.int64),
+        fleet_bin=torch.full(shape, 4, dtype=torch.int64),
+    )
+    actions_b = run_ppo.DiscreteTargetBinActions(
+        target=torch.full(shape, 6, dtype=torch.int64),
+        fleet_bin=torch.full(shape, 8, dtype=torch.int64),
+    )
+
+    selected = run_ppo._select_actions(
+        actions_a,
+        actions_b,
+        torch.tensor([[True, False, True, False]]),
+    )
+
+    assert isinstance(selected, run_ppo.DiscreteTargetBinActions)
+    assert selected.target[0, :, 0].tolist() == [2, 6, 2, 6]
+    assert selected.fleet_bin[0, :, 0].tolist() == [4, 8, 4, 8]
 
 
 def test_create_model_uses_env_owned_specs() -> None:

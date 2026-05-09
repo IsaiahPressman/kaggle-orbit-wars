@@ -20,9 +20,8 @@ from owl.model.base import (
     InputLayer,
     ModelActionEntropies,
     ModelActionLogProbs,
-    ModelActions,
 )
-from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS
+from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS, DiscreteTargetBinActions
 
 
 @dataclass(frozen=True)
@@ -75,7 +74,7 @@ class DiscreteTargetBinsActor(nn.Module):
         can_act: torch.Tensor,
         *,
         deterministic: bool,
-    ) -> tuple[ModelActions, ModelActionLogProbs, ModelActionEntropies]:
+    ) -> tuple[DiscreteTargetBinActions, ModelActionLogProbs, ModelActionEntropies]:
         selection = self._selection_params(actor_inputs, can_act)
         source_active = can_act.flatten(start_dim=-2).any(dim=-1)
         if deterministic:
@@ -113,7 +112,7 @@ class DiscreteTargetBinsActor(nn.Module):
 
         zeros = torch.zeros_like(per_player_entity_log_prob)
         return (
-            ModelActions(target=target, fleet_bin=fleet_bin),
+            DiscreteTargetBinActions(target=target, fleet_bin=fleet_bin),
             ModelActionLogProbs(
                 launch=zeros.unsqueeze(-1),
                 target=target_log_prob.unsqueeze(-1),
@@ -136,7 +135,7 @@ class DiscreteTargetBinsActor(nn.Module):
         self,
         actor_inputs: DiscreteActorInputs,
         can_act: torch.Tensor,
-        actions: ModelActions,
+        actions: DiscreteTargetBinActions,
     ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
         _require_discrete_target_bin_actions_shape(
             actions,
@@ -148,8 +147,6 @@ class DiscreteTargetBinsActor(nn.Module):
         )
         selection = self._selection_params(actor_inputs, can_act)
         source_active = can_act.flatten(start_dim=-2).any(dim=-1)
-        if actions.target is None or actions.fleet_bin is None:
-            raise ValueError("discrete target-bin actions require target and fleet_bin")
         _require_valid_discrete_target_bin_action(
             actions.target,
             actions.fleet_bin,
@@ -385,17 +382,13 @@ def categorical_entropy(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tenso
 
 
 def _require_discrete_target_bin_actions_shape(
-    actions: ModelActions,
+    actions: DiscreteTargetBinActions,
     expected_shape: tuple[int, int, int],
 ) -> None:
     for name, tensor in (
         ("target", actions.target),
         ("fleet_bin", actions.fleet_bin),
     ):
-        if tensor is None:
-            raise ValueError(
-                f"actions.{name} is required for discrete target-bin actions"
-            )
         if tensor.shape != expected_shape:
             raise ValueError(
                 f"actions.{name} must have shape {expected_shape}, got {tensor.shape}"
@@ -404,13 +397,6 @@ def _require_discrete_target_bin_actions_shape(
             raise ValueError(
                 f"actions.{name} must have dtype torch.int64, got {tensor.dtype}"
             )
-    if actions.launch is not None:
-        raise ValueError("discrete target-bin actions must not include actions.launch")
-    if actions.ships is not None:
-        raise ValueError("discrete target-bin actions must not include actions.ships")
-    if actions.angle is not None:
-        raise ValueError("discrete target-bin actions must not include actions.angle")
-
 
 def _require_valid_discrete_target_bin_action(
     target: torch.Tensor,

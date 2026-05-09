@@ -11,7 +11,6 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -20,7 +19,12 @@ from owl.rl import (
     ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
+    DiscreteTargetActionMask,
+    DiscreteTargetActions,
+    DiscreteTargetBinActions,
     EntityBasedConfig,
+    PureActionMask,
+    PureActions,
     VectorizedEnv,
 )
 from owl.rs import assert_release_build
@@ -202,7 +206,10 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
     if args.action_spec == "discrete_target_bins":
         target = np.zeros((args.n_envs, 4, ACTION_ENTITY_SLOTS), dtype=np.int64)
         fleet_bin = np.zeros_like(target)
-        actions: Any = SimpleNamespace(target=target, fleet_bin=fleet_bin)
+        actions: Any = DiscreteTargetBinActions(
+            target=cast(Any, target),
+            fleet_bin=cast(Any, fleet_bin),
+        )
     else:
         action_shape = (
             args.n_envs,
@@ -211,16 +218,19 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
             args.max_per_planet_launches,
         )
         launch = np.zeros(action_shape, dtype=np.bool_)
-        action_value = np.zeros(
-            action_shape,
-            dtype=np.float32 if args.action_spec == "pure" else np.int64,
-        )
         ships = np.zeros(action_shape, dtype=np.int64)
-        actions = SimpleNamespace(launch=launch, ships=ships)
         if args.action_spec == "pure":
-            actions.angle = action_value
+            actions = PureActions(
+                launch=cast(Any, launch),
+                angle=cast(Any, np.zeros(action_shape, dtype=np.float32)),
+                ships=cast(Any, ships),
+            )
         else:
-            actions.target = action_value
+            actions = DiscreteTargetActions(
+                launch=cast(Any, launch),
+                target=cast(Any, np.zeros(action_shape, dtype=np.int64)),
+                ships=cast(Any, ships),
+            )
 
     launches = 0
     for _ in trange(
@@ -231,7 +241,7 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
         unit="tick",
     ):
         launches += sample_rust_actions(env, rng, args.launch_prob, actions)
-        env.step_actions(actions)
+        env.step(actions)
 
     timed_launches = 0
     elapsed = 0.0
@@ -245,7 +255,7 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
         total_started_at = time.perf_counter()
         timed_launches += sample_rust_actions(env, rng, args.launch_prob, actions)
         started_at = time.perf_counter()
-        env.step_actions(actions)
+        env.step(actions)
         elapsed += time.perf_counter() - started_at
         total_elapsed += time.perf_counter() - total_started_at
 
@@ -268,20 +278,23 @@ def sample_rust_actions(
     launch_prob: float,
     actions: Any,
 ) -> int:
-    can_act = env.observations.can_act.numpy()
+    can_act = env.observations.action_mask.can_act.numpy()
     if can_act.ndim == 3:
-        if actions.launch is None or actions.angle is None or actions.ships is None:
+        if not isinstance(actions, PureActions):
             raise ValueError("pure benchmark actions require launch, angle, and ships")
-        max_launch = env.observations.max_launch
-        if max_launch is None:
+        action_mask = env.observations.action_mask
+        if not isinstance(action_mask, PureActionMask):
             raise ValueError("pure benchmark requires max_launch")
-        max_launch_np = max_launch.numpy()
+        max_launch_np = action_mask.max_launch.numpy()
+        launch = cast(np.ndarray, actions.launch)
+        angle = cast(np.ndarray, actions.angle)
+        ships = cast(np.ndarray, actions.ships)
         selected = can_act & (rng.random(can_act.shape) < launch_prob)
-        actions.angle[..., 0] = rng.uniform(0.0, math.tau, size=can_act.shape).astype(
+        angle[..., 0] = rng.uniform(0.0, math.tau, size=can_act.shape).astype(
             np.float32
         )
-        actions.launch.fill(False)
-        actions.launch[..., 0] = selected
+        launch.fill(False)
+        launch[..., 0] = selected
         high = np.maximum(max_launch_np + 1, env.action_spec.min_fleet_size + 1)
         sampled_ships = rng.integers(
             env.action_spec.min_fleet_size,
@@ -290,19 +303,22 @@ def sample_rust_actions(
             dtype=np.int64,
         )
         sampled_ships[~selected] = 0
-        actions.ships.fill(0)
-        actions.ships[..., 0] = sampled_ships
+        ships.fill(0)
+        ships[..., 0] = sampled_ships
         return int(selected.sum())
 
     if can_act.ndim == 4:
-        if actions.launch is None or actions.target is None or actions.ships is None:
+        if not isinstance(actions, DiscreteTargetActions):
             raise ValueError(
                 "discrete target benchmark actions require launch, target, and ships"
             )
-        max_launch = env.observations.max_launch
-        if max_launch is None:
+        action_mask = env.observations.action_mask
+        if not isinstance(action_mask, DiscreteTargetActionMask):
             raise ValueError("discrete target benchmark requires max_launch")
-        max_launch_np = max_launch.numpy()
+        max_launch_np = action_mask.max_launch.numpy()
+        launch = cast(np.ndarray, actions.launch)
+        target = cast(np.ndarray, actions.target)
+        ships = cast(np.ndarray, actions.ships)
         source_can_act = can_act.any(axis=-1)
         selected = source_can_act & (rng.random(source_can_act.shape) < launch_prob)
         target_counts = can_act.sum(axis=-1)
@@ -312,9 +328,9 @@ def sample_rust_actions(
         target_index = (np.cumsum(can_act, axis=-1) > target_rank[..., None]).argmax(
             axis=-1
         )
-        actions.target[..., 0] = target_index
-        actions.launch.fill(False)
-        actions.launch[..., 0] = selected
+        target[..., 0] = target_index
+        launch.fill(False)
+        launch[..., 0] = selected
         high = np.maximum(max_launch_np + 1, env.action_spec.min_fleet_size + 1)
         sampled_ships = rng.integers(
             env.action_spec.min_fleet_size,
@@ -323,12 +339,14 @@ def sample_rust_actions(
             dtype=np.int64,
         )
         sampled_ships[~selected] = 0
-        actions.ships.fill(0)
-        actions.ships[..., 0] = sampled_ships
+        ships.fill(0)
+        ships[..., 0] = sampled_ships
         return int(selected.sum())
 
-    if actions.target is None or actions.fleet_bin is None:
+    if not isinstance(actions, DiscreteTargetBinActions):
         raise ValueError("target-bin benchmark actions require target and fleet_bin")
+    target = cast(np.ndarray, actions.target)
+    fleet_bin = cast(np.ndarray, actions.fleet_bin)
     source_can_act = can_act.any(axis=(-1, -2))
     selected = source_can_act & (rng.random(source_can_act.shape) < launch_prob)
     pair_counts = can_act.reshape(*source_can_act.shape, -1).sum(axis=-1)
@@ -342,10 +360,10 @@ def sample_rust_actions(
         np.cumsum(can_act.reshape(*source_can_act.shape, -1), axis=-1)
         > pair_rank[..., None]
     ).argmax(axis=-1)
-    actions.target[...] = flat_index // can_act.shape[-1]
-    actions.fleet_bin[...] = flat_index % can_act.shape[-1]
-    actions.target[~selected] = 0
-    actions.fleet_bin[~selected] = 0
+    target[...] = flat_index // can_act.shape[-1]
+    fleet_bin[...] = flat_index % can_act.shape[-1]
+    target[~selected] = 0
+    fleet_bin[~selected] = 0
     return int(selected.sum())
 
 

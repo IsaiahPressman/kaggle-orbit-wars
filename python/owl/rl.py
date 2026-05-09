@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass
 from numbers import Integral
 from typing import Annotated, Any, Literal, SupportsFloat, TypeAlias, cast
 
 import numpy as np
 import torch
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from owl.config import BaseConfig
 from owl.rs import RlVecEnv as _RustRlVecEnv
@@ -117,6 +118,51 @@ ActionConfig: TypeAlias = Annotated[
 OUTER_PLAYER_SLOTS = 4
 
 
+@dataclass
+class PureActions:
+    launch: torch.Tensor
+    angle: torch.Tensor
+    ships: torch.Tensor
+
+
+@dataclass
+class DiscreteTargetActions:
+    launch: torch.Tensor
+    target: torch.Tensor
+    ships: torch.Tensor
+
+
+@dataclass
+class DiscreteTargetBinActions:
+    target: torch.Tensor
+    fleet_bin: torch.Tensor
+
+
+ActionBundle: TypeAlias = PureActions | DiscreteTargetActions | DiscreteTargetBinActions
+
+
+@dataclass(frozen=True)
+class PureActionMask:
+    can_act: torch.Tensor
+    max_launch: torch.Tensor
+
+
+@dataclass(frozen=True)
+class DiscreteTargetActionMask:
+    can_act: torch.Tensor
+    max_launch: torch.Tensor
+
+
+@dataclass(frozen=True)
+class DiscreteTargetBinActionMask:
+    can_act: torch.Tensor
+
+
+ActionMask: TypeAlias = (
+    PureActionMask | DiscreteTargetActionMask | DiscreteTargetBinActionMask
+)
+
+
 class EnvConfig(BaseConfig):
     n_envs: int = Field(default=2, ge=1)
     obs_spec: ObsConfig = Field(default_factory=EntityBasedConfig)
@@ -142,8 +188,50 @@ class ObsBatch(BaseModel):
     entity_mask: torch.Tensor
     still_playing: torch.Tensor
     global_features: torch.Tensor
-    can_act: torch.Tensor
-    max_launch: torch.Tensor | None = None
+    action_mask: ActionMask
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_action_mask(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        if "action_mask" in data:
+            return data
+        if "can_act" not in data:
+            return data
+        data = dict(data)
+        can_act = data.pop("can_act")
+        max_launch = data.pop("max_launch", None)
+        if max_launch is None:
+            data["action_mask"] = DiscreteTargetBinActionMask(can_act=can_act)
+        elif getattr(can_act, "ndim", 0) == getattr(max_launch, "ndim", -1) + 1:
+            data["action_mask"] = DiscreteTargetActionMask(
+                can_act=can_act,
+                max_launch=max_launch,
+            )
+        elif getattr(can_act, "ndim", 0) == getattr(max_launch, "ndim", -1):
+            data["action_mask"] = PureActionMask(
+                can_act=can_act,
+                max_launch=max_launch,
+            )
+        else:
+            raise ValueError(
+                "legacy can_act/max_launch shapes do not identify an action mask"
+            )
+        return data
+
+    @property
+    def can_act(self) -> torch.Tensor:
+        return self.action_mask.can_act
+
+    @property
+    def max_launch(self) -> torch.Tensor | None:
+        if isinstance(
+            self.action_mask,
+            PureActionMask | DiscreteTargetActionMask,
+        ):
+            return self.action_mask.max_launch
+        return None
 
 
 class VectorizedEnv:
@@ -240,27 +328,59 @@ class VectorizedEnv:
 
     def step(
         self,
-        launch: np.ndarray | torch.Tensor | Any,
-        action_value: np.ndarray | torch.Tensor | None = None,
-        ships: np.ndarray | torch.Tensor | None = None,
+        actions: ActionBundle,
     ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
-        if action_value is None and ships is None and _looks_like_action_bundle(launch):
-            return self.step_actions(launch)
-        if action_value is None or ships is None:
-            raise TypeError(
-                "step requires an action bundle or launch, action_value, ships"
-            )
         if isinstance(self.action_spec, ActionDiscreteTargetBinsConfig):
-            raise TypeError(
-                "discrete_target_bins requires a target/fleet_bin action bundle"
+            if not isinstance(actions, DiscreteTargetBinActions):
+                raise TypeError(
+                    "discrete_target_bins requires DiscreteTargetBinActions"
+                )
+            target_array = _actions_to_numpy(
+                "target", actions.target, dtype=np.int64, torch_dtype=torch.int64
             )
+            fleet_bin_array = _actions_to_numpy(
+                "fleet_bin",
+                actions.fleet_bin,
+                dtype=np.int64,
+                torch_dtype=torch.int64,
+            )
+            target_bin_shape = (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS)
+            _require_action_shape("target", target_array, target_bin_shape)
+            _require_action_shape("fleet_bin", fleet_bin_array, target_bin_shape)
+            episode_metrics = self._rust.step_discrete_target_bins(
+                target_array,
+                fleet_bin_array,
+                self._planet_obs_np,
+                self._orbiting_planet_obs_np,
+                self._fleet_obs_np,
+                self._comet_obs_np,
+                self._entity_mask_np,
+                self._still_playing_np,
+                self._global_obs_np,
+                self._can_act_np,
+                self._rewards_np,
+                self._dones_np,
+            )
+            return self.observations, self.rewards, self.dones, episode_metrics
+
+        if isinstance(self.action_spec, ActionPureConfig):
+            if not isinstance(actions, PureActions):
+                raise TypeError("pure requires PureActions")
+            launch_actions: PureActions | DiscreteTargetActions = actions
+        elif isinstance(self.action_spec, ActionDiscreteTargetsConfig):
+            if not isinstance(actions, DiscreteTargetActions):
+                raise TypeError("discrete_targets requires DiscreteTargetActions")
+            launch_actions = actions
+        else:
+            raise TypeError("unsupported action spec")
+
         launch_array = _actions_to_numpy(
-            "launch", launch, dtype=np.bool_, torch_dtype=torch.bool
+            "launch", launch_actions.launch, dtype=np.bool_, torch_dtype=torch.bool
         )
         ship_array = _actions_to_numpy(
-            "ships", ships, dtype=np.int64, torch_dtype=torch.int64
+            "ships", launch_actions.ships, dtype=np.int64, torch_dtype=torch.int64
         )
-        expected_shape = (
+        expected_shape: tuple[int, ...] = (
             self.n_envs,
             self.n_players,
             ACTION_ENTITY_SLOTS,
@@ -270,10 +390,11 @@ class VectorizedEnv:
         _require_action_shape("ships", ship_array, expected_shape)
 
         if isinstance(self.action_spec, ActionPureConfig):
+            pure_actions = cast(PureActions, launch_actions)
             assert self._max_launch_np is not None
             angle_array = _actions_to_numpy(
                 "angle",
-                action_value,
+                pure_actions.angle,
                 dtype=np.float32,
                 torch_dtype=torch.float32,
             )
@@ -295,10 +416,11 @@ class VectorizedEnv:
                 self._dones_np,
             )
         elif isinstance(self.action_spec, ActionDiscreteTargetsConfig):
+            discrete_actions = cast(DiscreteTargetActions, launch_actions)
             assert self._max_launch_np is not None
             target_array = _actions_to_numpy(
                 "target",
-                action_value,
+                discrete_actions.target,
                 dtype=np.int64,
                 torch_dtype=torch.int64,
             )
@@ -327,50 +449,38 @@ class VectorizedEnv:
 
     def step_actions(
         self,
-        actions: Any,
+        actions: ActionBundle,
     ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
-        if isinstance(self.action_spec, ActionDiscreteTargetBinsConfig):
-            target = getattr(actions, "target", None)
-            fleet_bin = getattr(actions, "fleet_bin", None)
-            if target is None or fleet_bin is None:
-                raise ValueError(
-                    "discrete_target_bins actions require target and fleet_bin tensors"
-                )
-            target_array = _actions_to_numpy(
-                "target", target, dtype=np.int64, torch_dtype=torch.int64
-            )
-            fleet_bin_array = _actions_to_numpy(
-                "fleet_bin", fleet_bin, dtype=np.int64, torch_dtype=torch.int64
-            )
-            expected_shape = (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS)
-            _require_action_shape("target", target_array, expected_shape)
-            _require_action_shape("fleet_bin", fleet_bin_array, expected_shape)
-            episode_metrics = self._rust.step_discrete_target_bins(
-                target_array,
-                fleet_bin_array,
-                self._planet_obs_np,
-                self._orbiting_planet_obs_np,
-                self._fleet_obs_np,
-                self._comet_obs_np,
-                self._entity_mask_np,
-                self._still_playing_np,
-                self._global_obs_np,
-                self._can_act_np,
-                self._rewards_np,
-                self._dones_np,
-            )
-            return self.observations, self.rewards, self.dones, episode_metrics
-
-        launch = getattr(actions, "launch", None)
-        ships = getattr(actions, "ships", None)
-        if launch is None or ships is None:
-            raise ValueError(
-                "pure and discrete_targets actions require launch and ships"
-            )
-        return self.step(launch, _action_value(actions), ships)
+        return self.step(actions)
 
     def _allocate_observations(self, *, pin_memory: bool) -> ObsBatch:
         can_act_shape = _can_act_shape(self.n_envs, self.n_players, self.action_spec)
+        can_act = torch.zeros(
+            can_act_shape,
+            dtype=torch.bool,
+            pin_memory=pin_memory,
+        )
+        max_launch = (
+            None
+            if isinstance(self.action_spec, ActionDiscreteTargetBinsConfig)
+            else torch.zeros(
+                (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS),
+                dtype=torch.int64,
+                pin_memory=pin_memory,
+            )
+        )
+        if isinstance(self.action_spec, ActionPureConfig):
+            action_mask: ActionMask = PureActionMask(
+                can_act=can_act,
+                max_launch=cast(torch.Tensor, max_launch),
+            )
+        elif isinstance(self.action_spec, ActionDiscreteTargetsConfig):
+            action_mask = DiscreteTargetActionMask(
+                can_act=can_act,
+                max_launch=cast(torch.Tensor, max_launch),
+            )
+        else:
+            action_mask = DiscreteTargetBinActionMask(can_act=can_act)
         return ObsBatch(
             planets=torch.zeros(
                 (
@@ -419,20 +529,7 @@ class VectorizedEnv:
                 dtype=torch.float32,
                 pin_memory=pin_memory,
             ),
-            can_act=torch.zeros(
-                can_act_shape,
-                dtype=torch.bool,
-                pin_memory=pin_memory,
-            ),
-            max_launch=(
-                None
-                if isinstance(self.action_spec, ActionDiscreteTargetBinsConfig)
-                else torch.zeros(
-                    (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS),
-                    dtype=torch.int64,
-                    pin_memory=pin_memory,
-                )
-            ),
+            action_mask=action_mask,
         )
 
 
@@ -535,54 +632,31 @@ def encode_python_observation(
 def actions_to_kaggle(
     obs: dict[str, Any],
     player: int,
-    launch: np.ndarray | torch.Tensor | Any,
-    action_value: np.ndarray | torch.Tensor | None = None,
-    ships: np.ndarray | torch.Tensor | None = None,
+    actions: ActionBundle,
     *,
     action_spec: ActionConfig,
 ) -> list[list[float]]:
-    if action_value is None and ships is None and _looks_like_action_bundle(launch):
-        actions = launch
-        if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
-            target = getattr(actions, "target", None)
-            fleet_bin = getattr(actions, "fleet_bin", None)
-            if target is None or fleet_bin is None:
-                raise ValueError(
-                    "discrete_target_bins actions require target and fleet_bin tensors"
-                )
-            return _target_bin_actions_to_kaggle(
-                obs,
-                player,
-                target,
-                fleet_bin,
-                action_spec=action_spec,
-            )
-        launch_tensor = getattr(actions, "launch", None)
-        ship_tensor = getattr(actions, "ships", None)
-        if launch_tensor is None or ship_tensor is None:
-            raise ValueError(
-                "pure and discrete_targets actions require launch and ships"
-            )
-        return actions_to_kaggle(
-            obs,
-            player,
-            launch_tensor,
-            _action_value(actions),
-            ship_tensor,
-            action_spec=action_spec,
-        )
-    if action_value is None or ships is None:
-        raise TypeError(
-            "actions_to_kaggle requires an action bundle or launch, action_value, ships"
-        )
     if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
+        if not isinstance(actions, DiscreteTargetBinActions):
+            raise TypeError("discrete_target_bins requires DiscreteTargetBinActions")
         return _target_bin_actions_to_kaggle(
             obs,
             player,
-            action_value,
-            ships,
+            actions.target,
+            actions.fleet_bin,
             action_spec=action_spec,
         )
+    if isinstance(action_spec, ActionPureConfig):
+        if not isinstance(actions, PureActions):
+            raise TypeError("pure requires PureActions")
+        launch_actions: PureActions | DiscreteTargetActions = actions
+    elif isinstance(action_spec, ActionDiscreteTargetsConfig):
+        if not isinstance(actions, DiscreteTargetActions):
+            raise TypeError("discrete_targets requires DiscreteTargetActions")
+        launch_actions = actions
+    else:
+        raise TypeError("unsupported action spec")
+
     (
         planets_in,
         initial_planets_in,
@@ -596,10 +670,10 @@ def actions_to_kaggle(
         episode_steps,
     ) = _observation_arrays(obs)
     launch_array = _actions_to_numpy(
-        "launch", launch, dtype=np.bool_, torch_dtype=torch.bool
+        "launch", launch_actions.launch, dtype=np.bool_, torch_dtype=torch.bool
     )
     ship_array = _actions_to_numpy(
-        "ships", ships, dtype=np.int64, torch_dtype=torch.int64
+        "ships", launch_actions.ships, dtype=np.int64, torch_dtype=torch.int64
     )
     expected_batched_shape = (
         1,
@@ -613,9 +687,10 @@ def actions_to_kaggle(
     ship_array = np.ascontiguousarray(ship_array[0])
 
     if isinstance(action_spec, ActionPureConfig):
+        pure_actions = cast(PureActions, launch_actions)
         angle_array = _actions_to_numpy(
             "angle",
-            action_value,
+            pure_actions.angle,
             dtype=np.float32,
             torch_dtype=torch.float32,
         )
@@ -639,9 +714,10 @@ def actions_to_kaggle(
             action_spec.min_fleet_size,
         )
 
+    discrete_actions = cast(DiscreteTargetActions, launch_actions)
     target_array = _actions_to_numpy(
         "target",
-        action_value,
+        discrete_actions.target,
         dtype=np.int64,
         torch_dtype=torch.int64,
     )
@@ -715,6 +791,24 @@ def _encoded_observation_to_batch(
         can_act,
         max_launch,
     ) = encoded
+    can_act_tensor = torch.as_tensor(can_act, dtype=torch.bool).unsqueeze(0)
+    max_launch_tensor = (
+        None
+        if max_launch is None
+        else torch.as_tensor(max_launch, dtype=torch.int64).unsqueeze(0)
+    )
+    if max_launch_tensor is None:
+        action_mask: ActionMask = DiscreteTargetBinActionMask(can_act=can_act_tensor)
+    elif can_act_tensor.ndim == 4:
+        action_mask = DiscreteTargetActionMask(
+            can_act=can_act_tensor,
+            max_launch=max_launch_tensor,
+        )
+    else:
+        action_mask = PureActionMask(
+            can_act=can_act_tensor,
+            max_launch=max_launch_tensor,
+        )
     return ObsBatch(
         planets=torch.as_tensor(planets, dtype=torch.float32).unsqueeze(0),
         orbiting_planets=torch.as_tensor(orbiting_planets, dtype=torch.bool).unsqueeze(
@@ -727,12 +821,7 @@ def _encoded_observation_to_batch(
         global_features=torch.as_tensor(global_features, dtype=torch.float32).unsqueeze(
             0
         ),
-        can_act=torch.as_tensor(can_act, dtype=torch.bool).unsqueeze(0),
-        max_launch=(
-            None
-            if max_launch is None
-            else torch.as_tensor(max_launch, dtype=torch.int64).unsqueeze(0)
-        ),
+        action_mask=action_mask,
     )
 
 
@@ -788,25 +877,6 @@ def _target_bin_actions_to_kaggle(
         action_spec.min_fleet_size,
         action_spec.n_bins,
     )
-
-
-def _looks_like_action_bundle(value: object) -> bool:
-    return any(
-        hasattr(value, field)
-        for field in ("launch", "angle", "ships", "target", "fleet_bin")
-    )
-
-
-def _action_value(actions: Any) -> torch.Tensor | np.ndarray:
-    angle = getattr(actions, "angle", None)
-    target = getattr(actions, "target", None)
-    if angle is not None and target is None:
-        return angle
-    if target is not None and angle is None:
-        return target
-    if hasattr(actions, "action_value"):
-        return actions.action_value()
-    raise ValueError("actions must include exactly one of angle or target")
 
 
 def _can_act_shape(

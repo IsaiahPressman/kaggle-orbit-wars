@@ -15,12 +15,21 @@ from owl.model.stateless_transformer_v1 import (
     StatelessTransformerV1,
     StatelessTransformerV1Config,
 )
+from owl.rl import (
+    ActionBundle,
+    DiscreteTargetActions,
+    DiscreteTargetBinActions,
+    PureActions,
+)
 
 __all__ = [
+    "ActionBundle",
     "ActorDiscreteTargetBinsConfig",
     "ActorDiscreteTargetsConfig",
     "ActorPureConfig",
     "BaseModelAPI",
+    "DiscreteTargetActions",
+    "DiscreteTargetBinActions",
     "InputLayer",
     "ModelActionEntropies",
     "ModelActionLogProbs",
@@ -28,6 +37,7 @@ __all__ = [
     "ModelConfig",
     "ModelEvaluation",
     "ModelOutput",
+    "PureActions",
     "StatelessTransformerV1",
     "StatelessTransformerV1Config",
 ]

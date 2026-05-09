@@ -2,29 +2,15 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import TypeAlias
 
 import torch
 from torch import nn
 
-from owl.rl import ObsBatch
+from owl.rl import ActionBundle, ObsBatch
 
 InputLayer = nn.Module | nn.Parameter
-
-
-@dataclass
-class ModelActions:
-    launch: torch.Tensor | None = None
-    ships: torch.Tensor | None = None
-    angle: torch.Tensor | None = None
-    target: torch.Tensor | None = None
-    fleet_bin: torch.Tensor | None = None
-
-    def action_value(self) -> torch.Tensor:
-        if self.angle is not None and self.target is None:
-            return self.angle
-        if self.target is not None and self.angle is None:
-            return self.target
-        raise ValueError("exactly one of actions.angle or actions.target must be set")
+ModelActions: TypeAlias = ActionBundle
 
 
 @dataclass

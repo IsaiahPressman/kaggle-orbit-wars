@@ -19,9 +19,8 @@ from owl.model.base import (
     InputLayer,
     ModelActionEntropies,
     ModelActionLogProbs,
-    ModelActions,
 )
-from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS
+from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS, PureActions
 
 
 @dataclass(frozen=True)
@@ -92,7 +91,7 @@ class PureActor(nn.Module):
         *,
         min_fleet_size: int,
         deterministic: bool,
-    ) -> tuple[ModelActions, ModelActionLogProbs, ModelActionEntropies]:
+    ) -> tuple[PureActions, ModelActionLogProbs, ModelActionEntropies]:
         max_slots = self.max_per_planet_launches
         launch_slots: list[torch.Tensor] = []
         angle_slots: list[torch.Tensor] = []
@@ -218,7 +217,7 @@ class PureActor(nn.Module):
         )
 
         return (
-            ModelActions(
+            PureActions(
                 launch=launch_tensor,
                 angle=angle_tensor,
                 ships=ship_tensor,
@@ -244,7 +243,7 @@ class PureActor(nn.Module):
         slot_input: torch.Tensor,
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
-        actions: ModelActions,
+        actions: PureActions,
         *,
         min_fleet_size: int,
     ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
@@ -257,8 +256,6 @@ class PureActor(nn.Module):
                 self.max_per_planet_launches,
             ),
         )
-        if actions.launch is None or actions.angle is None or actions.ships is None:
-            raise ValueError("pure actions require launch, angle, and ships")
         action_launch = actions.launch
         action_angle = actions.angle
         action_ships = actions.ships
@@ -788,7 +785,7 @@ def _per_player_action_entity_log_prob(
 
 
 def _require_actions_shape(
-    actions: ModelActions,
+    actions: PureActions,
     expected_shape: tuple[int, int, int, int],
 ) -> None:
     for name, tensor in (
@@ -796,18 +793,10 @@ def _require_actions_shape(
         ("angle", actions.angle),
         ("ships", actions.ships),
     ):
-        if tensor is None:
-            raise ValueError(f"actions.{name} is required for pure actions")
         if tensor.shape != expected_shape:
             raise ValueError(
                 f"actions.{name} must have shape {expected_shape}, got {tensor.shape}"
             )
-    if actions.target is not None:
-        raise ValueError("pure actions must not include actions.target")
-    if actions.fleet_bin is not None:
-        raise ValueError("pure actions must not include actions.fleet_bin")
-    if actions.launch is None or actions.angle is None or actions.ships is None:
-        raise ValueError("pure actions require launch, angle, and ships")
     if actions.launch.dtype != torch.bool:
         raise ValueError(
             f"actions.launch must have dtype torch.bool, got {actions.launch.dtype}"

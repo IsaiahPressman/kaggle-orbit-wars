@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 import torch
 from pydantic import Field, field_validator
@@ -14,12 +15,20 @@ from owl.model import BaseModelAPI, ModelActions, ModelEvaluation, ModelOutput
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     OUTER_PLAYER_SLOTS,
+    ActionBundle,
     ActionConfig,
     ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
+    ActionMask,
     ActionPureConfig,
+    DiscreteTargetActionMask,
+    DiscreteTargetActions,
+    DiscreteTargetBinActionMask,
+    DiscreteTargetBinActions,
     EntityBasedConfig,
     ObsBatch,
+    PureActionMask,
+    PureActions,
     VectorizedEnv,
 )
 from owl.train.advantages import (
@@ -67,8 +76,10 @@ CompileMode = Literal[
 ]
 
 
-_OBS_FIELDS = tuple(ObsBatch.model_fields)
-_ACTION_FIELDS = tuple(ModelActions.__dataclass_fields__)
+_OBS_TENSOR_FIELDS = tuple(
+    field for field in ObsBatch.model_fields if field != "action_mask"
+)
+_OBS_FIELDS = (*_OBS_TENSOR_FIELDS, "can_act", "max_launch")
 
 
 class PPOConfig(BaseConfig):
@@ -207,6 +218,32 @@ class PPORolloutBuffer:
                 ACTION_ENTITY_SLOTS,
                 action_spec.n_bins,
             )
+        can_act = torch.zeros(
+            can_act_shape,
+            dtype=torch.bool,
+            device=device,
+        )
+        max_launch = (
+            None
+            if isinstance(action_spec, ActionDiscreteTargetBinsConfig)
+            else torch.zeros(
+                (horizon, n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
+                dtype=torch.int64,
+                device=device,
+            )
+        )
+        if isinstance(action_spec, ActionPureConfig):
+            action_mask: ActionMask = PureActionMask(
+                can_act=can_act,
+                max_launch=cast(torch.Tensor, max_launch),
+            )
+        elif isinstance(action_spec, ActionDiscreteTargetsConfig):
+            action_mask = DiscreteTargetActionMask(
+                can_act=can_act,
+                max_launch=cast(torch.Tensor, max_launch),
+            )
+        else:
+            action_mask = DiscreteTargetBinActionMask(can_act=can_act)
         self.obs = ObsBatch(
             planets=torch.zeros(
                 (horizon, n_envs, obs_spec.max_planets, obs_spec.planet_channels),
@@ -247,20 +284,7 @@ class PPORolloutBuffer:
                 dtype=torch.float32,
                 device=device,
             ),
-            can_act=torch.zeros(
-                can_act_shape,
-                dtype=torch.bool,
-                device=device,
-            ),
-            max_launch=(
-                None
-                if isinstance(action_spec, ActionDiscreteTargetBinsConfig)
-                else torch.zeros(
-                    (horizon, n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
-                    dtype=torch.int64,
-                    device=device,
-                )
-            ),
+            action_mask=action_mask,
         )
         if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
             action_shape: tuple[int, ...] = (
@@ -269,7 +293,7 @@ class PPORolloutBuffer:
                 OUTER_PLAYER_SLOTS,
                 ACTION_ENTITY_SLOTS,
             )
-            self.actions = ModelActions(
+            self.actions: ActionBundle = DiscreteTargetBinActions(
                 target=torch.zeros(action_shape, dtype=torch.int64, device=device),
                 fleet_bin=torch.zeros(action_shape, dtype=torch.int64, device=device),
             )
@@ -281,20 +305,26 @@ class PPORolloutBuffer:
                 ACTION_ENTITY_SLOTS,
                 action_spec.max_per_planet_launches,
             )
-            self.actions = ModelActions(
-                launch=torch.zeros(action_shape, dtype=torch.bool, device=device),
-                ships=torch.zeros(action_shape, dtype=torch.int64, device=device),
-                angle=(
-                    torch.zeros(action_shape, dtype=torch.float32, device=device)
-                    if isinstance(action_spec, ActionPureConfig)
-                    else None
-                ),
-                target=(
-                    None
-                    if isinstance(action_spec, ActionPureConfig)
-                    else torch.zeros(action_shape, dtype=torch.int64, device=device)
-                ),
-            )
+            if isinstance(action_spec, ActionPureConfig):
+                self.actions = PureActions(
+                    launch=torch.zeros(
+                        action_shape,
+                        dtype=torch.bool,
+                        device=device,
+                    ),
+                    angle=torch.zeros(action_shape, dtype=torch.float32, device=device),
+                    ships=torch.zeros(action_shape, dtype=torch.int64, device=device),
+                )
+            else:
+                self.actions = DiscreteTargetActions(
+                    launch=torch.zeros(
+                        action_shape,
+                        dtype=torch.bool,
+                        device=device,
+                    ),
+                    target=torch.zeros(action_shape, dtype=torch.int64, device=device),
+                    ships=torch.zeros(action_shape, dtype=torch.int64, device=device),
+                )
         self.logp = torch.zeros(
             (horizon, n_envs, OUTER_PLAYER_SLOTS),
             dtype=torch.float32,
@@ -1371,67 +1401,151 @@ def validate_ppo_loss_inputs(
         assert_finite(tensor, name)
 
 
-def _copy_obs_time_step(dst: ObsBatch, step: int, src: ObsBatch) -> None:
-    for field in _OBS_FIELDS:
-        dst_tensor = getattr(dst, field)
-        src_tensor = getattr(src, field)
-        if dst_tensor is None:
-            continue
-        if src_tensor is None:
-            raise ValueError(f"obs.{field} is required")
-        dst_tensor[step].copy_(src_tensor)
+def _copy_action_mask_time_step(dst: ActionMask, step: int, src: ActionMask) -> None:
+    if type(dst) is not type(src):
+        raise ValueError(
+            f"rollout action-mask type mismatch: expected {type(dst).__name__}, "
+            f"got {type(src).__name__}"
+        )
+    dst.can_act[step].copy_(src.can_act)
+    if isinstance(dst, PureActionMask | DiscreteTargetActionMask):
+        if not isinstance(src, PureActionMask | DiscreteTargetActionMask):
+            raise ValueError("source action mask is missing max_launch")
+        dst.max_launch[step].copy_(src.max_launch)
 
 
-def _copy_actions_time_step(
-    dst: ModelActions,
-    step: int,
-    src: ModelActions,
+def _action_mask_segment_major(action_mask: ActionMask) -> ActionMask:
+    return _map_action_mask(action_mask, _optional_obs_segment_major)
+
+
+def _action_mask_index(action_mask: ActionMask, idx: torch.Tensor) -> ActionMask:
+    return _map_action_mask(
+        action_mask,
+        lambda tensor: _optional_obs_index(tensor, idx),
+    )
+
+
+def _action_mask_to_device(
+    action_mask: ActionMask,
+    device: torch.device,
+    *,
+    non_blocking: bool,
+    clone: bool,
+) -> ActionMask:
+    def move(tensor: torch.Tensor) -> torch.Tensor:
+        moved = tensor.to(device, non_blocking=non_blocking)
+        return moved.clone() if clone else moved
+
+    return _map_action_mask(action_mask, move)
+
+
+def _copy_action_mask_to_device_(
+    dst: ActionMask,
+    src: ActionMask,
+    *,
+    non_blocking: bool,
 ) -> None:
-    for field in _ACTION_FIELDS:
+    if type(dst) is not type(src):
+        raise ValueError(
+            f"obs action-mask type mismatch: expected {type(dst).__name__}, "
+            f"got {type(src).__name__}"
+        )
+    dst.can_act.copy_(src.can_act, non_blocking=non_blocking)
+    if isinstance(dst, PureActionMask | DiscreteTargetActionMask):
+        if not isinstance(src, PureActionMask | DiscreteTargetActionMask):
+            raise ValueError("source action mask is missing max_launch")
+        dst.max_launch.copy_(src.max_launch, non_blocking=non_blocking)
+
+
+def _action_mask_flatten_time(action_mask: ActionMask) -> ActionMask:
+    return _map_action_mask(action_mask, _optional_flatten_tensor_time)
+
+
+def _map_action_mask(
+    action_mask: ActionMask,
+    fn: Callable[[torch.Tensor], torch.Tensor],
+) -> ActionMask:
+    if isinstance(action_mask, PureActionMask):
+        return PureActionMask(
+            can_act=fn(action_mask.can_act),
+            max_launch=fn(action_mask.max_launch),
+        )
+    if isinstance(action_mask, DiscreteTargetActionMask):
+        return DiscreteTargetActionMask(
+            can_act=fn(action_mask.can_act),
+            max_launch=fn(action_mask.max_launch),
+        )
+    return DiscreteTargetBinActionMask(can_act=fn(action_mask.can_act))
+
+
+def _map_action_bundle(
+    actions: ActionBundle,
+    fn: Callable[[torch.Tensor], torch.Tensor],
+) -> ActionBundle:
+    if isinstance(actions, PureActions):
+        return PureActions(
+            launch=fn(actions.launch),
+            angle=fn(actions.angle),
+            ships=fn(actions.ships),
+        )
+    if isinstance(actions, DiscreteTargetActions):
+        return DiscreteTargetActions(
+            launch=fn(actions.launch),
+            target=fn(actions.target),
+            ships=fn(actions.ships),
+        )
+    return DiscreteTargetBinActions(
+        target=fn(actions.target),
+        fleet_bin=fn(actions.fleet_bin),
+    )
+
+
+def _copy_obs_time_step(dst: ObsBatch, step: int, src: ObsBatch) -> None:
+    for field in _OBS_TENSOR_FIELDS:
         dst_tensor = getattr(dst, field)
         src_tensor = getattr(src, field)
-        if dst_tensor is None:
-            continue
-        if src_tensor is None:
-            raise ValueError(f"actions.{field} is required")
         dst_tensor[step].copy_(src_tensor)
+    _copy_action_mask_time_step(dst.action_mask, step, src.action_mask)
+
+
+def _copy_actions_time_step(dst: ActionBundle, step: int, src: ActionBundle) -> None:
+    if type(dst) is not type(src):
+        raise ValueError(
+            f"rollout action bundle type mismatch: expected {type(dst).__name__}, "
+            f"got {type(src).__name__}"
+        )
+    for field in dst.__dataclass_fields__:
+        getattr(dst, field)[step].copy_(getattr(src, field))
 
 
 def _obs_segment_major(obs: ObsBatch) -> ObsBatch:
     return ObsBatch(
         **{
             field: _optional_obs_segment_major(getattr(obs, field))
-            for field in _OBS_FIELDS
-        }
+            for field in _OBS_TENSOR_FIELDS
+        },
+        action_mask=_action_mask_segment_major(obs.action_mask),
     )
 
 
-def _actions_segment_major(actions: ModelActions) -> ModelActions:
-    return ModelActions(
-        launch=_optional_actions_segment_major(actions.launch),
-        ships=_optional_actions_segment_major(actions.ships),
-        angle=_optional_actions_segment_major(actions.angle),
-        target=_optional_actions_segment_major(actions.target),
-        fleet_bin=_optional_actions_segment_major(actions.fleet_bin),
-    )
+def _actions_segment_major(actions: ActionBundle) -> ActionBundle:
+    return _map_action_bundle(actions, _optional_actions_segment_major)
 
 
 def _obs_index(obs: ObsBatch, idx: torch.Tensor) -> ObsBatch:
     return ObsBatch(
         **{
             field: _optional_obs_index(getattr(obs, field), idx)
-            for field in _OBS_FIELDS
-        }
+            for field in _OBS_TENSOR_FIELDS
+        },
+        action_mask=_action_mask_index(obs.action_mask, idx),
     )
 
 
-def _actions_index(actions: ModelActions, idx: torch.Tensor) -> ModelActions:
-    return ModelActions(
-        launch=_optional_actions_index(actions.launch, idx),
-        ships=_optional_actions_index(actions.ships, idx),
-        angle=_optional_actions_index(actions.angle, idx),
-        target=_optional_actions_index(actions.target, idx),
-        fleet_bin=_optional_actions_index(actions.fleet_bin, idx),
+def _actions_index(actions: ActionBundle, idx: torch.Tensor) -> ActionBundle:
+    return _map_action_bundle(
+        actions,
+        lambda tensor: _optional_actions_index(tensor, idx),
     )
 
 
@@ -1444,15 +1558,15 @@ def _obs_to_device(
     if device.type == "cpu":
         return ObsBatch(
             **{
-                field: (
-                    None
-                    if getattr(obs, field) is None
-                    else getattr(obs, field)
-                    .to(device, non_blocking=non_blocking)
-                    .clone()
-                )
-                for field in _OBS_FIELDS
-            }
+                field: getattr(obs, field).to(device, non_blocking=non_blocking).clone()
+                for field in _OBS_TENSOR_FIELDS
+            },
+            action_mask=_action_mask_to_device(
+                obs.action_mask,
+                device,
+                non_blocking=non_blocking,
+                clone=True,
+            ),
         )
 
     return ObsBatch(
@@ -1462,8 +1576,14 @@ def _obs_to_device(
                 device,
                 non_blocking=non_blocking,
             )
-            for field in _OBS_FIELDS
-        }
+            for field in _OBS_TENSOR_FIELDS
+        },
+        action_mask=_action_mask_to_device(
+            obs.action_mask,
+            device,
+            non_blocking=non_blocking,
+            clone=False,
+        ),
     )
 
 
@@ -1473,30 +1593,25 @@ def _copy_obs_to_device_(
     *,
     non_blocking: bool = False,
 ) -> None:
-    for field in _OBS_FIELDS:
+    for field in _OBS_TENSOR_FIELDS:
         dst_tensor = getattr(dst, field)
         src_tensor = getattr(src, field)
-        if dst_tensor is None:
-            continue
-        if src_tensor is None:
-            raise ValueError(f"obs.{field} is required")
         dst_tensor.copy_(src_tensor, non_blocking=non_blocking)
+    _copy_action_mask_to_device_(
+        dst.action_mask,
+        src.action_mask,
+        non_blocking=non_blocking,
+    )
 
 
 def _actions_to_cpu(
-    actions: ModelActions,
+    actions: ActionBundle,
     *,
     non_blocking: bool = False,
-) -> ModelActions:
-    return ModelActions(
-        launch=_optional_actions_to_cpu(actions.launch, non_blocking=non_blocking),
-        ships=_optional_actions_to_cpu(actions.ships, non_blocking=non_blocking),
-        angle=_optional_actions_to_cpu(actions.angle, non_blocking=non_blocking),
-        target=_optional_actions_to_cpu(actions.target, non_blocking=non_blocking),
-        fleet_bin=_optional_actions_to_cpu(
-            actions.fleet_bin,
-            non_blocking=non_blocking,
-        ),
+) -> ActionBundle:
+    return _map_action_bundle(
+        actions,
+        lambda tensor: _optional_actions_to_cpu(tensor, non_blocking=non_blocking),
     )
 
 
@@ -1508,36 +1623,22 @@ def _flatten_obs_time(obs: ObsBatch) -> ObsBatch:
     return ObsBatch(
         **{
             field: _optional_flatten_tensor_time(getattr(obs, field))
-            for field in _OBS_FIELDS
-        }
+            for field in _OBS_TENSOR_FIELDS
+        },
+        action_mask=_action_mask_flatten_time(obs.action_mask),
     )
 
 
-def _flatten_actions_time(actions: ModelActions) -> ModelActions:
-    return ModelActions(
-        launch=_optional_flatten_tensor_time(actions.launch),
-        ships=_optional_flatten_tensor_time(actions.ships),
-        angle=_optional_flatten_tensor_time(actions.angle),
-        target=_optional_flatten_tensor_time(actions.target),
-        fleet_bin=_optional_flatten_tensor_time(actions.fleet_bin),
-    )
+def _flatten_actions_time(actions: ActionBundle) -> ActionBundle:
+    return _map_action_bundle(actions, _optional_flatten_tensor_time)
 
 
 def _step_env(
     env: Any,
-    actions: ModelActions,
+    actions: ActionBundle,
 ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
     cpu_actions = _actions_to_cpu(actions)
-    if hasattr(env, "step_actions"):
-        result = env.step_actions(cpu_actions)
-    else:
-        if cpu_actions.launch is None or cpu_actions.ships is None:
-            raise ValueError("legacy envs require actions.launch and actions.ships")
-        result = env.step(
-            cpu_actions.launch,
-            cpu_actions.action_value(),
-            cpu_actions.ships,
-        )
+    result = env.step(cpu_actions)
     if len(result) == 3:
         obs, rewards, dones = result
         return obs, rewards, dones, {}
@@ -1703,64 +1804,50 @@ def _output_values(output: ModelOutput | ModelEvaluation) -> torch.Tensor:
 
 
 def _policy_mask(obs: ObsBatch) -> torch.Tensor:
-    can_act = obs.can_act.flatten(start_dim=3).any(dim=-1)
+    can_act = obs.action_mask.can_act.flatten(start_dim=3).any(dim=-1)
     return obs.still_playing & can_act
 
 
-def _optional_obs_segment_major(tensor: torch.Tensor | None) -> torch.Tensor | None:
-    if tensor is None:
-        return None
+def _optional_obs_segment_major(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.transpose(0, 1).contiguous()
 
 
 def _optional_obs_index(
-    tensor: torch.Tensor | None,
+    tensor: torch.Tensor,
     idx: torch.Tensor,
-) -> torch.Tensor | None:
-    if tensor is None:
-        return None
+) -> torch.Tensor:
     return tensor[idx]
 
 
 def _optional_obs_to_device(
-    tensor: torch.Tensor | None,
+    tensor: torch.Tensor,
     device: torch.device,
     *,
     non_blocking: bool,
-) -> torch.Tensor | None:
-    if tensor is None:
-        return None
+) -> torch.Tensor:
     return tensor.to(device, non_blocking=non_blocking)
 
 
-def _optional_actions_segment_major(tensor: torch.Tensor | None) -> torch.Tensor | None:
-    if tensor is None:
-        return None
+def _optional_actions_segment_major(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.transpose(0, 1).contiguous()
 
 
 def _optional_actions_index(
-    tensor: torch.Tensor | None,
+    tensor: torch.Tensor,
     idx: torch.Tensor,
-) -> torch.Tensor | None:
-    if tensor is None:
-        return None
+) -> torch.Tensor:
     return tensor[idx]
 
 
 def _optional_actions_to_cpu(
-    tensor: torch.Tensor | None,
+    tensor: torch.Tensor,
     *,
     non_blocking: bool,
-) -> torch.Tensor | None:
-    if tensor is None:
-        return None
+) -> torch.Tensor:
     return tensor.to("cpu", non_blocking=non_blocking)
 
 
-def _optional_flatten_tensor_time(tensor: torch.Tensor | None) -> torch.Tensor | None:
-    if tensor is None:
-        return None
+def _optional_flatten_tensor_time(tensor: torch.Tensor) -> torch.Tensor:
     return _flatten_tensor_time(tensor)
 
 

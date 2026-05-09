@@ -8,7 +8,6 @@ import pytest
 import torch
 import torch.nn.functional as F
 from owl.model import (
-    ModelActions,
     ModelConfig,
     StatelessTransformerV1,
     StatelessTransformerV1Config,
@@ -46,8 +45,11 @@ from owl.rl import (
     ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
+    DiscreteTargetActions,
+    DiscreteTargetBinActions,
     EntityBasedConfig,
     ObsBatch,
+    PureActions,
 )
 from pydantic import TypeAdapter
 from torch import nn
@@ -1099,12 +1101,11 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     output = model(obs)
 
     expected_action_shape = (2, 4, ACTION_ENTITY_SLOTS, 1)
+    assert isinstance(output.actions, PureActions)
     assert output.actions.launch.shape == expected_action_shape
     assert output.actions.launch.dtype == torch.bool
-    assert output.actions.angle is not None
     assert output.actions.angle.shape == expected_action_shape
     assert output.actions.angle.dtype == torch.float32
-    assert output.actions.target is None
     assert output.actions.ships.shape == expected_action_shape
     assert output.actions.ships.dtype == torch.int64
     assert output.log_probs.launch.shape == expected_action_shape
@@ -1214,9 +1215,8 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     output = model(obs)
 
     expected_action_shape = (2, 4, ACTION_ENTITY_SLOTS, 1)
+    assert isinstance(output.actions, DiscreteTargetActions)
     assert output.actions.launch.shape == expected_action_shape
-    assert output.actions.angle is None
-    assert output.actions.target is not None
     assert output.actions.target.shape == expected_action_shape
     assert output.actions.target.dtype == torch.int64
     assert output.actions.ships.shape == expected_action_shape
@@ -1315,11 +1315,7 @@ def test_discrete_target_bins_actor_outputs_bins_and_replays_log_probs() -> None
     output = model(obs)
 
     expected_action_shape = (2, 4, ACTION_ENTITY_SLOTS)
-    assert output.actions.launch is None
-    assert output.actions.ships is None
-    assert output.actions.angle is None
-    assert output.actions.target is not None
-    assert output.actions.fleet_bin is not None
+    assert isinstance(output.actions, DiscreteTargetBinActions)
     assert output.actions.target.shape == expected_action_shape
     assert output.actions.fleet_bin.shape == expected_action_shape
     source_active = obs.can_act.flatten(start_dim=-2).any(dim=-1)
@@ -1347,7 +1343,7 @@ def test_discrete_target_bins_actor_outputs_bins_and_replays_log_probs() -> None
         output.log_probs.per_player_entity,
     )
 
-    invalid = ModelActions(
+    invalid = DiscreteTargetBinActions(
         target=output.actions.target.clone(),
         fleet_bin=output.actions.fleet_bin.clone(),
     )
@@ -1518,7 +1514,7 @@ def test_discrete_targets_size_log_prob_conditions_on_replayed_target() -> None:
     can_act[0, 0, 0, 2] = True
     max_launch = torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
     max_launch[0, 0, 0] = 10
-    actions = ModelActions(
+    actions = DiscreteTargetActions(
         launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.bool),
         target=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
         ships=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
@@ -1567,7 +1563,7 @@ def test_discrete_targets_replay_entropy_ignores_no_launch_target_placeholder() 
     can_act[0, 0, 0, 2] = True
     max_launch = torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
     max_launch[0, 0, 0] = 30
-    actions = ModelActions(
+    actions = DiscreteTargetActions(
         launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.bool),
         target=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
         ships=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),

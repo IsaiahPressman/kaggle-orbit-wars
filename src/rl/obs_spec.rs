@@ -80,7 +80,7 @@ pub(super) fn encode_state(
     comet_mask: &mut [bool],
     global_obs: &mut [f32],
     can_act: &mut [bool],
-    max_launch: &mut [i64],
+    max_launch: Option<&mut [i64]>,
     min_fleet_size: i64,
 ) -> usize {
     let mut action_slots = [None; ACTION_ENTITY_SLOTS];
@@ -119,7 +119,7 @@ pub(super) fn encode_state_with_action_slots(
     comet_mask: &mut [bool],
     global_obs: &mut [f32],
     can_act: &mut [bool],
-    max_launch: &mut [i64],
+    mut max_launch: Option<&mut [i64]>,
     action_slots: &mut ActionEntitySlots,
     min_fleet_size: i64,
 ) -> usize {
@@ -148,7 +148,9 @@ pub(super) fn encode_state_with_action_slots(
     comet_mask.fill(false);
     global_obs.fill(0.0);
     can_act.fill(false);
-    max_launch.fill(0);
+    if let Some(max_launch) = max_launch.as_deref_mut() {
+        max_launch.fill(0);
+    }
 
     let mut fleets = state.fleets.iter().collect::<Vec<_>>();
     let ignored_fleets = fleets.len().saturating_sub(max_fleets);
@@ -964,9 +966,11 @@ pub fn encode_entity_based<'py>(
         can_act
             .as_slice_mut()
             .expect("newly allocated can_act array is contiguous"),
-        max_launch
-            .as_slice_mut()
-            .expect("newly allocated max_launch array is contiguous"),
+        Some(
+            max_launch
+                .as_slice_mut()
+                .expect("newly allocated max_launch array is contiguous"),
+        ),
         min_fleet_size,
     );
     let mut target_max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
@@ -978,7 +982,7 @@ pub fn encode_entity_based<'py>(
         target_can_act
             .as_slice_mut()
             .expect("newly allocated target_can_act array is contiguous"),
-        &mut target_max_launch,
+        Some(&mut target_max_launch),
         min_fleet_size,
     );
     log_ignored_fleets(ignored_fleets);
@@ -1537,7 +1541,7 @@ mod tests {
             &mut comet_mask,
             &mut global_obs,
             &mut can_act,
-            &mut max_launch,
+            Some(&mut max_launch),
             1,
         );
     }
@@ -1602,7 +1606,7 @@ mod tests {
             &mut comet_mask,
             &mut global_obs,
             &mut can_act,
-            &mut max_launch,
+            Some(&mut max_launch),
             1,
         );
 
@@ -1663,7 +1667,7 @@ mod tests {
             &mut comet_mask,
             &mut global_obs,
             &mut can_act,
-            &mut max_launch,
+            Some(&mut max_launch),
             3,
         );
 

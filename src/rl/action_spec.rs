@@ -424,7 +424,7 @@ pub(super) fn encode_action_spec(
     player_map: &PlayerMap,
     entities: &ActionEntitySlots,
     can_act: &mut [bool],
-    max_launch: &mut [i64],
+    mut max_launch: Option<&mut [i64]>,
     min_fleet_size: i64,
 ) {
     let mut entity_planets = [None; ACTION_ENTITY_SLOTS];
@@ -535,7 +535,10 @@ pub(super) fn encode_action_spec(
         }
         if source_can_act && action_spec.max_launch_len() > 0 {
             let index = player_map.internal_to_outer(player) * ACTION_ENTITY_SLOTS + entity_index;
-            max_launch[index] = i64::from(planet.ships);
+            max_launch
+                .as_deref_mut()
+                .expect("max_launch buffer required for this action spec")[index] =
+                i64::from(planet.ships);
         }
     }
 }
@@ -1310,7 +1313,7 @@ mod tests {
             &PlayerMap::identity(),
             &entities,
             &mut can_act,
-            &mut max_launch,
+            Some(&mut max_launch),
             1,
         );
 
@@ -1340,7 +1343,7 @@ mod tests {
             &PlayerMap::identity(),
             &entities,
             &mut can_act,
-            &mut max_launch,
+            Some(&mut max_launch),
             1,
         );
 
@@ -1373,7 +1376,6 @@ mod tests {
         let entities = action_entity_slots(&state);
         let spec = RlActionSpec::DiscreteTargetBins { n_bins: 8 };
         let mut can_act = vec![false; spec.can_act_len()];
-        let mut max_launch = Vec::new();
 
         encode_action_spec(
             spec,
@@ -1381,7 +1383,7 @@ mod tests {
             &PlayerMap::identity(),
             &entities,
             &mut can_act,
-            &mut max_launch,
+            None,
             1,
         );
 

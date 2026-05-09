@@ -269,7 +269,7 @@ impl PyRlVecEnv {
                         still_playing,
                         global_obs,
                         can_act,
-                        max_launch,
+                        Some(max_launch),
                     )
                 }
             })
@@ -371,7 +371,6 @@ impl PyRlVecEnv {
                 *player_map = new_player_map;
                 player_finished.fill(false);
                 *episode_stats = EpisodeStats::default();
-                let mut max_launch = [];
                 write_one_obs(
                     state,
                     player_map,
@@ -388,7 +387,7 @@ impl PyRlVecEnv {
                     still_playing,
                     global_obs,
                     can_act,
-                    &mut max_launch,
+                    None,
                 )
             })
             .sum();
@@ -606,7 +605,7 @@ impl PyRlVecEnv {
                         still_playing,
                         global_obs,
                         can_act,
-                        max_launch,
+                        Some(max_launch),
                     );
                     Ok::<_, String>(StepOneOutput {
                         terminal_metrics: terminal.metrics,
@@ -808,7 +807,7 @@ impl PyRlVecEnv {
                         still_playing,
                         global_obs,
                         can_act,
-                        max_launch,
+                        Some(max_launch),
                     );
                     Ok::<_, String>(StepOneOutput {
                         terminal_metrics: terminal.metrics,
@@ -970,7 +969,6 @@ impl PyRlVecEnv {
                     max_fleets,
                     two_player_weight,
                 );
-                let mut max_launch = [];
                 let ignored_fleets = write_one_obs(
                     state,
                     player_map,
@@ -987,7 +985,7 @@ impl PyRlVecEnv {
                     still_playing,
                     global_obs,
                     can_act,
-                    &mut max_launch,
+                    None,
                 );
                 Ok::<_, String>(StepOneOutput {
                     terminal_metrics: terminal.metrics,
@@ -1741,7 +1739,7 @@ fn write_one_obs(
     still_playing: &mut [bool],
     global_obs: &mut [f32],
     can_act: &mut [bool],
-    max_launch: &mut [i64],
+    max_launch: Option<&mut [i64]>,
 ) -> usize {
     write_still_playing(state, player_map, player_finished, still_playing);
     let (planet_mask, tail_mask) = entity_mask.split_at_mut(MAX_PLANETS);

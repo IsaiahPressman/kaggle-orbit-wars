@@ -5,12 +5,20 @@ import torch
 from pydantic import ConfigDict, Field
 
 from owl.config import BaseConfig
-from owl.model import ModelActions, ModelConfig, StatelessTransformerV1
+from owl.model import ModelConfig, StatelessTransformerV1
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
+    ActionBundle,
+    ActionMask,
+    DiscreteTargetActionMask,
+    DiscreteTargetActions,
+    DiscreteTargetBinActionMask,
+    DiscreteTargetBinActions,
     EntityBasedConfig,
     EnvConfig,
     ObsBatch,
+    PureActionMask,
+    PureActions,
     actions_to_kaggle,
     encode_python_observation,
 )
@@ -128,13 +136,11 @@ class Agent:
     def _obs_to_device(self, obs: ObsBatch) -> ObsBatch:
         return ObsBatch(
             **{
-                field: (
-                    None
-                    if getattr(obs, field) is None
-                    else getattr(obs, field).to(device=self.device)
-                )
+                field: getattr(obs, field).to(device=self.device)
                 for field in ObsBatch.model_fields
-            }
+                if field != "action_mask"
+            },
+            action_mask=_action_mask_to_device(obs.action_mask, self.device),
         )
 
     def _synchronize_device(self) -> None:
@@ -171,20 +177,37 @@ def _elapsed_ms(start: float) -> int:
     return round((perf_counter() - start) * 1000)
 
 
-def _model_actions_to_cpu(actions: ModelActions) -> ModelActions:
-    return ModelActions(
-        launch=_optional_tensor_to_cpu(actions.launch),
-        ships=_optional_tensor_to_cpu(actions.ships),
-        angle=_optional_tensor_to_cpu(actions.angle),
-        target=_optional_tensor_to_cpu(actions.target),
-        fleet_bin=_optional_tensor_to_cpu(actions.fleet_bin),
+def _model_actions_to_cpu(actions: ActionBundle) -> ActionBundle:
+    if isinstance(actions, PureActions):
+        return PureActions(
+            launch=actions.launch.cpu(),
+            angle=actions.angle.cpu(),
+            ships=actions.ships.cpu(),
+        )
+    if isinstance(actions, DiscreteTargetActions):
+        return DiscreteTargetActions(
+            launch=actions.launch.cpu(),
+            target=actions.target.cpu(),
+            ships=actions.ships.cpu(),
+        )
+    return DiscreteTargetBinActions(
+        target=actions.target.cpu(),
+        fleet_bin=actions.fleet_bin.cpu(),
     )
 
 
-def _optional_tensor_to_cpu(tensor: torch.Tensor | None) -> torch.Tensor | None:
-    if tensor is None:
-        return None
-    return tensor.cpu()
+def _action_mask_to_device(action_mask: ActionMask, device: torch.device) -> ActionMask:
+    if isinstance(action_mask, PureActionMask):
+        return PureActionMask(
+            can_act=action_mask.can_act.to(device=device),
+            max_launch=action_mask.max_launch.to(device=device),
+        )
+    if isinstance(action_mask, DiscreteTargetActionMask):
+        return DiscreteTargetActionMask(
+            can_act=action_mask.can_act.to(device=device),
+            max_launch=action_mask.max_launch.to(device=device),
+        )
+    return DiscreteTargetBinActionMask(can_act=action_mask.can_act.to(device=device))
 
 
 def compact_entities(obs: ObsBatch) -> ObsBatch:
@@ -214,8 +237,7 @@ def compact_entities(obs: ObsBatch) -> ObsBatch:
         ),
         still_playing=obs.still_playing,
         global_features=obs.global_features,
-        can_act=obs.can_act,
-        max_launch=obs.max_launch,
+        action_mask=obs.action_mask,
     )
 
 
