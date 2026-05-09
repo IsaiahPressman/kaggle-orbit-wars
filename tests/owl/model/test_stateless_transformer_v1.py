@@ -355,8 +355,8 @@ def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
         rtol=0,
     )
     torch.testing.assert_close(
-        compact_output.log_probs.angle_and_size,
-        padded_output.log_probs.angle_and_size,
+        compact_output.log_probs.event,
+        padded_output.log_probs.event,
         atol=1e-6,
         rtol=0,
     )
@@ -373,8 +373,8 @@ def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
         rtol=0,
     )
     torch.testing.assert_close(
-        compact_output.entropies.angle_and_size,
-        padded_output.entropies.angle_and_size,
+        compact_output.entropies.event,
+        padded_output.entropies.event,
         atol=1e-6,
         rtol=0,
     )
@@ -1108,31 +1108,31 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert output.actions.ships.shape == expected_action_shape
     assert output.actions.ships.dtype == torch.int64
     assert output.log_probs.launch.shape == expected_action_shape
-    assert output.log_probs.angle_and_size.shape == expected_action_shape
+    assert output.log_probs.event.shape == expected_action_shape
     assert output.log_probs.per_player_entity.shape == (2, 4, ACTION_ENTITY_SLOTS)
     assert output.entropies.launch.shape == expected_action_shape
-    assert output.entropies.angle_and_size.shape == expected_action_shape
+    assert output.entropies.event.shape == expected_action_shape
     assert output.entropies.per_player_entity.shape == (2, 4, ACTION_ENTITY_SLOTS)
     assert torch.allclose(
         output.log_probs.per_player_entity,
-        (output.log_probs.launch + output.log_probs.angle_and_size).sum(dim=-1),
+        (output.log_probs.launch + output.log_probs.event).sum(dim=-1),
     )
     assert torch.allclose(
         output.entropies.per_player_entity,
-        (output.entropies.launch + output.entropies.angle_and_size).sum(dim=-1),
+        (output.entropies.launch + output.entropies.event).sum(dim=-1),
     )
-    assert set(output.entropies.components) == {"launch", "angle_and_size"}
+    assert set(output.entropies.components) == {"launch", "event"}
     assert torch.allclose(
         output.entropies.components["launch"],
         output.entropies.launch.sum(dim=-1),
     )
     assert torch.allclose(
-        output.entropies.components["angle_and_size"],
-        output.entropies.angle_and_size.sum(dim=-1),
+        output.entropies.components["event"],
+        output.entropies.event.sum(dim=-1),
     )
     assert torch.isfinite(output.entropies.per_player_entity).all()
     assert torch.all(output.entropies.launch >= 0)
-    assert torch.all(output.entropies.angle_and_size >= 0)
+    assert torch.all(output.entropies.event >= 0)
     assert output.values.shape == (2, 4)
     assert output.winner_probabilities.shape == (2, 4)
     assert torch.allclose(output.winner_probabilities.sum(dim=1), torch.ones(2))
@@ -1145,8 +1145,8 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     evaluation = model.evaluate_actions(obs, output.actions)
     assert torch.allclose(evaluation.log_probs.launch, output.log_probs.launch)
     assert torch.allclose(
-        evaluation.log_probs.angle_and_size,
-        output.log_probs.angle_and_size,
+        evaluation.log_probs.event,
+        output.log_probs.event,
     )
     assert torch.allclose(
         evaluation.log_probs.per_player_entity,
@@ -1154,21 +1154,21 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     )
     assert torch.allclose(evaluation.entropies.launch, output.entropies.launch)
     assert torch.allclose(
-        evaluation.entropies.angle_and_size,
-        output.entropies.angle_and_size,
+        evaluation.entropies.event,
+        output.entropies.event,
     )
     assert torch.allclose(
         evaluation.entropies.per_player_entity,
         output.entropies.per_player_entity,
     )
-    assert set(evaluation.entropies.components) == {"launch", "angle_and_size"}
+    assert set(evaluation.entropies.components) == {"launch", "event"}
     assert torch.allclose(
         evaluation.entropies.components["launch"],
         output.entropies.components["launch"],
     )
     assert torch.allclose(
-        evaluation.entropies.components["angle_and_size"],
-        output.entropies.components["angle_and_size"],
+        evaluation.entropies.components["event"],
+        output.entropies.components["event"],
     )
     assert torch.allclose(evaluation.values, output.values)
     assert torch.allclose(evaluation.winner_probabilities, output.winner_probabilities)
@@ -1240,7 +1240,7 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     )
     assert torch.allclose(
         output.entropies.components["fleet_size_full"],
-        output.entropies.angle_and_size.squeeze(-1),
+        output.entropies.event.squeeze(-1),
     )
     assert output.entropies.components["fleet_size_mixture"].shape == (
         2,
@@ -1263,8 +1263,8 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     assert torch.allclose(evaluation.log_probs.launch, output.log_probs.launch)
     assert torch.allclose(evaluation.log_probs.target, output.log_probs.target)
     assert torch.allclose(
-        evaluation.log_probs.angle_and_size,
-        output.log_probs.angle_and_size,
+        evaluation.log_probs.event,
+        output.log_probs.event,
     )
     assert torch.allclose(
         evaluation.log_probs.per_player_entity,
@@ -1339,8 +1339,8 @@ def test_discrete_target_bins_actor_outputs_bins_and_replays_log_probs() -> None
     evaluation = model.evaluate_actions(obs, output.actions)
     assert torch.allclose(evaluation.log_probs.target, output.log_probs.target)
     assert torch.allclose(
-        evaluation.log_probs.angle_and_size,
-        output.log_probs.angle_and_size,
+        evaluation.log_probs.event,
+        output.log_probs.event,
     )
     assert torch.allclose(
         evaluation.log_probs.per_player_entity,
@@ -1544,8 +1544,8 @@ def test_discrete_targets_size_log_prob_conditions_on_replayed_target() -> None:
     )
 
     assert not torch.allclose(
-        target_one_logp.angle_and_size[0, 0, 0],
-        target_two_logp.angle_and_size[0, 0, 0],
+        target_one_logp.event[0, 0, 0],
+        target_two_logp.event[0, 0, 0],
     )
 
 
@@ -1592,7 +1592,7 @@ def test_discrete_targets_replay_entropy_ignores_no_launch_target_placeholder() 
 
     assert torch.allclose(entropy_one.launch, entropy_two.launch)
     assert torch.allclose(entropy_one.target, entropy_two.target)
-    assert torch.allclose(entropy_one.angle_and_size, entropy_two.angle_and_size)
+    assert torch.allclose(entropy_one.event, entropy_two.event)
     assert torch.allclose(entropy_one.per_player_entity, entropy_two.per_player_entity)
 
 
@@ -1854,8 +1854,8 @@ def test_min_fleet_size_masks_and_shifts_ship_distribution() -> None:
 
     evaluation = model.evaluate_actions(obs, output.actions)
     assert torch.allclose(
-        evaluation.log_probs.angle_and_size,
-        output.log_probs.angle_and_size,
+        evaluation.log_probs.event,
+        output.log_probs.event,
     )
 
     output.actions.launch.zero_()
@@ -2006,10 +2006,10 @@ def test_actor_distribution_outputs_remain_fp32_under_cpu_bf16_autocast() -> Non
     assert output.actions.ships.dtype == torch.int64
     for tensors in (output.log_probs, output.entropies, evaluation.log_probs):
         assert tensors.launch.dtype == torch.float32
-        assert tensors.angle_and_size.dtype == torch.float32
+        assert tensors.event.dtype == torch.float32
         assert tensors.per_player_entity.dtype == torch.float32
         assert torch.isfinite(tensors.launch).all()
-        assert torch.isfinite(tensors.angle_and_size).all()
+        assert torch.isfinite(tensors.event).all()
         assert torch.isfinite(tensors.per_player_entity).all()
 
 

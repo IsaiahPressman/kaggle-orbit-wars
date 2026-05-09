@@ -1682,8 +1682,8 @@ def _output_entropy_components(
         }
     fallback = {
         "launch": _sum_entropy_component(output.entropies.launch, like),
-        "angle_and_size": _sum_entropy_component(
-            output.entropies.angle_and_size,
+        "event": _sum_entropy_component(
+            output.entropies.event,
             like,
         ),
     }

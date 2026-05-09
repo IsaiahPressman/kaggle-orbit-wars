@@ -117,13 +117,13 @@ class DiscreteTargetBinsActor(nn.Module):
             ModelActionLogProbs(
                 launch=zeros.unsqueeze(-1),
                 target=target_log_prob.unsqueeze(-1),
-                angle_and_size=fleet_bin_log_prob.unsqueeze(-1),
+                event=fleet_bin_log_prob.unsqueeze(-1),
                 per_player_entity=per_player_entity_log_prob,
             ),
             ModelActionEntropies(
                 launch=zeros.unsqueeze(-1),
                 target=target_entropy.unsqueeze(-1),
-                angle_and_size=fleet_bin_entropy.unsqueeze(-1),
+                event=fleet_bin_entropy.unsqueeze(-1),
                 per_player_entity=per_player_entity_entropy,
                 components={
                     "target": target_entropy,
@@ -182,13 +182,13 @@ class DiscreteTargetBinsActor(nn.Module):
             ModelActionLogProbs(
                 launch=zeros.unsqueeze(-1),
                 target=target_log_prob.unsqueeze(-1),
-                angle_and_size=fleet_bin_log_prob.unsqueeze(-1),
+                event=fleet_bin_log_prob.unsqueeze(-1),
                 per_player_entity=per_player_entity_log_prob,
             ),
             ModelActionEntropies(
                 launch=zeros.unsqueeze(-1),
                 target=target_entropy.unsqueeze(-1),
-                angle_and_size=fleet_bin_entropy.unsqueeze(-1),
+                event=fleet_bin_entropy.unsqueeze(-1),
                 per_player_entity=per_player_entity_entropy,
                 components={
                     "target": target_entropy,

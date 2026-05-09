@@ -251,7 +251,7 @@ target or angle/size events, plus per-player action-entity totals with shape
 action-spec-specific payloads such as `fleet_bin` are preserved.
 Entropy outputs also carry policy-specific component names for logging, such as
 `launch`, `target`, `fleet_size_full`, `fleet_size_mixture`,
-`fleet_size_logistic`, or `angle_and_size`.
+`fleet_size_logistic`, or `event`.
 
 The angle/size entropy is an augmented latent-mixture entropy estimate: mixture
 label entropy plus expected component entropy. It is not the exact marginal
@@ -337,7 +337,7 @@ nonzero bins as rounded ship counts, using the same target-to-angle decoder as
 
 Replay log-probability follows the same factorization:
 `log p(target) + log p(fleet_bin | target)`. Entropy logging exposes `target`
-and `fleet_bin` components; the shared `angle_and_size` field carries the
+and `fleet_bin` components; the shared `event` field carries the
 fleet-bin term for compatibility with PPO loss aggregation. Like the
 discrete-target size entropy, fleet-bin entropy is computed only for the
 current policy's argmax target proxy rather than for every source-target pair.

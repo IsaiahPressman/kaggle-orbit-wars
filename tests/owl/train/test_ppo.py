@@ -285,7 +285,7 @@ class TinyOrbitModel(BaseModelAPI):
         n_envs = per_player.shape[0]
         action_shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
         launch = torch.zeros(action_shape, dtype=per_player.dtype)
-        angle_and_size = torch.zeros_like(launch)
+        event = torch.zeros_like(launch)
         per_player_entity = torch.zeros(
             (n_envs, 4, ACTION_ENTITY_SLOTS), dtype=per_player.dtype
         )
@@ -293,7 +293,7 @@ class TinyOrbitModel(BaseModelAPI):
         per_player_entity[:, :, 0] = per_player
         return ModelActionLogProbs(
             launch=launch,
-            angle_and_size=angle_and_size,
+            event=event,
             per_player_entity=per_player_entity,
         )
 
@@ -302,7 +302,7 @@ class TinyOrbitModel(BaseModelAPI):
         n_envs = per_player.shape[0]
         action_shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
         launch = torch.zeros(action_shape, dtype=per_player.dtype)
-        angle_and_size = torch.zeros_like(launch)
+        event = torch.zeros_like(launch)
         per_player_entity = torch.zeros(
             (n_envs, 4, ACTION_ENTITY_SLOTS), dtype=per_player.dtype
         )
@@ -310,7 +310,7 @@ class TinyOrbitModel(BaseModelAPI):
         per_player_entity[:, :, 0] = per_player
         return ModelActionEntropies(
             launch=launch,
-            angle_and_size=angle_and_size,
+            event=event,
             per_player_entity=per_player_entity,
             components={"launch": per_player_entity},
         )
@@ -1954,7 +1954,7 @@ def test_discrete_target_transformer_train_iteration_keeps_parameters_finite() -
     )
     assert "policy/fleet_size_mixture_entropy" in metrics
     assert "policy/fleet_size_logistic_entropy" in metrics
-    assert "policy/angle_and_size_entropy" not in metrics
+    assert "policy/event_entropy" not in metrics
     for parameter in model.parameters():
         assert torch.isfinite(parameter).all()
         if parameter.grad is not None:

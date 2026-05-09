@@ -182,13 +182,13 @@ class DiscreteTargetsActor(nn.Module):
             ModelActionLogProbs(
                 launch=launch_log_prob.unsqueeze(-1),
                 target=target_log_prob.unsqueeze(-1),
-                angle_and_size=size_log_prob.unsqueeze(-1),
+                event=size_log_prob.unsqueeze(-1),
                 per_player_entity=per_player_entity_log_prob,
             ),
             ModelActionEntropies(
                 launch=launch_entropy.unsqueeze(-1),
                 target=target_entropy.unsqueeze(-1),
-                angle_and_size=size_entropy.unsqueeze(-1),
+                event=size_entropy.unsqueeze(-1),
                 per_player_entity=per_player_entity_entropy,
                 components={
                     "launch": launch_entropy,
@@ -281,13 +281,13 @@ class DiscreteTargetsActor(nn.Module):
             ModelActionLogProbs(
                 launch=launch_log_prob.unsqueeze(-1),
                 target=target_log_prob.unsqueeze(-1),
-                angle_and_size=size_log_prob.unsqueeze(-1),
+                event=size_log_prob.unsqueeze(-1),
                 per_player_entity=per_player_entity_log_prob,
             ),
             ModelActionEntropies(
                 launch=launch_entropy.unsqueeze(-1),
                 target=target_entropy.unsqueeze(-1),
-                angle_and_size=size_entropy.unsqueeze(-1),
+                event=size_entropy.unsqueeze(-1),
                 per_player_entity=per_player_entity_entropy,
                 components={
                     "launch": launch_entropy,

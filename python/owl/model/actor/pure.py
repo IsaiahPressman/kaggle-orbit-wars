@@ -225,16 +225,16 @@ class PureActor(nn.Module):
             ),
             ModelActionLogProbs(
                 launch=launch_log_tensor,
-                angle_and_size=event_log_tensor,
+                event=event_log_tensor,
                 per_player_entity=per_player_entity_log_prob,
             ),
             ModelActionEntropies(
                 launch=launch_entropy_tensor,
-                angle_and_size=event_entropy_tensor,
+                event=event_entropy_tensor,
                 per_player_entity=per_player_entity_entropy,
                 components={
                     "launch": launch_entropy_tensor.sum(dim=-1),
-                    "angle_and_size": event_entropy_tensor.sum(dim=-1),
+                    "event": event_entropy_tensor.sum(dim=-1),
                 },
             ),
         )
@@ -372,16 +372,16 @@ class PureActor(nn.Module):
         return (
             ModelActionLogProbs(
                 launch=launch_log_tensor,
-                angle_and_size=event_log_tensor,
+                event=event_log_tensor,
                 per_player_entity=per_player_entity_log_prob,
             ),
             ModelActionEntropies(
                 launch=launch_entropy_tensor,
-                angle_and_size=event_entropy_tensor,
+                event=event_entropy_tensor,
                 per_player_entity=per_player_entity_entropy,
                 components={
                     "launch": launch_entropy_tensor.sum(dim=-1),
-                    "angle_and_size": event_entropy_tensor.sum(dim=-1),
+                    "event": event_entropy_tensor.sum(dim=-1),
                 },
             ),
         )

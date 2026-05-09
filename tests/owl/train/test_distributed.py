@@ -110,7 +110,7 @@ def _log_probs(per_player: torch.Tensor) -> ModelActionLogProbs:
     action_shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
     return ModelActionLogProbs(
         launch=torch.zeros(action_shape),
-        angle_and_size=torch.zeros(action_shape),
+        event=torch.zeros(action_shape),
         per_player_entity=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS)),
     )
 
@@ -120,7 +120,7 @@ def _entropies(per_player: torch.Tensor) -> ModelActionEntropies:
     action_shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
     return ModelActionEntropies(
         launch=torch.zeros(action_shape),
-        angle_and_size=torch.zeros(action_shape),
+        event=torch.zeros(action_shape),
         per_player_entity=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS)),
     )
 

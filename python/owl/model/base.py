@@ -30,7 +30,7 @@ class ModelActions:
 @dataclass
 class ModelActionLogProbs:
     launch: torch.Tensor
-    angle_and_size: torch.Tensor
+    event: torch.Tensor
     per_player_entity: torch.Tensor
     target: torch.Tensor | None = None
 
@@ -38,7 +38,7 @@ class ModelActionLogProbs:
 @dataclass
 class ModelActionEntropies:
     launch: torch.Tensor
-    angle_and_size: torch.Tensor
+    event: torch.Tensor
     per_player_entity: torch.Tensor
     target: torch.Tensor | None = None
     components: dict[str, torch.Tensor] = field(default_factory=dict)
