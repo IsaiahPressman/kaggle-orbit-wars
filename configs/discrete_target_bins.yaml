@@ -5,12 +5,12 @@ env:
     max_entities: 512
   action_spec:
     action_spec: discrete_target_bins
-    min_fleet_size: 
+    min_fleet_size: 6
     n_bins: 5
   two_player_weight: 0.5
   pin_memory: true
 
-model: stateless_transformer_20m_swiglu
+model: stateless_transformer_20m_swiglu_discrete_targets
 
 optimizer:
   optimizer: muon

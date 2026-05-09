@@ -3,8 +3,8 @@ from typing import Self
 from pydantic import Field, model_validator
 
 from owl.config import BaseConfig
-from owl.model import ModelConfig
-from owl.rl import EnvConfig
+from owl.model import ActorDiscreteTargetBinsConfig, ModelConfig
+from owl.rl import ActionDiscreteTargetBinsConfig, EnvConfig
 
 from .optimizer import OptimizerConfig
 from .ppo import PPOConfig
@@ -25,6 +25,12 @@ class FullConfig(BaseConfig):
     def _validate_model_env_action_spec(self) -> Self:
         if self.model.actor.action_spec != self.env.action_spec.action_spec:
             raise ValueError("model actor action_spec must match env action_spec")
+        if (
+            isinstance(self.model.actor, ActorDiscreteTargetBinsConfig)
+            and isinstance(self.env.action_spec, ActionDiscreteTargetBinsConfig)
+            and self.model.actor.n_bins != self.env.action_spec.n_bins
+        ):
+            raise ValueError("model actor n_bins must match env action_spec n_bins")
         return self
 
     @classmethod

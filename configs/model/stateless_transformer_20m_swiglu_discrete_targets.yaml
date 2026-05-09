@@ -1,0 +1,11 @@
+model_arch: stateless_transformer_v1
+embed_dim: 384
+depth: 10
+n_heads: 12
+mlp_ratio: 2.0
+n_scratch_tokens: 4
+activation: swiglu
+force_flash_attn: true
+actor:
+  action_spec: discrete_target_bins
+  n_bins: 5

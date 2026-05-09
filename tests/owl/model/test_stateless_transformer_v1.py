@@ -7,11 +7,13 @@ import owl.model.stateless_transformer_v1 as model_impl
 import pytest
 import torch
 import torch.nn.functional as F
+import yaml
 from owl.model import (
     ModelConfig,
     StatelessTransformerV1,
     StatelessTransformerV1Config,
 )
+from owl.model.actor import ActorConfig
 from owl.model.actor.discrete_targets import (
     discretized_logistic_mixture_log_prob,
     logsubexp,
@@ -206,6 +208,25 @@ def test_model_config_loads_actor_subconfig_reference() -> None:
     )
 
     assert config.actor == ActorDiscreteTargetsConfig()
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    sorted((_REPO_ROOT / "configs" / "model").glob("*.yaml")),
+)
+def test_model_config_files_load(config_path: Path) -> None:
+    _ = StatelessTransformerV1Config.from_file(config_path)
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    sorted((_REPO_ROOT / "configs" / "model" / "actor").glob("*.yaml")),
+)
+def test_actor_config_files_load(config_path: Path) -> None:
+    with config_path.open(encoding="utf-8") as f:
+        config_data = yaml.safe_load(f)
+
+    _ = TypeAdapter(ActorConfig).validate_python(config_data)
 
 
 @pytest.mark.parametrize(

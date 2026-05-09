@@ -247,6 +247,38 @@ def test_full_config_accepts_discrete_target_bins_model_action_spec() -> None:
     assert config.model.actor.action_spec == "discrete_target_bins"
 
 
+def test_full_config_rejects_discrete_target_bins_n_bins_mismatch() -> None:
+    with pytest.raises(
+        ValueError,
+        match="model actor n_bins must match env action_spec n_bins",
+    ):
+        FullConfig.model_validate(
+            {
+                "env": {
+                    "n_envs": 2,
+                    "action_spec": {
+                        "action_spec": "discrete_target_bins",
+                        "n_bins": 11,
+                    },
+                },
+                "model": {
+                    "model_arch": "stateless_transformer_v1",
+                    "actor": {"action_spec": "discrete_target_bins", "n_bins": 7},
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                },
+                "optimizer": {
+                    "optimizer": "adamw",
+                    "learning_rate": 0.001,
+                },
+                "rl": {
+                    "horizon": 4,
+                },
+            }
+        )
+
+
 def test_full_config_rejects_rl_env_count() -> None:
     with pytest.raises(
         ValueError,
@@ -275,9 +307,9 @@ def test_full_config_rejects_rl_env_count() -> None:
         )
 
 
-@pytest.mark.parametrize("preset", ["baseline"])
-def test_training_presets_load(preset: str) -> None:
-    _ = FullConfig.from_file(_REPO_ROOT / "configs" / f"{preset}.yaml")
+@pytest.mark.parametrize("config_path", sorted((_REPO_ROOT / "configs").glob("*.yaml")))
+def test_training_config_files_load(config_path: Path) -> None:
+    _ = FullConfig.from_file(config_path)
 
 
 def test_autocast_context_respects_dtype_config() -> None:
