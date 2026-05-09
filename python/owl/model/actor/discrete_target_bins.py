@@ -280,27 +280,6 @@ class DiscreteTargetBinsActor(nn.Module):
             fleet_bin_logits=fleet_bin_logits,
         )
 
-    def _all_fleet_bin_logits(
-        self,
-        selection: DiscreteTargetSelectionParams,
-        source_input: torch.Tensor,
-        can_act: torch.Tensor,
-    ) -> torch.Tensor:
-        batch, players, source_slots, _ = source_input.shape
-        target_slots = selection.target_values.shape[2]
-        target_values = selection.target_values.unsqueeze(2).expand(
-            batch,
-            players,
-            source_slots,
-            target_slots,
-            self.head_dim,
-        )
-        fleet_bin_logits = self._fleet_bin_logits_from_target_values(
-            source_input.unsqueeze(3),
-            target_values,
-        )
-        return masked_safe_logits(fleet_bin_logits, can_act)
-
     def _fleet_bin_logits_from_target_values(
         self,
         source_input: torch.Tensor,
@@ -323,14 +302,18 @@ class DiscreteTargetBinsActor(nn.Module):
             selection.target_logits,
             can_act.any(dim=-1),
         )
-        all_fleet_bin_logits = self._all_fleet_bin_logits(
+        target_index = selection.target_logits.argmax(dim=-1)
+        params = self._policy_params_for_selected_target(
             selection,
             source_input,
             can_act,
+            target_index,
         )
-        fleet_bin_entropy_by_target = categorical_entropy(all_fleet_bin_logits, can_act)
-        target_prob = torch.softmax(selection.target_logits.float(), dim=-1)
-        fleet_bin_entropy = (target_prob * fleet_bin_entropy_by_target).sum(dim=-1)
+        selected_bin_mask = gather_selected_bin_mask(can_act, target_index)
+        fleet_bin_entropy = categorical_entropy(
+            params.fleet_bin_logits,
+            selected_bin_mask,
+        )
         return (
             torch.where(
                 source_active,

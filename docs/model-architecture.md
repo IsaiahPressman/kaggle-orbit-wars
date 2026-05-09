@@ -338,7 +338,9 @@ nonzero bins as rounded ship counts, using the same target-to-angle decoder as
 Replay log-probability follows the same factorization:
 `log p(target) + log p(fleet_bin | target)`. Entropy logging exposes `target`
 and `fleet_bin` components; the shared `angle_and_size` field carries the
-fleet-bin term for compatibility with PPO loss aggregation.
+fleet-bin term for compatibility with PPO loss aggregation. Like the
+discrete-target size entropy, fleet-bin entropy is computed only for the
+current policy's argmax target proxy rather than for every source-target pair.
 
 ## Log-Prob Replay
 
