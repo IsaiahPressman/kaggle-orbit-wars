@@ -398,6 +398,7 @@ def _require_discrete_target_bin_actions_shape(
                 f"actions.{name} must have dtype torch.int64, got {tensor.dtype}"
             )
 
+
 def _require_valid_discrete_target_bin_action(
     target: torch.Tensor,
     fleet_bin: torch.Tensor,

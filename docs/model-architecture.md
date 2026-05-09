@@ -235,8 +235,9 @@ shifted beta-binomial size distribution emits ships in
 `min_fleet_size..remaining`, and the accumulated sampled ships are capped by
 `max_launch`.
 
-The model returns decomposed action tensors. Pure and discrete-target actions
-keep the final launch-slot dimension expected by their Rust API paths:
+The model returns a typed action bundle owned by the active action spec. Pure
+and discrete-target actions keep the final launch-slot dimension expected by
+their Rust API paths:
 
 - `launch`: bool, `(batch, 4, 44, max_per_planet_launches)`
 - `ships`: int64, `(batch, 4, 44, max_per_planet_launches)`
@@ -247,8 +248,11 @@ keep the final launch-slot dimension expected by their Rust API paths:
 
 It also returns decomposed log-prob and entropy tensors for launch gates and
 target or angle/size events, plus per-player action-entity totals with shape
-`(batch, 4, 44)`. PPO submits the typed action container to the environment so
-action-spec-specific payloads such as `fleet_bin` are preserved.
+`(batch, 4, 44)`. PPO stores and submits the typed action bundle directly, so
+action-spec-specific payloads such as `fleet_bin` cannot be silently dropped.
+Observation masks are likewise held in typed `ObsBatch.action_mask` bundles:
+pure and discrete-target masks carry `can_act` plus `max_launch`, while
+discrete target-bin masks carry only `can_act`.
 Entropy outputs also carry policy-specific component names for logging, such as
 `launch`, `target`, `fleet_size_full`, `fleet_size_mixture`,
 `fleet_size_logistic`, or `event`.
