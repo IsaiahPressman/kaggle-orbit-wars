@@ -5,7 +5,7 @@ import torch
 from pydantic import ConfigDict, Field
 
 from owl.config import BaseConfig
-from owl.model import ModelConfig, StatelessTransformerV1
+from owl.model import ModelActions, ModelConfig, StatelessTransformerV1
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     EntityBasedConfig,
@@ -107,7 +107,7 @@ class Agent:
         actions = actions_to_kaggle(
             obs_dict,
             observation.player,
-            output.actions,
+            _model_actions_to_cpu(output.actions),
             action_spec=self.checkpoint_config.env.action_spec,
         )
         conversion_ms = _elapsed_ms(conversion_start)
@@ -169,6 +169,22 @@ class Agent:
 
 def _elapsed_ms(start: float) -> int:
     return round((perf_counter() - start) * 1000)
+
+
+def _model_actions_to_cpu(actions: ModelActions) -> ModelActions:
+    return ModelActions(
+        launch=_optional_tensor_to_cpu(actions.launch),
+        ships=_optional_tensor_to_cpu(actions.ships),
+        angle=_optional_tensor_to_cpu(actions.angle),
+        target=_optional_tensor_to_cpu(actions.target),
+        fleet_bin=_optional_tensor_to_cpu(actions.fleet_bin),
+    )
+
+
+def _optional_tensor_to_cpu(tensor: torch.Tensor | None) -> torch.Tensor | None:
+    if tensor is None:
+        return None
+    return tensor.cpu()
 
 
 def compact_entities(obs: ObsBatch) -> ObsBatch:

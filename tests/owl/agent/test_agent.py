@@ -177,6 +177,65 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
     assert actions == [[0.0, 0.5, 1.0]]
 
 
+def test_agent_act_moves_action_bundle_to_cpu_before_kaggle_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    agent = Agent.__new__(Agent)
+    agent.checkpoint_config = SimpleNamespace(
+        env=SimpleNamespace(
+            obs_spec=EntityBasedConfig(),
+            action_spec=action_spec,
+        )
+    )
+    agent.config = AgentConfig(deterministic=False)
+    agent.device = torch.device("cpu")
+    converted: list[str] = []
+
+    class FakeActionTensor:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def cpu(self) -> str:
+            converted.append(self.name)
+            return f"cpu:{self.name}"
+
+    class FakeModel:
+        def __call__(self, _obs: object, *, deterministic: bool) -> object:
+            assert not deterministic
+            return SimpleNamespace(
+                actions=ModelActions(
+                    launch=FakeActionTensor("launch"),  # type: ignore[arg-type]
+                    angle=FakeActionTensor("angle"),  # type: ignore[arg-type]
+                    ships=FakeActionTensor("ships"),  # type: ignore[arg-type]
+                ),
+                values=torch.tensor([[0.25, -0.5, 0.0, 0.75]]),
+            )
+
+    def fake_actions_to_kaggle(
+        obs: dict[str, object],
+        player: int,
+        actions: ModelActions,
+        *,
+        action_spec: ActionPureConfig,
+    ) -> list[list[float]]:
+        assert obs["player"] == 0
+        assert player == 0
+        assert action_spec == agent.checkpoint_config.env.action_spec
+        assert actions.launch == "cpu:launch"
+        assert actions.angle == "cpu:angle"
+        assert actions.ships == "cpu:ships"
+        return []
+
+    agent.model = FakeModel()
+    monkeypatch.setattr("owl.agent.agent.actions_to_kaggle", fake_actions_to_kaggle)
+
+    actions = agent.act(KaggleObservation.model_validate(_raw_observation()))
+
+    assert actions == []
+    assert converted == ["launch", "ships", "angle"]
+
+
 def test_agent_log_prints_one_line_with_metrics(capsys) -> None:
     agent = Agent.__new__(Agent)
 
