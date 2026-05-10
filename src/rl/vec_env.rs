@@ -8,8 +8,8 @@ use rayon::prelude::*;
 
 use crate::rules_engine::env::{reset, step, PlayerAction};
 use crate::rules_engine::state::{
-    FleetLossStats, PlayerResult, ResetConfig, State, StaticTargetCache, BOARD_SIZE, CENTER,
-    SUN_RADIUS,
+    FleetLossStats, LaunchAction, PlayerResult, ResetConfig, State, StaticTargetCache, BOARD_SIZE,
+    CENTER, SUN_RADIUS,
 };
 
 use super::action_spec::{
@@ -427,6 +427,407 @@ impl PyRlVecEnv {
             return Ok(py.None());
         };
         terminal_metrics_to_py(py, metrics)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_action_mask(
+        &self,
+        action_spec: &str,
+        min_fleet_size: i64,
+        n_bins: usize,
+        can_act: PyReadwriteArrayDyn<'_, bool>,
+        max_launch: PyReadwriteArrayDyn<'_, i64>,
+    ) -> PyResult<()> {
+        let action_spec = parse_action_spec_for_buffers(action_spec, n_bins, min_fleet_size)?;
+        if matches!(action_spec, RlActionSpec::DiscreteTargetBins { .. }) {
+            return Err(PyValueError::new_err(
+                "write_action_mask with max_launch does not support discrete_target_bins",
+            ));
+        }
+        require_can_act_shape("can_act", can_act.shape(), self.n_envs, action_spec)?;
+        require_shape(
+            "max_launch",
+            max_launch.shape(),
+            &[self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS],
+        )?;
+
+        let mut can_act = can_act;
+        let mut max_launch = max_launch;
+        let action_masks_per_env = action_spec.can_act_len();
+        let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
+        self.states
+            .par_iter()
+            .zip_eq(self.player_maps.par_iter())
+            .zip_eq(self.action_slots.par_iter())
+            .zip_eq(can_act.as_slice_mut()?.par_chunks_mut(action_masks_per_env))
+            .zip_eq(
+                max_launch
+                    .as_slice_mut()?
+                    .par_chunks_mut(max_launch_per_env),
+            )
+            .for_each(|item| {
+                let (item, max_launch) = item;
+                let (item, can_act) = item;
+                let (item, action_slots) = item;
+                let (state, player_map) = item;
+                write_one_action_mask(
+                    action_spec,
+                    state,
+                    player_map,
+                    action_slots,
+                    can_act,
+                    Some(max_launch),
+                    min_fleet_size,
+                );
+            });
+        Ok(())
+    }
+
+    fn write_action_mask_discrete_target_bins(
+        &self,
+        min_fleet_size: i64,
+        n_bins: usize,
+        can_act: PyReadwriteArrayDyn<'_, bool>,
+    ) -> PyResult<()> {
+        let action_spec =
+            parse_action_spec_for_buffers("discrete_target_bins", n_bins, min_fleet_size)?;
+        require_can_act_shape("can_act", can_act.shape(), self.n_envs, action_spec)?;
+
+        let mut can_act = can_act;
+        let action_masks_per_env = action_spec.can_act_len();
+        self.states
+            .par_iter()
+            .zip_eq(self.player_maps.par_iter())
+            .zip_eq(self.action_slots.par_iter())
+            .zip_eq(can_act.as_slice_mut()?.par_chunks_mut(action_masks_per_env))
+            .for_each(|item| {
+                let (item, can_act) = item;
+                let (item, action_slots) = item;
+                let (state, player_map) = item;
+                write_one_action_mask(
+                    action_spec,
+                    state,
+                    player_map,
+                    action_slots,
+                    can_act,
+                    None,
+                    min_fleet_size,
+                );
+            });
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_pure_actions(
+        &self,
+        launch: PyReadonlyArrayDyn<'_, bool>,
+        angle: PyReadonlyArrayDyn<'_, f32>,
+        ships: PyReadonlyArrayDyn<'_, i64>,
+        max_per_planet_launches: usize,
+        min_fleet_size: i64,
+        valid: PyReadwriteArrayDyn<'_, bool>,
+        from_planet_id: PyReadwriteArrayDyn<'_, i64>,
+        decoded_angle: PyReadwriteArrayDyn<'_, f32>,
+        decoded_ships: PyReadwriteArrayDyn<'_, i64>,
+    ) -> PyResult<()> {
+        if !(1..=4).contains(&max_per_planet_launches) {
+            return Err(PyValueError::new_err(
+                "max_per_planet_launches must be between 1 and 4",
+            ));
+        }
+        require_min_fleet_size(min_fleet_size)?;
+        let action_shape = [
+            self.n_envs,
+            OUTER_PLAYER_SLOTS,
+            ACTION_ENTITY_SLOTS,
+            max_per_planet_launches,
+        ];
+        require_shape("launch", launch.shape(), &action_shape)?;
+        require_shape("angle", angle.shape(), &action_shape)?;
+        require_shape("ships", ships.shape(), &action_shape)?;
+        let max_decoded_actions = require_decoded_action_output_shapes(
+            self.n_envs,
+            &valid,
+            &from_planet_id,
+            &decoded_angle,
+            &decoded_ships,
+        )?;
+
+        let mut valid = valid;
+        let mut from_planet_id = from_planet_id;
+        let mut decoded_angle = decoded_angle;
+        let mut decoded_ships = decoded_ships;
+        let actions_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS * max_per_planet_launches;
+        let env_results = self
+            .states
+            .par_iter()
+            .zip_eq(self.player_maps.par_iter())
+            .zip_eq(self.action_slots.par_iter())
+            .zip_eq(launch.as_slice()?.par_chunks(actions_per_env))
+            .zip_eq(angle.as_slice()?.par_chunks(actions_per_env))
+            .zip_eq(ships.as_slice()?.par_chunks(actions_per_env))
+            .zip_eq(
+                valid
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS * max_decoded_actions),
+            )
+            .zip_eq(
+                from_planet_id
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS * max_decoded_actions),
+            )
+            .zip_eq(
+                decoded_angle
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS * max_decoded_actions),
+            )
+            .zip_eq(
+                decoded_ships
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS * max_decoded_actions),
+            )
+            .enumerate()
+            .map(|(env_index, item)| {
+                let (item, decoded_ships) = item;
+                let (item, decoded_angle) = item;
+                let (item, from_planet_id) = item;
+                let (item, valid) = item;
+                let (item, ships) = item;
+                let (item, angle) = item;
+                let (item, launch) = item;
+                let (item, action_slots) = item;
+                let (state, player_map) = item;
+                let decoded = decode_pure_actions(
+                    state,
+                    player_map,
+                    action_slots,
+                    launch,
+                    angle,
+                    ships,
+                    max_per_planet_launches,
+                    min_fleet_size,
+                )
+                .map_err(|err| format!("env {env_index}: {err}"))?;
+                write_decoded_action_buffers(
+                    &decoded,
+                    player_map,
+                    valid,
+                    from_planet_id,
+                    decoded_angle,
+                    decoded_ships,
+                    max_decoded_actions,
+                )
+                .map_err(|err| format!("env {env_index}: {err}"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(PyValueError::new_err)?;
+        drop(env_results);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_discrete_target_actions(
+        &self,
+        launch: PyReadonlyArrayDyn<'_, bool>,
+        target: PyReadonlyArrayDyn<'_, i64>,
+        ships: PyReadonlyArrayDyn<'_, i64>,
+        max_per_planet_launches: usize,
+        min_fleet_size: i64,
+        valid: PyReadwriteArrayDyn<'_, bool>,
+        from_planet_id: PyReadwriteArrayDyn<'_, i64>,
+        decoded_angle: PyReadwriteArrayDyn<'_, f32>,
+        decoded_ships: PyReadwriteArrayDyn<'_, i64>,
+    ) -> PyResult<()> {
+        if !(1..=4).contains(&max_per_planet_launches) {
+            return Err(PyValueError::new_err(
+                "max_per_planet_launches must be between 1 and 4",
+            ));
+        }
+        require_min_fleet_size(min_fleet_size)?;
+        let action_shape = [
+            self.n_envs,
+            OUTER_PLAYER_SLOTS,
+            ACTION_ENTITY_SLOTS,
+            max_per_planet_launches,
+        ];
+        require_shape("launch", launch.shape(), &action_shape)?;
+        require_shape("target", target.shape(), &action_shape)?;
+        require_shape("ships", ships.shape(), &action_shape)?;
+        let max_decoded_actions = require_decoded_action_output_shapes(
+            self.n_envs,
+            &valid,
+            &from_planet_id,
+            &decoded_angle,
+            &decoded_ships,
+        )?;
+
+        let mut valid = valid;
+        let mut from_planet_id = from_planet_id;
+        let mut decoded_angle = decoded_angle;
+        let mut decoded_ships = decoded_ships;
+        let actions_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS * max_per_planet_launches;
+        let env_results = self
+            .states
+            .par_iter()
+            .zip_eq(self.player_maps.par_iter())
+            .zip_eq(self.action_slots.par_iter())
+            .zip_eq(launch.as_slice()?.par_chunks(actions_per_env))
+            .zip_eq(target.as_slice()?.par_chunks(actions_per_env))
+            .zip_eq(ships.as_slice()?.par_chunks(actions_per_env))
+            .zip_eq(
+                valid
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS * max_decoded_actions),
+            )
+            .zip_eq(
+                from_planet_id
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS * max_decoded_actions),
+            )
+            .zip_eq(
+                decoded_angle
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS * max_decoded_actions),
+            )
+            .zip_eq(
+                decoded_ships
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS * max_decoded_actions),
+            )
+            .enumerate()
+            .map(|(env_index, item)| {
+                let (item, decoded_ships) = item;
+                let (item, decoded_angle) = item;
+                let (item, from_planet_id) = item;
+                let (item, valid) = item;
+                let (item, ships) = item;
+                let (item, target) = item;
+                let (item, launch) = item;
+                let (item, action_slots) = item;
+                let (state, player_map) = item;
+                let decoded = decode_discrete_target_actions(
+                    state,
+                    player_map,
+                    action_slots,
+                    launch,
+                    target,
+                    ships,
+                    max_per_planet_launches,
+                    min_fleet_size,
+                )
+                .map_err(|err| format!("env {env_index}: {err}"))?;
+                write_decoded_action_buffers(
+                    &decoded.actions,
+                    player_map,
+                    valid,
+                    from_planet_id,
+                    decoded_angle,
+                    decoded_ships,
+                    max_decoded_actions,
+                )
+                .map_err(|err| format!("env {env_index}: {err}"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(PyValueError::new_err)?;
+        drop(env_results);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decode_discrete_target_bin_actions(
+        &self,
+        target: PyReadonlyArrayDyn<'_, i64>,
+        fleet_bin: PyReadonlyArrayDyn<'_, i64>,
+        min_fleet_size: i64,
+        n_bins: usize,
+        valid: PyReadwriteArrayDyn<'_, bool>,
+        from_planet_id: PyReadwriteArrayDyn<'_, i64>,
+        decoded_angle: PyReadwriteArrayDyn<'_, f32>,
+        decoded_ships: PyReadwriteArrayDyn<'_, i64>,
+    ) -> PyResult<()> {
+        let action_spec =
+            parse_action_spec_for_buffers("discrete_target_bins", n_bins, min_fleet_size)?;
+        let RlActionSpec::DiscreteTargetBins { n_bins } = action_spec else {
+            unreachable!("parsed action spec must be discrete target bins");
+        };
+        let action_shape = [self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS];
+        require_shape("target", target.shape(), &action_shape)?;
+        require_shape("fleet_bin", fleet_bin.shape(), &action_shape)?;
+        let max_decoded_actions = require_decoded_action_output_shapes(
+            self.n_envs,
+            &valid,
+            &from_planet_id,
+            &decoded_angle,
+            &decoded_ships,
+        )?;
+
+        let mut valid = valid;
+        let mut from_planet_id = from_planet_id;
+        let mut decoded_angle = decoded_angle;
+        let mut decoded_ships = decoded_ships;
+        let actions_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
+        let env_results = self
+            .states
+            .par_iter()
+            .zip_eq(self.player_maps.par_iter())
+            .zip_eq(self.action_slots.par_iter())
+            .zip_eq(target.as_slice()?.par_chunks(actions_per_env))
+            .zip_eq(fleet_bin.as_slice()?.par_chunks(actions_per_env))
+            .zip_eq(
+                valid
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS * max_decoded_actions),
+            )
+            .zip_eq(
+                from_planet_id
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS * max_decoded_actions),
+            )
+            .zip_eq(
+                decoded_angle
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS * max_decoded_actions),
+            )
+            .zip_eq(
+                decoded_ships
+                    .as_slice_mut()?
+                    .par_chunks_mut(OUTER_PLAYER_SLOTS * max_decoded_actions),
+            )
+            .enumerate()
+            .map(|(env_index, item)| {
+                let (item, decoded_ships) = item;
+                let (item, decoded_angle) = item;
+                let (item, from_planet_id) = item;
+                let (item, valid) = item;
+                let (item, fleet_bin) = item;
+                let (item, target) = item;
+                let (item, action_slots) = item;
+                let (state, player_map) = item;
+                let decoded = decode_discrete_target_bin_actions(
+                    state,
+                    player_map,
+                    action_slots,
+                    target,
+                    fleet_bin,
+                    n_bins,
+                    min_fleet_size,
+                )
+                .map_err(|err| format!("env {env_index}: {err}"))?;
+                write_decoded_action_buffers(
+                    &decoded.actions,
+                    player_map,
+                    valid,
+                    from_planet_id,
+                    decoded_angle,
+                    decoded_ships,
+                    max_decoded_actions,
+                )
+                .map_err(|err| format!("env {env_index}: {err}"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(PyValueError::new_err)?;
+        drop(env_results);
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1008,6 +1409,288 @@ impl PyRlVecEnv {
         Ok(episode_metrics)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn step_decoded_actions(
+        &mut self,
+        valid: PyReadonlyArrayDyn<'_, bool>,
+        from_planet_id: PyReadonlyArrayDyn<'_, i64>,
+        angle: PyReadonlyArrayDyn<'_, f32>,
+        ships: PyReadonlyArrayDyn<'_, i64>,
+        planet_obs: PyReadwriteArrayDyn<'_, f32>,
+        orbiting_planet_obs: PyReadwriteArrayDyn<'_, bool>,
+        fleet_obs: PyReadwriteArrayDyn<'_, f32>,
+        comet_obs: PyReadwriteArrayDyn<'_, f32>,
+        entity_mask: PyReadwriteArrayDyn<'_, bool>,
+        still_playing: PyReadwriteArrayDyn<'_, bool>,
+        global_obs: PyReadwriteArrayDyn<'_, f32>,
+        can_act: PyReadwriteArrayDyn<'_, bool>,
+        max_launch: Option<PyReadwriteArrayDyn<'_, i64>>,
+        rewards: PyReadwriteArrayDyn<'_, f32>,
+        dones: PyReadwriteArrayDyn<'_, bool>,
+    ) -> PyResult<HashMap<String, Vec<f64>>> {
+        let max_decoded_actions = require_decoded_action_input_shapes(
+            self.n_envs,
+            &valid,
+            &from_planet_id,
+            &angle,
+            &ships,
+        )?;
+        require_shape(
+            "rewards",
+            rewards.shape(),
+            &[self.n_envs, OUTER_PLAYER_SLOTS],
+        )?;
+        require_shape("dones", dones.shape(), &[self.n_envs, OUTER_PLAYER_SLOTS])?;
+        if matches!(self.action_spec, RlActionSpec::DiscreteTargetBins { .. }) {
+            if max_launch.is_some() {
+                return Err(PyValueError::new_err(
+                    "max_launch must be omitted for discrete_target_bins observations",
+                ));
+            }
+            self.require_obs_shapes_without_max_launch(
+                &planet_obs,
+                &orbiting_planet_obs,
+                &fleet_obs,
+                &comet_obs,
+                &entity_mask,
+                &still_playing,
+                &global_obs,
+                &can_act,
+            )?;
+        } else {
+            let Some(max_launch_ref) = max_launch.as_ref() else {
+                return Err(PyValueError::new_err(
+                    "max_launch is required for pure and discrete_targets observations",
+                ));
+            };
+            self.require_obs_shapes(
+                &planet_obs,
+                &orbiting_planet_obs,
+                &fleet_obs,
+                &comet_obs,
+                &entity_mask,
+                &still_playing,
+                &global_obs,
+                &can_act,
+                max_launch_ref,
+            )?;
+        }
+
+        let mut rewards = rewards;
+        let mut dones = dones;
+        let mut planet_obs = planet_obs;
+        let mut orbiting_planet_obs = orbiting_planet_obs;
+        let mut fleet_obs = fleet_obs;
+        let mut comet_obs = comet_obs;
+        let mut entity_mask = entity_mask;
+        let mut still_playing = still_playing;
+        let mut global_obs = global_obs;
+        let mut can_act = can_act;
+        let mut max_launch = max_launch;
+
+        let reward_chunks = rewards.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
+        let done_chunks = dones.as_slice_mut()?.par_chunks_mut(OUTER_PLAYER_SLOTS);
+        let decoded_actions_per_env = OUTER_PLAYER_SLOTS * max_decoded_actions;
+        let valid_slice = valid.as_slice()?;
+        let from_planet_id_slice = from_planet_id.as_slice()?;
+        let angle_slice = angle.as_slice()?;
+        let ship_slice = ships.as_slice()?;
+
+        let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
+        let orbiting_planets_per_env = MAX_PLANETS;
+        let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
+        let comets_per_env = MAX_COMETS * COMET_CHANNELS;
+        let action_masks_per_env = self.action_spec.can_act_len();
+        let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
+        let min_fleet_size = self.min_fleet_size;
+        let max_fleets = self.max_fleets;
+        let two_player_weight = self.two_player_weight;
+        let action_spec = self.action_spec;
+
+        let env_results = if let Some(max_launch) = max_launch.as_mut() {
+            self.states
+                .par_iter_mut()
+                .zip_eq(self.player_maps.par_iter_mut())
+                .zip_eq(self.action_slots.par_iter_mut())
+                .zip_eq(self.player_finished.par_iter_mut())
+                .zip_eq(self.episode_stats.par_iter_mut())
+                .zip_eq(valid_slice.par_chunks(decoded_actions_per_env))
+                .zip_eq(from_planet_id_slice.par_chunks(decoded_actions_per_env))
+                .zip_eq(angle_slice.par_chunks(decoded_actions_per_env))
+                .zip_eq(ship_slice.par_chunks(decoded_actions_per_env))
+                .zip_eq(reward_chunks)
+                .zip_eq(done_chunks)
+                .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
+                .zip_eq(
+                    orbiting_planet_obs
+                        .as_slice_mut()?
+                        .par_chunks_mut(orbiting_planets_per_env),
+                )
+                .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
+                .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
+                .zip_eq(
+                    entity_mask
+                        .as_slice_mut()?
+                        .par_chunks_mut(self.max_entities),
+                )
+                .zip_eq(
+                    still_playing
+                        .as_slice_mut()?
+                        .par_chunks_mut(OUTER_PLAYER_SLOTS),
+                )
+                .zip_eq(global_obs.as_slice_mut()?.par_chunks_mut(GLOBAL_CHANNELS))
+                .zip_eq(can_act.as_slice_mut()?.par_chunks_mut(action_masks_per_env))
+                .zip_eq(
+                    max_launch
+                        .as_slice_mut()?
+                        .par_chunks_mut(max_launch_per_env),
+                )
+                .enumerate()
+                .map(|(env_index, item)| {
+                    let (item, max_launch) = item;
+                    let (item, can_act) = item;
+                    let (item, global_obs) = item;
+                    let (item, still_playing) = item;
+                    let (item, entity_mask) = item;
+                    let (item, comet_obs) = item;
+                    let (item, fleet_obs) = item;
+                    let (item, orbiting_planet_obs) = item;
+                    let (item, planet_obs) = item;
+                    let (item, done_chunk) = item;
+                    let (item, reward_chunk) = item;
+                    let (item, ship_chunk) = item;
+                    let (item, angle_chunk) = item;
+                    let (item, from_planet_id_chunk) = item;
+                    let (item, valid_chunk) = item;
+                    let ((((state, player_map), action_slots), player_finished), episode_stats) =
+                        item;
+                    step_one_decoded_env(
+                        env_index,
+                        state,
+                        player_map,
+                        action_slots,
+                        player_finished,
+                        episode_stats,
+                        valid_chunk,
+                        from_planet_id_chunk,
+                        angle_chunk,
+                        ship_chunk,
+                        max_decoded_actions,
+                        reward_chunk,
+                        done_chunk,
+                        planet_obs,
+                        orbiting_planet_obs,
+                        fleet_obs,
+                        comet_obs,
+                        entity_mask,
+                        still_playing,
+                        global_obs,
+                        can_act,
+                        Some(max_launch),
+                        action_spec,
+                        max_fleets,
+                        min_fleet_size,
+                        two_player_weight,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(PyValueError::new_err)?
+        } else {
+            self.states
+                .par_iter_mut()
+                .zip_eq(self.player_maps.par_iter_mut())
+                .zip_eq(self.action_slots.par_iter_mut())
+                .zip_eq(self.player_finished.par_iter_mut())
+                .zip_eq(self.episode_stats.par_iter_mut())
+                .zip_eq(valid_slice.par_chunks(decoded_actions_per_env))
+                .zip_eq(from_planet_id_slice.par_chunks(decoded_actions_per_env))
+                .zip_eq(angle_slice.par_chunks(decoded_actions_per_env))
+                .zip_eq(ship_slice.par_chunks(decoded_actions_per_env))
+                .zip_eq(reward_chunks)
+                .zip_eq(done_chunks)
+                .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
+                .zip_eq(
+                    orbiting_planet_obs
+                        .as_slice_mut()?
+                        .par_chunks_mut(orbiting_planets_per_env),
+                )
+                .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
+                .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
+                .zip_eq(
+                    entity_mask
+                        .as_slice_mut()?
+                        .par_chunks_mut(self.max_entities),
+                )
+                .zip_eq(
+                    still_playing
+                        .as_slice_mut()?
+                        .par_chunks_mut(OUTER_PLAYER_SLOTS),
+                )
+                .zip_eq(global_obs.as_slice_mut()?.par_chunks_mut(GLOBAL_CHANNELS))
+                .zip_eq(can_act.as_slice_mut()?.par_chunks_mut(action_masks_per_env))
+                .enumerate()
+                .map(|(env_index, item)| {
+                    let (item, can_act) = item;
+                    let (item, global_obs) = item;
+                    let (item, still_playing) = item;
+                    let (item, entity_mask) = item;
+                    let (item, comet_obs) = item;
+                    let (item, fleet_obs) = item;
+                    let (item, orbiting_planet_obs) = item;
+                    let (item, planet_obs) = item;
+                    let (item, done_chunk) = item;
+                    let (item, reward_chunk) = item;
+                    let (item, ship_chunk) = item;
+                    let (item, angle_chunk) = item;
+                    let (item, from_planet_id_chunk) = item;
+                    let (item, valid_chunk) = item;
+                    let ((((state, player_map), action_slots), player_finished), episode_stats) =
+                        item;
+                    step_one_decoded_env(
+                        env_index,
+                        state,
+                        player_map,
+                        action_slots,
+                        player_finished,
+                        episode_stats,
+                        valid_chunk,
+                        from_planet_id_chunk,
+                        angle_chunk,
+                        ship_chunk,
+                        max_decoded_actions,
+                        reward_chunk,
+                        done_chunk,
+                        planet_obs,
+                        orbiting_planet_obs,
+                        fleet_obs,
+                        comet_obs,
+                        entity_mask,
+                        still_playing,
+                        global_obs,
+                        can_act,
+                        None,
+                        action_spec,
+                        max_fleets,
+                        min_fleet_size,
+                        two_player_weight,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(PyValueError::new_err)?
+        };
+        let mut terminal_metrics = Vec::with_capacity(env_results.len());
+        let mut ignored_fleets = 0;
+        for (env_index, result) in env_results.into_iter().enumerate() {
+            self.last_terminal_snapshots[env_index] = result.terminal_snapshot;
+            self.last_terminal_metrics[env_index] = result.terminal_metrics.clone();
+            terminal_metrics.push(result.terminal_metrics);
+            ignored_fleets += result.ignored_fleets;
+        }
+        let episode_metrics = collect_terminal_metrics(terminal_metrics);
+        log_ignored_fleets(ignored_fleets);
+        Ok(episode_metrics)
+    }
+
     fn obs_shapes(&self) -> ObsShapes {
         (
             (self.n_envs, MAX_PLANETS, PLANET_CHANNELS),
@@ -1158,6 +1841,319 @@ impl PyRlVecEnv {
         require_shape("can_act", can_act.shape(), &can_act_shape)?;
         Ok(())
     }
+}
+
+fn parse_action_spec_for_buffers(
+    action_spec: &str,
+    n_bins: usize,
+    min_fleet_size: i64,
+) -> PyResult<RlActionSpec> {
+    require_min_fleet_size(min_fleet_size)?;
+    RlActionSpec::parse(action_spec, n_bins).map_err(PyValueError::new_err)
+}
+
+fn require_min_fleet_size(min_fleet_size: i64) -> PyResult<()> {
+    if (1..=i64::from(i32::MAX)).contains(&min_fleet_size) {
+        return Ok(());
+    }
+    Err(PyValueError::new_err(
+        "min_fleet_size must be between 1 and i32::MAX",
+    ))
+}
+
+fn require_can_act_shape(
+    name: &str,
+    actual: &[usize],
+    n_envs: usize,
+    action_spec: RlActionSpec,
+) -> PyResult<()> {
+    let expected = match action_spec {
+        RlActionSpec::Pure => vec![n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS],
+        RlActionSpec::DiscreteTargets => {
+            vec![
+                n_envs,
+                OUTER_PLAYER_SLOTS,
+                ACTION_ENTITY_SLOTS,
+                ACTION_ENTITY_SLOTS,
+            ]
+        },
+        RlActionSpec::DiscreteTargetBins { n_bins } => vec![
+            n_envs,
+            OUTER_PLAYER_SLOTS,
+            ACTION_ENTITY_SLOTS,
+            ACTION_ENTITY_SLOTS,
+            n_bins,
+        ],
+    };
+    require_shape(name, actual, &expected)
+}
+
+fn require_decoded_action_output_shapes(
+    n_envs: usize,
+    valid: &PyReadwriteArrayDyn<'_, bool>,
+    from_planet_id: &PyReadwriteArrayDyn<'_, i64>,
+    angle: &PyReadwriteArrayDyn<'_, f32>,
+    ships: &PyReadwriteArrayDyn<'_, i64>,
+) -> PyResult<usize> {
+    let shape = valid.shape();
+    if shape.len() != 3 || shape[0] != n_envs || shape[1] != OUTER_PLAYER_SLOTS {
+        return Err(PyValueError::new_err(format!(
+            "valid must have shape ({n_envs}, {OUTER_PLAYER_SLOTS}, max_actions), got {shape:?}"
+        )));
+    }
+    if shape[2] == 0 {
+        return Err(PyValueError::new_err("max_actions must be positive"));
+    }
+    let expected = [n_envs, OUTER_PLAYER_SLOTS, shape[2]];
+    require_shape("from_planet_id", from_planet_id.shape(), &expected)?;
+    require_shape("decoded_angle", angle.shape(), &expected)?;
+    require_shape("decoded_ships", ships.shape(), &expected)?;
+    Ok(shape[2])
+}
+
+fn require_decoded_action_input_shapes(
+    n_envs: usize,
+    valid: &PyReadonlyArrayDyn<'_, bool>,
+    from_planet_id: &PyReadonlyArrayDyn<'_, i64>,
+    angle: &PyReadonlyArrayDyn<'_, f32>,
+    ships: &PyReadonlyArrayDyn<'_, i64>,
+) -> PyResult<usize> {
+    let shape = valid.shape();
+    if shape.len() != 3 || shape[0] != n_envs || shape[1] != OUTER_PLAYER_SLOTS {
+        return Err(PyValueError::new_err(format!(
+            "valid must have shape ({n_envs}, {OUTER_PLAYER_SLOTS}, max_actions), got {shape:?}"
+        )));
+    }
+    if shape[2] == 0 {
+        return Err(PyValueError::new_err("max_actions must be positive"));
+    }
+    let expected = [n_envs, OUTER_PLAYER_SLOTS, shape[2]];
+    require_shape("from_planet_id", from_planet_id.shape(), &expected)?;
+    require_shape("angle", angle.shape(), &expected)?;
+    require_shape("ships", ships.shape(), &expected)?;
+    Ok(shape[2])
+}
+
+fn write_one_action_mask(
+    action_spec: RlActionSpec,
+    state: &State,
+    player_map: &PlayerMap,
+    action_slots: &ActionEntitySlots,
+    can_act: &mut [bool],
+    mut max_launch: Option<&mut [i64]>,
+    min_fleet_size: i64,
+) {
+    can_act.fill(false);
+    if let Some(max_launch) = max_launch.as_deref_mut() {
+        max_launch.fill(0);
+    }
+    super::action_spec::encode_action_spec(
+        action_spec,
+        state,
+        player_map,
+        action_slots,
+        can_act,
+        max_launch,
+        min_fleet_size,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_decoded_action_buffers(
+    decoded: &[PlayerAction],
+    player_map: &PlayerMap,
+    valid: &mut [bool],
+    from_planet_id: &mut [i64],
+    angle: &mut [f32],
+    ships: &mut [i64],
+    max_decoded_actions: usize,
+) -> Result<(), String> {
+    valid.fill(false);
+    from_planet_id.fill(0);
+    angle.fill(0.0);
+    ships.fill(0);
+    for (internal_player, actions) in decoded.iter().enumerate() {
+        let outer_player = player_map.internal_to_outer(internal_player);
+        if actions.len() > max_decoded_actions {
+            return Err(format!(
+                "player {outer_player} decoded {} actions, but output max_actions is {max_decoded_actions}",
+                actions.len()
+            ));
+        }
+        let player_offset = outer_player * max_decoded_actions;
+        for (action_index, action) in actions.iter().enumerate() {
+            let index = player_offset + action_index;
+            valid[index] = true;
+            from_planet_id[index] = i64::from(action.from_planet_id);
+            angle[index] = action.angle as f32;
+            ships[index] = i64::from(action.ships);
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dense_decoded_actions_to_player_actions(
+    state: &State,
+    player_map: &PlayerMap,
+    valid: &[bool],
+    from_planet_id: &[i64],
+    angle: &[f32],
+    ships: &[i64],
+    max_decoded_actions: usize,
+) -> Result<Vec<PlayerAction>, String> {
+    let mut actions = vec![Vec::new(); state.config.player_count];
+    let mut spent_by_planet = HashMap::<u32, i64>::new();
+    for outer_player in 0..OUTER_PLAYER_SLOTS {
+        let player_offset = outer_player * max_decoded_actions;
+        let Some(internal_player) = player_map
+            .outer_to_internal(outer_player)
+            .filter(|player| *player < state.config.player_count)
+        else {
+            for action_index in 0..max_decoded_actions {
+                if valid[player_offset + action_index] {
+                    return Err(format!("player slot {outer_player} is inactive"));
+                }
+            }
+            continue;
+        };
+        for action_index in 0..max_decoded_actions {
+            let index = player_offset + action_index;
+            if !valid[index] {
+                continue;
+            }
+            let planet_id = from_planet_id[index];
+            if planet_id < 0 || planet_id > i64::from(u32::MAX) {
+                return Err(format!(
+                    "player {outer_player} action {action_index} from_planet_id must fit in u32"
+                ));
+            }
+            let planet_id = planet_id as u32;
+            let Some(planet) = state.planets.get(planet_id) else {
+                return Err(format!(
+                    "player {outer_player} action {action_index} cannot launch from unknown planet {planet_id}"
+                ));
+            };
+            if planet.id != planet_id {
+                return Err(format!(
+                    "player {outer_player} action {action_index} planet index {planet_id} does not match planet id {}",
+                    planet.id
+                ));
+            }
+            if planet.owner != internal_player as i32 {
+                return Err(format!(
+                    "player {outer_player} cannot launch from planet {} owned by {}",
+                    planet.id, planet.owner
+                ));
+            }
+            let ship_count = ships[index];
+            if ship_count < 1 {
+                return Err(format!(
+                    "player {outer_player} action {action_index} ships must be >= 1"
+                ));
+            }
+            if ship_count > i64::from(i32::MAX) {
+                return Err(format!(
+                    "player {outer_player} action {action_index} ships must fit in i32"
+                ));
+            }
+            let spent = spent_by_planet.entry(planet_id).or_default();
+            *spent += ship_count;
+            if *spent > i64::from(planet.ships) {
+                return Err(format!(
+                    "planet {} has {} ships, cannot launch {}",
+                    planet.id, planet.ships, *spent
+                ));
+            }
+            let launch_angle = angle[index];
+            if !launch_angle.is_finite() {
+                return Err(format!(
+                    "player {outer_player} action {action_index} angle must be finite"
+                ));
+            }
+            actions[internal_player].push(LaunchAction {
+                from_planet_id: planet_id,
+                angle: f64::from(launch_angle),
+                ships: ship_count as i32,
+            });
+        }
+    }
+    Ok(actions)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_one_decoded_env(
+    env_index: usize,
+    state: &mut State,
+    player_map: &mut PlayerMap,
+    action_slots: &mut ActionEntitySlots,
+    player_finished: &mut [bool],
+    episode_stats: &mut EpisodeStats,
+    valid_chunk: &[bool],
+    from_planet_id_chunk: &[i64],
+    angle_chunk: &[f32],
+    ship_chunk: &[i64],
+    max_decoded_actions: usize,
+    reward_chunk: &mut [f32],
+    done_chunk: &mut [bool],
+    planet_obs: &mut [f32],
+    orbiting_planet_obs: &mut [bool],
+    fleet_obs: &mut [f32],
+    comet_obs: &mut [f32],
+    entity_mask: &mut [bool],
+    still_playing: &mut [bool],
+    global_obs: &mut [f32],
+    can_act: &mut [bool],
+    max_launch: Option<&mut [i64]>,
+    action_spec: RlActionSpec,
+    max_fleets: usize,
+    min_fleet_size: i64,
+    two_player_weight: f64,
+) -> Result<StepOneOutput, String> {
+    let decoded = dense_decoded_actions_to_player_actions(
+        state,
+        player_map,
+        valid_chunk,
+        from_planet_id_chunk,
+        angle_chunk,
+        ship_chunk,
+        max_decoded_actions,
+    )
+    .map_err(|err| format!("env {env_index}: {err}"))?;
+    let terminal = step_one_env(
+        state,
+        player_map,
+        player_finished,
+        episode_stats,
+        &decoded,
+        reward_chunk,
+        done_chunk,
+        max_fleets,
+        two_player_weight,
+    );
+    let ignored_fleets = write_one_obs(
+        state,
+        player_map,
+        action_slots,
+        player_finished,
+        action_spec,
+        max_fleets,
+        min_fleet_size,
+        planet_obs,
+        orbiting_planet_obs,
+        fleet_obs,
+        comet_obs,
+        entity_mask,
+        still_playing,
+        global_obs,
+        can_act,
+        max_launch,
+    );
+    Ok(StepOneOutput {
+        terminal_metrics: terminal.metrics,
+        terminal_snapshot: terminal.snapshot,
+        ignored_fleets,
+    })
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2381,5 +3377,170 @@ mod tests {
 
         assert_eq!(dones, vec![true; 4]);
         assert_eq!(still_playing, vec![true; 4]);
+    }
+
+    #[test]
+    fn decoded_launch_buffers_represent_each_action_spec() {
+        let state = state_with_all_players_alive();
+        let player_map = PlayerMap::identity();
+        let action_slots = action_entity_slots(&state);
+        let max_actions = ACTION_ENTITY_SLOTS;
+        let mut valid = vec![false; OUTER_PLAYER_SLOTS * max_actions];
+        let mut from_planet_id = vec![0; OUTER_PLAYER_SLOTS * max_actions];
+        let mut angle = vec![0.0; OUTER_PLAYER_SLOTS * max_actions];
+        let mut ships_out = vec![0; OUTER_PLAYER_SLOTS * max_actions];
+
+        let mut launch = vec![false; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut pure_angle = vec![0.0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        pure_angle[0] = 0.5;
+        ships[0] = 3;
+        let decoded = decode_pure_actions(
+            &state,
+            &player_map,
+            &action_slots,
+            &launch,
+            &pure_angle,
+            &ships,
+            1,
+            1,
+        )
+        .expect("pure action should decode");
+        write_decoded_action_buffers(
+            &decoded,
+            &player_map,
+            &mut valid,
+            &mut from_planet_id,
+            &mut angle,
+            &mut ships_out,
+            max_actions,
+        )
+        .expect("decoded pure action should fit");
+        assert!(valid[0]);
+        assert_eq!(from_planet_id[0], 0);
+        assert_eq!(ships_out[0], 3);
+
+        valid.fill(false);
+        from_planet_id.fill(0);
+        angle.fill(0.0);
+        ships_out.fill(0);
+        let mut target = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        target[0] = 1;
+        let decoded = decode_discrete_target_actions(
+            &state,
+            &player_map,
+            &action_slots,
+            &launch,
+            &target,
+            &ships,
+            1,
+            1,
+        )
+        .expect("discrete target action should decode");
+        write_decoded_action_buffers(
+            &decoded.actions,
+            &player_map,
+            &mut valid,
+            &mut from_planet_id,
+            &mut angle,
+            &mut ships_out,
+            max_actions,
+        )
+        .expect("decoded target action should fit");
+        assert!(valid[0]);
+        assert_eq!(from_planet_id[0], 0);
+        assert_eq!(ships_out[0], 3);
+
+        valid.fill(false);
+        from_planet_id.fill(0);
+        angle.fill(0.0);
+        ships_out.fill(0);
+        let mut bin_target = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut fleet_bin = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        bin_target[0] = 1;
+        fleet_bin[0] = 5;
+        let decoded = decode_discrete_target_bin_actions(
+            &state,
+            &player_map,
+            &action_slots,
+            &bin_target,
+            &fleet_bin,
+            11,
+            1,
+        )
+        .expect("target-bin action should decode");
+        write_decoded_action_buffers(
+            &decoded.actions,
+            &player_map,
+            &mut valid,
+            &mut from_planet_id,
+            &mut angle,
+            &mut ships_out,
+            max_actions,
+        )
+        .expect("decoded target-bin action should fit");
+        assert!(valid[0]);
+        assert_eq!(from_planet_id[0], 0);
+        assert_eq!(ships_out[0], 5);
+    }
+
+    #[test]
+    fn dense_decoded_launches_match_direct_step_actions() {
+        let state = state_with_all_players_alive();
+        let player_map = PlayerMap::identity();
+        let action_slots = action_entity_slots(&state);
+        let mut launch = vec![false; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut pure_angle = vec![0.0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        pure_angle[0] = 0.5;
+        ships[0] = 3;
+        let direct = decode_pure_actions(
+            &state,
+            &player_map,
+            &action_slots,
+            &launch,
+            &pure_angle,
+            &ships,
+            1,
+            1,
+        )
+        .expect("pure action should decode");
+        let max_actions = ACTION_ENTITY_SLOTS;
+        let mut valid = vec![false; OUTER_PLAYER_SLOTS * max_actions];
+        let mut from_planet_id = vec![0; OUTER_PLAYER_SLOTS * max_actions];
+        let mut angle = vec![0.0; OUTER_PLAYER_SLOTS * max_actions];
+        let mut decoded_ships = vec![0; OUTER_PLAYER_SLOTS * max_actions];
+        write_decoded_action_buffers(
+            &direct,
+            &player_map,
+            &mut valid,
+            &mut from_planet_id,
+            &mut angle,
+            &mut decoded_ships,
+            max_actions,
+        )
+        .expect("decoded action should fit");
+        let from_dense = dense_decoded_actions_to_player_actions(
+            &state,
+            &player_map,
+            &valid,
+            &from_planet_id,
+            &angle,
+            &decoded_ships,
+            max_actions,
+        )
+        .expect("dense decoded action should validate");
+
+        let mut direct_state = state.clone();
+        let mut dense_state = state;
+        step(&mut direct_state, &direct);
+        step(&mut dense_state, &from_dense);
+
+        assert_eq!(dense_state.step, direct_state.step);
+        assert_eq!(dense_state.planets[0].ships, direct_state.planets[0].ships);
+        assert_eq!(dense_state.fleets.len(), direct_state.fleets.len());
+        assert_eq!(dense_state.fleets[0].from_planet_id, 0);
     }
 }

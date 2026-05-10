@@ -11,7 +11,15 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from owl.rl import ACTION_ENTITY_SLOTS, ObsBatch
+from owl.rl import (
+    ACTION_ENTITY_SLOTS,
+    ActionDiscreteTargetsConfig,
+    ActionPureConfig,
+    DecodedLaunchActions,
+    DiscreteTargetActionMask,
+    ObsBatch,
+    PureActionMask,
+)
 
 _BENCHMARK_PATH = Path(__file__).parents[2] / "scripts" / "benchmark_checkpoints.py"
 _BENCHMARK_SPEC = importlib.util.spec_from_file_location(
@@ -147,6 +155,54 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context(
             assert deterministic
             return SimpleNamespace(actions=actions)
 
+    class FakeEnv:
+        def __init__(self) -> None:
+            self.observed_specs: list[str] = []
+            self.decoded_specs: list[str] = []
+
+        def observation_for_action_spec(
+            self,
+            action_spec: ActionPureConfig,
+        ) -> ObsBatch:
+            self.observed_specs.append(action_spec.action_spec)
+            return ObsBatch(
+                planets=torch.zeros((1, 1, 1)),
+                orbiting_planets=torch.zeros((1, 1), dtype=torch.bool),
+                fleets=torch.zeros((1, 1, 1)),
+                comets=torch.zeros((1, 1, 1)),
+                entity_mask=torch.zeros((1, 1), dtype=torch.bool),
+                still_playing=torch.ones((1, 4), dtype=torch.bool),
+                global_features=torch.zeros((1, 1)),
+                action_mask=PureActionMask(
+                    can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
+                    max_launch=torch.zeros(
+                        (1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64
+                    ),
+                ),
+            )
+
+        def decode_actions(
+            self,
+            actions: benchmark_checkpoints.ActionBundle,
+            *,
+            action_spec: ActionPureConfig,
+        ) -> DecodedLaunchActions:
+            self.decoded_specs.append(action_spec.action_spec)
+            valid = torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool)
+            ships = torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
+            valid[:, :, 0] = actions.launch[:, :, 0, 0]
+            ships[:, :, 0] = torch.where(
+                valid[:, :, 0],
+                actions.ships[:, :, 0, 0],
+                torch.zeros_like(actions.ships[:, :, 0, 0]),
+            )
+            return DecodedLaunchActions(
+                valid=valid,
+                from_planet_id=torch.zeros_like(ships),
+                angle=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.float32),
+                ships=ships,
+            )
+
     seen: list[tuple[str, torch.device]] = []
 
     @contextmanager
@@ -162,36 +218,197 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context(
         "autocast_context",
         fake_autocast_context,
     )
-    obs = ObsBatch(
-        planets=torch.zeros((1, 1, 1)),
-        orbiting_planets=torch.zeros((1, 1), dtype=torch.bool),
-        fleets=torch.zeros((1, 1, 1)),
-        comets=torch.zeros((1, 1, 1)),
-        entity_mask=torch.zeros((1, 1), dtype=torch.bool),
-        still_playing=torch.ones((1, 4), dtype=torch.bool),
-        global_features=torch.zeros((1, 1)),
-        can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
-        max_launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
-    )
+    env = FakeEnv()
     assignments = torch.tensor([[0, 1, 0, 1]])
 
     actions = benchmark_checkpoints._actions_for_assignments(
-        obs,
+        env,
         assignments,
         model_a=FakeModel(launch_value=True, ship_value=3),
         model_b=FakeModel(launch_value=False, ship_value=7),
+        action_spec_a=ActionPureConfig(max_per_planet_launches=1),
+        action_spec_b=ActionPureConfig(max_per_planet_launches=1),
         config_a=Namespace(dtype="bfloat16"),
         config_b=Namespace(dtype="float32"),
         device=torch.device("cpu"),
         deterministic=True,
     )
 
+    assert env.observed_specs == ["pure", "pure"]
+    assert env.decoded_specs == ["pure", "pure"]
     assert seen == [
         ("bfloat16", torch.device("cpu")),
         ("float32", torch.device("cpu")),
     ]
-    assert actions.launch[0, :, 0, 0].tolist() == [True, False, True, False]
-    assert actions.ships[0, :, 0, 0].tolist() == [3, 7, 3, 7]
+    assert actions.valid[0, :, 0].tolist() == [True, False, True, False]
+    assert actions.ships[0, :, 0].tolist() == [3, 0, 3, 0]
+
+
+def test_actions_for_assignments_uses_each_checkpoint_action_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEnv:
+        def __init__(self) -> None:
+            self.observed_specs: list[str] = []
+            self.decoded_specs: list[str] = []
+
+        def observation_for_action_spec(
+            self,
+            action_spec: benchmark_checkpoints.ActionConfig,
+        ) -> ObsBatch:
+            self.observed_specs.append(action_spec.action_spec)
+            if isinstance(action_spec, ActionDiscreteTargetsConfig):
+                action_mask = DiscreteTargetActionMask(
+                    can_act=torch.zeros(
+                        (1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
+                        dtype=torch.bool,
+                    ),
+                    max_launch=torch.zeros(
+                        (1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64
+                    ),
+                )
+            else:
+                action_mask = PureActionMask(
+                    can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
+                    max_launch=torch.zeros(
+                        (1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64
+                    ),
+                )
+            return ObsBatch(
+                planets=torch.zeros((1, 1, 1)),
+                orbiting_planets=torch.zeros((1, 1), dtype=torch.bool),
+                fleets=torch.zeros((1, 1, 1)),
+                comets=torch.zeros((1, 1, 1)),
+                entity_mask=torch.zeros((1, 1), dtype=torch.bool),
+                still_playing=torch.ones((1, 4), dtype=torch.bool),
+                global_features=torch.zeros((1, 1)),
+                action_mask=action_mask,
+            )
+
+        def decode_actions(
+            self,
+            actions: benchmark_checkpoints.ActionBundle,  # noqa: ARG002
+            *,
+            action_spec: benchmark_checkpoints.ActionConfig,
+        ) -> DecodedLaunchActions:
+            self.decoded_specs.append(action_spec.action_spec)
+            valid = torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool)
+            valid[:, :, 0] = True
+            ships = torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
+            ships[:, :, 0] = (
+                7 if isinstance(action_spec, ActionDiscreteTargetsConfig) else 3
+            )
+            return DecodedLaunchActions(
+                valid=valid,
+                from_planet_id=torch.zeros_like(ships),
+                angle=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.float32),
+                ships=ships,
+            )
+
+    class FakeModel:
+        def __call__(
+            self,
+            obs: ObsBatch,
+            *,
+            deterministic: bool = False,
+        ) -> SimpleNamespace:
+            assert deterministic
+            shape = (1, 4, ACTION_ENTITY_SLOTS, 1)
+            if isinstance(obs.action_mask, DiscreteTargetActionMask):
+                actions = benchmark_checkpoints.DiscreteTargetActions(
+                    launch=torch.ones(shape, dtype=torch.bool),
+                    target=torch.zeros(shape, dtype=torch.int64),
+                    ships=torch.full(shape, 7, dtype=torch.int64),
+                )
+            else:
+                actions = benchmark_checkpoints.PureActions(
+                    launch=torch.ones(shape, dtype=torch.bool),
+                    angle=torch.zeros(shape, dtype=torch.float32),
+                    ships=torch.full(shape, 3, dtype=torch.int64),
+                )
+            return SimpleNamespace(actions=actions)
+
+    @contextmanager
+    def fake_autocast_context(
+        cfg: Namespace,  # noqa: ARG001
+        device: torch.device,  # noqa: ARG001
+    ) -> Iterator[None]:
+        yield
+
+    monkeypatch.setattr(
+        benchmark_checkpoints,
+        "autocast_context",
+        fake_autocast_context,
+    )
+    env = FakeEnv()
+
+    actions = benchmark_checkpoints._actions_for_assignments(
+        env,
+        torch.tensor([[0, 1, 0, 1]]),
+        model_a=FakeModel(),
+        model_b=FakeModel(),
+        action_spec_a=ActionPureConfig(max_per_planet_launches=1),
+        action_spec_b=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+        config_a=Namespace(dtype="float32"),
+        config_b=Namespace(dtype="float32"),
+        device=torch.device("cpu"),
+        deterministic=True,
+    )
+
+    assert env.observed_specs == ["pure", "discrete_targets"]
+    assert env.decoded_specs == ["pure", "discrete_targets"]
+    assert actions.ships[0, :, 0].tolist() == [3, 7, 3, 7]
+
+
+def test_validate_compatible_checkpoints_allows_different_action_specs() -> None:
+    obs_spec = object()
+    checkpoint_a = SimpleNamespace(
+        config=SimpleNamespace(
+            env=SimpleNamespace(
+                obs_spec=obs_spec,
+                action_spec=ActionPureConfig(max_per_planet_launches=1),
+            )
+        )
+    )
+    checkpoint_b = SimpleNamespace(
+        config=SimpleNamespace(
+            env=SimpleNamespace(
+                obs_spec=obs_spec,
+                action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+            )
+        )
+    )
+
+    benchmark_checkpoints._validate_compatible_checkpoints(
+        checkpoint_a,
+        checkpoint_b,
+    )
+
+
+def test_select_decoded_actions_pads_to_larger_action_capacity() -> None:
+    actions_a = DecodedLaunchActions(
+        valid=torch.ones((1, 4, 1), dtype=torch.bool),
+        from_planet_id=torch.zeros((1, 4, 1), dtype=torch.int64),
+        angle=torch.zeros((1, 4, 1), dtype=torch.float32),
+        ships=torch.full((1, 4, 1), 3, dtype=torch.int64),
+    )
+    actions_b = DecodedLaunchActions(
+        valid=torch.ones((1, 4, 2), dtype=torch.bool),
+        from_planet_id=torch.zeros((1, 4, 2), dtype=torch.int64),
+        angle=torch.zeros((1, 4, 2), dtype=torch.float32),
+        ships=torch.full((1, 4, 2), 7, dtype=torch.int64),
+    )
+
+    selected = benchmark_checkpoints._select_decoded_actions(
+        actions_a,
+        actions_b,
+        torch.tensor([[True, False, True, False]]),
+    )
+
+    assert selected.valid.shape == (1, 4, 2)
+    assert selected.valid[0, :, 0].tolist() == [True, True, True, True]
+    assert selected.valid[0, :, 1].tolist() == [False, True, False, True]
+    assert selected.ships[0, :, 0].tolist() == [3, 7, 3, 7]
 
 
 def test_select_actions_handles_discrete_target_bundles() -> None:

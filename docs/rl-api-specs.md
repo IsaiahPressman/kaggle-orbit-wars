@@ -471,6 +471,41 @@ selected source-target-bin tuple against `can_act`, decode the bin to a ship
 count, then use the same target-to-angle decoder and launch-failure accounting
 as `discrete_targets`.
 
+## Decoded Launch Actions
+
+`VectorizedEnv` can expose action masks for action specs other than the env's
+construction spec, decode model actions from those specs, and step the simulator
+with a common launch representation. This is intended for evaluation code that
+benchmarks checkpoints trained with different action specs against each other.
+
+```python
+obs_a = env.observation_for_action_spec(checkpoint_a.config.env.action_spec)
+obs_b = env.observation_for_action_spec(checkpoint_b.config.env.action_spec)
+decoded_a = env.decode_actions(output_a.actions, action_spec=checkpoint_a.config.env.action_spec)
+decoded_b = env.decode_actions(output_b.actions, action_spec=checkpoint_b.config.env.action_spec)
+obs, rewards, dones, episode_metrics = env.step_decoded_actions(selected_decoded)
+```
+
+`DecodedLaunchActions` has fixed-rank tensors:
+
+| Tensor | dtype | Shape | Meaning |
+| --- | --- | --- | --- |
+| `valid` | `bool` | `(n_envs, 4, max_actions)` | whether this decoded launch slot should execute |
+| `from_planet_id` | `int64` | `(n_envs, 4, max_actions)` | source planet ID for valid launches |
+| `angle` | `float32` | `(n_envs, 4, max_actions)` | launch angle for valid launches |
+| `ships` | `int64` | `(n_envs, 4, max_actions)` | ship count for valid launches |
+
+`decode_actions(...)` chooses `max_actions` from the source action spec:
+`44 * max_per_planet_launches` for `pure` and `discrete_targets`, and `44` for
+`discrete_target_bins`. Callers that merge decoded actions from different specs
+should pad to the larger `max_actions` and select per outer player slot.
+`step_decoded_actions(...)` ignores payload fields where `valid` is false,
+rejects launches from inactive outer slots, validates source ownership, finite
+angles, positive `i32` ship counts, and per-source ship budgets, then uses the
+normal Rust rules-engine step path. Spec-specific constraints such as
+`min_fleet_size`, target eligibility, target-to-angle conversion, and target-bin
+rounding are enforced during `decode_actions(...)`.
+
 ## Replay Snapshots
 
 `VectorizedEnv.state_snapshot(env_index)` returns a JSON-serializable snapshot

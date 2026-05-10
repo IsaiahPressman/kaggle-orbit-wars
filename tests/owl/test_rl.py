@@ -15,6 +15,7 @@ from owl.rl import (
     ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
+    DecodedLaunchActions,
     DiscreteTargetActions,
     DiscreteTargetBinActions,
     EntityBasedConfig,
@@ -531,6 +532,127 @@ def test_discrete_target_bins_step_uses_target_and_fleet_bin_bundle() -> None:
     )
     with pytest.raises(ValueError, match=r"fleet_bin must have dtype torch\.int64"):
         env.step(invalid_actions)
+
+
+def test_vectorized_env_writes_action_masks_for_alternate_specs() -> None:
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+        pin_memory=False,
+    )
+    obs = env.reset()
+    target_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+    target_bin_spec = ActionDiscreteTargetBinsConfig(n_bins=7)
+
+    target_mask = env.action_mask_for_spec(target_spec)
+    target_bin_mask = env.action_mask_for_spec(target_bin_spec)
+    target_obs = env.observation_for_action_spec(target_spec)
+
+    assert obs.can_act.shape == (1, 4, ACTION_ENTITY_SLOTS)
+    assert target_mask.can_act.shape == (
+        1,
+        4,
+        ACTION_ENTITY_SLOTS,
+        ACTION_ENTITY_SLOTS,
+    )
+    assert target_mask.max_launch.shape == (1, 4, ACTION_ENTITY_SLOTS)
+    assert target_bin_mask.can_act.shape == (
+        1,
+        4,
+        ACTION_ENTITY_SLOTS,
+        ACTION_ENTITY_SLOTS,
+        7,
+    )
+    assert target_obs.planets is env.observations.planets
+    assert target_obs.action_mask.can_act.shape == target_mask.can_act.shape
+
+
+def test_step_decoded_actions_validates_shapes() -> None:
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+        pin_memory=False,
+    )
+    env.reset()
+    actions = DecodedLaunchActions(
+        valid=torch.zeros((1, 4, 1), dtype=torch.int64),
+        from_planet_id=torch.zeros((1, 4, 1), dtype=torch.int64),
+        angle=torch.zeros((1, 4, 1), dtype=torch.float32),
+        ships=torch.zeros((1, 4, 1), dtype=torch.int64),
+    )
+
+    with pytest.raises(ValueError, match=r"valid must have dtype torch\.bool"):
+        env.step_decoded_actions(actions)
+
+
+def test_step_decoded_actions_accepts_mixed_source_action_specs() -> None:
+    pure_spec = ActionPureConfig(max_per_planet_launches=1)
+    target_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=EntityBasedConfig(),
+        action_spec=pure_spec,
+        pin_memory=False,
+    )
+    obs = env.reset()
+    active_players = torch.nonzero(obs.still_playing[0], as_tuple=False).flatten()
+    pure_player = int(active_players[0].item())
+    target_player = int(active_players[1].item())
+
+    pure_shape = (1, 4, ACTION_ENTITY_SLOTS, 1)
+    pure_launch = torch.zeros(pure_shape, dtype=torch.bool)
+    pure_angle = torch.zeros(pure_shape, dtype=torch.float32)
+    pure_ships = torch.zeros(pure_shape, dtype=torch.int64)
+    pure_source = int(torch.nonzero(obs.can_act[0, pure_player], as_tuple=False)[0])
+    pure_launch[0, pure_player, pure_source, 0] = True
+    pure_ships[0, pure_player, pure_source, 0] = pure_spec.min_fleet_size
+    pure_decoded = env.decode_actions(
+        PureActions(launch=pure_launch, angle=pure_angle, ships=pure_ships),
+        action_spec=pure_spec,
+    )
+
+    target_mask = env.action_mask_for_spec(target_spec)
+    target_shape = (1, 4, ACTION_ENTITY_SLOTS, 1)
+    target_launch = torch.zeros(target_shape, dtype=torch.bool)
+    target = torch.zeros(target_shape, dtype=torch.int64)
+    target_ships = torch.zeros(target_shape, dtype=torch.int64)
+    target_source, target_index = torch.nonzero(
+        target_mask.can_act[0, target_player],
+        as_tuple=False,
+    )[0].tolist()
+    target_launch[0, target_player, target_source, 0] = True
+    target[0, target_player, target_source, 0] = target_index
+    target_ships[0, target_player, target_source, 0] = target_spec.min_fleet_size
+    target_decoded = env.decode_actions(
+        DiscreteTargetActions(
+            launch=target_launch,
+            target=target,
+            ships=target_ships,
+        ),
+        action_spec=target_spec,
+    )
+
+    use_pure = torch.zeros((1, 4, 1), dtype=torch.bool)
+    use_pure[0, pure_player, 0] = True
+    mixed = DecodedLaunchActions(
+        valid=torch.where(use_pure, pure_decoded.valid, target_decoded.valid),
+        from_planet_id=torch.where(
+            use_pure,
+            pure_decoded.from_planet_id,
+            target_decoded.from_planet_id,
+        ),
+        angle=torch.where(use_pure, pure_decoded.angle, target_decoded.angle),
+        ships=torch.where(use_pure, pure_decoded.ships, target_decoded.ships),
+    )
+
+    obs, rewards, dones, episode_metrics = env.step_decoded_actions(mixed)
+
+    assert obs.can_act.shape == (1, 4, ACTION_ENTITY_SLOTS)
+    assert rewards.shape == (1, 4)
+    assert dones.shape == (1, 4)
+    assert episode_metrics == {}
 
 
 def test_actions_to_kaggle_converts_pure_model_actions() -> None:

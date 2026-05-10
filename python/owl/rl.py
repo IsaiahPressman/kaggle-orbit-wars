@@ -141,6 +141,14 @@ class DiscreteTargetBinActions:
 ActionBundle: TypeAlias = PureActions | DiscreteTargetActions | DiscreteTargetBinActions
 
 
+@dataclass
+class DecodedLaunchActions:
+    valid: torch.Tensor
+    from_planet_id: torch.Tensor
+    angle: torch.Tensor
+    ships: torch.Tensor
+
+
 @dataclass(frozen=True)
 class PureActionMask:
     can_act: torch.Tensor
@@ -326,6 +334,152 @@ class VectorizedEnv:
     def terminal_metrics(self, env_index: int) -> dict[str, float] | None:
         return self._rust.terminal_metrics(env_index)
 
+    def action_mask_for_spec(self, action_spec: ActionConfig) -> ActionMask:
+        can_act = torch.zeros(
+            _can_act_shape(self.n_envs, self.n_players, action_spec),
+            dtype=torch.bool,
+            pin_memory=self.pin_memory_enabled,
+        )
+        if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
+            self._rust.write_action_mask_discrete_target_bins(
+                action_spec.min_fleet_size,
+                action_spec.n_bins,
+                can_act.numpy(),
+            )
+            return DiscreteTargetBinActionMask(can_act=can_act)
+
+        max_launch = torch.zeros(
+            (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS),
+            dtype=torch.int64,
+            pin_memory=self.pin_memory_enabled,
+        )
+        self._rust.write_action_mask(
+            action_spec.action_spec,
+            action_spec.min_fleet_size,
+            0,
+            can_act.numpy(),
+            max_launch.numpy(),
+        )
+        if isinstance(action_spec, ActionPureConfig):
+            return PureActionMask(can_act=can_act, max_launch=max_launch)
+        return DiscreteTargetActionMask(can_act=can_act, max_launch=max_launch)
+
+    def observation_for_action_spec(self, action_spec: ActionConfig) -> ObsBatch:
+        return ObsBatch(
+            planets=self.observations.planets,
+            orbiting_planets=self.observations.orbiting_planets,
+            fleets=self.observations.fleets,
+            comets=self.observations.comets,
+            entity_mask=self.observations.entity_mask,
+            still_playing=self.observations.still_playing,
+            global_features=self.observations.global_features,
+            action_mask=self.action_mask_for_spec(action_spec),
+        )
+
+    def decode_actions(
+        self,
+        actions: ActionBundle,
+        *,
+        action_spec: ActionConfig,
+    ) -> DecodedLaunchActions:
+        decoded = self._allocate_decoded_actions(
+            max_actions=_max_decoded_actions(action_spec)
+        )
+        if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
+            if not isinstance(actions, DiscreteTargetBinActions):
+                raise TypeError(
+                    "discrete_target_bins requires DiscreteTargetBinActions"
+                )
+            target_array = _actions_to_numpy(
+                "target", actions.target, dtype=np.int64, torch_dtype=torch.int64
+            )
+            fleet_bin_array = _actions_to_numpy(
+                "fleet_bin",
+                actions.fleet_bin,
+                dtype=np.int64,
+                torch_dtype=torch.int64,
+            )
+            expected_bin_shape = (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS)
+            _require_action_shape("target", target_array, expected_bin_shape)
+            _require_action_shape("fleet_bin", fleet_bin_array, expected_bin_shape)
+            self._rust.decode_discrete_target_bin_actions(
+                target_array,
+                fleet_bin_array,
+                action_spec.min_fleet_size,
+                action_spec.n_bins,
+                decoded.valid.numpy(),
+                decoded.from_planet_id.numpy(),
+                decoded.angle.numpy(),
+                decoded.ships.numpy(),
+            )
+            return decoded
+
+        if isinstance(action_spec, ActionPureConfig):
+            if not isinstance(actions, PureActions):
+                raise TypeError("pure requires PureActions")
+            launch_actions: PureActions | DiscreteTargetActions = actions
+        elif isinstance(action_spec, ActionDiscreteTargetsConfig):
+            if not isinstance(actions, DiscreteTargetActions):
+                raise TypeError("discrete_targets requires DiscreteTargetActions")
+            launch_actions = actions
+        else:
+            raise TypeError("unsupported action spec")
+
+        launch_array = _actions_to_numpy(
+            "launch", launch_actions.launch, dtype=np.bool_, torch_dtype=torch.bool
+        )
+        ship_array = _actions_to_numpy(
+            "ships", launch_actions.ships, dtype=np.int64, torch_dtype=torch.int64
+        )
+        expected_launch_shape = (
+            self.n_envs,
+            self.n_players,
+            ACTION_ENTITY_SLOTS,
+            action_spec.max_per_planet_launches,
+        )
+        _require_action_shape("launch", launch_array, expected_launch_shape)
+        _require_action_shape("ships", ship_array, expected_launch_shape)
+
+        if isinstance(action_spec, ActionPureConfig):
+            pure_actions = cast(PureActions, launch_actions)
+            angle_array = _actions_to_numpy(
+                "angle",
+                pure_actions.angle,
+                dtype=np.float32,
+                torch_dtype=torch.float32,
+            )
+            _require_action_shape("angle", angle_array, expected_launch_shape)
+            self._rust.decode_pure_actions(
+                launch_array,
+                angle_array,
+                ship_array,
+                action_spec.max_per_planet_launches,
+                action_spec.min_fleet_size,
+                decoded.valid.numpy(),
+                decoded.from_planet_id.numpy(),
+                decoded.angle.numpy(),
+                decoded.ships.numpy(),
+            )
+            return decoded
+
+        discrete_actions = cast(DiscreteTargetActions, launch_actions)
+        target_array = _actions_to_numpy(
+            "target", discrete_actions.target, dtype=np.int64, torch_dtype=torch.int64
+        )
+        _require_action_shape("target", target_array, expected_launch_shape)
+        self._rust.decode_discrete_target_actions(
+            launch_array,
+            target_array,
+            ship_array,
+            action_spec.max_per_planet_launches,
+            action_spec.min_fleet_size,
+            decoded.valid.numpy(),
+            decoded.from_planet_id.numpy(),
+            decoded.angle.numpy(),
+            decoded.ships.numpy(),
+        )
+        return decoded
+
     def step(
         self,
         actions: ActionBundle,
@@ -453,6 +607,56 @@ class VectorizedEnv:
     ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
         return self.step(actions)
 
+    def step_decoded_actions(
+        self,
+        actions: DecodedLaunchActions,
+    ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
+        valid_array = _actions_to_numpy(
+            "valid", actions.valid, dtype=np.bool_, torch_dtype=torch.bool
+        )
+        from_planet_id_array = _actions_to_numpy(
+            "from_planet_id",
+            actions.from_planet_id,
+            dtype=np.int64,
+            torch_dtype=torch.int64,
+        )
+        angle_array = _actions_to_numpy(
+            "angle", actions.angle, dtype=np.float32, torch_dtype=torch.float32
+        )
+        ship_array = _actions_to_numpy(
+            "ships", actions.ships, dtype=np.int64, torch_dtype=torch.int64
+        )
+        if valid_array.ndim != 3:
+            raise ValueError(
+                "valid must have shape (n_envs, n_players, max_actions), "
+                f"got {valid_array.shape}"
+            )
+        expected_shape = (self.n_envs, self.n_players, valid_array.shape[2])
+        if valid_array.shape[2] <= 0:
+            raise ValueError("max_actions must be positive")
+        _require_action_shape("valid", valid_array, expected_shape)
+        _require_action_shape("from_planet_id", from_planet_id_array, expected_shape)
+        _require_action_shape("angle", angle_array, expected_shape)
+        _require_action_shape("ships", ship_array, expected_shape)
+        episode_metrics = self._rust.step_decoded_actions(
+            valid_array,
+            from_planet_id_array,
+            angle_array,
+            ship_array,
+            self._planet_obs_np,
+            self._orbiting_planet_obs_np,
+            self._fleet_obs_np,
+            self._comet_obs_np,
+            self._entity_mask_np,
+            self._still_playing_np,
+            self._global_obs_np,
+            self._can_act_np,
+            self._max_launch_np,
+            self._rewards_np,
+            self._dones_np,
+        )
+        return self.observations, self.rewards, self.dones, episode_metrics
+
     def _allocate_observations(self, *, pin_memory: bool) -> ObsBatch:
         can_act_shape = _can_act_shape(self.n_envs, self.n_players, self.action_spec)
         can_act = torch.zeros(
@@ -530,6 +734,23 @@ class VectorizedEnv:
                 pin_memory=pin_memory,
             ),
             action_mask=action_mask,
+        )
+
+    def _allocate_decoded_actions(self, *, max_actions: int) -> DecodedLaunchActions:
+        shape = (self.n_envs, self.n_players, max_actions)
+        return DecodedLaunchActions(
+            valid=torch.zeros(
+                shape, dtype=torch.bool, pin_memory=self.pin_memory_enabled
+            ),
+            from_planet_id=torch.zeros(
+                shape, dtype=torch.int64, pin_memory=self.pin_memory_enabled
+            ),
+            angle=torch.zeros(
+                shape, dtype=torch.float32, pin_memory=self.pin_memory_enabled
+            ),
+            ships=torch.zeros(
+                shape, dtype=torch.int64, pin_memory=self.pin_memory_enabled
+            ),
         )
 
 
@@ -895,6 +1116,12 @@ def _can_act_shape(
         ACTION_ENTITY_SLOTS,
         action_spec.n_bins,
     )
+
+
+def _max_decoded_actions(action_spec: ActionConfig) -> int:
+    if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
+        return ACTION_ENTITY_SLOTS
+    return ACTION_ENTITY_SLOTS * action_spec.max_per_planet_launches
 
 
 def fleet_bin_to_ships(

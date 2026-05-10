@@ -12,7 +12,9 @@ from owl.model import StatelessTransformerV1
 from owl.replay import ReplayRecorder
 from owl.rl import (
     ActionBundle,
+    ActionConfig,
     ActionMask,
+    DecodedLaunchActions,
     DiscreteTargetActionMask,
     DiscreteTargetActions,
     DiscreteTargetBinActionMask,
@@ -188,16 +190,18 @@ def run_benchmark(
     try:
         while games < n_games:
             actions = _actions_for_assignments(
-                obs,
+                env,
                 assignments,
                 model_a=checkpoint_a.model,
                 model_b=checkpoint_b.model,
+                action_spec_a=checkpoint_a.config.env.action_spec,
+                action_spec_b=checkpoint_b.config.env.action_spec,
                 config_a=checkpoint_a.config.rl,
                 config_b=checkpoint_b.config.rl,
                 device=device,
                 deterministic=deterministic,
             )
-            obs, rewards, dones, _episode_metrics = env.step(actions)
+            obs, rewards, dones, _episode_metrics = env.step_decoded_actions(actions)
             steps += n_envs
             terminal_envs = torch.nonzero(dones.all(dim=1), as_tuple=False).flatten()
             terminal_env_set = {int(env_index.item()) for env_index in terminal_envs}
@@ -298,29 +302,39 @@ def _validate_compatible_checkpoints(
     env_b = checkpoint_b.config.env
     if env_a.obs_spec != env_b.obs_spec:
         raise ValueError("checkpoint observation specs must match")
-    if env_a.action_spec != env_b.action_spec:
-        raise ValueError("checkpoint action specs must match")
 
 
 @torch.inference_mode()
 def _actions_for_assignments(
-    obs: ObsBatch,
+    env: VectorizedEnv,
     assignments: torch.Tensor,
     *,
     model_a: StatelessTransformerV1,
     model_b: StatelessTransformerV1,
+    action_spec_a: ActionConfig,
+    action_spec_b: ActionConfig,
     config_a: DTypeConfig,
     config_b: DTypeConfig,
     device: torch.device,
     deterministic: bool,
-) -> ActionBundle:
-    device_obs = _obs_to_device(obs, device)
+) -> DecodedLaunchActions:
+    obs_a = env.observation_for_action_spec(action_spec_a)
+    obs_b = env.observation_for_action_spec(action_spec_b)
+    device_obs_a = _obs_to_device(obs_a, device)
+    device_obs_b = _obs_to_device(obs_b, device)
     with autocast_context(config_a, device):
-        output_a = model_a(device_obs, deterministic=deterministic)
+        output_a = model_a(device_obs_a, deterministic=deterministic)
     with autocast_context(config_b, device):
-        output_b = model_b(device_obs, deterministic=deterministic)
-    use_a = assignments.to(device=device).eq(MODEL_A)
-    return _select_actions(output_a.actions, output_b.actions, use_a)
+        output_b = model_b(device_obs_b, deterministic=deterministic)
+    decoded_a = env.decode_actions(
+        _model_actions_to_cpu(output_a.actions),
+        action_spec=action_spec_a,
+    )
+    decoded_b = env.decode_actions(
+        _model_actions_to_cpu(output_b.actions),
+        action_spec=action_spec_b,
+    )
+    return _select_decoded_actions(decoded_a, decoded_b, assignments.eq(MODEL_A))
 
 
 def _obs_to_device(obs: ObsBatch, device: torch.device) -> ObsBatch:
@@ -366,6 +380,70 @@ def _action_mask_to_device(obs: ObsBatch, device: torch.device) -> ActionMask:
             non_blocking=device.type == "cuda",
         )
     )
+
+
+def _model_actions_to_cpu(actions: ActionBundle) -> ActionBundle:
+    if isinstance(actions, PureActions):
+        return PureActions(
+            launch=actions.launch.cpu(),
+            angle=actions.angle.cpu(),
+            ships=actions.ships.cpu(),
+        )
+    if isinstance(actions, DiscreteTargetActions):
+        return DiscreteTargetActions(
+            launch=actions.launch.cpu(),
+            target=actions.target.cpu(),
+            ships=actions.ships.cpu(),
+        )
+    return DiscreteTargetBinActions(
+        target=actions.target.cpu(),
+        fleet_bin=actions.fleet_bin.cpu(),
+    )
+
+
+def _select_decoded_actions(
+    actions_a: DecodedLaunchActions,
+    actions_b: DecodedLaunchActions,
+    use_a: torch.Tensor,
+) -> DecodedLaunchActions:
+    max_actions = max(actions_a.valid.shape[2], actions_b.valid.shape[2])
+    padded_a = _pad_decoded_actions(actions_a, max_actions)
+    padded_b = _pad_decoded_actions(actions_b, max_actions)
+    action_mask = use_a[:, :, None]
+    return DecodedLaunchActions(
+        valid=_select_action(padded_a.valid, padded_b.valid, action_mask),
+        from_planet_id=_select_action(
+            padded_a.from_planet_id,
+            padded_b.from_planet_id,
+            action_mask,
+        ),
+        angle=_select_action(padded_a.angle, padded_b.angle, action_mask),
+        ships=_select_action(padded_a.ships, padded_b.ships, action_mask),
+    )
+
+
+def _pad_decoded_actions(
+    actions: DecodedLaunchActions,
+    max_actions: int,
+) -> DecodedLaunchActions:
+    return DecodedLaunchActions(
+        valid=_pad_decoded_tensor(actions.valid, max_actions),
+        from_planet_id=_pad_decoded_tensor(actions.from_planet_id, max_actions),
+        angle=_pad_decoded_tensor(actions.angle, max_actions),
+        ships=_pad_decoded_tensor(actions.ships, max_actions),
+    )
+
+
+def _pad_decoded_tensor(tensor: torch.Tensor, max_actions: int) -> torch.Tensor:
+    if tensor.shape[2] == max_actions:
+        return tensor
+    padded = torch.zeros(
+        (*tensor.shape[:2], max_actions),
+        dtype=tensor.dtype,
+        device=tensor.device,
+    )
+    padded[:, :, : tensor.shape[2]] = tensor
+    return padded
 
 
 def _select_actions(
