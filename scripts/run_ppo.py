@@ -646,6 +646,7 @@ def _checkpoint_metadata(
         "env_steps",
         "optimizer_steps",
         "player_step_total",
+        "total_games_played",
         "target_kl_exceeded_total",
         "wandb_run_id",
     }
@@ -668,6 +669,11 @@ def _checkpoint_metadata(
         player_step_total=_checkpoint_nonnegative_int(
             checkpoint["player_step_total"],
             name="player_step_total",
+            path=path,
+        ),
+        total_games_played=_checkpoint_nonnegative_int(
+            checkpoint["total_games_played"],
+            name="total_games_played",
             path=path,
         ),
         target_kl_exceeded_total=_checkpoint_nonnegative_int(

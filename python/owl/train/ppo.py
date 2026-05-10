@@ -176,6 +176,7 @@ class PPOCheckpointMetadata:
     env_steps: int
     optimizer_steps: int
     player_step_total: int
+    total_games_played: int
     target_kl_exceeded_total: int
     wandb_run_id: str | None
 
@@ -412,6 +413,7 @@ class PPOTrainer:
         self.n_envs = env.n_envs
         self.optimizer_steps = 0
         self.player_step_total = 0
+        self.total_games_played = 0
         self.target_kl_exceeded_total = 0
         self._non_blocking_env_to_device = device.type == "cuda" and getattr(
             env, "pin_memory_enabled", False
@@ -499,13 +501,18 @@ class PPOTrainer:
         )
         self.player_step_total += self._sum_int(value_mask.sum())
         metrics["train/player_step_total"] = float(self.player_step_total)
-        metrics.update(
-            _mean_env_metrics(
-                env_metrics,
-                context=self.distributed_context,
-                device=self.device,
-            )
+        env_metrics_logged = _mean_env_metrics(
+            env_metrics,
+            context=self.distributed_context,
+            device=self.device,
         )
+        total_games_played = env_metrics_logged.get("train/total_games_played")
+        if total_games_played is not None:
+            self.total_games_played += int(total_games_played)
+            env_metrics_logged["train/total_games_played"] = float(
+                self.total_games_played
+            )
+        metrics.update(env_metrics_logged)
         elapsed = self._max_float(max(perf_counter() - start, 1e-12))
         rollout_elapsed = self._max_float(rollout_elapsed)
         update_elapsed = self._max_float(update_elapsed)
@@ -535,6 +542,7 @@ class PPOTrainer:
             "env_steps": env_steps,
             "optimizer_steps": self.optimizer_steps,
             "player_step_total": self.player_step_total,
+            "total_games_played": self.total_games_played,
             "target_kl_exceeded_total": self.target_kl_exceeded_total,
             "wandb_run_id": wandb_run_id,
         }
@@ -547,21 +555,6 @@ class PPOTrainer:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         if not isinstance(checkpoint, dict):
             raise ValueError("checkpoint must be a dictionary")
-        expected_keys = {
-            "model",
-            "optimizer",
-            "lr_scheduler",
-            "env_steps",
-            "optimizer_steps",
-            "player_step_total",
-            "target_kl_exceeded_total",
-            "wandb_run_id",
-        }
-        if set(checkpoint) != expected_keys:
-            raise ValueError(
-                f"checkpoint keys must be {sorted(expected_keys)}, "
-                f"got {sorted(checkpoint)}"
-            )
 
         env_steps = _checkpoint_nonnegative_int(
             checkpoint["env_steps"],
@@ -575,8 +568,12 @@ class PPOTrainer:
             checkpoint["player_step_total"],
             name="player_step_total",
         )
+        total_games_played = _checkpoint_nonnegative_int(
+            checkpoint.get("total_games_played"),
+            name="total_games_played",
+        )
         target_kl_exceeded_total = _checkpoint_nonnegative_int(
-            checkpoint["target_kl_exceeded_total"],
+            checkpoint.get("target_kl_exceeded_total"),
             name="target_kl_exceeded_total",
         )
         wandb_run_id = _checkpoint_optional_str(
@@ -597,11 +594,13 @@ class PPOTrainer:
             self.lr_scheduler.load_state_dict(scheduler_state)
         self.optimizer_steps = optimizer_steps
         self.player_step_total = player_step_total
+        self.total_games_played = total_games_played
         self.target_kl_exceeded_total = target_kl_exceeded_total
         return PPOCheckpointMetadata(
             env_steps=env_steps,
             optimizer_steps=optimizer_steps,
             player_step_total=player_step_total,
+            total_games_played=total_games_played,
             target_kl_exceeded_total=target_kl_exceeded_total,
             wandb_run_id=wandb_run_id,
         )

@@ -156,6 +156,16 @@ class TinyOrbitEnv:
         return still_playing
 
 
+class TinyOrbitEnvWithMetrics(TinyOrbitEnv):
+    def step(
+        self,
+        actions: ActionBundle,
+    ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
+        obs, rewards, dones = super().step(actions)
+        games_played = float(dones[:, 0].sum().item())
+        return obs, rewards, dones, {"total_games_played": [games_played]}
+
+
 class TinyDiscreteTargetEnv:
     def __init__(self, *, n_envs: int) -> None:
         self.n_envs = n_envs
@@ -936,6 +946,29 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
 
     assert next_metrics["train/player_step_total"] == pytest.approx(160.0)
     assert next_metrics["optimizer/steps"] == pytest.approx(4.0)
+
+
+def test_trainer_total_games_played_is_cumulative() -> None:
+    torch.manual_seed(0)
+    env = TinyOrbitEnvWithMetrics(n_envs=4, episode_length=3)
+    model = TinyOrbitModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.05, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=3,
+            segment_sampling=ppo.SegmentSamplingConfig(segments_per_minibatch=2),
+        ),
+        device=torch.device("cpu"),
+    )
+
+    metrics = trainer.train_iteration()
+    next_metrics = trainer.train_iteration()
+
+    assert metrics["train/total_games_played"] == pytest.approx(4.0)
+    assert next_metrics["train/total_games_played"] == pytest.approx(8.0)
+    assert trainer.total_games_played == 8
 
 
 def test_rollout_and_update_model_calls_run_under_autocast() -> None:
