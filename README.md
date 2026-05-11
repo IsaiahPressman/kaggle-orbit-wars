@@ -87,6 +87,9 @@ PPO supports `pure`, `discrete_targets`, and `discrete_target_bins` action specs
 when the `StatelessTransformerV1` actor discriminator matches the environment
 action spec. The current discrete-target actor requires
 `max_per_planet_launches: 1`; the target-bin actor requires matching `n_bins`.
+Both discrete target specs default to `targeting_mode: full_mask`; set
+`stop_bad_launch` or `anything_goes` to expose loose target masks while
+controlling whether sun-crossing decoded launches are replaced with no-ops.
 
 Run a preset with:
 

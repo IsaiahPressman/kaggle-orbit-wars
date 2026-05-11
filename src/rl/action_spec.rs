@@ -14,21 +14,56 @@ const QUADRATIC_EPS: f64 = 1e-12;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RlActionSpec {
     Pure,
-    DiscreteTargets,
-    DiscreteTargetBins { n_bins: usize },
+    DiscreteTargets {
+        targeting_mode: TargetingMode,
+    },
+    DiscreteTargetBins {
+        n_bins: usize,
+        targeting_mode: TargetingMode,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TargetingMode {
+    AnythingGoes,
+    StopBadLaunch,
+    FullMask,
+}
+
+impl TargetingMode {
+    pub(super) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "anything_goes" => Ok(Self::AnythingGoes),
+            "stop_bad_launch" => Ok(Self::StopBadLaunch),
+            "full_mask" => Ok(Self::FullMask),
+            _ => Err(format!(
+                "unsupported targeting_mode {value:?}; expected \"anything_goes\", \"stop_bad_launch\", or \"full_mask\""
+            )),
+        }
+    }
+
+    const fn uses_full_mask(self) -> bool {
+        matches!(self, Self::FullMask)
+    }
 }
 
 impl RlActionSpec {
-    pub(super) fn parse(value: &str, n_bins: usize) -> Result<Self, String> {
+    pub(super) fn parse(value: &str, n_bins: usize, targeting_mode: &str) -> Result<Self, String> {
         match value {
             "pure" => Ok(Self::Pure),
-            "discrete_targets" => Ok(Self::DiscreteTargets),
+            "discrete_targets" => Ok(Self::DiscreteTargets {
+                targeting_mode: TargetingMode::parse(targeting_mode)?,
+            }),
             "discrete_target_bins" => {
+                let targeting_mode = TargetingMode::parse(targeting_mode)?;
                 if n_bins < 2 {
                     return Err("n_bins must be >= 2 for action_spec \"discrete_target_bins\""
                         .to_string());
                 }
-                let spec = Self::DiscreteTargetBins { n_bins };
+                let spec = Self::DiscreteTargetBins {
+                    n_bins,
+                    targeting_mode,
+                };
                 spec.checked_can_act_len().ok_or_else(|| {
                     "n_bins is too large for the discrete_target_bins can_act shape".to_string()
                 })?;
@@ -48,10 +83,10 @@ impl RlActionSpec {
     fn checked_can_act_len(self) -> Option<usize> {
         match self {
             Self::Pure => OUTER_PLAYER_SLOTS.checked_mul(ACTION_ENTITY_SLOTS),
-            Self::DiscreteTargets => OUTER_PLAYER_SLOTS
+            Self::DiscreteTargets { .. } => OUTER_PLAYER_SLOTS
                 .checked_mul(ACTION_ENTITY_SLOTS)?
                 .checked_mul(ACTION_ENTITY_SLOTS),
-            Self::DiscreteTargetBins { n_bins } => OUTER_PLAYER_SLOTS
+            Self::DiscreteTargetBins { n_bins, .. } => OUTER_PLAYER_SLOTS
                 .checked_mul(ACTION_ENTITY_SLOTS)?
                 .checked_mul(ACTION_ENTITY_SLOTS)?
                 .checked_mul(n_bins),
@@ -60,7 +95,7 @@ impl RlActionSpec {
 
     pub(super) const fn max_launch_len(self) -> usize {
         match self {
-            Self::Pure | Self::DiscreteTargets => OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS,
+            Self::Pure | Self::DiscreteTargets { .. } => OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS,
             Self::DiscreteTargetBins { .. } => 0,
         }
     }
@@ -202,6 +237,7 @@ pub(super) fn decode_discrete_target_actions(
     ships: &[i64],
     max_per_planet_launches: usize,
     min_fleet_size: i64,
+    targeting_mode: TargetingMode,
 ) -> Result<DecodedDiscreteTargetActions, String> {
     let mut actions = vec![Vec::new(); state.config.player_count];
     let mut launch_failures = 0_u32;
@@ -291,6 +327,7 @@ pub(super) fn decode_discrete_target_actions(
                     target_planet,
                     ship_count as i32,
                     &mut orbit_target_cache,
+                    targeting_mode,
                 )?
                 else {
                     launch_failures += 1;
@@ -311,6 +348,7 @@ pub(super) fn decode_discrete_target_actions(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn decode_discrete_target_bin_actions(
     state: &State,
     player_map: &PlayerMap,
@@ -319,6 +357,7 @@ pub(super) fn decode_discrete_target_bin_actions(
     fleet_bin: &[i64],
     n_bins: usize,
     min_fleet_size: i64,
+    targeting_mode: TargetingMode,
 ) -> Result<DecodedDiscreteTargetActions, String> {
     if n_bins < 2 {
         return Err("n_bins must be >= 2".to_string());
@@ -400,6 +439,7 @@ pub(super) fn decode_discrete_target_bin_actions(
                 target_planet,
                 ship_count as i32,
                 &mut orbit_target_cache,
+                targeting_mode,
             )?
             else {
                 launch_failures += 1;
@@ -431,7 +471,7 @@ pub(super) fn encode_action_spec(
     let mut entity_static = [false; ACTION_ENTITY_SLOTS];
     if matches!(
         action_spec,
-        RlActionSpec::DiscreteTargets | RlActionSpec::DiscreteTargetBins { .. }
+        RlActionSpec::DiscreteTargets { .. } | RlActionSpec::DiscreteTargetBins { .. }
     ) {
         for (entity_index, slot) in entities.iter().enumerate() {
             if let Some(planet) = slot.and_then(|slot| planet_for_slot(state, slot)) {
@@ -463,59 +503,46 @@ pub(super) fn encode_action_spec(
                 can_act[index] = true;
                 source_can_act = true;
             },
-            RlActionSpec::DiscreteTargets => {
+            RlActionSpec::DiscreteTargets { targeting_mode } => {
                 let base = (player_map.internal_to_outer(player) * ACTION_ENTITY_SLOTS
                     + entity_index)
                     * ACTION_ENTITY_SLOTS;
                 let source_static = entity_static[entity_index];
                 for target_index in 0..ACTION_ENTITY_SLOTS {
-                    let eligible = if target_index == entity_index {
-                        false
-                    } else {
-                        entity_planets[target_index].is_some_and(|target| {
-                            if entity_static[target_index] {
-                                if source_static && !state.static_target_cache.is_empty() {
-                                    state
-                                        .static_target_cache
-                                        .get(planet.id, target.id)
-                                        .is_some()
-                                } else {
-                                    best_live_static_target_angle(state, planet, target).is_some()
-                                }
-                            } else {
-                                true
-                            }
-                        })
-                    };
+                    let eligible = target_eligible_for_mode(
+                        state,
+                        planet,
+                        entity_index,
+                        target_index,
+                        source_static,
+                        &entity_planets,
+                        &entity_static,
+                        targeting_mode,
+                    );
                     can_act[base + target_index] = eligible;
                     source_can_act |= eligible;
                 }
             },
-            RlActionSpec::DiscreteTargetBins { n_bins } => {
+            RlActionSpec::DiscreteTargetBins {
+                n_bins,
+                targeting_mode,
+            } => {
                 let target_base = (player_map.internal_to_outer(player) * ACTION_ENTITY_SLOTS
                     + entity_index)
                     * ACTION_ENTITY_SLOTS
                     * n_bins;
                 let source_static = entity_static[entity_index];
                 for target_index in 0..ACTION_ENTITY_SLOTS {
-                    let eligible = if target_index == entity_index {
-                        false
-                    } else {
-                        entity_planets[target_index].is_some_and(|target| {
-                            if entity_static[target_index] {
-                                if source_static && !state.static_target_cache.is_empty() {
-                                    state
-                                        .static_target_cache
-                                        .get(planet.id, target.id)
-                                        .is_some()
-                                } else {
-                                    best_live_static_target_angle(state, planet, target).is_some()
-                                }
-                            } else {
-                                true
-                            }
-                        })
-                    };
+                    let eligible = target_eligible_for_mode(
+                        state,
+                        planet,
+                        entity_index,
+                        target_index,
+                        source_static,
+                        &entity_planets,
+                        &entity_static,
+                        targeting_mode,
+                    );
                     let bin_base = target_base + target_index * n_bins;
                     can_act[bin_base] = eligible;
                     for fleet_bin in 1..n_bins {
@@ -566,6 +593,39 @@ pub(super) fn action_entity_slots(state: &State) -> ActionEntitySlots {
         entities[MAX_PLANETS + comet_index] = Some(ActionEntitySlot { planet_id });
     }
     entities
+}
+
+#[allow(clippy::too_many_arguments)]
+fn target_eligible_for_mode(
+    state: &State,
+    source: &Planet,
+    source_index: usize,
+    target_index: usize,
+    source_static: bool,
+    entity_planets: &[Option<&Planet>; ACTION_ENTITY_SLOTS],
+    entity_static: &[bool; ACTION_ENTITY_SLOTS],
+    targeting_mode: TargetingMode,
+) -> bool {
+    if target_index == source_index {
+        return false;
+    }
+    let Some(target) = entity_planets[target_index] else {
+        return false;
+    };
+    if !targeting_mode.uses_full_mask() {
+        return true;
+    }
+    if !entity_static[target_index] {
+        return true;
+    }
+    if source_static && !state.static_target_cache.is_empty() {
+        state
+            .static_target_cache
+            .get(source.id, target.id)
+            .is_some()
+    } else {
+        best_live_static_target_angle(state, source, target).is_some()
+    }
 }
 
 pub(super) fn sorted_comet_planet_ids(state: &State) -> Vec<u32> {
@@ -670,6 +730,7 @@ fn target_angle(
     target: &Planet,
     ships: i32,
     orbit_target_cache: &mut OrbitTargetCache<'_>,
+    targeting_mode: TargetingMode,
 ) -> Result<Option<f64>, String> {
     let speed = fleet_speed(ships, state.config.ship_speed);
     if is_dynamic_planet_cached(state, target) {
@@ -679,7 +740,18 @@ fn target_angle(
             target,
             speed,
             orbit_target_cache,
+            targeting_mode,
         ));
+    }
+
+    if matches!(targeting_mode, TargetingMode::AnythingGoes) {
+        return Ok(Some(direct_target_angle(source, target)));
+    }
+
+    if matches!(targeting_mode, TargetingMode::StopBadLaunch) {
+        let angle = direct_target_angle(source, target);
+        let candidate = static_target_candidate(source, target, angle, speed);
+        return Ok((!hits_sun(source, candidate)).then_some(angle));
     }
 
     if !is_dynamic_planet_cached(state, source) && !state.static_target_cache.is_empty() {
@@ -704,15 +776,38 @@ fn dynamic_target_angle(
     target: &Planet,
     speed: f64,
     orbit_target_cache: &mut OrbitTargetCache<'_>,
+    targeting_mode: TargetingMode,
 ) -> Option<f64> {
     if state.comet_planet_ids.contains(&target.id) {
         let candidates = comet_target_candidates(state, source, target, speed)?;
-        return choose_dynamic_candidate(state, source, target, candidates)
+        return choose_dynamic_candidate(state, source, target, candidates, targeting_mode)
             .map(|candidate| candidate.angle);
     }
 
     let candidates = orbiting_target_candidates(state, source, target, speed, orbit_target_cache)?;
-    choose_dynamic_candidate(state, source, target, candidates).map(|candidate| candidate.angle)
+    choose_dynamic_candidate(state, source, target, candidates, targeting_mode)
+        .map(|candidate| candidate.angle)
+}
+
+fn direct_target_angle(source: &Planet, target: &Planet) -> f64 {
+    angle_between(source.position(), target.position())
+}
+
+fn static_target_candidate(
+    source: &Planet,
+    target: &Planet,
+    angle: f64,
+    speed: f64,
+) -> TargetCandidate {
+    let start = launch_start(source, angle);
+    let target_pos = target.position();
+    let distance_to_target = distance(start, target_pos);
+    let end_distance = (distance_to_target - target.radius).max(0.0);
+    TargetCandidate {
+        angle,
+        end: point_along(start, angle, end_distance),
+        time: end_distance / speed.max(f64::EPSILON),
+    }
 }
 
 fn best_live_static_target_angle(state: &State, source: &Planet, target: &Planet) -> Option<f64> {
@@ -949,9 +1044,19 @@ fn choose_dynamic_candidate(
     source: &Planet,
     target: &Planet,
     candidates: Vec<TargetCandidate>,
+    targeting_mode: TargetingMode,
 ) -> Option<TargetCandidate> {
     if candidates.is_empty() {
         return None;
+    }
+    if matches!(targeting_mode, TargetingMode::AnythingGoes) {
+        return candidates.first().copied();
+    }
+    if matches!(targeting_mode, TargetingMode::StopBadLaunch) {
+        return candidates
+            .iter()
+            .copied()
+            .find(|candidate| !hits_sun(source, *candidate));
     }
     candidates
         .iter()
@@ -1075,6 +1180,26 @@ mod tests {
         CometGroup, OrbitPath, ResetConfig, SimConfig, StaticTargetCache,
     };
     use crate::rules_engine::utils::swept_pair_hit;
+
+    #[test]
+    fn parse_ignores_targeting_mode_for_pure_action_spec() {
+        assert_eq!(
+            RlActionSpec::parse("pure", 0, "not_a_targeting_mode")
+                .expect("pure should ignore targeting_mode"),
+            RlActionSpec::Pure,
+        );
+    }
+
+    #[test]
+    fn parse_rejects_invalid_targeting_mode_for_discrete_action_specs() {
+        let err = RlActionSpec::parse("discrete_targets", 0, "not_a_targeting_mode")
+            .expect_err("discrete target specs should validate targeting_mode");
+        assert!(err.contains("unsupported targeting_mode"));
+
+        let err = RlActionSpec::parse("discrete_target_bins", 7, "not_a_targeting_mode")
+            .expect_err("target-bin specs should validate targeting_mode");
+        assert!(err.contains("unsupported targeting_mode"));
+    }
 
     fn one_planet_state() -> State {
         let planets = vec![Planet {
@@ -1304,11 +1429,14 @@ mod tests {
             path_index: 0,
         }];
         let entities = action_entity_slots(&state);
-        let mut can_act = vec![false; RlActionSpec::DiscreteTargets.can_act_len()];
+        let spec = RlActionSpec::DiscreteTargets {
+            targeting_mode: TargetingMode::FullMask,
+        };
+        let mut can_act = vec![false; spec.can_act_len()];
         let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
 
         encode_action_spec(
-            RlActionSpec::DiscreteTargets,
+            spec,
             &state,
             &PlayerMap::identity(),
             &entities,
@@ -1334,11 +1462,14 @@ mod tests {
             planet(2, -1, 100.0, 80.0, 2.0, 10),
         ]);
         let entities = action_entity_slots(&state);
-        let mut can_act = vec![false; RlActionSpec::DiscreteTargets.can_act_len()];
+        let spec = RlActionSpec::DiscreteTargets {
+            targeting_mode: TargetingMode::FullMask,
+        };
+        let mut can_act = vec![false; spec.can_act_len()];
         let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
 
         encode_action_spec(
-            RlActionSpec::DiscreteTargets,
+            spec,
             &state,
             &PlayerMap::identity(),
             &entities,
@@ -1358,6 +1489,69 @@ mod tests {
     }
 
     #[test]
+    fn loose_discrete_target_modes_do_not_mask_statically_obstructed_targets() {
+        let state = state_from_planets(vec![
+            planet(0, 0, 0.0, 50.0, 2.0, 10),
+            planet(1, -1, 100.0, 50.0, 2.0, 10),
+        ]);
+        let entities = action_entity_slots(&state);
+
+        for targeting_mode in [TargetingMode::AnythingGoes, TargetingMode::StopBadLaunch] {
+            let spec = RlActionSpec::DiscreteTargets { targeting_mode };
+            let mut can_act = vec![false; spec.can_act_len()];
+            let mut max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+
+            encode_action_spec(
+                spec,
+                &state,
+                &PlayerMap::identity(),
+                &entities,
+                &mut can_act,
+                Some(&mut max_launch),
+                1,
+            );
+
+            assert!(can_act[1]);
+            assert!(!can_act[0]);
+            assert!(!can_act[2]);
+            assert_eq!(max_launch[0], 10);
+        }
+    }
+
+    #[test]
+    fn loose_discrete_target_bin_modes_do_not_mask_statically_obstructed_targets() {
+        let state = state_from_planets(vec![
+            planet(0, 0, 0.0, 50.0, 2.0, 10),
+            planet(1, -1, 100.0, 50.0, 2.0, 10),
+        ]);
+        let entities = action_entity_slots(&state);
+
+        for targeting_mode in [TargetingMode::AnythingGoes, TargetingMode::StopBadLaunch] {
+            let spec = RlActionSpec::DiscreteTargetBins {
+                n_bins: 5,
+                targeting_mode,
+            };
+            let mut can_act = vec![false; spec.can_act_len()];
+
+            encode_action_spec(
+                spec,
+                &state,
+                &PlayerMap::identity(),
+                &entities,
+                &mut can_act,
+                None,
+                1,
+            );
+
+            let target_base = 5;
+            assert!(can_act[target_base]);
+            assert!(can_act[target_base + 4]);
+            assert!(!can_act[0..5].iter().any(|eligible| *eligible));
+            assert!(!can_act[10..15].iter().any(|eligible| *eligible));
+        }
+    }
+
+    #[test]
     fn fleet_bin_mapping_uses_half_up_rounding() {
         let ships = (0..5)
             .map(|fleet_bin| fleet_bin_to_ships(fleet_bin, 10, 5))
@@ -1374,7 +1568,10 @@ mod tests {
             planet(1, -1, 70.0, 80.0, 3.0, 10),
         ]);
         let entities = action_entity_slots(&state);
-        let spec = RlActionSpec::DiscreteTargetBins { n_bins: 8 };
+        let spec = RlActionSpec::DiscreteTargetBins {
+            n_bins: 8,
+            targeting_mode: TargetingMode::FullMask,
+        };
         let mut can_act = vec![false; spec.can_act_len()];
 
         encode_action_spec(
@@ -1414,6 +1611,7 @@ mod tests {
             &fleet_bins,
             5,
             1,
+            TargetingMode::FullMask,
         )
         .expect("valid target-bin action should decode");
 
@@ -1442,6 +1640,7 @@ mod tests {
             &fleet_bins,
             5,
             1,
+            TargetingMode::FullMask,
         )
         .expect("zero fleet bin should decode as a no-op");
 
@@ -1476,6 +1675,7 @@ mod tests {
             &ships,
             1,
             1,
+            TargetingMode::FullMask,
         )
         .expect("cached static target should decode");
 
@@ -1529,6 +1729,7 @@ mod tests {
             &ships,
             1,
             1,
+            TargetingMode::FullMask,
         )
         .expect("dynamic target launch failure should decode as a no-op");
 
@@ -1565,10 +1766,131 @@ mod tests {
             &ships,
             1,
             1,
+            TargetingMode::FullMask,
         )
         .expect_err("masked static target should fail fast");
 
         assert_eq!(err, "static source 0 cannot target masked static planet 1");
+    }
+
+    #[test]
+    fn stop_bad_launch_replaces_sun_crossing_static_target_with_no_op() {
+        let state = state_from_planets(vec![
+            planet(0, 0, 0.0, 50.0, 2.0, 100),
+            planet(1, -1, 100.0, 50.0, 2.0, 20),
+        ]);
+        let entities = action_entity_slots(&state);
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+        let mut targets = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        targets[0] = 1;
+        ships[0] = 100;
+
+        let decoded = decode_discrete_target_actions(
+            &state,
+            &PlayerMap::identity(),
+            &entities,
+            &launch,
+            &targets,
+            &ships,
+            1,
+            1,
+            TargetingMode::StopBadLaunch,
+        )
+        .expect("stop_bad_launch should decode sun-crossing target as no-op");
+
+        assert_eq!(decoded.launch_failures, 1);
+        assert!(decoded.actions.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn anything_goes_submits_sun_crossing_static_target() {
+        let state = state_from_planets(vec![
+            planet(0, 0, 0.0, 50.0, 2.0, 100),
+            planet(1, -1, 100.0, 50.0, 2.0, 20),
+        ]);
+        let entities = action_entity_slots(&state);
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+        let mut targets = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        targets[0] = 1;
+        ships[0] = 100;
+
+        let decoded = decode_discrete_target_actions(
+            &state,
+            &PlayerMap::identity(),
+            &entities,
+            &launch,
+            &targets,
+            &ships,
+            1,
+            1,
+            TargetingMode::AnythingGoes,
+        )
+        .expect("anything_goes should submit sun-crossing target");
+
+        assert_eq!(decoded.launch_failures, 0);
+        assert_eq!(decoded.actions[0].len(), 1);
+        assert_eq!(decoded.actions[0][0].from_planet_id, 0);
+    }
+
+    #[test]
+    fn anything_goes_target_bins_submit_sun_crossing_static_target() {
+        let state = state_from_planets(vec![
+            planet(0, 0, 0.0, 50.0, 2.0, 100),
+            planet(1, -1, 100.0, 50.0, 2.0, 20),
+        ]);
+        let entities = action_entity_slots(&state);
+        let mut targets = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut fleet_bins = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        targets[0] = 1;
+        fleet_bins[0] = 4;
+
+        let decoded = decode_discrete_target_bin_actions(
+            &state,
+            &PlayerMap::identity(),
+            &entities,
+            &targets,
+            &fleet_bins,
+            5,
+            1,
+            TargetingMode::AnythingGoes,
+        )
+        .expect("anything_goes target bins should submit sun-crossing target");
+
+        assert_eq!(decoded.launch_failures, 0);
+        assert_eq!(decoded.actions[0].len(), 1);
+        assert_eq!(decoded.actions[0][0].from_planet_id, 0);
+    }
+
+    #[test]
+    fn stop_bad_launch_target_bins_replace_sun_crossing_static_target_with_no_op() {
+        let state = state_from_planets(vec![
+            planet(0, 0, 0.0, 50.0, 2.0, 100),
+            planet(1, -1, 100.0, 50.0, 2.0, 20),
+        ]);
+        let entities = action_entity_slots(&state);
+        let mut targets = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut fleet_bins = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        targets[0] = 1;
+        fleet_bins[0] = 4;
+
+        let decoded = decode_discrete_target_bin_actions(
+            &state,
+            &PlayerMap::identity(),
+            &entities,
+            &targets,
+            &fleet_bins,
+            5,
+            1,
+            TargetingMode::StopBadLaunch,
+        )
+        .expect("stop_bad_launch target bins should decode sun-crossing target as no-op");
+
+        assert_eq!(decoded.launch_failures, 1);
+        assert!(decoded.actions.iter().all(Vec::is_empty));
     }
 
     #[test]
@@ -1600,6 +1922,7 @@ mod tests {
             &ships,
             1,
             1,
+            TargetingMode::FullMask,
         )
         .expect("dynamic target launch failure should decode as a no-op");
 
@@ -1629,6 +1952,7 @@ mod tests {
             &ships,
             1,
             1,
+            TargetingMode::FullMask,
         )
         .expect_err("self target should fail");
         assert!(err.contains("cannot target itself"));
@@ -1643,6 +1967,7 @@ mod tests {
             &ships,
             1,
             1,
+            TargetingMode::FullMask,
         )
         .expect_err("empty target should fail");
         assert!(err.contains("cannot target empty action entity slot 2"));
@@ -1671,6 +1996,7 @@ mod tests {
             &ships,
             1,
             1,
+            TargetingMode::FullMask,
         )
         .expect("valid discrete target should decode");
 
@@ -1702,6 +2028,7 @@ mod tests {
             &ships,
             1,
             1,
+            TargetingMode::FullMask,
         )
         .expect("valid orbiting target should decode");
 
@@ -1805,6 +2132,7 @@ mod tests {
                 &launched_ships,
                 1,
                 1,
+                TargetingMode::FullMask,
             )
             .expect("valid orbiting target action should decode");
 
@@ -2135,6 +2463,7 @@ mod tests {
             &ships,
             1,
             1,
+            TargetingMode::FullMask,
         )
         .expect("valid comet target should decode");
 
@@ -2172,6 +2501,7 @@ mod tests {
             &ships,
             1,
             1,
+            TargetingMode::FullMask,
         )
         .expect("unreachable comet target should decode as a no-op");
 

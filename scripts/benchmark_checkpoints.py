@@ -602,13 +602,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n-games",
         type=int,
-        required=True,
+        default=512,
         help="Total completed games to count, split evenly between 2p and 4p.",
     )
     parser.add_argument(
         "--n-envs",
         type=int,
-        default=64,
+        default=256,
         help="Number of parallel Rust sub-envs.",
     )
     parser.add_argument(

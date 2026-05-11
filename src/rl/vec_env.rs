@@ -56,7 +56,7 @@ pub struct PyRlVecEnv {
 #[pymethods]
 impl PyRlVecEnv {
     #[new]
-    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="entity_based", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=3, min_fleet_size=1, n_bins=0))]
+    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="entity_based", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=3, min_fleet_size=1, n_bins=0, targeting_mode="full_mask"))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         n_envs: usize,
@@ -67,6 +67,7 @@ impl PyRlVecEnv {
         max_per_planet_launches: usize,
         min_fleet_size: i64,
         n_bins: usize,
+        targeting_mode: &str,
     ) -> PyResult<Self> {
         if n_envs == 0 {
             return Err(PyValueError::new_err("n_envs must be positive"));
@@ -79,8 +80,8 @@ impl PyRlVecEnv {
                 "unsupported obs_spec {obs_spec:?}; expected \"entity_based\""
             )));
         }
-        let action_spec =
-            RlActionSpec::parse(action_spec, n_bins).map_err(PyValueError::new_err)?;
+        let action_spec = RlActionSpec::parse(action_spec, n_bins, targeting_mode)
+            .map_err(PyValueError::new_err)?;
         if max_entities <= MAX_PLANETS + MAX_COMETS {
             return Err(PyValueError::new_err(format!(
                 "max_entities must be greater than MAX_PLANETS + MAX_COMETS ({})",
@@ -435,10 +436,12 @@ impl PyRlVecEnv {
         action_spec: &str,
         min_fleet_size: i64,
         n_bins: usize,
+        targeting_mode: &str,
         can_act: PyReadwriteArrayDyn<'_, bool>,
         max_launch: PyReadwriteArrayDyn<'_, i64>,
     ) -> PyResult<()> {
-        let action_spec = parse_action_spec_for_buffers(action_spec, n_bins, min_fleet_size)?;
+        let action_spec =
+            parse_action_spec_for_buffers(action_spec, n_bins, min_fleet_size, targeting_mode)?;
         if matches!(action_spec, RlActionSpec::DiscreteTargetBins { .. }) {
             return Err(PyValueError::new_err(
                 "write_action_mask with max_launch does not support discrete_target_bins",
@@ -487,10 +490,15 @@ impl PyRlVecEnv {
         &self,
         min_fleet_size: i64,
         n_bins: usize,
+        targeting_mode: &str,
         can_act: PyReadwriteArrayDyn<'_, bool>,
     ) -> PyResult<()> {
-        let action_spec =
-            parse_action_spec_for_buffers("discrete_target_bins", n_bins, min_fleet_size)?;
+        let action_spec = parse_action_spec_for_buffers(
+            "discrete_target_bins",
+            n_bins,
+            min_fleet_size,
+            targeting_mode,
+        )?;
         require_can_act_shape("can_act", can_act.shape(), self.n_envs, action_spec)?;
 
         let mut can_act = can_act;
@@ -633,6 +641,7 @@ impl PyRlVecEnv {
         ships: PyReadonlyArrayDyn<'_, i64>,
         max_per_planet_launches: usize,
         min_fleet_size: i64,
+        targeting_mode: &str,
         valid: PyReadwriteArrayDyn<'_, bool>,
         from_planet_id: PyReadwriteArrayDyn<'_, i64>,
         decoded_angle: PyReadwriteArrayDyn<'_, f32>,
@@ -644,6 +653,8 @@ impl PyRlVecEnv {
             ));
         }
         require_min_fleet_size(min_fleet_size)?;
+        let targeting_mode = super::action_spec::TargetingMode::parse(targeting_mode)
+            .map_err(PyValueError::new_err)?;
         let action_shape = [
             self.n_envs,
             OUTER_PLAYER_SLOTS,
@@ -714,6 +725,7 @@ impl PyRlVecEnv {
                     ships,
                     max_per_planet_launches,
                     min_fleet_size,
+                    targeting_mode,
                 )
                 .map_err(|err| format!("env {env_index}: {err}"))?;
                 write_decoded_action_buffers(
@@ -740,14 +752,23 @@ impl PyRlVecEnv {
         fleet_bin: PyReadonlyArrayDyn<'_, i64>,
         min_fleet_size: i64,
         n_bins: usize,
+        targeting_mode: &str,
         valid: PyReadwriteArrayDyn<'_, bool>,
         from_planet_id: PyReadwriteArrayDyn<'_, i64>,
         decoded_angle: PyReadwriteArrayDyn<'_, f32>,
         decoded_ships: PyReadwriteArrayDyn<'_, i64>,
     ) -> PyResult<()> {
-        let action_spec =
-            parse_action_spec_for_buffers("discrete_target_bins", n_bins, min_fleet_size)?;
-        let RlActionSpec::DiscreteTargetBins { n_bins } = action_spec else {
+        let action_spec = parse_action_spec_for_buffers(
+            "discrete_target_bins",
+            n_bins,
+            min_fleet_size,
+            targeting_mode,
+        )?;
+        let RlActionSpec::DiscreteTargetBins {
+            n_bins,
+            targeting_mode,
+        } = action_spec
+        else {
             unreachable!("parsed action spec must be discrete target bins");
         };
         let action_shape = [self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS];
@@ -811,6 +832,7 @@ impl PyRlVecEnv {
                     fleet_bin,
                     n_bins,
                     min_fleet_size,
+                    targeting_mode,
                 )
                 .map_err(|err| format!("env {env_index}: {err}"))?;
                 write_decoded_action_buffers(
@@ -1049,11 +1071,11 @@ impl PyRlVecEnv {
         rewards: PyReadwriteArrayDyn<'_, f32>,
         dones: PyReadwriteArrayDyn<'_, bool>,
     ) -> PyResult<HashMap<String, Vec<f64>>> {
-        if self.action_spec != RlActionSpec::DiscreteTargets {
+        let RlActionSpec::DiscreteTargets { targeting_mode } = self.action_spec else {
             return Err(PyValueError::new_err(
                 "step_discrete_targets requires action_spec \"discrete_targets\"",
             ));
-        }
+        };
         let action_shape = [
             self.n_envs,
             OUTER_PLAYER_SLOTS,
@@ -1178,6 +1200,7 @@ impl PyRlVecEnv {
                         ship_chunk,
                         max_per_planet_launches,
                         min_fleet_size,
+                        targeting_mode,
                     )
                     .map_err(|err| format!("env {env_index}: {err}"))?;
                     episode_stats.record_launch_failures(decoded.launch_failures);
@@ -1249,7 +1272,11 @@ impl PyRlVecEnv {
         rewards: PyReadwriteArrayDyn<'_, f32>,
         dones: PyReadwriteArrayDyn<'_, bool>,
     ) -> PyResult<HashMap<String, Vec<f64>>> {
-        let RlActionSpec::DiscreteTargetBins { n_bins } = self.action_spec else {
+        let RlActionSpec::DiscreteTargetBins {
+            n_bins,
+            targeting_mode,
+        } = self.action_spec
+        else {
             return Err(PyValueError::new_err(
                 "step_discrete_target_bins requires action_spec \"discrete_target_bins\"",
             ));
@@ -1356,6 +1383,7 @@ impl PyRlVecEnv {
                     fleet_bin_chunk,
                     n_bins,
                     min_fleet_size,
+                    targeting_mode,
                 )
                 .map_err(|err| format!("env {env_index}: {err}"))?;
                 episode_stats.record_launch_failures(decoded.launch_failures);
@@ -1702,13 +1730,13 @@ impl PyRlVecEnv {
             (self.n_envs, GLOBAL_CHANNELS),
             match self.action_spec {
                 RlActionSpec::Pure => vec![self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS],
-                RlActionSpec::DiscreteTargets => vec![
+                RlActionSpec::DiscreteTargets { .. } => vec![
                     self.n_envs,
                     OUTER_PLAYER_SLOTS,
                     ACTION_ENTITY_SLOTS,
                     ACTION_ENTITY_SLOTS,
                 ],
-                RlActionSpec::DiscreteTargetBins { n_bins } => vec![
+                RlActionSpec::DiscreteTargetBins { n_bins, .. } => vec![
                     self.n_envs,
                     OUTER_PLAYER_SLOTS,
                     ACTION_ENTITY_SLOTS,
@@ -1717,7 +1745,7 @@ impl PyRlVecEnv {
                 ],
             },
             match self.action_spec {
-                RlActionSpec::Pure | RlActionSpec::DiscreteTargets => {
+                RlActionSpec::Pure | RlActionSpec::DiscreteTargets { .. } => {
                     (self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS)
                 },
                 RlActionSpec::DiscreteTargetBins { .. } => (self.n_envs, 0, 0),
@@ -1824,13 +1852,13 @@ impl PyRlVecEnv {
         )?;
         let can_act_shape = match self.action_spec {
             RlActionSpec::Pure => vec![self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS],
-            RlActionSpec::DiscreteTargets => vec![
+            RlActionSpec::DiscreteTargets { .. } => vec![
                 self.n_envs,
                 OUTER_PLAYER_SLOTS,
                 ACTION_ENTITY_SLOTS,
                 ACTION_ENTITY_SLOTS,
             ],
-            RlActionSpec::DiscreteTargetBins { n_bins } => vec![
+            RlActionSpec::DiscreteTargetBins { n_bins, .. } => vec![
                 self.n_envs,
                 OUTER_PLAYER_SLOTS,
                 ACTION_ENTITY_SLOTS,
@@ -1847,9 +1875,10 @@ fn parse_action_spec_for_buffers(
     action_spec: &str,
     n_bins: usize,
     min_fleet_size: i64,
+    targeting_mode: &str,
 ) -> PyResult<RlActionSpec> {
     require_min_fleet_size(min_fleet_size)?;
-    RlActionSpec::parse(action_spec, n_bins).map_err(PyValueError::new_err)
+    RlActionSpec::parse(action_spec, n_bins, targeting_mode).map_err(PyValueError::new_err)
 }
 
 fn require_min_fleet_size(min_fleet_size: i64) -> PyResult<()> {
@@ -1869,7 +1898,7 @@ fn require_can_act_shape(
 ) -> PyResult<()> {
     let expected = match action_spec {
         RlActionSpec::Pure => vec![n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS],
-        RlActionSpec::DiscreteTargets => {
+        RlActionSpec::DiscreteTargets { .. } => {
             vec![
                 n_envs,
                 OUTER_PLAYER_SLOTS,
@@ -1877,7 +1906,7 @@ fn require_can_act_shape(
                 ACTION_ENTITY_SLOTS,
             ]
         },
-        RlActionSpec::DiscreteTargetBins { n_bins } => vec![
+        RlActionSpec::DiscreteTargetBins { n_bins, .. } => vec![
             n_envs,
             OUTER_PLAYER_SLOTS,
             ACTION_ENTITY_SLOTS,
@@ -3436,6 +3465,7 @@ mod tests {
             &ships,
             1,
             1,
+            crate::rl::action_spec::TargetingMode::FullMask,
         )
         .expect("discrete target action should decode");
         write_decoded_action_buffers(
@@ -3468,6 +3498,7 @@ mod tests {
             &fleet_bin,
             11,
             1,
+            crate::rl::action_spec::TargetingMode::FullMask,
         )
         .expect("target-bin action should decode");
         write_decoded_action_buffers(

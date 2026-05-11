@@ -88,6 +88,9 @@ class ActionPureConfig(BaseConfig):
     min_fleet_size: int = Field(default=1, ge=1)
 
 
+TargetingMode: TypeAlias = Literal["anything_goes", "stop_bad_launch", "full_mask"]
+
+
 class ActionDiscreteTargetsConfig(BaseConfig):
     """Discrete target action spec.
 
@@ -99,6 +102,7 @@ class ActionDiscreteTargetsConfig(BaseConfig):
     action_spec: Literal["discrete_targets"] = "discrete_targets"
     max_per_planet_launches: int = Field(default=3, ge=1, le=4)
     min_fleet_size: int = Field(default=6, ge=1)
+    targeting_mode: TargetingMode = "full_mask"
 
 
 class ActionDiscreteTargetBinsConfig(BaseConfig):
@@ -107,6 +111,7 @@ class ActionDiscreteTargetBinsConfig(BaseConfig):
     action_spec: Literal["discrete_target_bins"] = "discrete_target_bins"
     min_fleet_size: int = Field(default=1, ge=1)
     n_bins: int = Field(ge=2)
+    targeting_mode: TargetingMode = "full_mask"
 
 
 ObsConfig: TypeAlias = Annotated[EntityBasedConfig, Field(discriminator="obs_spec")]
@@ -263,6 +268,7 @@ class VectorizedEnv:
             getattr(self.action_spec, "max_per_planet_launches", 1),
             self.action_spec.min_fleet_size,
             getattr(self.action_spec, "n_bins", 0),
+            getattr(self.action_spec, "targeting_mode", "full_mask"),
         )
         if pin_memory and not torch.cuda.is_available():
             warnings.warn(
@@ -344,6 +350,7 @@ class VectorizedEnv:
             self._rust.write_action_mask_discrete_target_bins(
                 action_spec.min_fleet_size,
                 action_spec.n_bins,
+                action_spec.targeting_mode,
                 can_act.numpy(),
             )
             return DiscreteTargetBinActionMask(can_act=can_act)
@@ -357,6 +364,7 @@ class VectorizedEnv:
             action_spec.action_spec,
             action_spec.min_fleet_size,
             0,
+            getattr(action_spec, "targeting_mode", "full_mask"),
             can_act.numpy(),
             max_launch.numpy(),
         )
@@ -407,6 +415,7 @@ class VectorizedEnv:
                 fleet_bin_array,
                 action_spec.min_fleet_size,
                 action_spec.n_bins,
+                action_spec.targeting_mode,
                 decoded.valid.numpy(),
                 decoded.from_planet_id.numpy(),
                 decoded.angle.numpy(),
@@ -473,6 +482,7 @@ class VectorizedEnv:
             ship_array,
             action_spec.max_per_planet_launches,
             action_spec.min_fleet_size,
+            action_spec.targeting_mode,
             decoded.valid.numpy(),
             decoded.from_planet_id.numpy(),
             decoded.angle.numpy(),
@@ -816,6 +826,10 @@ def encode_python_observation(
             still_playing=still_playing,
         )
     if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
+        if action_spec.targeting_mode == "full_mask":
+            target_can_act = source_target_can_act
+        else:
+            target_can_act = _loose_target_can_act(source_can_act, entity_mask)
         return _encoded_observation_to_batch(
             (
                 planets,
@@ -825,7 +839,7 @@ def encode_python_observation(
                 entity_mask,
                 global_features,
                 _target_bin_can_act(
-                    source_target_can_act,
+                    target_can_act,
                     max_launch,
                     min_fleet_size=action_spec.min_fleet_size,
                     n_bins=action_spec.n_bins,
@@ -834,7 +848,11 @@ def encode_python_observation(
             ),
             still_playing=still_playing,
         )
-    target_max_launch = np.where(source_target_can_act.any(axis=-1), max_launch, 0)
+    if action_spec.targeting_mode == "full_mask":
+        target_can_act = source_target_can_act
+    else:
+        target_can_act = _loose_target_can_act(source_can_act, entity_mask)
+    target_max_launch = np.where(target_can_act.any(axis=-1), max_launch, 0)
     return _encoded_observation_to_batch(
         (
             planets,
@@ -843,7 +861,7 @@ def encode_python_observation(
             comets,
             entity_mask,
             global_features,
-            source_target_can_act,
+            target_can_act,
             target_max_launch,
         ),
         still_playing=still_playing,
@@ -960,6 +978,7 @@ def actions_to_kaggle(
         ship_array,
         action_spec.max_per_planet_launches,
         action_spec.min_fleet_size,
+        action_spec.targeting_mode,
     )
 
 
@@ -1046,6 +1065,16 @@ def _encoded_observation_to_batch(
     )
 
 
+def _loose_target_can_act(
+    source_can_act: np.ndarray, entity_mask: np.ndarray
+) -> np.ndarray:
+    target_exists = entity_mask[:ACTION_ENTITY_SLOTS].astype(np.bool_, copy=False)
+    can_act = source_can_act[:, :, None] & target_exists[None, None, :]
+    source_indices = np.arange(ACTION_ENTITY_SLOTS)
+    can_act[:, source_indices, source_indices] = False
+    return can_act
+
+
 def _target_bin_actions_to_kaggle(
     obs: dict[str, Any],
     player: int,
@@ -1097,6 +1126,7 @@ def _target_bin_actions_to_kaggle(
         np.ascontiguousarray(fleet_bin_array[0]),
         action_spec.min_fleet_size,
         action_spec.n_bins,
+        action_spec.targeting_mode,
     )
 
 

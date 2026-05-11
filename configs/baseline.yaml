@@ -7,6 +7,7 @@ env:
     action_spec: discrete_targets
     max_per_planet_launches: 1
     min_fleet_size: 6
+    targeting_mode: anything_goes
   two_player_weight: 0.5
   pin_memory: true
 

@@ -19,6 +19,7 @@ class RlVecEnv:
         max_per_planet_launches: int = ...,
         min_fleet_size: int = ...,
         n_bins: int = ...,
+        targeting_mode: str = ...,
     ) -> None: ...
     def reset(
         self,
@@ -113,6 +114,7 @@ class RlVecEnv:
         action_spec: str,
         min_fleet_size: int,
         n_bins: int,
+        targeting_mode: str,
         can_act: np.ndarray,
         max_launch: np.ndarray,
     ) -> None: ...
@@ -120,6 +122,7 @@ class RlVecEnv:
         self,
         min_fleet_size: int,
         n_bins: int,
+        targeting_mode: str,
         can_act: np.ndarray,
     ) -> None: ...
     def decode_pure_actions(
@@ -141,6 +144,7 @@ class RlVecEnv:
         ships: np.ndarray,
         max_per_planet_launches: int,
         min_fleet_size: int,
+        targeting_mode: str,
         valid: np.ndarray,
         from_planet_id: np.ndarray,
         decoded_angle: np.ndarray,
@@ -152,6 +156,7 @@ class RlVecEnv:
         fleet_bin: np.ndarray,
         min_fleet_size: int,
         n_bins: int,
+        targeting_mode: str,
         valid: np.ndarray,
         from_planet_id: np.ndarray,
         decoded_angle: np.ndarray,
@@ -237,6 +242,7 @@ def discrete_target_actions_to_kaggle(
     ships: np.ndarray,
     max_per_planet_launches: int,
     min_fleet_size: int,
+    targeting_mode: str = ...,
 ) -> list[list[float]]: ...
 def discrete_target_bin_actions_to_kaggle(
     planets: np.ndarray,
@@ -254,4 +260,5 @@ def discrete_target_bin_actions_to_kaggle(
     fleet_bin: np.ndarray,
     min_fleet_size: int,
     n_bins: int,
+    targeting_mode: str = ...,
 ) -> list[list[float]]: ...
