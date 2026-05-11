@@ -55,11 +55,29 @@ from owl.rl import (
     EntityBasedConfig,
     ObsBatch,
     PureActions,
+    encode_python_observation,
 )
 from pydantic import TypeAdapter
 from torch import nn
 
 _REPO_ROOT = Path(__file__).parents[3]
+
+
+def _python_obs(**overrides: object) -> dict[str, object]:
+    obs = {
+        "step": 0,
+        "episode_steps": 500,
+        "angular_velocity": 0.025,
+        "planets": [],
+        "initial_planets": [],
+        "fleets": [],
+        "player": 0,
+        "comets": [],
+    }
+    obs.update(overrides)
+    if "initial_planets" not in overrides:
+        obs["initial_planets"] = obs["planets"]
+    return obs
 
 
 def _obs_batch(
@@ -1445,6 +1463,78 @@ def test_pairwise_action_features_use_action_entity_state() -> None:
     torch.testing.assert_close(
         features[0, 0, 0, 2:],
         torch.tensor([1.0, 0.0, 0.0, 1.0 - 1.0 / math.sqrt(2.0)]),
+    )
+    torch.testing.assert_close(
+        features[0, 0, MAX_PLANETS],
+        torch.tensor(
+            [
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                1.0 - 1.0 / math.sqrt(2.0),
+            ]
+        ),
+    )
+
+
+def test_pairwise_action_features_match_simulator_channel_layout() -> None:
+    obs = encode_python_observation(
+        _python_obs(
+            planets=[
+                [0, 0, 0.0, 50.0, 2.0, 20, 3],
+                [1, -1, 100.0, 50.0, 2.0, 10, 3],
+                [2, 1, 50.0, 100.0, 2.0, 30, 3],
+                [10, 2, 50.0, 50.0, 1.0, 15, 1],
+                [11, -1, 25.0, 50.0, 1.0, 5, 1],
+            ],
+            comets=[
+                {
+                    "planet_ids": [10, 11],
+                    "paths": [
+                        [[50.0, 50.0], [0.0, 50.0], [50.0, 0.0]],
+                        [[25.0, 50.0], [25.0, 100.0], [100.0, 100.0]],
+                    ],
+                    "path_index": 1,
+                }
+            ],
+        ),
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+
+    features = build_pairwise_action_features(obs)
+
+    torch.testing.assert_close(
+        features[0, 0, 1],
+        torch.tensor(
+            [
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                2.0 / math.sqrt(8.0),
+                1.0,
+            ]
+        ),
+    )
+    torch.testing.assert_close(
+        features[0, 0, MAX_PLANETS + 1],
+        torch.tensor(
+            [
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                math.sqrt(1.25) / math.sqrt(8.0),
+                1.0 - math.sqrt(0.8) / math.sqrt(2.0),
+            ]
+        ),
+    )
+    torch.testing.assert_close(
+        features[0, 0, 2, :4],
+        torch.tensor([0.0, 0.0, 0.0, 1.0]),
     )
     torch.testing.assert_close(
         features[0, 0, MAX_PLANETS],

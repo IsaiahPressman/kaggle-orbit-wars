@@ -721,6 +721,8 @@ class PairwiseBiasMLP(nn.Module):
 
 
 def build_pairwise_action_features(obs: ObsBatch) -> torch.Tensor:
+    # TODO: Move these pairwise features into the simulator observation contract
+    # once they are no longer model-local, so Rust owns the channel layout.
     planet_owners = obs.planets[..., : _PLANET_NEUTRAL_OWNER + 1]
     comet_owners = obs.comets[..., : _PLANET_NEUTRAL_OWNER + 1]
     owners = torch.cat((planet_owners, comet_owners), dim=1)
