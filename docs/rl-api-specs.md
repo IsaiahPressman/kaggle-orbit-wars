@@ -350,7 +350,12 @@ environment stepping.
 Config:
 
 ```python
-{"action_spec": "discrete_targets", "max_per_planet_launches": 3, "min_fleet_size": 1}
+{
+    "action_spec": "discrete_targets",
+    "max_per_planet_launches": 3,
+    "min_fleet_size": 1,
+    "targeting_mode": "full_mask",
+}
 ```
 
 `ActionDiscreteTargetsConfig` uses the same launch-count and minimum-fleet
@@ -366,14 +371,22 @@ train against this action spec when the model actor config also uses
 | `can_act` | `bool` | `(n_envs, 4, 44, 44)` | whether a player can launch from a source slot to a target slot |
 | `max_launch` | `int64` | `(n_envs, 4, 44)` | maximum launchable ship count for that source slot |
 
+`targeting_mode` controls target masking and selected bad-launch handling:
+
+| Mode | Target mask | Bad selected target launch |
+| --- | --- | --- |
+| `"full_mask"` | Existing targets except self, plus the simulator's full static-target eligibility filter. | Dynamic targets are replaced with no-op when no allowed ray exists. Invalid masked static targets fail fast if submitted. This is the default and preserves the original behavior. |
+| `"stop_bad_launch"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Replaced with no-op when the computed ray crosses the sun. |
+| `"anything_goes"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Submitted even when the computed ray crosses the sun. Comet targets that cannot be intercepted before leaving the board still become no-ops because no launch angle is defined. |
+
+In `"full_mask"`, static-source to static-target pairs use the reset-time
+cached unobstructed 3-ray result. Dynamic-source to static-target pairs
+recompute the same 3-ray sun/static-blocker check for the current step.
+Dynamic targets remain eligible in the mask because full obstruction checks are
+deferred until the selected launch is decoded. In the loose modes,
 `can_act[player, source, target]` is true when the source entity is owned by
 that outer player slot, has at least `min_fleet_size` ships, the target slot
-exists, `source != target`, and the target passes the simulator's eligibility
-filter. Static-source to static-target pairs use the reset-time cached
-unobstructed 3-ray result. Dynamic-source to static-target pairs recompute the
-same 3-ray sun/static-blocker check for the current step. Dynamic targets
-remain eligible in the mask because full obstruction checks are deferred until
-the selected launch is decoded.
+exists, and `source != target`.
 
 ### Discrete Targets Submitted Actions
 
@@ -399,36 +412,45 @@ uses the Rust target decoder to convert discrete target slots into submitted
 
 ### Targeting Rules
 
-For static planets, the 3-ray check tries the centerline plus both edge paths
-using `target_radius - eps`, then selects the first ray unobstructed by the sun
-and other static planets. Reset precomputes this best angle for every
-static-source/static-target planet ID pair in a contiguous cache and reuses the
-cached angle during discrete target decoding. Dynamic-source/static-target pairs
-run the same check live.
+For static planets in `"full_mask"`, the 3-ray check tries the centerline plus
+both edge paths using `target_radius - eps`, then selects the first ray
+unobstructed by the sun and other static planets. Reset precomputes this best
+angle for every static-source/static-target planet ID pair in a contiguous
+cache and reuses the cached angle during discrete target decoding.
+Dynamic-source/static-target pairs run the same check live. In
+`"stop_bad_launch"` and `"anything_goes"`, static targets use the direct
+source-to-target angle instead of searching for an unobstructed ray.
 
 For orbiting non-comet planets, reset caches future tick positions across the
 episode horizon, and decoding solves inflated-radius intercepts against the
 cached linear segments for the selected target. Manually reconstructed states
-without that cache build the selected target path lazily during decode. This
-fast orbiting path checks the selected ray for sun crossing and out-of-bounds
-impact before emitting the launch angle. For comets, decoding solves
-inflated-radius intercepts against each stored linear path segment, then applies
-the same selected-ray sun/out-of-bounds cancellation. Submitted discrete-target
-launches that cannot produce an allowed ray are treated as no-ops and counted
-in `launch_failures_per_game`.
+without that cache build the selected target path lazily during decode. For
+comets, decoding solves inflated-radius intercepts against each stored linear
+path segment. In
+`"full_mask"`, selected dynamic candidates are filtered for sun crossing,
+out-of-bounds impact, and static blockers. In `"stop_bad_launch"`, only
+sun-crossing candidates are filtered. In `"anything_goes"`, the earliest
+computed candidate is submitted. Submitted discrete-target launches that cannot
+produce an allowed or defined ray are treated as no-ops and counted in
+`launch_failures_per_game`.
 
 ## Discrete Target Bins Action Spec
 
 Config:
 
 ```python
-{"action_spec": "discrete_target_bins", "min_fleet_size": 1, "n_bins": 11}
+{
+    "action_spec": "discrete_target_bins",
+    "min_fleet_size": 1,
+    "n_bins": 11,
+    "targeting_mode": "full_mask",
+}
 ```
 
-`ActionDiscreteTargetBinsConfig` uses the same target-slot eligibility as
-`discrete_targets`, but fleet size is selected as a categorical bin instead of
-an integer ship count. `n_bins` is the total action count, including no-op, and
-must be at least `2`.
+`ActionDiscreteTargetBinsConfig` uses the same `targeting_mode` target-slot
+eligibility and bad-launch handling as `discrete_targets`, but fleet size is
+selected as a categorical bin instead of an integer ship count. `n_bins` is the
+total action count, including no-op, and must be at least `2`.
 
 ### Discrete Target Bins Output Tensors
 

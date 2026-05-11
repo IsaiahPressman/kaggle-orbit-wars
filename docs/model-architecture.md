@@ -280,9 +280,10 @@ the two streams, then projects source slots to queries and target slots to keys
 and values with a single target-selection head independent of the shared
 transformer trunk's attention head count. It computes scaled dot-product target
 logits for every `(source, target)` pair and masks those logits with the 4-D
-discrete `can_act` tensor, which includes simulator target eligibility rather
-than only entity existence and self-targeting. Fully masked source rows are
-sanitized to finite zero logits and are suppressed by the launch/source mask.
+discrete `can_act` tensor. The environment action spec's `targeting_mode`
+decides whether this mask includes full simulator target eligibility or only
+entity existence plus self-targeting. Fully masked source rows are sanitized to
+finite zero logits and are suppressed by the launch/source mask.
 
 After sampling or replaying a target from the masked softmax, the actor gathers
 only the selected target value vector, adds it to the source residual stream,
