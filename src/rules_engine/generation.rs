@@ -42,7 +42,7 @@ pub fn generate_planets(rng: &mut impl RandomSource) -> Vec<Planet> {
         let angle = rng.uniform(0.0, std::f64::consts::FRAC_PI_2);
         let min_orbital = ROTATION_RADIUS_LIMIT - radius;
         let max_orbital = (BOARD_SIZE - CENTER - radius) / angle.cos().max(angle.sin());
-        if min_orbital > max_orbital {
+        if min_orbital >= max_orbital {
             continue;
         }
 
@@ -405,6 +405,10 @@ mod tests {
         float: f64,
     }
 
+    struct DegenerateFirstAngleRandom {
+        float_calls: usize,
+    }
+
     impl RandomSource for RepeatingRandom {
         fn randint(&mut self, _low: i32, _high: i32) -> i32 {
             self.int
@@ -412,6 +416,22 @@ mod tests {
 
         fn uniform(&mut self, low: f64, high: f64) -> f64 {
             low + (high - low) * self.float
+        }
+    }
+
+    impl RandomSource for DegenerateFirstAngleRandom {
+        fn randint(&mut self, low: i32, high: i32) -> i32 {
+            low + (high - low) / 2
+        }
+
+        fn uniform(&mut self, low: f64, high: f64) -> f64 {
+            assert!(low < high, "uniform range must be non-empty");
+            self.float_calls += 1;
+            if self.float_calls == 1 {
+                return low;
+            }
+            let unit = (self.float_calls as f64 * 0.618_033_988_749_894_9).fract();
+            low + (high - low) * unit
         }
     }
 
@@ -562,6 +582,15 @@ mod tests {
             assert_eq!(group[3].x, BOARD_SIZE - q1.x);
             assert_eq!(group[3].y, BOARD_SIZE - q1.y);
         }
+    }
+
+    #[test]
+    fn generate_planets_skips_degenerate_static_orbital_range() {
+        let mut rng = DegenerateFirstAngleRandom { float_calls: 0 };
+
+        let planets = generate_planets(&mut rng);
+
+        assert_eq!(planets.len() % 4, 0);
     }
 
     #[derive(Debug, Deserialize)]
