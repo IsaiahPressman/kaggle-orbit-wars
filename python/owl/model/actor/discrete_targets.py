@@ -28,6 +28,7 @@ from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS, DiscreteTargetAction
 class DiscreteActorInputs:
     source: torch.Tensor
     target: torch.Tensor
+    pairwise_bias: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -342,6 +343,14 @@ class DiscreteTargetsActor(nn.Module):
         v = self.v(target_x)
         target_logits = torch.einsum("bpsd,bptd->bpst", q, k)
         target_logits = target_logits / math.sqrt(self.head_dim)
+        if actor_inputs.pairwise_bias is not None:
+            pairwise_bias = actor_inputs.pairwise_bias
+            if pairwise_bias.shape != target_logits.shape:
+                raise ValueError(
+                    "discrete target pairwise bias must have shape "
+                    f"{tuple(target_logits.shape)}, got {tuple(pairwise_bias.shape)}"
+                )
+            target_logits = target_logits + pairwise_bias.to(dtype=target_logits.dtype)
         target_logits = target_logits.masked_fill(
             ~can_act,
             torch.finfo(target_logits.dtype).min,

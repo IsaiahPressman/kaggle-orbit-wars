@@ -239,6 +239,14 @@ class DiscreteTargetBinsActor(nn.Module):
         v = self.v(target_x)
         target_logits = torch.einsum("bpsd,bptd->bpst", q, k)
         target_logits = target_logits / math.sqrt(self.head_dim)
+        if actor_inputs.pairwise_bias is not None:
+            pairwise_bias = actor_inputs.pairwise_bias
+            if pairwise_bias.shape != target_logits.shape:
+                raise ValueError(
+                    "discrete target-bin pairwise bias must have shape "
+                    f"{tuple(target_logits.shape)}, got {tuple(pairwise_bias.shape)}"
+                )
+            target_logits = target_logits + pairwise_bias.to(dtype=target_logits.dtype)
         target_valid = can_act.any(dim=-1)
         target_logits = target_logits.masked_fill(
             ~target_valid,

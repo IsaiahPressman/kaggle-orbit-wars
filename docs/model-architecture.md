@@ -28,6 +28,7 @@ without changing callers that validate config dictionaries through the union.
 | `mlp_ratio` | `4.0` | FFN hidden width multiplier. |
 | `activation` | `"gelu"` | FFN activation: `"gelu"`, `"silu"`, or `"swiglu"`. |
 | `force_flash_attn` | `False` | Require packed varlen flash-attn; raise an error instead of falling back when tensors are not flash-compatible. |
+| `use_learned_pairwise_bias` | `False` | Enable an auxiliary source-target feature MLP for discrete target selection. Only valid with `"discrete_targets"` and `"discrete_target_bins"` actors. |
 | `n_scratch_tokens` | `4` | Learned shared scratch tokens appended to the trunk sequence. |
 | `actor` | `{"action_spec": "pure"}` | Discriminated actor-head config. Supported actor specs are `"pure"`, `"discrete_targets"`, and `"discrete_target_bins"`. |
 
@@ -184,6 +185,32 @@ Both actor heads start from the same shared transformer trunk. For each
 The final action head is selected by `config.actor.action_spec`. The concrete
 heads live under `python/owl/model/actor/`: `PureActor` for raw angles and
 `DiscreteTargetsActor` for target slots.
+
+When `use_learned_pairwise_bias=True`, the discrete-target and discrete
+target-bin actors receive an auxiliary learned bias after the shared
+self-attention trunk. The model builds six raw source-target features over the
+44 action entity slots, applies a two-layer MLP
+`6 -> embed_dim -> 1`, and adds the result to the target-selection attention
+score before action masking:
+
+- `has_more_ships`: source ship count is greater than target ship count.
+- `target_is_neutral`: target owner is neutral.
+- `target_is_mine`: source and target share the same non-neutral owner.
+- `target_is_enemy`: target has a non-neutral owner different from the source.
+- `normalized_distance`: Euclidean source-target distance in normalized board
+  coordinates, divided by the normalized board diagonal `sqrt(8)`.
+- `sun_proximity`: `1 - d / sqrt(2)`, where `d` is the minimum Euclidean
+  distance from the sun center `(0, 0)` to the source-target line segment in
+  normalized board coordinates.
+
+The source-target segment distance makes `sun_proximity` mathematically
+well-defined: it is the standard point-to-segment distance, with zero-length
+segments falling back to the source/target point distance. Feature construction
+uses planet slots `0..39` and comet slots `40..43`; comet positions use their
+current path position. Neutral planet ships are denormalized from `/100`,
+while owned planet and comet ships are denormalized from `/500` before
+comparison. Existing model configs default this path off and therefore do not
+gain extra parameters.
 
 ### Pure Actor
 
