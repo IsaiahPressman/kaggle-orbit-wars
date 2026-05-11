@@ -25,14 +25,17 @@ from owl.model.stateless_transformer_v1 import (
     ActorDiscreteTargetsConfig,
     ActorPureConfig,
     DiscreteActorInputs,
+    DiscreteTargetBinsActor,
     DiscreteTargetPolicyParams,
     DiscreteTargetsActor,
     FeedForward,
     MinGRUCell,
     MultiHeadSelfAttention,
     OutputProjectionMLP,
+    PairwiseBiasMLP,
     PolicyParams,
     PureActor,
+    build_pairwise_action_features,
     discrete_action_entropy,
     masked_event_log_prob_from_params,
     pack_sequence,
@@ -52,11 +55,29 @@ from owl.rl import (
     EntityBasedConfig,
     ObsBatch,
     PureActions,
+    encode_python_observation,
 )
 from pydantic import TypeAdapter
 from torch import nn
 
 _REPO_ROOT = Path(__file__).parents[3]
+
+
+def _python_obs(**overrides: object) -> dict[str, object]:
+    obs = {
+        "step": 0,
+        "episode_steps": 500,
+        "angular_velocity": 0.025,
+        "planets": [],
+        "initial_planets": [],
+        "fleets": [],
+        "player": 0,
+        "comets": [],
+    }
+    obs.update(overrides)
+    if "initial_planets" not in overrides:
+        obs["initial_planets"] = obs["planets"]
+    return obs
 
 
 def _obs_batch(
@@ -168,10 +189,24 @@ def _model(
 def _discrete_actor_inputs(
     source: torch.Tensor,
     target: torch.Tensor | None = None,
+    pairwise_bias: torch.Tensor | None = None,
 ) -> DiscreteActorInputs:
     return DiscreteActorInputs(
-        source=source, target=source if target is None else target
+        source=source,
+        target=source if target is None else target,
+        pairwise_bias=pairwise_bias,
     )
+
+
+def _zero_target_attention(
+    actor: DiscreteTargetsActor | DiscreteTargetBinsActor,
+) -> None:
+    with torch.no_grad():
+        actor.source_role.zero_()
+        actor.target_role.zero_()
+        for module in (actor.q, actor.k):
+            module.weight.zero_()
+            module.bias.zero_()
 
 
 def test_model_config_requires_heads_to_divide_embed_dim() -> None:
@@ -472,11 +507,19 @@ def test_attention_and_swiglu_use_separate_projection_matrices_for_muon() -> Non
     attn = MultiHeadSelfAttention(config)
     mlp = FeedForward(config)
     output_head = OutputProjectionMLP(config, output_dim=3)
+    pairwise_head = PairwiseBiasMLP(config)
 
     assert attn.q is not attn.k
     assert attn.k is not attn.v
     assert mlp.gate is not mlp.value
     assert output_head.gate is not output_head.value
+    assert pairwise_head.gate is not pairwise_head.value
+    assert pairwise_head.get_input_layers() == (
+        pairwise_head.gate,
+        pairwise_head.value,
+    )
+    pairwise_features = torch.randn((2, 3, 4, 6))
+    assert pairwise_head(pairwise_features).shape == (2, 3, 4)
 
 
 def test_non_flash_attention_uses_regular_shaped_sdpa(
@@ -1372,6 +1415,254 @@ def test_discrete_target_bins_actor_outputs_bins_and_replays_log_probs() -> None
     obs.can_act[0, 0, 0, :, 1] = False
     with pytest.raises(ValueError, match="valid target-bin pair"):
         model.evaluate_actions(obs, invalid)
+
+
+def test_pairwise_action_features_use_action_entity_state() -> None:
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 1)
+    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+    obs = _obs_batch(batch_size=1, obs_spec=obs_spec, action_spec=action_spec)
+    obs.planets.zero_()
+    obs.comets.zero_()
+
+    obs.planets[0, 0, 0] = 1.0
+    obs.planets[0, 0, 5] = -1.0
+    obs.planets[0, 0, 15] = 20.0 / 500.0
+
+    obs.planets[0, 1, 4] = 1.0
+    obs.planets[0, 1, 5] = 1.0
+    obs.planets[0, 1, 13] = 10.0 / 100.0
+
+    obs.planets[0, 2, 1] = 1.0
+    obs.planets[0, 2, 6] = 1.0
+    obs.planets[0, 2, 15] = 30.0 / 500.0
+
+    obs.comets[0, 0, 2] = 1.0
+    obs.comets[0, 0, 5] = 15.0 / 500.0
+    obs.comets[0, 0, 52] = -1.0
+
+    features = build_pairwise_action_features(obs)
+
+    assert features.shape == (1, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS, 6)
+    torch.testing.assert_close(
+        features[0, 0, 1],
+        torch.tensor(
+            [
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                2.0 / math.sqrt(8.0),
+                1.0,
+            ]
+        ),
+    )
+    torch.testing.assert_close(
+        features[0, 0, 2, :4],
+        torch.tensor([0.0, 0.0, 0.0, 1.0]),
+    )
+    torch.testing.assert_close(
+        features[0, 0, 0, 2:],
+        torch.tensor([1.0, 0.0, 0.0, 1.0 - 1.0 / math.sqrt(2.0)]),
+    )
+    torch.testing.assert_close(
+        features[0, 0, MAX_PLANETS],
+        torch.tensor(
+            [
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                1.0 - 1.0 / math.sqrt(2.0),
+            ]
+        ),
+    )
+
+
+def test_pairwise_action_features_match_simulator_channel_layout() -> None:
+    obs = encode_python_observation(
+        _python_obs(
+            planets=[
+                [0, 0, 0.0, 50.0, 2.0, 20, 3],
+                [1, -1, 100.0, 50.0, 2.0, 10, 3],
+                [2, 1, 50.0, 100.0, 2.0, 30, 3],
+                [10, 2, 50.0, 50.0, 1.0, 15, 1],
+                [11, -1, 25.0, 50.0, 1.0, 5, 1],
+            ],
+            comets=[
+                {
+                    "planet_ids": [10, 11],
+                    "paths": [
+                        [[50.0, 50.0], [0.0, 50.0], [50.0, 0.0]],
+                        [[25.0, 50.0], [25.0, 100.0], [100.0, 100.0]],
+                    ],
+                    "path_index": 1,
+                }
+            ],
+        ),
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+
+    features = build_pairwise_action_features(obs)
+
+    torch.testing.assert_close(
+        features[0, 0, 1],
+        torch.tensor(
+            [
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                2.0 / math.sqrt(8.0),
+                1.0,
+            ]
+        ),
+    )
+    torch.testing.assert_close(
+        features[0, 0, MAX_PLANETS + 1],
+        torch.tensor(
+            [
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                math.sqrt(1.25) / math.sqrt(8.0),
+                1.0 - math.sqrt(0.8) / math.sqrt(2.0),
+            ]
+        ),
+    )
+    torch.testing.assert_close(
+        features[0, 0, 2, :4],
+        torch.tensor([0.0, 0.0, 0.0, 1.0]),
+    )
+    torch.testing.assert_close(
+        features[0, 0, MAX_PLANETS],
+        torch.tensor(
+            [
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                1.0 - 1.0 / math.sqrt(2.0),
+            ]
+        ),
+    )
+
+
+def test_learned_pairwise_bias_config_is_discrete_only() -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        use_learned_pairwise_bias=True,
+    )
+    model = _model(
+        config,
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+
+    assert model.pairwise_bias_mlp is not None
+    input_layer_ids = {id(layer) for layer in model.get_input_layers()}
+    assert id(model.pairwise_bias_mlp.up) in input_layer_ids
+
+    with pytest.raises(ValueError, match="requires a discrete target action_spec"):
+        _model(
+            StatelessTransformerV1Config(
+                embed_dim=32,
+                depth=1,
+                n_heads=4,
+                use_learned_pairwise_bias=True,
+            ),
+            action_spec=ActionPureConfig(max_per_planet_launches=1),
+        )
+
+
+def test_swiglu_learned_pairwise_bias_input_layers_are_wired_to_model() -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        activation="swiglu",
+        use_learned_pairwise_bias=True,
+    )
+    model = _model(
+        config,
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+
+    assert model.pairwise_bias_mlp is not None
+    input_layer_ids = {id(layer) for layer in model.get_input_layers()}
+    assert id(model.pairwise_bias_mlp.gate) in input_layer_ids
+    assert id(model.pairwise_bias_mlp.value) in input_layer_ids
+
+
+def test_discrete_targets_actor_adds_pairwise_bias_before_masking() -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    actor = DiscreteTargetsActor(config.actor, transformer_config=config)
+    _zero_target_attention(actor)
+    slot_input = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    can_act = torch.zeros(
+        (1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
+        dtype=torch.bool,
+    )
+    can_act[0, 0, 0, 1] = True
+    pairwise_bias = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS))
+    pairwise_bias[0, 0, 0, 0] = 9.0
+    pairwise_bias[0, 0, 0, 1] = 3.0
+    pairwise_bias[0, 0, 1, 2] = 5.0
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        selection = actor._selection_params(
+            _discrete_actor_inputs(slot_input, pairwise_bias=pairwise_bias),
+            can_act,
+        )
+
+    assert selection.target_logits.dtype == torch.bfloat16
+    assert selection.target_logits[0, 0, 0, 0] == torch.finfo(torch.bfloat16).min
+    assert selection.target_logits[0, 0, 0, 1] == torch.tensor(
+        3.0,
+        dtype=torch.bfloat16,
+    )
+    assert selection.target_logits[0, 0, 1].eq(0).all()
+
+
+def test_discrete_target_bins_actor_adds_pairwise_bias_before_masking() -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetBinsConfig(n_bins=3),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    actor = DiscreteTargetBinsActor(config.actor, transformer_config=config)
+    _zero_target_attention(actor)
+    slot_input = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    can_act = torch.zeros(
+        (1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS, 3),
+        dtype=torch.bool,
+    )
+    can_act[0, 0, 0, 1, 2] = True
+    pairwise_bias = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS))
+    pairwise_bias[0, 0, 0, 0] = 9.0
+    pairwise_bias[0, 0, 0, 1] = 4.0
+    pairwise_bias[0, 0, 1, 2] = 5.0
+
+    selection = actor._selection_params(
+        _discrete_actor_inputs(slot_input, pairwise_bias=pairwise_bias),
+        can_act,
+    )
+
+    assert selection.target_logits[0, 0, 0, 0] == torch.finfo(torch.float32).min
+    assert selection.target_logits[0, 0, 0, 1] == 4.0
+    assert selection.target_logits[0, 0, 1].eq(0).all()
 
 
 def test_discrete_targets_output_layers_include_only_second_head_layers() -> None:

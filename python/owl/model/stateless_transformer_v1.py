@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Annotated, Literal, Self, TypeAlias, cast
+from typing import Annotated, Literal, Self, TypeAlias, assert_never, cast
 
 import torch
 import torch.nn.functional as F
@@ -83,12 +83,14 @@ __all__ = [
     "MultiHeadSelfAttention",
     "OutputProjectionMLP",
     "PackedSequence",
+    "PairwiseBiasMLP",
     "PolicyParams",
     "PureActor",
     "StatelessTransformerV1",
     "StatelessTransformerV1Config",
     "binary_entropy_from_logits",
     "build_packed_sequence",
+    "build_pairwise_action_features",
     "discrete_action_entropy",
     "discretized_logistic_mixture_log_prob",
     "masked_action_entropy_from_params",
@@ -107,6 +109,18 @@ _HIDDEN_INIT_GAIN = math.sqrt(2.0)
 _INPUT_INIT_GAIN = 1.0
 _ACTOR_HEAD_INIT_GAIN = 0.01
 _CRITIC_HEAD_INIT_GAIN = 1.0
+_PAIRWISE_FEATURE_DIM = 6
+_NORMALIZED_BOARD_DIAGONAL = math.sqrt(8.0)
+_PLANET_NEUTRAL_OWNER = 4
+_PLANET_X = 5
+_PLANET_Y = 6
+_PLANET_NEUTRAL_SHIPS = 13
+_PLANET_OWNED_SHIPS = 15
+_COMET_SHIPS = 5
+_COMET_X = 52
+_COMET_Y = 53
+_NEUTRAL_SHIP_NORMALIZER = 100.0
+_SHIP_NORMALIZER = 500.0
 
 
 class StatelessTransformerV1Config(BaseConfig):
@@ -118,6 +132,7 @@ class StatelessTransformerV1Config(BaseConfig):
     n_scratch_tokens: int = Field(default=4, ge=0)
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
     force_flash_attn: bool = False
+    use_learned_pairwise_bias: bool = False
     actor: ActorConfig = Field(default_factory=ActorPureConfig)
 
     @classmethod
@@ -171,6 +186,12 @@ class StatelessTransformerV1(BaseModelAPI):
         super().__init__()
         if config.actor.action_spec != action_spec.action_spec:
             raise ValueError("model actor config must match env action_spec")
+        if config.use_learned_pairwise_bias and isinstance(
+            action_spec, ActionPureConfig
+        ):
+            raise ValueError(
+                "use_learned_pairwise_bias requires a discrete target action_spec"
+            )
         if (
             isinstance(action_spec, ActionDiscreteTargetsConfig)
             and action_spec.max_per_planet_launches != 1
@@ -215,6 +236,11 @@ class StatelessTransformerV1(BaseModelAPI):
         self.final_norm = nn.LayerNorm(dim)
 
         self.critic_head = OutputProjectionMLP(self.config, 1)
+        self.pairwise_bias_mlp: PairwiseBiasMLP | None = (
+            PairwiseBiasMLP(self.config)
+            if self.config.use_learned_pairwise_bias
+            else None
+        )
         self.pure_actor_input_proj: nn.Linear | None = None
         self.source_actor_input_proj: nn.Linear | None = None
         self.target_actor_input_proj: nn.Linear | None = None
@@ -266,6 +292,11 @@ class StatelessTransformerV1(BaseModelAPI):
             self.fleet_proj.input,
             self.comet_proj.input,
             self.global_proj.input,
+            *(
+                ()
+                if self.pairwise_bias_mlp is None
+                else self.pairwise_bias_mlp.get_input_layers()
+            ),
             self.player_tokens,
             self.board_tokens,
             self.actor_plan_tokens,
@@ -274,7 +305,15 @@ class StatelessTransformerV1(BaseModelAPI):
         )
 
     def get_output_layers(self) -> tuple[nn.Linear, ...]:
-        return (self.critic_head.out, *self.actor.get_output_layers())
+        return (
+            self.critic_head.out,
+            *(
+                ()
+                if self.pairwise_bias_mlp is None
+                else self.pairwise_bias_mlp.get_output_layers()
+            ),
+            *self.actor.get_output_layers(),
+        )
 
     def encode_observations(self, obs: ObsBatch) -> EncodedObservations:
         global_x = self.global_proj(obs.global_features)
@@ -390,6 +429,7 @@ class StatelessTransformerV1(BaseModelAPI):
         values, winner_probabilities = self._value_from_encoded(encoded, obs)
         actions, log_probs, entropies = self._actor(
             encoded,
+            obs,
             obs.action_mask,
             deterministic=deterministic,
         )
@@ -410,6 +450,7 @@ class StatelessTransformerV1(BaseModelAPI):
         values, winner_probabilities = self._value_from_encoded(encoded, obs)
         log_probs, entropies = self._actor_log_prob(
             encoded,
+            obs,
             obs.action_mask,
             actions,
         )
@@ -479,6 +520,7 @@ class StatelessTransformerV1(BaseModelAPI):
     def _discrete_actor_inputs(
         self,
         encoded: EncodedObservations,
+        obs: ObsBatch,
     ) -> DiscreteActorInputs:
         action_entity_hidden = encoded.action_entity_hidden
         entity_features = action_entity_hidden[:, None, :, :].expand(
@@ -507,11 +549,25 @@ class StatelessTransformerV1(BaseModelAPI):
         target = self.target_actor_input_proj(
             torch.cat((entity_features, player_features, plan_features), dim=-1)
         )
-        return DiscreteActorInputs(source=source, target=target)
+        pairwise_bias: torch.Tensor | None = None
+        if self.pairwise_bias_mlp is not None:
+            pairwise_bias = self.pairwise_bias_mlp(build_pairwise_action_features(obs))
+            pairwise_bias = pairwise_bias[:, None, :, :].expand(
+                -1,
+                OUTER_PLAYER_SLOTS,
+                -1,
+                -1,
+            )
+        return DiscreteActorInputs(
+            source=source,
+            target=target,
+            pairwise_bias=pairwise_bias,
+        )
 
     def _actor(
         self,
         encoded: EncodedObservations,
+        obs: ObsBatch,
         action_mask: ActionMask,
         *,
         deterministic: bool,
@@ -522,7 +578,7 @@ class StatelessTransformerV1(BaseModelAPI):
                     "discrete_target_bins actor requires a target-bin action mask"
                 )
             return self.actor(
-                self._discrete_actor_inputs(encoded),
+                self._discrete_actor_inputs(encoded, obs),
                 action_mask.can_act,
                 deterministic=deterministic,
             )
@@ -532,7 +588,7 @@ class StatelessTransformerV1(BaseModelAPI):
                     "discrete_targets actor requires a discrete-target action mask"
                 )
             return self.actor(
-                self._discrete_actor_inputs(encoded),
+                self._discrete_actor_inputs(encoded, obs),
                 action_mask.can_act,
                 action_mask.max_launch,
                 min_fleet_size=self.action_spec.min_fleet_size,
@@ -551,6 +607,7 @@ class StatelessTransformerV1(BaseModelAPI):
     def _actor_log_prob(
         self,
         encoded: EncodedObservations,
+        obs: ObsBatch,
         action_mask: ActionMask,
         actions: ActionBundle,
     ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
@@ -564,7 +621,7 @@ class StatelessTransformerV1(BaseModelAPI):
                     "discrete_target_bins actor requires DiscreteTargetBinActions"
                 )
             return self.actor.log_prob(
-                self._discrete_actor_inputs(encoded),
+                self._discrete_actor_inputs(encoded, obs),
                 action_mask.can_act,
                 actions,
             )
@@ -578,7 +635,7 @@ class StatelessTransformerV1(BaseModelAPI):
                     "discrete_targets actor requires DiscreteTargetActions"
                 )
             return self.actor.log_prob(
-                self._discrete_actor_inputs(encoded),
+                self._discrete_actor_inputs(encoded, obs),
                 action_mask.can_act,
                 action_mask.max_launch,
                 actions,
@@ -617,6 +674,110 @@ class ObservationInputStem(nn.Module):
         if self.activation == "gelu":
             return self.output(F.gelu(self.input(x)))
         return self.output(F.silu(self.input(x)))
+
+
+class PairwiseBiasMLP(nn.Module):
+    def __init__(self, config: StatelessTransformerV1Config) -> None:
+        super().__init__()
+        self.activation = config.activation
+        match self.activation:
+            case "gelu" | "silu":
+                self.up = nn.Linear(_PAIRWISE_FEATURE_DIM, config.embed_dim)
+            case "swiglu":
+                self.gate = nn.Linear(_PAIRWISE_FEATURE_DIM, config.embed_dim)
+                self.value = nn.Linear(_PAIRWISE_FEATURE_DIM, config.embed_dim)
+            case _:
+                assert_never(self.activation)
+        self.out = nn.Linear(config.embed_dim, 1)
+
+    def get_input_layers(self) -> tuple[InputLayer, ...]:
+        match self.activation:
+            case "gelu" | "silu":
+                return (self.up,)
+            case "swiglu":
+                return (self.gate, self.value)
+            case _:
+                assert_never(self.activation)
+
+    def get_output_layers(self) -> tuple[nn.Linear, ...]:
+        return (self.out,)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        if features.shape[-1] != _PAIRWISE_FEATURE_DIM:
+            raise ValueError(
+                "pairwise features must have final dimension "
+                f"{_PAIRWISE_FEATURE_DIM}, got {features.shape[-1]}"
+            )
+        match self.activation:
+            case "gelu":
+                hidden = F.gelu(self.up(features))
+            case "silu":
+                hidden = F.silu(self.up(features))
+            case "swiglu":
+                hidden = F.silu(self.gate(features)) * self.value(features)
+            case _:
+                assert_never(self.activation)
+        return self.out(hidden).squeeze(-1)
+
+
+def build_pairwise_action_features(obs: ObsBatch) -> torch.Tensor:
+    # TODO: Move these pairwise features into the simulator observation contract
+    # once they are no longer model-local, so Rust owns the channel layout.
+    planet_owners = obs.planets[..., : _PLANET_NEUTRAL_OWNER + 1]
+    comet_owners = obs.comets[..., : _PLANET_NEUTRAL_OWNER + 1]
+    owners = torch.cat((planet_owners, comet_owners), dim=1)
+
+    planet_neutral = obs.planets[..., _PLANET_NEUTRAL_OWNER]
+    planet_ships = torch.where(
+        planet_neutral.bool(),
+        obs.planets[..., _PLANET_NEUTRAL_SHIPS] * _NEUTRAL_SHIP_NORMALIZER,
+        obs.planets[..., _PLANET_OWNED_SHIPS] * _SHIP_NORMALIZER,
+    )
+    comet_ships = obs.comets[..., _COMET_SHIPS] * _SHIP_NORMALIZER
+    ships = torch.cat((planet_ships, comet_ships), dim=1)
+
+    planet_xy = obs.planets[..., (_PLANET_X, _PLANET_Y)]
+    comet_xy = obs.comets[..., (_COMET_X, _COMET_Y)]
+    xy = torch.cat((planet_xy, comet_xy), dim=1)
+
+    source_ships = ships[:, :, None]
+    target_ships = ships[:, None, :]
+    has_more_ships = (source_ships > target_ships).to(dtype=obs.planets.dtype)
+
+    neutral_owner = owners[..., _PLANET_NEUTRAL_OWNER]
+    target_is_neutral = neutral_owner[:, None, :].expand_as(has_more_ships)
+
+    player_owners = owners[..., :OUTER_PLAYER_SLOTS]
+    source_player_owners = player_owners[:, :, None, :]
+    target_player_owners = player_owners[:, None, :, :]
+    target_is_mine = (source_player_owners * target_player_owners).sum(dim=-1)
+    target_is_enemy = (target_player_owners.sum(dim=-1) - target_is_mine).clamp_min(0.0)
+
+    source_xy = xy[:, :, None, :]
+    target_xy = xy[:, None, :, :]
+    segment = target_xy - source_xy
+    distance = segment.norm(dim=-1)
+    normalized_distance = (distance / _NORMALIZED_BOARD_DIAGONAL).clamp(0.0, 1.0)
+
+    segment_len_sq = (segment * segment).sum(dim=-1)
+    eps = torch.finfo(obs.planets.dtype).eps
+    projection = -(source_xy * segment).sum(dim=-1) / segment_len_sq.clamp_min(eps)
+    projection = projection.clamp(0.0, 1.0)
+    closest_to_sun = source_xy + projection.unsqueeze(-1) * segment
+    sun_distance = closest_to_sun.norm(dim=-1)
+    sun_proximity = 1.0 - (sun_distance / math.sqrt(2.0)).clamp(0.0, 1.0)
+
+    return torch.stack(
+        (
+            has_more_ships,
+            target_is_neutral,
+            target_is_mine,
+            target_is_enemy,
+            normalized_distance,
+            sun_proximity,
+        ),
+        dim=-1,
+    )
 
 
 def _expand_tokens(
