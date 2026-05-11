@@ -975,7 +975,9 @@ pub fn encode_entity_based<'py>(
     );
     let mut target_max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
     encode_action_spec(
-        RlActionSpec::DiscreteTargets,
+        RlActionSpec::DiscreteTargets {
+            targeting_mode: super::action_spec::TargetingMode::FullMask,
+        },
         &state,
         &PlayerMap::identity(),
         &action_entity_slots(&state),
@@ -1102,7 +1104,8 @@ pub fn pure_actions_to_kaggle(
     target,
     ships,
     max_per_planet_launches,
-    min_fleet_size
+    min_fleet_size,
+    targeting_mode="full_mask"
 ))]
 pub fn discrete_target_actions_to_kaggle(
     planets: PyReadonlyArray2<'_, f64>,
@@ -1121,6 +1124,7 @@ pub fn discrete_target_actions_to_kaggle(
     ships: PyReadonlyArrayDyn<'_, i64>,
     max_per_planet_launches: usize,
     min_fleet_size: i64,
+    targeting_mode: &str,
 ) -> PyResult<Vec<Vec<f64>>> {
     require_kaggle_action_args(player, max_per_planet_launches, min_fleet_size)?;
     let action_shape = [
@@ -1153,6 +1157,8 @@ pub fn discrete_target_actions_to_kaggle(
         step,
         episode_steps,
     )?;
+    let targeting_mode =
+        super::action_spec::TargetingMode::parse(targeting_mode).map_err(PyValueError::new_err)?;
     let action_slots = action_entity_slots(&state);
     let decoded = decode_discrete_target_actions(
         &state,
@@ -1163,6 +1169,7 @@ pub fn discrete_target_actions_to_kaggle(
         ships.as_slice()?,
         max_per_planet_launches,
         min_fleet_size,
+        targeting_mode,
     )
     .map_err(PyValueError::new_err)?;
     Ok(player_actions_to_kaggle(&decoded.actions[player]))
@@ -1185,7 +1192,8 @@ pub fn discrete_target_actions_to_kaggle(
     target,
     fleet_bin,
     min_fleet_size,
-    n_bins
+    n_bins,
+    targeting_mode="full_mask"
 ))]
 pub fn discrete_target_bin_actions_to_kaggle(
     planets: PyReadonlyArray2<'_, f64>,
@@ -1203,6 +1211,7 @@ pub fn discrete_target_bin_actions_to_kaggle(
     fleet_bin: PyReadonlyArrayDyn<'_, i64>,
     min_fleet_size: i64,
     n_bins: usize,
+    targeting_mode: &str,
 ) -> PyResult<Vec<Vec<f64>>> {
     require_kaggle_target_bin_action_args(player, min_fleet_size, n_bins)?;
     let action_shape = [OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS];
@@ -1230,6 +1239,8 @@ pub fn discrete_target_bin_actions_to_kaggle(
         step,
         episode_steps,
     )?;
+    let targeting_mode =
+        super::action_spec::TargetingMode::parse(targeting_mode).map_err(PyValueError::new_err)?;
     let action_slots = action_entity_slots(&state);
     let decoded = decode_discrete_target_bin_actions(
         &state,
@@ -1239,6 +1250,7 @@ pub fn discrete_target_bin_actions_to_kaggle(
         fleet_bin.as_slice()?,
         n_bins,
         min_fleet_size,
+        targeting_mode,
     )
     .map_err(PyValueError::new_err)?;
     Ok(player_actions_to_kaggle(&decoded.actions[player]))

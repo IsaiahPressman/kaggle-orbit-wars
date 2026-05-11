@@ -419,6 +419,7 @@ def test_discrete_targets_config_and_env_shapes() -> None:
                 "action_spec": "discrete_targets",
                 "max_per_planet_launches": 2,
                 "min_fleet_size": 4,
+                "targeting_mode": "stop_bad_launch",
             },
             "pin_memory": False,
         }
@@ -426,6 +427,7 @@ def test_discrete_targets_config_and_env_shapes() -> None:
     assert isinstance(config.action_spec, ActionDiscreteTargetsConfig)
     assert config.action_spec.max_per_planet_launches == 2
     assert config.action_spec.min_fleet_size == 4
+    assert config.action_spec.targeting_mode == "stop_bad_launch"
 
     env = VectorizedEnv(
         n_envs=1,
@@ -480,6 +482,7 @@ def test_discrete_target_bins_config_and_env_shapes() -> None:
                 "action_spec": "discrete_target_bins",
                 "min_fleet_size": 4,
                 "n_bins": 11,
+                "targeting_mode": "anything_goes",
             },
             "pin_memory": False,
         }
@@ -487,6 +490,7 @@ def test_discrete_target_bins_config_and_env_shapes() -> None:
     assert isinstance(config.action_spec, ActionDiscreteTargetBinsConfig)
     assert config.action_spec.min_fleet_size == 4
     assert config.action_spec.n_bins == 11
+    assert config.action_spec.targeting_mode == "anything_goes"
 
     env = VectorizedEnv(
         n_envs=2,
@@ -703,6 +707,47 @@ def test_actions_to_kaggle_converts_discrete_target_model_actions() -> None:
     assert actions[0][2] == float(action_spec.min_fleet_size)
 
 
+def test_actions_to_kaggle_respects_discrete_targeting_mode() -> None:
+    obs = _python_obs(
+        planets=[
+            [0, 0, 0.0, 50.0, 2.0, 100, 3],
+            [1, -1, 100.0, 50.0, 2.0, 10, 3],
+        ]
+    )
+    shape = (1, 4, ACTION_ENTITY_SLOTS, 1)
+    launch = torch.zeros(shape, dtype=torch.bool)
+    target = torch.zeros(shape, dtype=torch.int64)
+    ships = torch.zeros(shape, dtype=torch.int64)
+    launch[0, 0, 0, 0] = True
+    target[0, 0, 0, 0] = 1
+    ships[0, 0, 0, 0] = 100
+    actions = DiscreteTargetActions(launch=launch, target=target, ships=ships)
+
+    stop_bad_launch = actions_to_kaggle(
+        obs,
+        0,
+        actions,
+        action_spec=ActionDiscreteTargetsConfig(
+            max_per_planet_launches=1,
+            targeting_mode="stop_bad_launch",
+        ),
+    )
+    anything_goes = actions_to_kaggle(
+        obs,
+        0,
+        actions,
+        action_spec=ActionDiscreteTargetsConfig(
+            max_per_planet_launches=1,
+            targeting_mode="anything_goes",
+        ),
+    )
+
+    assert stop_bad_launch == []
+    assert len(anything_goes) == 1
+    assert anything_goes[0][0] == 0.0
+    assert anything_goes[0][2] == 100.0
+
+
 def test_actions_to_kaggle_converts_discrete_target_bin_actions() -> None:
     action_spec = ActionDiscreteTargetBinsConfig(n_bins=11)
     shape = (1, 4, ACTION_ENTITY_SLOTS)
@@ -878,6 +923,36 @@ def test_python_observation_encoder_masks_statically_obstructed_targets() -> Non
 
     assert not can_act[0, 0, 1]
     assert can_act[0, 0, 2]
+    assert max_launch[0, 0] == 10
+
+
+@pytest.mark.parametrize("targeting_mode", ["anything_goes", "stop_bad_launch"])
+def test_python_observation_encoder_loose_target_modes_do_not_mask_sun_targets(
+    targeting_mode: str,
+) -> None:
+    (
+        _planets,
+        _orbiting_planets,
+        _fleets,
+        _comets,
+        _entity_mask,
+        _global_features,
+        can_act,
+        max_launch,
+    ) = _encoded_python_observation(
+        _python_obs(
+            planets=[
+                [0, 0, 0.0, 50.0, 2.0, 10, 3],
+                [1, -1, 100.0, 50.0, 2.0, 10, 3],
+            ]
+        ),
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionDiscreteTargetsConfig(targeting_mode=targeting_mode),
+    )
+
+    assert can_act[0, 0, 1]
+    assert not can_act[0, 0, 0]
+    assert not can_act[0, 0, 2]
     assert max_launch[0, 0] == 10
 
 
