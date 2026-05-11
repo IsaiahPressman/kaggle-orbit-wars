@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Annotated, Literal, Self, TypeAlias, cast
+from typing import Annotated, Literal, Self, TypeAlias, assert_never, cast
 
 import torch
 import torch.nn.functional as F
@@ -680,11 +680,24 @@ class PairwiseBiasMLP(nn.Module):
     def __init__(self, config: StatelessTransformerV1Config) -> None:
         super().__init__()
         self.activation = config.activation
-        self.up = nn.Linear(_PAIRWISE_FEATURE_DIM, config.embed_dim)
+        match self.activation:
+            case "gelu" | "silu":
+                self.up = nn.Linear(_PAIRWISE_FEATURE_DIM, config.embed_dim)
+            case "swiglu":
+                self.gate = nn.Linear(_PAIRWISE_FEATURE_DIM, config.embed_dim)
+                self.value = nn.Linear(_PAIRWISE_FEATURE_DIM, config.embed_dim)
+            case _:
+                assert_never(self.activation)
         self.out = nn.Linear(config.embed_dim, 1)
 
     def get_input_layers(self) -> tuple[InputLayer, ...]:
-        return (self.up,)
+        match self.activation:
+            case "gelu" | "silu":
+                return (self.up,)
+            case "swiglu":
+                return (self.gate, self.value)
+            case _:
+                assert_never(self.activation)
 
     def get_output_layers(self) -> tuple[nn.Linear, ...]:
         return (self.out,)
@@ -695,10 +708,15 @@ class PairwiseBiasMLP(nn.Module):
                 "pairwise features must have final dimension "
                 f"{_PAIRWISE_FEATURE_DIM}, got {features.shape[-1]}"
             )
-        if self.activation == "gelu":
-            hidden = F.gelu(self.up(features))
-        else:
-            hidden = F.silu(self.up(features))
+        match self.activation:
+            case "gelu":
+                hidden = F.gelu(self.up(features))
+            case "silu":
+                hidden = F.silu(self.up(features))
+            case "swiglu":
+                hidden = F.silu(self.gate(features)) * self.value(features)
+            case _:
+                assert_never(self.activation)
         return self.out(hidden).squeeze(-1)
 
 

@@ -32,6 +32,7 @@ from owl.model.stateless_transformer_v1 import (
     MinGRUCell,
     MultiHeadSelfAttention,
     OutputProjectionMLP,
+    PairwiseBiasMLP,
     PolicyParams,
     PureActor,
     build_pairwise_action_features,
@@ -488,11 +489,19 @@ def test_attention_and_swiglu_use_separate_projection_matrices_for_muon() -> Non
     attn = MultiHeadSelfAttention(config)
     mlp = FeedForward(config)
     output_head = OutputProjectionMLP(config, output_dim=3)
+    pairwise_head = PairwiseBiasMLP(config)
 
     assert attn.q is not attn.k
     assert attn.k is not attn.v
     assert mlp.gate is not mlp.value
     assert output_head.gate is not output_head.value
+    assert pairwise_head.gate is not pairwise_head.value
+    assert pairwise_head.get_input_layers() == (
+        pairwise_head.gate,
+        pairwise_head.value,
+    )
+    pairwise_features = torch.randn((2, 3, 4, 6))
+    assert pairwise_head(pairwise_features).shape == (2, 3, 4)
 
 
 def test_non_flash_attention_uses_regular_shaped_sdpa(
@@ -1466,6 +1475,8 @@ def test_learned_pairwise_bias_config_is_discrete_only() -> None:
     )
 
     assert model.pairwise_bias_mlp is not None
+    input_layer_ids = {id(layer) for layer in model.get_input_layers()}
+    assert id(model.pairwise_bias_mlp.up) in input_layer_ids
 
     with pytest.raises(ValueError, match="requires a discrete target action_spec"):
         _model(
@@ -1477,6 +1488,26 @@ def test_learned_pairwise_bias_config_is_discrete_only() -> None:
             ),
             action_spec=ActionPureConfig(max_per_planet_launches=1),
         )
+
+
+def test_swiglu_learned_pairwise_bias_input_layers_are_wired_to_model() -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        activation="swiglu",
+        use_learned_pairwise_bias=True,
+    )
+    model = _model(
+        config,
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+
+    assert model.pairwise_bias_mlp is not None
+    input_layer_ids = {id(layer) for layer in model.get_input_layers()}
+    assert id(model.pairwise_bias_mlp.gate) in input_layer_ids
+    assert id(model.pairwise_bias_mlp.value) in input_layer_ids
 
 
 def test_discrete_targets_actor_adds_pairwise_bias_before_masking() -> None:
