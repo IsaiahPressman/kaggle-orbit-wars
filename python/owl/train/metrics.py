@@ -19,14 +19,6 @@ def masked_std(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return variance.sqrt()
 
 
-def masked_max(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    return torch.where(mask, values, torch.full_like(values, -torch.inf)).max()
-
-
-def masked_sum_by_segment(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    return (values * mask.to(dtype=values.dtype)).sum(dim=(1, 2))
-
-
 def explained_variance(
     predicted: torch.Tensor,
     target: torch.Tensor,

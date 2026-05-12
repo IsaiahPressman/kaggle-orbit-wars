@@ -42,7 +42,6 @@ from .ppo import (
 )
 from .sampling import (
     SegmentSample,
-    sample_segments_uniform,
     sample_segments_uniform_single_pass,
 )
 from .utils import TrainingDType, assert_finite, autocast_context, configure_torch
@@ -86,7 +85,6 @@ __all__ = [
     "lr_multiplier",
     "normalize_masked_advantages",
     "ppo_loss",
-    "sample_segments_uniform",
     "sample_segments_uniform_single_pass",
     "unwrap_model",
     "wrap_model_for_distributed",

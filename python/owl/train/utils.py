@@ -53,12 +53,6 @@ def require_same_shape(
     )
 
 
-def require_2d(tensor: torch.Tensor, name: str) -> None:
-    """Require a segment-major/time-second tensor with shape [N, T]."""
-    if tensor.ndim != 2:
-        raise ValueError(f"{name} must have shape [N, T], got {tensor.shape}")
-
-
 def require_segment_time_major(tensor: torch.Tensor, name: str) -> None:
     """Require segment-major/time-second layout: [N, T, ...]."""
     if tensor.ndim < 2:

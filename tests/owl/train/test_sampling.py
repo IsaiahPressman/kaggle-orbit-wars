@@ -1,18 +1,5 @@
 import torch
-from owl.train import (
-    sample_segments_uniform,
-    sample_segments_uniform_single_pass,
-)
-
-
-def test_sample_segments_uniform_shapes() -> None:
-    sample = sample_segments_uniform(n_segments=4, segments_per_minibatch=3)
-
-    assert sample.indices.shape == (3,)
-    assert sample.importance.shape == (3, 1)
-    assert torch.all(sample.indices >= 0)
-    assert torch.all(sample.indices < 4)
-    assert torch.allclose(sample.importance, torch.ones((3, 1)))
+from owl.train import sample_segments_uniform_single_pass
 
 
 def test_sample_segments_uniform_single_pass_shuffles_without_replacement() -> None:
