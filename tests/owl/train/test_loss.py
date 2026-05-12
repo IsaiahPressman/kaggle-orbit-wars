@@ -16,7 +16,7 @@ def test_ppo_loss_matches_clipped_objectives() -> None:
     advantages = torch.tensor([[1.0, -1.0]])
     entropy = torch.tensor([[0.2, 0.4]])
 
-    metrics = _ppo_loss(
+    metrics, backward_loss = _ppo_loss(
         new_logp=new_logp,
         entropy=entropy,
         new_values=new_values,
@@ -56,6 +56,7 @@ def test_ppo_loss_matches_clipped_objectives() -> None:
     assert torch.allclose(metrics.entropy_loss, expected_entropy_loss)
     assert torch.allclose(metrics.entropy, expected_entropy)
     assert torch.allclose(metrics.loss, expected_loss)
+    assert backward_loss is metrics.loss
     assert torch.allclose(metrics.clipfrac, torch.tensor(1.0))
 
 
@@ -70,7 +71,7 @@ def test_ppo_loss_uses_policy_and_value_weights_separately() -> None:
     policy_weight = torch.tensor([[1.0, 0.0]])
     value_weight = torch.ones_like(policy_weight)
 
-    metrics = _ppo_loss(
+    metrics, _backward_loss = _ppo_loss(
         new_logp=new_logp,
         entropy=entropy,
         new_values=new_values,
@@ -110,7 +111,7 @@ def test_ppo_loss_uses_raw_advantages() -> None:
     entropy = torch.zeros((1, 3))
     policy_weight = torch.tensor([[1.0, 1.0, 0.0]])
 
-    metrics = _ppo_loss(
+    metrics, _backward_loss = _ppo_loss(
         new_logp=new_logp,
         entropy=entropy,
         new_values=values,
@@ -135,7 +136,7 @@ def test_ppo_loss_uses_raw_advantages() -> None:
 def test_ppo_loss_handles_all_policy_invalid_minibatch() -> None:
     shape = (1, 2)
     policy_weight = torch.zeros(shape)
-    metrics = _ppo_loss(
+    metrics, _backward_loss = _ppo_loss(
         new_logp=torch.zeros(shape),
         entropy=torch.ones(shape),
         new_values=torch.zeros(shape),
@@ -198,7 +199,7 @@ def test_distributed_ppo_loss_only_reduces_scalar_summaries(
     shape = (2, 3)
     new_logp = torch.zeros(shape, requires_grad=True)
 
-    metrics = _ppo_loss(
+    metrics, backward_loss = _ppo_loss(
         new_logp=new_logp,
         entropy=torch.ones(shape),
         new_values=torch.zeros(shape, requires_grad=True),
@@ -212,7 +213,7 @@ def test_distributed_ppo_loss_only_reduces_scalar_summaries(
         context=context,
     )
 
-    assert metrics.backward_loss is not None
-    metrics.backward_loss.backward()
+    assert backward_loss is not metrics.loss
+    backward_loss.backward()
     assert reduced_shapes
     assert all(prod(shape) <= 2 for shape in reduced_shapes)

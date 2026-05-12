@@ -117,7 +117,6 @@ class _PPOLossMetrics:
     logratio_mean: torch.Tensor
     logratio_abs_max: torch.Tensor
     entropy_components: dict[str, torch.Tensor] = dataclass_field(default_factory=dict)
-    backward_loss: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -693,7 +692,7 @@ class PPOTrainer:
         entropy_components = _output_entropy_components(output, batch_old_logp)
         new_values = _output_values(output).view_as(batch_old_values)
 
-        metrics = self._ppo_loss(
+        metrics, backward_loss = self._ppo_loss(
             new_logp=new_logp,
             entropy=entropy,
             new_values=new_values,
@@ -718,9 +717,6 @@ class PPOTrainer:
             },
         )
         self.optimizer.zero_grad(set_to_none=True)
-        backward_loss = (
-            metrics.loss if metrics.backward_loss is None else metrics.backward_loss
-        )
         backward_loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(
             self.model.parameters(), self.config.max_grad_norm
@@ -819,7 +815,7 @@ class PPOTrainer:
 
 def _compile_ppo_loss(
     compile_mode: CompileMode | None,
-) -> Callable[..., _PPOLossMetrics]:
+) -> Callable[..., tuple[_PPOLossMetrics, torch.Tensor]]:
     if compile_mode is None:
         return _ppo_loss
     compiled_loss_components = torch.compile(_ppo_loss_components, mode=compile_mode)
@@ -837,7 +833,7 @@ def _compile_ppo_loss(
         value_weight: torch.Tensor,
         config: PPOConfig,
         context: DistributedContext | None = None,
-    ) -> _PPOLossMetrics:
+    ) -> tuple[_PPOLossMetrics, torch.Tensor]:
         return _ppo_loss(
             new_logp=new_logp,
             entropy=entropy,
@@ -870,7 +866,7 @@ def _ppo_loss(
     config: PPOConfig,
     context: DistributedContext | None = None,
     loss_components: Callable[..., tuple[torch.Tensor, ...]] | None = None,
-) -> _PPOLossMetrics:
+) -> tuple[_PPOLossMetrics, torch.Tensor]:
     if loss_components is None:
         loss_components = _ppo_loss_components
     return _ppo_loss_metrics_from_components(
@@ -901,7 +897,7 @@ def _ppo_loss_metrics_from_components(
     vf_coef: float,
     ent_coef: float,
     context: DistributedContext | None,
-) -> _PPOLossMetrics:
+) -> tuple[_PPOLossMetrics, torch.Tensor]:
     (
         policy_loss_values,
         value_loss_values,
@@ -954,24 +950,27 @@ def _local_ppo_loss_metrics(
     value_weight: torch.Tensor,
     vf_coef: float,
     ent_coef: float,
-) -> _PPOLossMetrics:
+) -> tuple[_PPOLossMetrics, torch.Tensor]:
     policy_loss = weighted_mean(policy_loss_values, policy_weight)
     value_loss = weighted_mean(value_loss_values, value_weight)
     entropy_mean = weighted_mean(entropy_values, policy_weight)
     loss = policy_loss + vf_coef * value_loss - ent_coef * entropy_mean
 
-    return _PPOLossMetrics(
-        loss=loss,
-        policy_loss=policy_loss,
-        value_loss=value_loss,
-        entropy_loss=-ent_coef * entropy_mean,
-        entropy=entropy_mean,
-        approx_kl=weighted_mean(approx_kl_values, policy_weight),
-        clipfrac=weighted_mean(clipfrac_values, policy_weight),
-        ratio_mean=weighted_mean(ratio, policy_weight),
-        ratio_max=_masked_max_or_zero(ratio, policy_weight > 0),
-        logratio_mean=weighted_mean(logratio, policy_weight),
-        logratio_abs_max=_masked_max_or_zero(logratio.abs(), policy_weight > 0),
+    return (
+        _PPOLossMetrics(
+            loss=loss,
+            policy_loss=policy_loss,
+            value_loss=value_loss,
+            entropy_loss=-ent_coef * entropy_mean,
+            entropy=entropy_mean,
+            approx_kl=weighted_mean(approx_kl_values, policy_weight),
+            clipfrac=weighted_mean(clipfrac_values, policy_weight),
+            ratio_mean=weighted_mean(ratio, policy_weight),
+            ratio_max=_masked_max_or_zero(ratio, policy_weight > 0),
+            logratio_mean=weighted_mean(logratio, policy_weight),
+            logratio_abs_max=_masked_max_or_zero(logratio.abs(), policy_weight > 0),
+        ),
+        loss,
     )
 
 
@@ -989,7 +988,7 @@ def _distributed_ppo_loss_metrics(
     vf_coef: float,
     ent_coef: float,
     context: DistributedContext,
-) -> _PPOLossMetrics:
+) -> tuple[_PPOLossMetrics, torch.Tensor]:
     policy_loss = _distributed_weighted_mean(
         policy_loss_values.detach(),
         policy_weight,
@@ -1027,39 +1026,45 @@ def _distributed_ppo_loss_metrics(
         - ent_coef * backward_entropy
     )
 
-    return _PPOLossMetrics(
-        loss=loss,
-        policy_loss=policy_loss,
-        value_loss=value_loss,
-        entropy_loss=-ent_coef * entropy_mean,
-        entropy=entropy_mean,
-        approx_kl=_distributed_weighted_mean(
-            approx_kl_values.detach(),
-            policy_weight,
-            context,
+    return (
+        _PPOLossMetrics(
+            loss=loss,
+            policy_loss=policy_loss,
+            value_loss=value_loss,
+            entropy_loss=-ent_coef * entropy_mean,
+            entropy=entropy_mean,
+            approx_kl=_distributed_weighted_mean(
+                approx_kl_values.detach(),
+                policy_weight,
+                context,
+            ),
+            clipfrac=_distributed_weighted_mean(
+                clipfrac_values,
+                policy_weight,
+                context,
+            ),
+            ratio_mean=_distributed_weighted_mean(
+                ratio.detach(),
+                policy_weight,
+                context,
+            ),
+            ratio_max=_distributed_masked_max_or_zero(
+                ratio.detach(),
+                policy_weight > 0,
+                context,
+            ),
+            logratio_mean=_distributed_weighted_mean(
+                logratio.detach(),
+                policy_weight,
+                context,
+            ),
+            logratio_abs_max=_distributed_masked_max_or_zero(
+                logratio.detach().abs(),
+                policy_weight > 0,
+                context,
+            ),
         ),
-        clipfrac=_distributed_weighted_mean(
-            clipfrac_values,
-            policy_weight,
-            context,
-        ),
-        ratio_mean=_distributed_weighted_mean(ratio.detach(), policy_weight, context),
-        ratio_max=_distributed_masked_max_or_zero(
-            ratio.detach(),
-            policy_weight > 0,
-            context,
-        ),
-        logratio_mean=_distributed_weighted_mean(
-            logratio.detach(),
-            policy_weight,
-            context,
-        ),
-        logratio_abs_max=_distributed_masked_max_or_zero(
-            logratio.detach().abs(),
-            policy_weight > 0,
-            context,
-        ),
-        backward_loss=backward_loss,
+        backward_loss,
     )
 
 

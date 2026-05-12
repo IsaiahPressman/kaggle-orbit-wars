@@ -1068,11 +1068,11 @@ def test_update_minibatch_normalizes_policy_advantages_only() -> None:
         value_weight: torch.Tensor,  # noqa: ARG001
         config: ppo.PPOConfig,  # noqa: ARG001
         context: ppo.DistributedContext | None = None,  # noqa: ARG001
-    ) -> ppo._PPOLossMetrics:
+    ) -> tuple[ppo._PPOLossMetrics, torch.Tensor]:
         seen["advantages"] = advantages.detach().clone()
         seen["returns"] = returns.detach().clone()
         loss = new_values.mean() + 0.0 * new_logp.mean() + 0.0 * policy_weight.mean()
-        return _zero_loss_metrics(loss)
+        return _zero_loss_metrics(loss), loss
 
     trainer._ppo_loss = fake_ppo_loss
     trainer._update_minibatch(
@@ -1163,11 +1163,14 @@ def test_update_minibatch_steps_before_target_kl_guard(
         value_weight: torch.Tensor,  # noqa: ARG001
         config: ppo.PPOConfig,  # noqa: ARG001
         context: ppo.DistributedContext | None = None,  # noqa: ARG001
-    ) -> ppo._PPOLossMetrics:
+    ) -> tuple[ppo._PPOLossMetrics, torch.Tensor]:
         loss = new_logp.sum()
-        return replace(
-            _zero_loss_metrics(loss),
-            approx_kl=loss.detach().new_tensor(0.02),
+        return (
+            replace(
+                _zero_loss_metrics(loss),
+                approx_kl=loss.detach().new_tensor(0.02),
+            ),
+            loss,
         )
 
     monkeypatch.setattr(trainer, "_ppo_loss", fake_ppo_loss)
