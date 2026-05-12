@@ -30,10 +30,8 @@ optimizer:
 rl:
   horizon: 128
   checkpoint_freq: 20_000_000
-  replay_ratio: 1.0
-  segment_sampling:
-    sampling: uniform
-    segments_per_minibatch: 16
+  ppo_epochs: 1
+  segments_per_minibatch: 16
   # gamma=1.0 keeps the critic softmax well-defined
   gamma: 1.0
   gae_lambda: 0.9
@@ -43,10 +41,7 @@ rl:
   ent_coef: 2e-5
   max_grad_norm: 1.0
   target_kl: 0.1
-  advantage_mode: gae
-  recompute_advantages_each_minibatch: false
   normalize_advantages: true
-  debug_validate_ppo_loss_inputs: false
   eval_replay_games: 8
   compile_mode: default
   dtype: bfloat16

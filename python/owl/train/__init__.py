@@ -1,8 +1,6 @@
 from .advantages import (
-    AdvantageMode,
     compute_advantages,
     compute_gae,
-    compute_puffer_vtrace_action_aligned,
 )
 from .config import FullConfig, RuntimeConfig
 from .distributed import (
@@ -41,24 +39,16 @@ from .ppo import (
     PPOTrainer,
     normalize_masked_advantages,
     ppo_loss,
-    validate_ppo_loss_inputs,
 )
 from .sampling import (
     SegmentSample,
-    SegmentSampling,
-    SegmentSamplingConfig,
-    SegmentSamplingMetrics,
-    sample_segments,
-    sample_segments_by_advantage,
     sample_segments_uniform,
     sample_segments_uniform_single_pass,
-    segment_sampling_metrics,
 )
 from .utils import TrainingDType, assert_finite, autocast_context, configure_torch
 
 __all__ = [
     "AdamWConfig",
-    "AdvantageMode",
     "CompileMode",
     "CompositeOptimizer",
     "DistributedContext",
@@ -78,9 +68,6 @@ __all__ = [
     "PPOTrainer",
     "RuntimeConfig",
     "SegmentSample",
-    "SegmentSampling",
-    "SegmentSamplingConfig",
-    "SegmentSamplingMetrics",
     "TrainingDType",
     "all_gather_object",
     "all_reduce_any",
@@ -91,7 +78,6 @@ __all__ = [
     "broadcast_object",
     "compute_advantages",
     "compute_gae",
-    "compute_puffer_vtrace_action_aligned",
     "configure_torch",
     "create_lr_scheduler",
     "create_optimizer",
@@ -100,12 +86,8 @@ __all__ = [
     "lr_multiplier",
     "normalize_masked_advantages",
     "ppo_loss",
-    "sample_segments",
-    "sample_segments_by_advantage",
     "sample_segments_uniform",
     "sample_segments_uniform_single_pass",
-    "segment_sampling_metrics",
     "unwrap_model",
-    "validate_ppo_loss_inputs",
     "wrap_model_for_distributed",
 ]

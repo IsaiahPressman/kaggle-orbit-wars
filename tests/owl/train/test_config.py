@@ -11,13 +11,15 @@ def test_ppo_config_validates_with_pydantic() -> None:
     config = PPOConfig.model_validate(
         {
             "horizon": 4,
-            "segment_sampling": {"segments_per_minibatch": 2},
+            "segments_per_minibatch": 2,
+            "ppo_epochs": 3,
             "gamma": 0.9,
         }
     )
 
     assert config.horizon == 4
-    assert config.segment_sampling.segments_per_minibatch == 2
+    assert config.segments_per_minibatch == 2
+    assert config.ppo_epochs == 3
     assert config.gamma == pytest.approx(0.9)
     assert config.checkpoint_freq is None
     assert config.eval_replay_games == 0
@@ -28,27 +30,13 @@ def test_ppo_config_validates_with_pydantic() -> None:
         PPOConfig(checkpoint_freq=999)
     with pytest.raises(ValueError, match="eval_replay_games must be even"):
         PPOConfig(eval_replay_games=1)
-    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-        PPOConfig(segments_per_minibatch=2)
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        PPOConfig(ppo_epochs=0)
 
     assert PPOConfig(dtype="bfloat16").dtype == "bfloat16"
-    assert (
-        PPOConfig(
-            recompute_advantages_each_minibatch=False
-        ).recompute_advantages_each_minibatch
-        is False
-    )
 
-
-def test_ppo_config_accepts_puffer_vtrace_mode() -> None:
-    assert PPOConfig(advantage_mode="puffer_vtrace").advantage_mode == "puffer_vtrace"
-
-
-def test_ppo_config_rejects_removed_vtrace_mode() -> None:
-    old_mode = "gae" + "_vtrace"
-
-    with pytest.raises(ValueError, match="Input should be 'gae' or 'puffer_vtrace'"):
-        PPOConfig(advantage_mode=old_mode)
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        PPOConfig(removed_field=True)
 
 
 def test_full_config_accepts_nested_discriminated_configs() -> None:
@@ -80,11 +68,7 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
             },
             "rl": {
                 "horizon": 4,
-                "segment_sampling": {
-                    "sampling": "advantage_priority",
-                    "segments_per_minibatch": 2,
-                    "prio_alpha": 0.5,
-                },
+                "segments_per_minibatch": 2,
             },
         }
     )
@@ -94,7 +78,7 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
     assert config.optimizer.learning_rate == pytest.approx(0.001)
     assert config.optimizer.lr_schedule is not None
     assert config.optimizer.lr_schedule.warmup_steps == 2
-    assert config.rl.segment_sampling.sampling == "advantage_priority"
+    assert config.rl.segments_per_minibatch == 2
     assert config.runtime.n_runtime_gpus == 1
 
 

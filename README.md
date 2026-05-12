@@ -66,9 +66,10 @@ uv run python -c 'from importlib import import_module; from pathlib import Path;
 Training presets live in `configs/`:
 
 - `baseline.yaml`: vanilla PPO with the 20m stateless transformer preset,
-  discrete-target actions, `max_entities=512`, larger rollout/minibatch sizing,
-  Muon/AdamW optimizer rates, periodic checkpoints every 20M environment steps,
-  `torch.compile` default mode, and bfloat16 autocast.
+  discrete-target actions, `max_entities=512`, one PPO epoch per rollout,
+  larger rollout/minibatch sizing, Muon/AdamW optimizer rates, periodic
+  checkpoints every 20M environment steps, `torch.compile` default mode, and
+  bfloat16 autocast.
 - `model/stateless_transformer_20m.yaml`: larger stateless transformer model
   config used by `baseline.yaml`, with an inline discrete-target actor override
   using eight action mixtures and `max_ship_normalizer=500.0`.
@@ -79,10 +80,12 @@ Fresh launches explicitly reset model parameters before optimizer construction;
 resume launches load checkpoint weights and optimizer state without resetting
 the model first.
 Training `EnvConfig.n_envs` must be even so periodic checkpoint evaluation can
-split evaluation games across 2-player and 4-player batches. In distributed PPO
-launches, `EnvConfig.n_envs`, rollout horizon, and minibatch segment width are
-per GPU. Checkpoint cadence, `--max-env-steps`, W&B step values, and
-`train/env_steps` are counted across all ranks.
+split evaluation games across 2-player and 4-player batches. PPO updates run
+`rl.ppo_epochs` full-shuffle passes over rollout segments, grouped by
+`rl.segments_per_minibatch`. In distributed PPO launches, `EnvConfig.n_envs`,
+rollout horizon, and minibatch segment width are per GPU. Checkpoint cadence,
+`--max-env-steps`, W&B step values, and `train/env_steps` are counted across all
+ranks.
 PPO supports `pure`, `discrete_targets`, and `discrete_target_bins` action specs
 when the `StatelessTransformerV1` actor discriminator matches the environment
 action spec. The current discrete-target actor requires
