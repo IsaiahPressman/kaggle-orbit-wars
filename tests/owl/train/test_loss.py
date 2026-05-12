@@ -1,5 +1,6 @@
 import torch
-from owl.train import PPOConfig, ppo_loss
+from owl.train import PPOConfig
+from owl.train.ppo import ppo_loss
 
 
 def test_ppo_loss_matches_clipped_objectives() -> None:

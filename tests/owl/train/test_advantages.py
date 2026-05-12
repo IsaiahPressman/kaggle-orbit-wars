@@ -1,7 +1,7 @@
 import owl.train.advantages as advantages_module
 import pytest
 import torch
-from owl.train import compute_gae
+from owl.train.advantages import compute_gae
 
 
 def test_compute_gae_matches_recurrence() -> None:

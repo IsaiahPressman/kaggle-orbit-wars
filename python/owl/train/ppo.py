@@ -31,11 +31,7 @@ from owl.rl import (
     PureActions,
     VectorizedEnv,
 )
-from owl.train.advantages import (
-    ComputeGAEFn,
-    compile_compute_gae,
-    compute_gae,
-)
+from owl.train.advantages import compile_compute_gae
 from owl.train.distributed import (
     DistributedContext,
     all_gather_object,
@@ -50,10 +46,6 @@ from owl.train.metrics import (
     weighted_mean,
 )
 from owl.train.optimizer import CompositeOptimizer, LRScheduler, Optimizer
-from owl.train.sampling import (
-    SegmentSample,
-    sample_segments_uniform_single_pass,
-)
 from owl.train.utils import (
     TrainingDType,
     autocast_context,
@@ -138,7 +130,6 @@ class PPOLossMetrics:
 class PPOUpdateResult:
     metrics: PPOLossMetrics
     indices: torch.Tensor
-    new_logp: torch.Tensor
     new_values: torch.Tensor
     grad_norm: torch.Tensor
     target_kl_exceeded: bool = False
@@ -381,7 +372,7 @@ class PPOTrainer:
         model_action_spec = getattr(model, "action_spec", None)
         if model_action_spec != env.action_spec:
             raise ValueError("model and env action_spec must match")
-        self._compute_gae = _compile_compute_gae(config.compile_mode)
+        self._compute_gae = compile_compute_gae(config.compile_mode)
         self._ppo_loss = _compile_ppo_loss(config.compile_mode)
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
@@ -443,7 +434,6 @@ class PPOTrainer:
             segments,
             advantages,
             returns,
-            last_values,
             policy_mask,
             value_mask,
         )
@@ -625,31 +615,29 @@ class PPOTrainer:
         segments: PPORolloutSegments,
         advantages: torch.Tensor,
         returns: torch.Tensor,
-        _bootstrap_values: torch.Tensor,
         policy_mask: torch.Tensor,
         value_mask: torch.Tensor,
     ) -> dict[str, float]:
         loss_metrics: list[PPOLossMetrics] = []
         grad_norms: list[torch.Tensor] = []
         current_values = segments.values.clone()
-        n_minibatches = _num_minibatches_per_update(self.config, self.n_envs)
-        sampled_segments = 0
-        target_kl_exceeded = False
-        update_samples = _update_samples(
+        update_samples = _minibatch_indices(
             config=self.config,
-            n_minibatches=n_minibatches,
             n_segments=self.n_envs,
             device=segments.logp.device,
         )
-        for sample in update_samples:
-            sampled_segments += int(sample.indices.numel())
+        n_minibatches = len(update_samples)
+        sampled_segments = 0
+        target_kl_exceeded = False
+        for sample_indices in update_samples:
+            sampled_segments += int(sample_indices.numel())
             update = self._update_minibatch(
                 segments,
                 advantages,
                 returns,
                 policy_mask,
                 value_mask,
-                sample,
+                sample_indices,
                 value_clip_anchor=current_values,
             )
             loss_metrics.append(update.metrics)
@@ -691,11 +679,11 @@ class PPOTrainer:
         returns: torch.Tensor,
         policy_mask: torch.Tensor,
         value_mask: torch.Tensor,
-        sample: SegmentSample,
+        indices: torch.Tensor,
         *,
         value_clip_anchor: torch.Tensor,
     ) -> PPOUpdateResult:
-        idx = sample.indices
+        idx = indices
         batch_actions = _flatten_actions_time(_actions_index(segments.actions, idx))
         batch_obs = _flatten_obs_time(_obs_index(segments.obs, idx))
         batch_old_logp = segments.logp[idx]
@@ -703,16 +691,12 @@ class PPOTrainer:
         batch_returns = returns[idx]
         batch_policy_mask = policy_mask[idx]
         batch_value_mask = value_mask[idx]
-        importance = sample.importance
-        while importance.ndim < advantages[idx].ndim:
-            importance = importance.unsqueeze(-1)
         batch_advantages = advantages[idx]
         if self.config.normalize_advantages:
-            batch_advantages = normalize_masked_advantages(
+            batch_advantages = _normalize_masked_advantages(
                 batch_advantages,
                 batch_policy_mask,
             )
-        batch_advantages = batch_advantages * importance
         batch_policy_weight = batch_policy_mask.to(dtype=batch_advantages.dtype)
         batch_value_weight = batch_value_mask.to(dtype=batch_advantages.dtype)
 
@@ -777,7 +761,6 @@ class PPOTrainer:
         return PPOUpdateResult(
             metrics=metrics,
             indices=idx,
-            new_logp=new_logp.detach(),
             new_values=new_values.detach(),
             grad_norm=grad_norm.detach(),
             target_kl_exceeded=target_kl_exceeded,
@@ -856,12 +839,6 @@ class PPOTrainer:
             key: float(value)
             for key, value in zip(keys, reduced.detach().cpu().tolist(), strict=True)
         }
-
-
-def _compile_compute_gae(compile_mode: CompileMode | None) -> ComputeGAEFn:
-    if compile_mode is None:
-        return compute_gae
-    return compile_compute_gae(compile_mode)
 
 
 def _compile_ppo_loss(compile_mode: CompileMode | None) -> PPOLossFn:
@@ -1615,30 +1592,16 @@ def _optional_flatten_tensor_time(tensor: torch.Tensor) -> torch.Tensor:
     return _flatten_tensor_time(tensor)
 
 
-def _num_minibatches_per_update(config: PPOConfig, n_envs: int) -> int:
-    return config.ppo_epochs * (
-        (n_envs + config.segments_per_minibatch - 1) // config.segments_per_minibatch
-    )
-
-
-def _update_samples(
+def _minibatch_indices(
     *,
     config: PPOConfig,
-    n_minibatches: int,
     n_segments: int,
     device: torch.device,
-) -> list[SegmentSample]:
-    samples: list[SegmentSample] = []
+) -> list[torch.Tensor]:
+    samples: list[torch.Tensor] = []
     for _epoch in range(config.ppo_epochs):
-        samples.extend(
-            sample_segments_uniform_single_pass(
-                n_segments=n_segments,
-                segments_per_minibatch=config.segments_per_minibatch,
-                device=device,
-            )
-        )
-    if len(samples) != n_minibatches:
-        raise RuntimeError("internal error: PPO update generated wrong minibatch count")
+        permutation = torch.randperm(n_segments, device=device)
+        samples.extend(permutation.split(config.segments_per_minibatch))
     return samples
 
 
@@ -1713,7 +1676,7 @@ def _distributed_explained_variance(
     return 1.0 - error_variance / target_variance
 
 
-def normalize_masked_advantages(
+def _normalize_masked_advantages(
     advantages: torch.Tensor,
     mask: torch.Tensor,
     eps: float = 1e-8,

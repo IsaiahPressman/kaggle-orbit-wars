@@ -1,9 +1,7 @@
 import pytest
 import torch
-from owl.train import (
-    assert_finite,
-    explained_variance,
-)
+from owl.train.metrics import explained_variance
+from owl.train.utils import assert_finite
 
 
 def test_explained_variance_returns_zero_for_constant_target() -> None:

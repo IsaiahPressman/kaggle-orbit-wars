@@ -1,6 +1,3 @@
-from .advantages import (
-    compute_gae,
-)
 from .config import FullConfig, RuntimeConfig
 from .distributed import (
     DistributedContext,
@@ -14,7 +11,6 @@ from .distributed import (
     unwrap_model,
     wrap_model_for_distributed,
 )
-from .metrics import explained_variance
 from .optimizer import (
     AdamWConfig,
     CompositeOptimizer,
@@ -32,18 +28,9 @@ from .ppo import (
     CompileMode,
     PPOCheckpointMetadata,
     PPOConfig,
-    PPOLossMetrics,
-    PPORolloutBuffer,
-    PPORolloutSegments,
     PPOTrainer,
-    normalize_masked_advantages,
-    ppo_loss,
 )
-from .sampling import (
-    SegmentSample,
-    sample_segments_uniform_single_pass,
-)
-from .utils import TrainingDType, assert_finite, autocast_context, configure_torch
+from .utils import TrainingDType, configure_torch
 
 __all__ = [
     "AdamWConfig",
@@ -60,30 +47,19 @@ __all__ = [
     "OptimizerName",
     "PPOCheckpointMetadata",
     "PPOConfig",
-    "PPOLossMetrics",
-    "PPORolloutBuffer",
-    "PPORolloutSegments",
     "PPOTrainer",
     "RuntimeConfig",
-    "SegmentSample",
     "TrainingDType",
     "all_gather_object",
     "all_reduce_any",
     "all_reduce_max",
     "all_reduce_sum",
-    "assert_finite",
-    "autocast_context",
     "broadcast_object",
-    "compute_gae",
     "configure_torch",
     "create_lr_scheduler",
     "create_optimizer",
     "distributed_session",
-    "explained_variance",
     "lr_multiplier",
-    "normalize_masked_advantages",
-    "ppo_loss",
-    "sample_segments_uniform_single_pass",
     "unwrap_model",
     "wrap_model_for_distributed",
 ]
