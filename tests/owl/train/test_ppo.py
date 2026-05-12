@@ -914,7 +914,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "optimizer/steps",
         "optimizer/learning_rate",
         "optimizer/minibatches_per_update",
-        "sampling/effective_replay_exposure",
+        "sampling/minibatch_exposure",
         "train/policy_active_ratio",
         "train/advantage_mean",
         "train/advantage_std",
@@ -1179,7 +1179,7 @@ def test_update_minibatch_steps_before_target_kl_guard(
     assert update.grad_norm.item() > 0.0
 
 
-def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
+def test_ppo_epoch_one_uses_shuffled_single_pass_minibatches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     torch.manual_seed(7)
@@ -1238,7 +1238,7 @@ def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
     assert metrics["optimizer/minibatches_per_update"] == pytest.approx(3.0)
     assert "optimizer/num_minibatches" not in metrics
     assert "optimizer/num_total_minibatches" not in metrics
-    assert metrics["sampling/effective_replay_exposure"] == pytest.approx(1.0)
+    assert metrics["sampling/minibatch_exposure"] == pytest.approx(1.0)
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(0.0)
 
 
@@ -1351,7 +1351,7 @@ def test_train_iteration_update_sps_uses_actual_segments_when_target_kl_stops_up
 
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(1.0)
     assert metrics["policy/target_kl_exceeded_total"] == pytest.approx(1.0)
-    assert metrics["sampling/effective_replay_exposure"] == pytest.approx(0.25)
+    assert metrics["sampling/minibatch_exposure"] == pytest.approx(0.25)
     assert metrics["perf/update_sps"] == pytest.approx(2.0)
 
 

@@ -45,10 +45,22 @@ from owl.train.metrics import (
     masked_std,
     weighted_mean,
 )
-from owl.train.optimizer import CompositeOptimizer, LRScheduler, Optimizer
+from owl.train.optimizer import (
+    CompositeOptimizer as _CompositeOptimizer,
+)
+from owl.train.optimizer import (
+    LRScheduler as _LRScheduler,
+)
+from owl.train.optimizer import (
+    Optimizer as _Optimizer,
+)
 from owl.train.utils import (
-    TrainingDType,
-    autocast_context,
+    TrainingDType as _TrainingDType,
+)
+from owl.train.utils import (
+    autocast_context as _autocast_context,
+)
+from owl.train.utils import (
     require_same_shape,
 )
 
@@ -82,7 +94,7 @@ class PPOConfig(BaseConfig):
     normalize_advantages: bool = False
     eval_replay_games: int = Field(default=0, ge=0)
     compile_mode: CompileMode | None = None
-    dtype: TrainingDType = "float32"
+    dtype: _TrainingDType = "float32"
 
     @field_validator("eval_replay_games")
     @classmethod
@@ -345,9 +357,9 @@ class PPOTrainer:
         config: PPOConfig,
         env: VectorizedEnv,
         model: BaseModelAPI,
-        optimizer: Optimizer,
+        optimizer: _Optimizer,
         device: torch.device,
-        lr_scheduler: LRScheduler | None = None,
+        lr_scheduler: _LRScheduler | None = None,
         distributed_context: DistributedContext | None = None,
     ) -> None:
         self.env = env
@@ -465,7 +477,7 @@ class PPOTrainer:
         rollout_elapsed = self._max_float(rollout_elapsed)
         update_elapsed = self._max_float(update_elapsed)
         rollout_steps = self.config.horizon * self.n_envs * self.world_size
-        update_steps = rollout_steps * metrics["sampling/effective_replay_exposure"]
+        update_steps = rollout_steps * metrics["sampling/minibatch_exposure"]
         metrics["time/rollout_seconds"] = float(rollout_elapsed)
         metrics["time/update_seconds"] = float(update_elapsed)
         metrics["time/iteration_seconds"] = float(elapsed)
@@ -517,11 +529,11 @@ class PPOTrainer:
             name="player_step_total",
         )
         total_games_played = _checkpoint_nonnegative_int(
-            checkpoint.get("total_games_played"),
+            checkpoint["total_games_played"],
             name="total_games_played",
         )
         target_kl_exceeded_total = _checkpoint_nonnegative_int(
-            checkpoint.get("target_kl_exceeded_total"),
+            checkpoint["target_kl_exceeded_total"],
             name="target_kl_exceeded_total",
         )
         wandb_run_id = _checkpoint_optional_str(
@@ -559,7 +571,7 @@ class PPOTrainer:
         env_metrics: dict[str, list[float]] = {}
         with torch.no_grad():
             for step in range(self.config.horizon):
-                with autocast_context(self.config, self.device):
+                with _autocast_context(self.config, self.device):
                     output = self.model(self._obs)
                 actions = _output_actions(output)
                 next_obs, rewards, dones, step_env_metrics = _step_env(
@@ -588,7 +600,7 @@ class PPOTrainer:
                     next_obs,
                     non_blocking=self._non_blocking_env_to_device,
                 )
-            with autocast_context(self.config, self.device):
+            with _autocast_context(self.config, self.device):
                 bootstrap = self.model(self._obs)
             self._last_env_metrics = env_metrics
             return _output_values(bootstrap).detach()
@@ -644,7 +656,7 @@ class PPOTrainer:
         )
         metrics["optimizer/steps"] = float(self.optimizer_steps)
         metrics["optimizer/minibatches_per_update"] = float(n_minibatches)
-        metrics["sampling/effective_replay_exposure"] = float(
+        metrics["sampling/minibatch_exposure"] = float(
             self._sum_int(torch.tensor(sampled_segments, device=self.device))
             / (self.n_envs * self.world_size)
         )
@@ -683,7 +695,7 @@ class PPOTrainer:
         batch_policy_weight = batch_policy_mask.to(dtype=batch_advantages.dtype)
         batch_value_weight = batch_value_mask.to(dtype=batch_advantages.dtype)
 
-        with autocast_context(self.config, self.device):
+        with _autocast_context(self.config, self.device):
             output = self.model.evaluate_actions(batch_obs, batch_actions)
         new_logp = _output_logp(output).view_as(batch_old_logp)
         entropy = _output_entropy(output, batch_old_logp)
@@ -1141,14 +1153,14 @@ def _copy_action_mask_time_step(dst: ActionMask, step: int, src: ActionMask) -> 
 
 
 def _action_mask_segment_major(action_mask: ActionMask) -> ActionMask:
-    return _map_action_mask(action_mask, _optional_obs_segment_major)
+    return _map_action_mask(
+        action_mask,
+        lambda tensor: tensor.transpose(0, 1).contiguous(),
+    )
 
 
 def _action_mask_index(action_mask: ActionMask, idx: torch.Tensor) -> ActionMask:
-    return _map_action_mask(
-        action_mask,
-        lambda tensor: _optional_obs_index(tensor, idx),
-    )
+    return _map_action_mask(action_mask, lambda tensor: tensor[idx])
 
 
 def _action_mask_to_device(
@@ -1184,7 +1196,7 @@ def _copy_action_mask_to_device_(
 
 
 def _action_mask_flatten_time(action_mask: ActionMask) -> ActionMask:
-    return _map_action_mask(action_mask, _optional_flatten_tensor_time)
+    return _map_action_mask(action_mask, _flatten_tensor_time)
 
 
 def _map_action_mask(
@@ -1247,7 +1259,7 @@ def _copy_actions_time_step(dst: ActionBundle, step: int, src: ActionBundle) -> 
 def _obs_segment_major(obs: ObsBatch) -> ObsBatch:
     return ObsBatch(
         **{
-            field: _optional_obs_segment_major(getattr(obs, field))
+            field: getattr(obs, field).transpose(0, 1).contiguous()
             for field in _OBS_TENSOR_FIELDS
         },
         action_mask=_action_mask_segment_major(obs.action_mask),
@@ -1255,24 +1267,21 @@ def _obs_segment_major(obs: ObsBatch) -> ObsBatch:
 
 
 def _actions_segment_major(actions: ActionBundle) -> ActionBundle:
-    return _map_action_bundle(actions, _optional_actions_segment_major)
+    return _map_action_bundle(
+        actions,
+        lambda tensor: tensor.transpose(0, 1).contiguous(),
+    )
 
 
 def _obs_index(obs: ObsBatch, idx: torch.Tensor) -> ObsBatch:
     return ObsBatch(
-        **{
-            field: _optional_obs_index(getattr(obs, field), idx)
-            for field in _OBS_TENSOR_FIELDS
-        },
+        **{field: getattr(obs, field)[idx] for field in _OBS_TENSOR_FIELDS},
         action_mask=_action_mask_index(obs.action_mask, idx),
     )
 
 
 def _actions_index(actions: ActionBundle, idx: torch.Tensor) -> ActionBundle:
-    return _map_action_bundle(
-        actions,
-        lambda tensor: _optional_actions_index(tensor, idx),
-    )
+    return _map_action_bundle(actions, lambda tensor: tensor[idx])
 
 
 def _obs_to_device(
@@ -1297,11 +1306,7 @@ def _obs_to_device(
 
     return ObsBatch(
         **{
-            field: _optional_obs_to_device(
-                getattr(obs, field),
-                device,
-                non_blocking=non_blocking,
-            )
+            field: getattr(obs, field).to(device, non_blocking=non_blocking)
             for field in _OBS_TENSOR_FIELDS
         },
         action_mask=_action_mask_to_device(
@@ -1337,7 +1342,7 @@ def _actions_to_cpu(
 ) -> ActionBundle:
     return _map_action_bundle(
         actions,
-        lambda tensor: _optional_actions_to_cpu(tensor, non_blocking=non_blocking),
+        lambda tensor: tensor.to("cpu", non_blocking=non_blocking),
     )
 
 
@@ -1348,7 +1353,7 @@ def _flatten_tensor_time(tensor: torch.Tensor) -> torch.Tensor:
 def _flatten_obs_time(obs: ObsBatch) -> ObsBatch:
     return ObsBatch(
         **{
-            field: _optional_flatten_tensor_time(getattr(obs, field))
+            field: _flatten_tensor_time(getattr(obs, field))
             for field in _OBS_TENSOR_FIELDS
         },
         action_mask=_action_mask_flatten_time(obs.action_mask),
@@ -1356,7 +1361,7 @@ def _flatten_obs_time(obs: ObsBatch) -> ObsBatch:
 
 
 def _flatten_actions_time(actions: ActionBundle) -> ActionBundle:
-    return _map_action_bundle(actions, _optional_flatten_tensor_time)
+    return _map_action_bundle(actions, _flatten_tensor_time)
 
 
 def _step_env(
@@ -1447,12 +1452,12 @@ def _masked_reward_max(rewards: torch.Tensor, value_mask: torch.Tensor) -> torch
 
 
 def _current_learning_rate(
-    optimizer: Optimizer,
-    lr_scheduler: LRScheduler | None,
+    optimizer: _Optimizer,
+    lr_scheduler: _LRScheduler | None,
 ) -> float:
     if lr_scheduler is not None:
         return float(lr_scheduler.get_last_lr()[0])
-    if isinstance(optimizer, CompositeOptimizer):
+    if isinstance(optimizer, _CompositeOptimizer):
         return _torch_optimizer_learning_rate(optimizer.optimizers[0])
     if isinstance(optimizer, torch.optim.Optimizer):
         return _torch_optimizer_learning_rate(optimizer)
@@ -1528,49 +1533,6 @@ def _output_values(output: ModelOutput | ModelEvaluation) -> torch.Tensor:
 def _policy_mask(obs: ObsBatch) -> torch.Tensor:
     can_act = obs.action_mask.can_act.flatten(start_dim=3).any(dim=-1)
     return obs.still_playing & can_act
-
-
-def _optional_obs_segment_major(tensor: torch.Tensor) -> torch.Tensor:
-    return tensor.transpose(0, 1).contiguous()
-
-
-def _optional_obs_index(
-    tensor: torch.Tensor,
-    idx: torch.Tensor,
-) -> torch.Tensor:
-    return tensor[idx]
-
-
-def _optional_obs_to_device(
-    tensor: torch.Tensor,
-    device: torch.device,
-    *,
-    non_blocking: bool,
-) -> torch.Tensor:
-    return tensor.to(device, non_blocking=non_blocking)
-
-
-def _optional_actions_segment_major(tensor: torch.Tensor) -> torch.Tensor:
-    return tensor.transpose(0, 1).contiguous()
-
-
-def _optional_actions_index(
-    tensor: torch.Tensor,
-    idx: torch.Tensor,
-) -> torch.Tensor:
-    return tensor[idx]
-
-
-def _optional_actions_to_cpu(
-    tensor: torch.Tensor,
-    *,
-    non_blocking: bool,
-) -> torch.Tensor:
-    return tensor.to("cpu", non_blocking=non_blocking)
-
-
-def _optional_flatten_tensor_time(tensor: torch.Tensor) -> torch.Tensor:
-    return _flatten_tensor_time(tensor)
 
 
 def _minibatch_indices(

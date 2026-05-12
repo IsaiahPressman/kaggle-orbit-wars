@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 import torch
-from owl.train import FullConfig, PPOConfig, ppo
+from owl.train import FullConfig, PPOConfig
+from owl.train.utils import autocast_context
 
 _REPO_ROOT = Path(__file__).parents[3]
 
@@ -297,8 +298,8 @@ def test_training_config_files_load(config_path: Path) -> None:
 
 
 def test_autocast_context_respects_dtype_config() -> None:
-    with ppo.autocast_context(PPOConfig(dtype="float32"), torch.device("cpu")):
+    with autocast_context(PPOConfig(dtype="float32"), torch.device("cpu")):
         assert not torch.is_autocast_enabled("cpu")
 
-    with ppo.autocast_context(PPOConfig(dtype="bfloat16"), torch.device("cpu")):
+    with autocast_context(PPOConfig(dtype="bfloat16"), torch.device("cpu")):
         assert torch.is_autocast_enabled("cpu")

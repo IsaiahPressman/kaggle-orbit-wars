@@ -31,7 +31,7 @@ from owl.rl import (
     VectorizedEnv,
 )
 from owl.rs import assert_release_build
-from owl.train import FullConfig, PPOCheckpointMetadata, PPOTrainer, configure_torch
+from owl.train import FullConfig, PPOTrainer, configure_torch
 from owl.train.distributed import (
     DistributedContext,
     all_reduce_any,
@@ -45,7 +45,7 @@ from owl.train.optimizer import (
     create_lr_scheduler,
     create_optimizer,
 )
-from owl.train.ppo import _mean_env_metrics
+from owl.train.ppo import PPOCheckpointMetadata, _mean_env_metrics
 from owl.train.utils import DTypeConfig, autocast_context
 from tqdm import tqdm
 
