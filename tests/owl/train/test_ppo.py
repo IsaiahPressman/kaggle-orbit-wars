@@ -1067,6 +1067,7 @@ def test_update_minibatch_normalizes_policy_advantages_only() -> None:
         policy_weight: torch.Tensor,
         value_weight: torch.Tensor,  # noqa: ARG001
         config: ppo.PPOConfig,  # noqa: ARG001
+        context: ppo.DistributedContext | None = None,  # noqa: ARG001
     ) -> ppo._PPOLossMetrics:
         seen["advantages"] = advantages.detach().clone()
         seen["returns"] = returns.detach().clone()
@@ -1161,6 +1162,7 @@ def test_update_minibatch_steps_before_target_kl_guard(
         policy_weight: torch.Tensor,  # noqa: ARG001
         value_weight: torch.Tensor,  # noqa: ARG001
         config: ppo.PPOConfig,  # noqa: ARG001
+        context: ppo.DistributedContext | None = None,  # noqa: ARG001
     ) -> ppo._PPOLossMetrics:
         loss = new_logp.sum()
         return replace(
@@ -1405,7 +1407,7 @@ def test_trainer_compile_mode_compiles_only_tensor_helpers(
 
     assert calls == [
         ("_compute_gae_tensors", "default"),
-        ("_ppo_loss_tensors", "default"),
+        ("_ppo_loss_components", "default"),
     ]
 
 

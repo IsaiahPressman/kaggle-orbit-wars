@@ -1,3 +1,7 @@
+from math import prod
+
+import owl.train.ppo as ppo
+import pytest
 import torch
 from owl.train import PPOConfig
 from owl.train.ppo import _ppo_loss
@@ -159,3 +163,56 @@ def test_ppo_loss_handles_all_policy_invalid_minibatch() -> None:
     assert torch.allclose(metrics.policy_loss, torch.tensor(0.0))
     assert torch.allclose(metrics.value_loss, torch.tensor(0.5))
     assert torch.allclose(metrics.ratio_max, torch.tensor(0.0))
+
+
+def test_distributed_ppo_loss_only_reduces_scalar_summaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=True,
+    )
+    reduced_shapes: list[tuple[int, ...]] = []
+
+    def fake_all_reduce_sum(
+        tensor: torch.Tensor,
+        _context: ppo.DistributedContext,
+    ) -> torch.Tensor:
+        assert _context is context
+        reduced_shapes.append(tuple(tensor.shape))
+        return tensor.clone()
+
+    def fake_all_reduce_max(
+        tensor: torch.Tensor,
+        _context: ppo.DistributedContext,
+    ) -> torch.Tensor:
+        assert _context is context
+        reduced_shapes.append(tuple(tensor.shape))
+        return tensor.clone()
+
+    monkeypatch.setattr(ppo, "all_reduce_sum", fake_all_reduce_sum)
+    monkeypatch.setattr(ppo, "all_reduce_max", fake_all_reduce_max)
+    shape = (2, 3)
+    new_logp = torch.zeros(shape, requires_grad=True)
+
+    metrics = _ppo_loss(
+        new_logp=new_logp,
+        entropy=torch.ones(shape),
+        new_values=torch.zeros(shape, requires_grad=True),
+        old_logp=torch.zeros(shape),
+        old_values=torch.zeros(shape),
+        returns=torch.ones(shape),
+        advantages=torch.ones(shape),
+        policy_weight=torch.ones(shape),
+        value_weight=torch.ones(shape),
+        config=PPOConfig(),
+        context=context,
+    )
+
+    assert metrics.backward_loss is not None
+    metrics.backward_loss.backward()
+    assert reduced_shapes
+    assert all(prod(shape) <= 2 for shape in reduced_shapes)
