@@ -199,19 +199,12 @@ def _run_training_session(
     env_steps_per_iteration: int,
     max_env_steps: int | None,
     max_runtime_seconds: float | None,
-    distributed: DistributedContext | None = None,
+    distributed: DistributedContext,
     start_env_steps: int = 0,
     resume_run_id: str | None = None,
     last_best_model: BaseModelAPI | None = None,
     trainable_parameters: int | None = None,
 ) -> None:
-    distributed = distributed or DistributedContext(
-        device=trainer.device,
-        rank=0,
-        local_rank=0,
-        world_size=1,
-        initialized=False,
-    )
     if not distributed.is_main_process:
         _run_training_session_worker(
             trainer=trainer,

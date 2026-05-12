@@ -124,7 +124,7 @@ class TinyOrbitEnv:
     def step(
         self,
         actions: ActionBundle,
-    ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor]:
+    ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
         if not isinstance(actions, PureActions):
             raise TypeError("TinyOrbitEnv requires PureActions")
         active = self._still_playing()
@@ -135,7 +135,7 @@ class TinyOrbitEnv:
         done = self._steps >= self.episode_length
         self._steps[done] = 0
         dones = done[:, None].expand(-1, 4) | ~active
-        return self._obs(), reward, dones
+        return self._obs(), reward, dones, {}
 
     def _obs(self) -> ObsBatch:
         obs = _obs_batch(n_envs=self.n_envs, obs_spec=self.obs_spec)
@@ -161,7 +161,7 @@ class TinyOrbitEnvWithMetrics(TinyOrbitEnv):
         self,
         actions: ActionBundle,
     ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
-        obs, rewards, dones = super().step(actions)
+        obs, rewards, dones, _metrics = super().step(actions)
         games_played = float(dones[:, 0].sum().item())
         return obs, rewards, dones, {"total_games_played": [games_played]}
 
@@ -180,7 +180,7 @@ class TinyDiscreteTargetEnv:
     def step(
         self,
         actions: ActionBundle,
-    ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor]:
+    ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
         if not isinstance(actions, DiscreteTargetActions):
             raise TypeError("TinyDiscreteTargetEnv requires DiscreteTargetActions")
         assert actions.target.dtype == torch.int64
@@ -192,7 +192,7 @@ class TinyDiscreteTargetEnv:
             0,
         ].to(torch.float32)
         dones = torch.zeros((self.n_envs, 4), dtype=torch.bool)
-        return self._obs(), rewards, dones
+        return self._obs(), rewards, dones, {}
 
     def _obs(self) -> ObsBatch:
         obs = _discrete_obs_batch(n_envs=self.n_envs, obs_spec=self.obs_spec)
@@ -478,8 +478,8 @@ class FixedEvaluationModel(BaseModelAPI):
         return ()
 
 
-def _zero_loss_metrics(zero: torch.Tensor) -> ppo.PPOLossMetrics:
-    return ppo.PPOLossMetrics(
+def _zero_loss_metrics(zero: torch.Tensor) -> ppo._PPOLossMetrics:
+    return ppo._PPOLossMetrics(
         loss=zero,
         policy_loss=zero,
         value_loss=zero,
@@ -497,7 +497,7 @@ def _zero_loss_metrics(zero: torch.Tensor) -> ppo.PPOLossMetrics:
 def test_rollout_buffer_collects_time_major_and_returns_contiguous_segments() -> None:
     obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 1)
     action_spec = ActionPureConfig()
-    buffer = ppo.PPORolloutBuffer(
+    buffer = ppo._PPORolloutBuffer(
         horizon=3,
         n_envs=2,
         obs_spec=obs_spec,
@@ -825,7 +825,7 @@ def test_trainer_sets_static_env_transfer_policy(
             pass
 
     monkeypatch.setattr(ppo, "_obs_to_device", fake_obs_to_device)
-    monkeypatch.setattr(ppo, "PPORolloutBuffer", FakeRolloutBuffer)
+    monkeypatch.setattr(ppo, "_PPORolloutBuffer", FakeRolloutBuffer)
 
     trainer = ppo.PPOTrainer(
         env=env,
@@ -1061,7 +1061,7 @@ def test_update_minibatch_normalizes_policy_advantages_only() -> None:
         policy_weight: torch.Tensor,
         value_weight: torch.Tensor,  # noqa: ARG001
         config: ppo.PPOConfig,  # noqa: ARG001
-    ) -> ppo.PPOLossMetrics:
+    ) -> ppo._PPOLossMetrics:
         seen["advantages"] = advantages.detach().clone()
         seen["returns"] = returns.detach().clone()
         loss = new_values.mean() + 0.0 * new_logp.mean() + 0.0 * policy_weight.mean()
@@ -1102,7 +1102,7 @@ def test_update_minibatch_value_clipping_uses_current_value_anchor() -> None:
     )
     trainer._collect_rollout()
     rollout_segments = trainer.rollout.segment_major()
-    segments = ppo.PPORolloutSegments(
+    segments = ppo._PPORolloutSegments(
         obs=rollout_segments.obs,
         actions=rollout_segments.actions,
         logp=torch.zeros_like(rollout_segments.logp),
@@ -1155,7 +1155,7 @@ def test_update_minibatch_steps_before_target_kl_guard(
         policy_weight: torch.Tensor,  # noqa: ARG001
         value_weight: torch.Tensor,  # noqa: ARG001
         config: ppo.PPOConfig,  # noqa: ARG001
-    ) -> ppo.PPOLossMetrics:
+    ) -> ppo._PPOLossMetrics:
         loss = new_logp.sum()
         return replace(
             _zero_loss_metrics(loss),
@@ -1204,7 +1204,7 @@ def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
     seen: list[torch.Tensor] = []
 
     def fake_update_minibatch(
-        segments: ppo.PPORolloutSegments,
+        segments: ppo._PPORolloutSegments,
         advantages: torch.Tensor,  # noqa: ARG001
         returns: torch.Tensor,  # noqa: ARG001
         policy_mask: torch.Tensor,  # noqa: ARG001
@@ -1212,10 +1212,10 @@ def test_uniform_replay_one_uses_shuffled_single_pass_minibatches(
         indices: torch.Tensor,
         *,
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
-    ) -> ppo.PPOUpdateResult:
+    ) -> ppo._PPOUpdateResult:
         seen.append(indices.detach().clone())
         zero = segments.logp.new_zeros(())
-        return ppo.PPOUpdateResult(
+        return ppo._PPOUpdateResult(
             metrics=_zero_loss_metrics(zero),
             indices=indices,
             new_values=segments.values[indices],
@@ -1268,7 +1268,7 @@ def test_update_reports_target_kl_guard_when_exceeded(
     update_calls = 0
 
     def fake_update_minibatch(
-        segments: ppo.PPORolloutSegments,
+        segments: ppo._PPORolloutSegments,
         advantages: torch.Tensor,  # noqa: ARG001
         returns: torch.Tensor,  # noqa: ARG001
         policy_mask: torch.Tensor,  # noqa: ARG001
@@ -1276,12 +1276,12 @@ def test_update_reports_target_kl_guard_when_exceeded(
         indices: torch.Tensor,
         *,
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
-    ) -> ppo.PPOUpdateResult:
+    ) -> ppo._PPOUpdateResult:
         nonlocal update_calls
         update_calls += 1
         zero = segments.logp.new_zeros(())
         metrics = replace(_zero_loss_metrics(zero), approx_kl=zero + 0.02)
-        return ppo.PPOUpdateResult(
+        return ppo._PPOUpdateResult(
             metrics=metrics,
             indices=indices,
             new_values=segments.values[indices],
@@ -1324,7 +1324,7 @@ def test_train_iteration_update_sps_uses_actual_segments_when_target_kl_stops_up
     )
 
     def fake_update_minibatch(
-        segments: ppo.PPORolloutSegments,
+        segments: ppo._PPORolloutSegments,
         advantages: torch.Tensor,  # noqa: ARG001
         returns: torch.Tensor,  # noqa: ARG001
         policy_mask: torch.Tensor,  # noqa: ARG001
@@ -1332,10 +1332,10 @@ def test_train_iteration_update_sps_uses_actual_segments_when_target_kl_stops_up
         indices: torch.Tensor,
         *,
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
-    ) -> ppo.PPOUpdateResult:
+    ) -> ppo._PPOUpdateResult:
         zero = segments.logp.new_zeros(())
         metrics = replace(_zero_loss_metrics(zero), approx_kl=zero + 0.02)
-        return ppo.PPOUpdateResult(
+        return ppo._PPOUpdateResult(
             metrics=metrics,
             indices=indices,
             new_values=segments.values[indices],
@@ -1431,7 +1431,7 @@ def test_trainer_overwrites_dones_when_envs_terminate_inside_rollout() -> None:
 def test_discrete_target_rollout_buffer_and_policy_mask() -> None:
     obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
     action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
-    buffer = ppo.PPORolloutBuffer(
+    buffer = ppo._PPORolloutBuffer(
         horizon=2,
         n_envs=3,
         obs_spec=obs_spec,
@@ -1478,7 +1478,7 @@ def test_discrete_target_rollout_buffer_and_policy_mask() -> None:
 def test_discrete_target_bin_rollout_buffer_and_policy_mask() -> None:
     obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
     action_spec = ActionDiscreteTargetBinsConfig(n_bins=7)
-    buffer = ppo.PPORolloutBuffer(
+    buffer = ppo._PPORolloutBuffer(
         horizon=2,
         n_envs=3,
         obs_spec=obs_spec,

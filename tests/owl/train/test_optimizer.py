@@ -15,8 +15,8 @@ from owl.train import (
     MuonConfig,
     create_lr_scheduler,
     create_optimizer,
-    lr_multiplier,
 )
+from owl.train.optimizer import lr_multiplier
 from torch import nn
 
 

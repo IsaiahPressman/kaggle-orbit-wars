@@ -1,6 +1,6 @@
 import torch
 from owl.train import PPOConfig
-from owl.train.ppo import ppo_loss
+from owl.train.ppo import _ppo_loss
 
 
 def test_ppo_loss_matches_clipped_objectives() -> None:
@@ -12,7 +12,7 @@ def test_ppo_loss_matches_clipped_objectives() -> None:
     advantages = torch.tensor([[1.0, -1.0]])
     entropy = torch.tensor([[0.2, 0.4]])
 
-    metrics = ppo_loss(
+    metrics = _ppo_loss(
         new_logp=new_logp,
         entropy=entropy,
         new_values=new_values,
@@ -66,7 +66,7 @@ def test_ppo_loss_uses_policy_and_value_weights_separately() -> None:
     policy_weight = torch.tensor([[1.0, 0.0]])
     value_weight = torch.ones_like(policy_weight)
 
-    metrics = ppo_loss(
+    metrics = _ppo_loss(
         new_logp=new_logp,
         entropy=entropy,
         new_values=new_values,
@@ -106,7 +106,7 @@ def test_ppo_loss_uses_raw_advantages() -> None:
     entropy = torch.zeros((1, 3))
     policy_weight = torch.tensor([[1.0, 1.0, 0.0]])
 
-    metrics = ppo_loss(
+    metrics = _ppo_loss(
         new_logp=new_logp,
         entropy=entropy,
         new_values=values,
@@ -131,7 +131,7 @@ def test_ppo_loss_uses_raw_advantages() -> None:
 def test_ppo_loss_handles_all_policy_invalid_minibatch() -> None:
     shape = (1, 2)
     policy_weight = torch.zeros(shape)
-    metrics = ppo_loss(
+    metrics = _ppo_loss(
         new_logp=torch.zeros(shape),
         entropy=torch.ones(shape),
         new_values=torch.zeros(shape),

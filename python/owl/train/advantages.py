@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol
+from collections.abc import Callable
 
 import torch
 
@@ -10,19 +10,6 @@ from owl.train.utils import (
     require_same_shape,
     require_segment_time_major,
 )
-
-
-class ComputeGAEFn(Protocol):
-    def __call__(
-        self,
-        *,
-        rewards: torch.Tensor,
-        values: torch.Tensor,
-        dones: torch.Tensor,
-        last_values: torch.Tensor,
-        gamma: float,
-        gae_lambda: float,
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 
 def compute_gae(
@@ -52,7 +39,9 @@ def compute_gae(
     )
 
 
-def compile_compute_gae(compile_mode: str | None) -> ComputeGAEFn:
+def compile_compute_gae(
+    compile_mode: str | None,
+) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
     if compile_mode is None:
         return compute_gae
     compiled_compute_gae_tensors = torch.compile(

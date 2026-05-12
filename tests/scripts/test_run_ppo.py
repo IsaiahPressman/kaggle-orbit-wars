@@ -770,6 +770,7 @@ def test_run_training_session_sets_trainable_parameter_summary(
         env_steps_per_iteration=8,
         max_env_steps=8,
         max_runtime_seconds=None,
+        distributed=DistributedContext.single_process_cpu(),
         start_env_steps=16,
         trainable_parameters=123,
     )
@@ -837,6 +838,7 @@ def test_run_training_session_closes_logger_and_skips_final_checkpoint_on_error(
             env_steps_per_iteration=8,
             max_env_steps=8,
             max_runtime_seconds=None,
+            distributed=DistributedContext.single_process_cpu(),
         )
 
     assert logger.closed

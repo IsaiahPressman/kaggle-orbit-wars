@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Literal, Protocol, cast
+from typing import Literal, cast
 
 import torch
 from pydantic import Field, field_validator
@@ -92,25 +92,8 @@ class PPOConfig(BaseConfig):
         return value
 
 
-class PPOLossFn(Protocol):
-    def __call__(
-        self,
-        *,
-        new_logp: torch.Tensor,
-        entropy: torch.Tensor,
-        new_values: torch.Tensor,
-        old_logp: torch.Tensor,
-        old_values: torch.Tensor,
-        returns: torch.Tensor,
-        advantages: torch.Tensor,
-        policy_weight: torch.Tensor,
-        value_weight: torch.Tensor,
-        config: PPOConfig,
-    ) -> PPOLossMetrics: ...
-
-
 @dataclass(frozen=True)
-class PPOLossMetrics:
+class _PPOLossMetrics:
     loss: torch.Tensor
     policy_loss: torch.Tensor
     value_loss: torch.Tensor
@@ -127,8 +110,8 @@ class PPOLossMetrics:
 
 
 @dataclass(frozen=True)
-class PPOUpdateResult:
-    metrics: PPOLossMetrics
+class _PPOUpdateResult:
+    metrics: _PPOLossMetrics
     indices: torch.Tensor
     new_values: torch.Tensor
     grad_norm: torch.Tensor
@@ -136,7 +119,7 @@ class PPOUpdateResult:
 
 
 @dataclass(frozen=True)
-class PPORolloutSegments:
+class _PPORolloutSegments:
     """Rollout tensors converted from collection layout [T, N, ...] to [N, T, ...]."""
 
     obs: ObsBatch
@@ -157,7 +140,7 @@ class PPOCheckpointMetadata:
     wandb_run_id: str | None
 
 
-class PPORolloutBuffer:
+class _PPORolloutBuffer:
     """Collect rollouts in time-major layout [T, N, ...]."""
 
     def __init__(
@@ -343,9 +326,9 @@ class PPORolloutBuffer:
         self.rewards[step].copy_(rewards)
         self.dones[step].copy_(dones)
 
-    def segment_major(self) -> PPORolloutSegments:
+    def segment_major(self) -> _PPORolloutSegments:
         """Return contiguous segment-major/time-second rollout tensors [N, T, ...]."""
-        return PPORolloutSegments(
+        return _PPORolloutSegments(
             obs=_obs_segment_major(self.obs),
             actions=_actions_segment_major(self.actions),
             logp=self.logp.transpose(0, 1).contiguous(),
@@ -398,7 +381,7 @@ class PPOTrainer:
             device,
             non_blocking=self._non_blocking_env_to_device,
         )
-        self.rollout = PPORolloutBuffer(
+        self.rollout = _PPORolloutBuffer(
             horizon=config.horizon,
             n_envs=env.n_envs,
             obs_spec=env.obs_spec,
@@ -612,13 +595,13 @@ class PPOTrainer:
 
     def _update(
         self,
-        segments: PPORolloutSegments,
+        segments: _PPORolloutSegments,
         advantages: torch.Tensor,
         returns: torch.Tensor,
         policy_mask: torch.Tensor,
         value_mask: torch.Tensor,
     ) -> dict[str, float]:
-        loss_metrics: list[PPOLossMetrics] = []
+        loss_metrics: list[_PPOLossMetrics] = []
         grad_norms: list[torch.Tensor] = []
         current_values = segments.values.clone()
         update_samples = _minibatch_indices(
@@ -674,7 +657,7 @@ class PPOTrainer:
 
     def _update_minibatch(
         self,
-        segments: PPORolloutSegments,
+        segments: _PPORolloutSegments,
         advantages: torch.Tensor,
         returns: torch.Tensor,
         policy_mask: torch.Tensor,
@@ -682,7 +665,7 @@ class PPOTrainer:
         indices: torch.Tensor,
         *,
         value_clip_anchor: torch.Tensor,
-    ) -> PPOUpdateResult:
+    ) -> _PPOUpdateResult:
         idx = indices
         batch_actions = _flatten_actions_time(_actions_index(segments.actions, idx))
         batch_obs = _flatten_obs_time(_obs_index(segments.obs, idx))
@@ -708,7 +691,7 @@ class PPOTrainer:
         new_values = _output_values(output).view_as(batch_old_values)
 
         if self.distributed_context.initialized:
-            metrics = distributed_ppo_loss(
+            metrics = _distributed_ppo_loss(
                 new_logp=new_logp,
                 entropy=entropy,
                 new_values=new_values,
@@ -758,7 +741,7 @@ class PPOTrainer:
             and metrics.approx_kl.item() > self.config.target_kl
         )
 
-        return PPOUpdateResult(
+        return _PPOUpdateResult(
             metrics=metrics,
             indices=idx,
             new_values=new_values.detach(),
@@ -841,9 +824,11 @@ class PPOTrainer:
         }
 
 
-def _compile_ppo_loss(compile_mode: CompileMode | None) -> PPOLossFn:
+def _compile_ppo_loss(
+    compile_mode: CompileMode | None,
+) -> Callable[..., _PPOLossMetrics]:
     if compile_mode is None:
-        return ppo_loss
+        return _ppo_loss
     compiled_tensor_loss = torch.compile(_ppo_loss_tensors, mode=compile_mode)
 
     def compiled_ppo_loss(
@@ -858,7 +843,7 @@ def _compile_ppo_loss(compile_mode: CompileMode | None) -> PPOLossFn:
         policy_weight: torch.Tensor,
         value_weight: torch.Tensor,
         config: PPOConfig,
-    ) -> PPOLossMetrics:
+    ) -> _PPOLossMetrics:
         return _ppo_loss_metrics_from_tuple(
             compiled_tensor_loss(
                 new_logp,
@@ -880,7 +865,7 @@ def _compile_ppo_loss(compile_mode: CompileMode | None) -> PPOLossFn:
     return compiled_ppo_loss
 
 
-def ppo_loss(
+def _ppo_loss(
     *,
     new_logp: torch.Tensor,
     entropy: torch.Tensor,
@@ -892,7 +877,7 @@ def ppo_loss(
     policy_weight: torch.Tensor,
     value_weight: torch.Tensor,
     config: PPOConfig,
-) -> PPOLossMetrics:
+) -> _PPOLossMetrics:
     return _ppo_loss_metrics_from_tuple(
         _ppo_loss_tensors(
             new_logp,
@@ -912,7 +897,7 @@ def ppo_loss(
     )
 
 
-def distributed_ppo_loss(
+def _distributed_ppo_loss(
     *,
     new_logp: torch.Tensor,
     entropy: torch.Tensor,
@@ -925,7 +910,7 @@ def distributed_ppo_loss(
     value_weight: torch.Tensor,
     config: PPOConfig,
     context: DistributedContext,
-) -> PPOLossMetrics:
+) -> _PPOLossMetrics:
     logratio = new_logp - old_logp
     ratio = logratio.exp()
     pg_loss1 = -advantages * ratio
@@ -984,7 +969,7 @@ def distributed_ppo_loss(
         - config.ent_coef * backward_entropy
     )
 
-    return PPOLossMetrics(
+    return _PPOLossMetrics(
         loss=loss,
         policy_loss=policy_loss,
         value_loss=value_loss,
@@ -1034,7 +1019,7 @@ def _ppo_loss_metrics_from_tuple(
         torch.Tensor,
         torch.Tensor,
     ],
-) -> PPOLossMetrics:
+) -> _PPOLossMetrics:
     (
         loss,
         policy_loss,
@@ -1048,7 +1033,7 @@ def _ppo_loss_metrics_from_tuple(
         logratio_mean,
         logratio_abs_max,
     ) = tensors
-    return PPOLossMetrics(
+    return _PPOLossMetrics(
         loss=loss,
         policy_loss=policy_loss,
         value_loss=value_loss,
@@ -1375,15 +1360,11 @@ def _flatten_actions_time(actions: ActionBundle) -> ActionBundle:
 
 
 def _step_env(
-    env: Any,
+    env: VectorizedEnv,
     actions: ActionBundle,
 ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
     cpu_actions = _actions_to_cpu(actions)
-    result = env.step(cpu_actions)
-    if len(result) == 3:
-        obs, rewards, dones = result
-        return obs, rewards, dones, {}
-    return result
+    return env.step(cpu_actions)
 
 
 def _extend_env_metrics(
@@ -1691,7 +1672,7 @@ def _normalize_masked_advantages(
     return (advantages - mean) / (var.sqrt() + eps)
 
 
-def _mean_loss_metrics(metrics: list[PPOLossMetrics]) -> dict[str, float]:
+def _mean_loss_metrics(metrics: list[_PPOLossMetrics]) -> dict[str, float]:
     metric_names = (
         ("loss/total_loss", "loss"),
         ("loss/policy_loss", "policy_loss"),
@@ -1721,7 +1702,7 @@ def _mean_loss_metrics(metrics: list[PPOLossMetrics]) -> dict[str, float]:
     return logged
 
 
-def _entropy_component_names(metrics: list[PPOLossMetrics]) -> tuple[str, ...]:
+def _entropy_component_names(metrics: list[_PPOLossMetrics]) -> tuple[str, ...]:
     if not metrics:
         return ()
     names = set(metrics[0].entropy_components)
