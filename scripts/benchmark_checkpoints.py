@@ -39,7 +39,7 @@ class LoadedCheckpoint:
     path: Path
     config: FullConfig
     model: StatelessTransformerV1
-    env_steps: int | None
+    env_steps: int
 
 
 @dataclass
@@ -281,9 +281,7 @@ def _load_checkpoint(path: Path, *, device: torch.device) -> LoadedCheckpoint:
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
-    env_steps = checkpoint.get("env_steps")
-    if env_steps is not None:
-        env_steps = int(env_steps)
+    env_steps = _checkpoint_env_steps(checkpoint["env_steps"], path=path)
     return LoadedCheckpoint(path=path, config=config, model=model, env_steps=env_steps)
 
 
@@ -446,46 +444,6 @@ def _pad_decoded_tensor(tensor: torch.Tensor, max_actions: int) -> torch.Tensor:
     return padded
 
 
-def _select_actions(
-    actions_a: ActionBundle,
-    actions_b: ActionBundle,
-    use_a: torch.Tensor,
-) -> ActionBundle:
-    if type(actions_a) is not type(actions_b):
-        raise ValueError("checkpoint action bundles must have matching kinds")
-    if isinstance(actions_a, PureActions) and isinstance(actions_b, PureActions):
-        action_mask = use_a[:, :, None, None]
-        return PureActions(
-            launch=_select_action(actions_a.launch, actions_b.launch, action_mask),
-            angle=_select_action(actions_a.angle, actions_b.angle, action_mask),
-            ships=_select_action(actions_a.ships, actions_b.ships, action_mask),
-        )
-    if isinstance(actions_a, DiscreteTargetActions) and isinstance(
-        actions_b,
-        DiscreteTargetActions,
-    ):
-        action_mask = use_a[:, :, None, None]
-        return DiscreteTargetActions(
-            launch=_select_action(actions_a.launch, actions_b.launch, action_mask),
-            target=_select_action(actions_a.target, actions_b.target, action_mask),
-            ships=_select_action(actions_a.ships, actions_b.ships, action_mask),
-        )
-    if isinstance(actions_a, DiscreteTargetBinActions) and isinstance(
-        actions_b,
-        DiscreteTargetBinActions,
-    ):
-        action_mask = use_a[:, :, None]
-        return DiscreteTargetBinActions(
-            target=_select_action(actions_a.target, actions_b.target, action_mask),
-            fleet_bin=_select_action(
-                actions_a.fleet_bin,
-                actions_b.fleet_bin,
-                action_mask,
-            ),
-        )
-    raise ValueError("unsupported checkpoint action bundle kind")
-
-
 def _select_action(
     tensor_a: torch.Tensor,
     tensor_b: torch.Tensor,
@@ -572,9 +530,15 @@ def _print_results(
 
 
 def _env_steps_label(checkpoint: LoadedCheckpoint) -> str:
-    if checkpoint.env_steps is None:
-        return "env_steps unknown"
     return f"{checkpoint.env_steps:,} env steps"
+
+
+def _checkpoint_env_steps(value: object, *, path: Path) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"checkpoint env_steps must be an integer: {path}")
+    if value < 0:
+        raise ValueError(f"checkpoint env_steps must be non-negative: {path}")
+    return value
 
 
 def _print_matrix(stats: MatchupStats) -> None:

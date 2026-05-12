@@ -7,16 +7,11 @@ from .optimizer import (
     create_lr_scheduler,
     create_optimizer,
 )
-from .ppo import (
-    CompileMode,
-    PPOConfig,
-    PPOTrainer,
-)
+from .ppo import PPOConfig, PPOTrainer
 from .utils import configure_torch
 
 __all__ = [
     "AdamWConfig",
-    "CompileMode",
     "FullConfig",
     "LRScheduleConfig",
     "MuonConfig",

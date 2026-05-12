@@ -290,10 +290,6 @@ def test_resolve_resume_launch_uses_adjacent_config_for_file(tmp_path: Path) -> 
 def test_resume_wandb_run_id_requires_checkpoint_run_id() -> None:
     metadata = run_ppo.PPOCheckpointMetadata(
         env_steps=1,
-        optimizer_steps=1,
-        player_step_total=1,
-        total_games_played=1,
-        target_kl_exceeded_total=0,
         wandb_run_id=None,
     )
 
@@ -932,10 +928,6 @@ def test_ppo_trainer_load_checkpoint_restores_training_state(tmp_path: Path) -> 
     metadata = dst_trainer.load_checkpoint(path)
 
     assert metadata.env_steps == 2048
-    assert metadata.optimizer_steps == 11
-    assert metadata.player_step_total == 37
-    assert metadata.total_games_played == 41
-    assert metadata.target_kl_exceeded_total == 5
     assert metadata.wandb_run_id == "run-abc"
     assert dst_trainer.optimizer_steps == 11
     assert dst_trainer.player_step_total == 37

@@ -654,26 +654,6 @@ def _checkpoint_metadata(
             name="env_steps",
             path=path,
         ),
-        optimizer_steps=_checkpoint_nonnegative_int(
-            checkpoint["optimizer_steps"],
-            name="optimizer_steps",
-            path=path,
-        ),
-        player_step_total=_checkpoint_nonnegative_int(
-            checkpoint["player_step_total"],
-            name="player_step_total",
-            path=path,
-        ),
-        total_games_played=_checkpoint_nonnegative_int(
-            checkpoint["total_games_played"],
-            name="total_games_played",
-            path=path,
-        ),
-        target_kl_exceeded_total=_checkpoint_nonnegative_int(
-            checkpoint["target_kl_exceeded_total"],
-            name="target_kl_exceeded_total",
-            path=path,
-        ),
         wandb_run_id=_checkpoint_optional_str(
             checkpoint["wandb_run_id"],
             name="wandb_run_id",

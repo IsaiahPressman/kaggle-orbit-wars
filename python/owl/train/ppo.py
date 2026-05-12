@@ -75,7 +75,6 @@ CompileMode = Literal[
 _OBS_TENSOR_FIELDS = tuple(
     field for field in ObsBatch.model_fields if field != "action_mask"
 )
-_OBS_FIELDS = (*_OBS_TENSOR_FIELDS, "can_act", "max_launch")
 
 
 class PPOConfig(BaseConfig):
@@ -145,10 +144,6 @@ class _PPORolloutSegments:
 @dataclass(frozen=True)
 class PPOCheckpointMetadata:
     env_steps: int
-    optimizer_steps: int
-    player_step_total: int
-    total_games_played: int
-    target_kl_exceeded_total: int
     wandb_run_id: str | None
 
 
@@ -558,10 +553,6 @@ class PPOTrainer:
         self.target_kl_exceeded_total = target_kl_exceeded_total
         return PPOCheckpointMetadata(
             env_steps=env_steps,
-            optimizer_steps=optimizer_steps,
-            player_step_total=player_step_total,
-            total_games_played=total_games_played,
-            target_kl_exceeded_total=target_kl_exceeded_total,
             wandb_run_id=wandb_run_id,
         )
 

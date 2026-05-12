@@ -33,6 +33,12 @@ from owl.rl import (
 from owl.train import ppo
 from torch import nn
 
+_OBS_COPY_FIELDS = (
+    *(field for field in ObsBatch.model_fields if field != "action_mask"),
+    "can_act",
+    "max_launch",
+)
+
 
 def _obs_batch(*, n_envs: int, obs_spec: EntityBasedConfig) -> ObsBatch:
     return ObsBatch(
@@ -559,7 +565,7 @@ def test_obs_to_device_clones_cpu_observation_buffers() -> None:
     obs.global_features.fill_(2.0)
 
     assert torch.equal(copied.global_features, torch.ones_like(copied.global_features))
-    for field in ppo._OBS_FIELDS:
+    for field in _OBS_COPY_FIELDS:
         assert getattr(copied, field).data_ptr() != getattr(obs, field).data_ptr()
 
 
@@ -755,7 +761,7 @@ def test_obs_to_device_uses_explicit_non_blocking_policy(
 
     ppo._obs_to_device(obs, torch.device("cuda"), non_blocking=True)
 
-    assert non_blocking_args == [True] * len(ppo._OBS_FIELDS)
+    assert non_blocking_args == [True] * len(_OBS_COPY_FIELDS)
 
 
 def test_obs_to_device_defaults_to_blocking_transfer(
@@ -777,7 +783,7 @@ def test_obs_to_device_defaults_to_blocking_transfer(
 
     ppo._obs_to_device(obs, torch.device("cuda"))
 
-    assert non_blocking_args == [False] * len(ppo._OBS_FIELDS)
+    assert non_blocking_args == [False] * len(_OBS_COPY_FIELDS)
 
 
 def test_actions_to_cpu_transfer_policy_is_explicit(
@@ -854,14 +860,14 @@ def test_collect_rollout_keeps_pre_step_obs_with_reused_cpu_buffers() -> None:
         device=torch.device("cpu"),
     )
     obs_ptrs = {
-        field: getattr(trainer._obs, field).data_ptr() for field in ppo._OBS_FIELDS
+        field: getattr(trainer._obs, field).data_ptr() for field in _OBS_COPY_FIELDS
     }
 
     trainer._collect_rollout()
     segments = trainer.rollout.segment_major()
 
     assert obs_ptrs == {
-        field: getattr(trainer._obs, field).data_ptr() for field in ppo._OBS_FIELDS
+        field: getattr(trainer._obs, field).data_ptr() for field in _OBS_COPY_FIELDS
     }
     expected_steps = torch.tensor([0.0, 1.0, 2.0])
     assert torch.equal(
