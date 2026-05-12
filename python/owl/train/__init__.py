@@ -1,5 +1,4 @@
 from .advantages import (
-    compute_advantages,
     compute_gae,
 )
 from .config import FullConfig, RuntimeConfig
@@ -75,7 +74,6 @@ __all__ = [
     "assert_finite",
     "autocast_context",
     "broadcast_object",
-    "compute_advantages",
     "compute_gae",
     "configure_torch",
     "create_lr_scheduler",

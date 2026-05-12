@@ -1,27 +1,29 @@
 import owl.train.advantages as advantages_module
 import pytest
 import torch
-from owl.train import compute_advantages
+from owl.train import compute_gae
 
 
-def test_compute_advantages_matches_gae_recurrence() -> None:
-    advantages = compute_advantages(
+def test_compute_gae_matches_recurrence() -> None:
+    advantages, returns = compute_gae(
         values=torch.tensor([[0.5, 0.25, 0.0]]),
         rewards=torch.tensor([[1.0, 1.0, 1.0]]),
         dones=torch.tensor([[False, False, True]]),
+        last_values=torch.tensor([10.0]),
         gamma=0.9,
         gae_lambda=0.8,
     )
 
     assert torch.allclose(advantages, torch.tensor([[1.7834, 1.47, 1.0]]))
+    assert torch.allclose(returns, advantages + torch.tensor([[0.5, 0.25, 0.0]]))
 
 
-def test_compute_advantages_uses_bootstrap_value() -> None:
-    advantages = compute_advantages(
+def test_compute_gae_uses_bootstrap_value() -> None:
+    advantages, _returns = compute_gae(
         values=torch.tensor([[0.0, 0.0]]),
         rewards=torch.tensor([[0.0, 1.0]]),
         dones=torch.tensor([[False, False]]),
-        bootstrap_values=torch.tensor([2.0]),
+        last_values=torch.tensor([2.0]),
         gamma=0.5,
         gae_lambda=1.0,
     )
@@ -29,15 +31,16 @@ def test_compute_advantages_uses_bootstrap_value() -> None:
     assert torch.allclose(advantages, torch.tensor([[1.0, 2.0]]))
 
 
-def test_compute_advantages_resets_recursion_at_terminal_dones() -> None:
+def test_compute_gae_resets_recursion_at_terminal_dones() -> None:
     rewards = torch.tensor([[1.0, 1.0, 1.0], [0.0, 2.0, 3.0]])
     values = torch.zeros_like(rewards)
     dones = torch.tensor([[False, True, False], [True, False, False]])
 
-    advantages = compute_advantages(
+    advantages, _returns = compute_gae(
         values=values,
         rewards=rewards,
         dones=dones,
+        last_values=torch.zeros((2,)),
         gamma=1.0,
         gae_lambda=1.0,
     )
@@ -45,16 +48,16 @@ def test_compute_advantages_resets_recursion_at_terminal_dones() -> None:
     assert torch.equal(advantages, torch.tensor([[2.0, 1.0, 1.0], [0.0, 5.0, 3.0]]))
 
 
-def test_compute_advantages_bootstraps_only_nonterminal_last_steps() -> None:
+def test_compute_gae_bootstraps_only_nonterminal_last_steps() -> None:
     rewards = torch.tensor([[0.0, 1.0], [0.0, 1.0]])
     values = torch.zeros_like(rewards)
     dones = torch.tensor([[False, False], [False, True]])
 
-    advantages = compute_advantages(
+    advantages, _returns = compute_gae(
         values=values,
         rewards=rewards,
         dones=dones,
-        bootstrap_values=torch.tensor([10.0, 10.0]),
+        last_values=torch.tensor([10.0, 10.0]),
         gamma=0.5,
         gae_lambda=1.0,
     )
@@ -62,12 +65,13 @@ def test_compute_advantages_bootstraps_only_nonterminal_last_steps() -> None:
     assert torch.equal(advantages, torch.tensor([[3.0, 6.0], [0.5, 1.0]]))
 
 
-def test_compute_advantages_rejects_shape_mismatch() -> None:
+def test_compute_gae_rejects_shape_mismatch() -> None:
     with pytest.raises(ValueError, match="rewards must match values shape"):
-        compute_advantages(
+        compute_gae(
             values=torch.zeros((2, 3)),
             rewards=torch.zeros((3, 2)),
             dones=torch.zeros((2, 3), dtype=torch.bool),
+            last_values=torch.zeros((2,)),
             gamma=0.99,
             gae_lambda=0.95,
         )

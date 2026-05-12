@@ -89,34 +89,6 @@ def compile_compute_gae(compile_mode: str | None) -> ComputeGAEFn:
     return compiled_compute_gae
 
 
-def compute_advantages(
-    *,
-    values: torch.Tensor,
-    rewards: torch.Tensor,
-    dones: torch.Tensor,
-    gamma: float,
-    gae_lambda: float,
-    bootstrap_values: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Compute GAE advantages for segment-major/time-second tensors [N, T, ...]."""
-    next_values = _advantage_tensor_inputs(
-        values=values,
-        rewards=rewards,
-        dones=dones,
-        bootstrap_values=bootstrap_values,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
-    )
-    return _compute_advantages_tensors(
-        values=values,
-        rewards=rewards,
-        dones=dones,
-        next_values=next_values,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
-    )
-
-
 def _advantage_tensor_inputs(
     *,
     values: torch.Tensor,
@@ -156,7 +128,7 @@ def _compute_gae_tensors(
     gamma: float,
     gae_lambda: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    advantages = _compute_advantages_tensors(
+    advantages = _compute_gae_advantages_tensors(
         values=values,
         rewards=rewards,
         dones=dones,
@@ -167,7 +139,7 @@ def _compute_gae_tensors(
     return advantages, advantages + values
 
 
-def _compute_advantages_tensors(
+def _compute_gae_advantages_tensors(
     *,
     values: torch.Tensor,
     rewards: torch.Tensor,
