@@ -11,7 +11,6 @@ from torch import nn
 from owl.config import BaseConfig
 from owl.model import BaseModelAPI, InputLayer
 
-OptimizerName = Literal["adamw", "muon"]
 LRScheduleName = Literal["linear_warmup_cosine_decay"]
 StateDict: TypeAlias = dict[str, Any]
 

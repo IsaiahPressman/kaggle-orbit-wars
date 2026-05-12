@@ -63,10 +63,6 @@ class EntityBasedConfig(BaseConfig):
         return MAX_COMETS
 
     @property
-    def max_comet_path_length(self) -> int:
-        return MAX_COMET_PATH_LENGTH
-
-    @property
     def comet_channels(self) -> int:
         return COMET_CHANNELS
 
@@ -610,12 +606,6 @@ class VectorizedEnv:
                 "discrete_target_bins requires a target/fleet_bin action bundle"
             )
         return self.observations, self.rewards, self.dones, episode_metrics
-
-    def step_actions(
-        self,
-        actions: ActionBundle,
-    ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
-        return self.step(actions)
 
     def step_decoded_actions(
         self,

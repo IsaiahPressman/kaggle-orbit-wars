@@ -290,10 +290,6 @@ def test_resolve_resume_launch_uses_adjacent_config_for_file(tmp_path: Path) -> 
 def test_resume_wandb_run_id_requires_checkpoint_run_id() -> None:
     metadata = run_ppo.PPOCheckpointMetadata(
         env_steps=1,
-        optimizer_steps=1,
-        player_step_total=1,
-        total_games_played=1,
-        target_kl_exceeded_total=0,
         wandb_run_id=None,
     )
 
@@ -770,6 +766,7 @@ def test_run_training_session_sets_trainable_parameter_summary(
         env_steps_per_iteration=8,
         max_env_steps=8,
         max_runtime_seconds=None,
+        distributed=DistributedContext.single_process_cpu(),
         start_env_steps=16,
         trainable_parameters=123,
     )
@@ -837,6 +834,7 @@ def test_run_training_session_closes_logger_and_skips_final_checkpoint_on_error(
             env_steps_per_iteration=8,
             max_env_steps=8,
             max_runtime_seconds=None,
+            distributed=DistributedContext.single_process_cpu(),
         )
 
     assert logger.closed
@@ -930,10 +928,6 @@ def test_ppo_trainer_load_checkpoint_restores_training_state(tmp_path: Path) -> 
     metadata = dst_trainer.load_checkpoint(path)
 
     assert metadata.env_steps == 2048
-    assert metadata.optimizer_steps == 11
-    assert metadata.player_step_total == 37
-    assert metadata.total_games_played == 41
-    assert metadata.target_kl_exceeded_total == 5
     assert metadata.wandb_run_id == "run-abc"
     assert dst_trainer.optimizer_steps == 11
     assert dst_trainer.player_step_total == 37

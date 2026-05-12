@@ -241,9 +241,8 @@ single node. Override Slurm GPU resources in the normal `sbatch` position:
 sbatch --gpus-per-node=4 scripts/slurm/launch-train.sbatch
 ```
 
-`EnvConfig.n_envs`, `rl.horizon`, and
-`rl.segment_sampling.segments_per_minibatch` are per rank. The effective rollout
-width is:
+`EnvConfig.n_envs`, `rl.horizon`, and `rl.segments_per_minibatch` are per rank.
+The effective rollout width is:
 
 ```text
 world_size * env.n_envs * rl.horizon
@@ -284,8 +283,7 @@ uv run python -c 'import torch; print(torch.cuda.is_available())'
 uv run python scripts/run_ppo.py configs/baseline.yaml /runs \
   --log-mode debug \
   -o env.n_envs=1 env.pin_memory=false model.embed_dim=32 model.depth=1 \
-    model.n_heads=4 rl.horizon=16 \
-    rl.segment_sampling.segments_per_minibatch=1 \
+    model.n_heads=4 rl.horizon=16 rl.segments_per_minibatch=1 \
   --max-env-steps 16
 ```
 

@@ -42,9 +42,9 @@ class OrbitWarsModule(Protocol):
         self,
         initial_planets: list[list[int | float]],
         angular_velocity: float,
-        spawn_step: int,
+        _spawn_step: int,
         comet_planet_ids: list[int],
-        comet_speed: float,
+        _comet_speed: float,
     ) -> list[list[list[float]]] | None: ...
 
     def interpreter(self, state: list[Any], env: Any) -> list[Any]: ...

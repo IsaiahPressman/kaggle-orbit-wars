@@ -1,9 +1,10 @@
-from typing import Any
+from math import prod
 
-import owl.train.ppo as ppo_module
+import owl.train.ppo as ppo
 import pytest
 import torch
-from owl.train import PPOConfig, ppo_loss, validate_ppo_loss_inputs
+from owl.train import PPOConfig
+from owl.train.ppo import _ppo_loss
 
 
 def test_ppo_loss_matches_clipped_objectives() -> None:
@@ -15,7 +16,7 @@ def test_ppo_loss_matches_clipped_objectives() -> None:
     advantages = torch.tensor([[1.0, -1.0]])
     entropy = torch.tensor([[0.2, 0.4]])
 
-    metrics = ppo_loss(
+    metrics, backward_loss = _ppo_loss(
         new_logp=new_logp,
         entropy=entropy,
         new_values=new_values,
@@ -55,6 +56,7 @@ def test_ppo_loss_matches_clipped_objectives() -> None:
     assert torch.allclose(metrics.entropy_loss, expected_entropy_loss)
     assert torch.allclose(metrics.entropy, expected_entropy)
     assert torch.allclose(metrics.loss, expected_loss)
+    assert backward_loss is metrics.loss
     assert torch.allclose(metrics.clipfrac, torch.tensor(1.0))
 
 
@@ -69,7 +71,7 @@ def test_ppo_loss_uses_policy_and_value_weights_separately() -> None:
     policy_weight = torch.tensor([[1.0, 0.0]])
     value_weight = torch.ones_like(policy_weight)
 
-    metrics = ppo_loss(
+    metrics, _backward_loss = _ppo_loss(
         new_logp=new_logp,
         entropy=entropy,
         new_values=new_values,
@@ -109,7 +111,7 @@ def test_ppo_loss_uses_raw_advantages() -> None:
     entropy = torch.zeros((1, 3))
     policy_weight = torch.tensor([[1.0, 1.0, 0.0]])
 
-    metrics = ppo_loss(
+    metrics, _backward_loss = _ppo_loss(
         new_logp=new_logp,
         entropy=entropy,
         new_values=values,
@@ -134,7 +136,7 @@ def test_ppo_loss_uses_raw_advantages() -> None:
 def test_ppo_loss_handles_all_policy_invalid_minibatch() -> None:
     shape = (1, 2)
     policy_weight = torch.zeros(shape)
-    metrics = ppo_loss(
+    metrics, _backward_loss = _ppo_loss(
         new_logp=torch.zeros(shape),
         entropy=torch.ones(shape),
         new_values=torch.zeros(shape),
@@ -164,92 +166,54 @@ def test_ppo_loss_handles_all_policy_invalid_minibatch() -> None:
     assert torch.allclose(metrics.ratio_max, torch.tensor(0.0))
 
 
-def _call_loss_with_broadcast_policy_weight(
-    loss_fn: ppo_module.PPOLossFn,
-    config: PPOConfig,
-) -> ppo_module.PPOLossMetrics:
-    shape = (2, 2)
-    return loss_fn(
-        new_logp=torch.zeros(shape),
-        entropy=torch.ones(shape),
-        new_values=torch.zeros(shape),
-        old_logp=torch.zeros(shape),
-        old_values=torch.zeros(shape),
-        returns=torch.zeros(shape),
-        advantages=torch.ones(shape),
-        policy_weight=torch.ones((1, 2)),
-        value_weight=torch.ones(shape),
-        config=config,
-    )
-
-
-def test_ppo_loss_validates_inputs_only_when_debug_enabled() -> None:
-    metrics = _call_loss_with_broadcast_policy_weight(
-        ppo_loss,
-        PPOConfig(),
-    )
-    assert torch.isfinite(metrics.loss)
-
-    with pytest.raises(ValueError, match="policy_weight must match new_logp shape"):
-        _call_loss_with_broadcast_policy_weight(
-            ppo_loss,
-            PPOConfig(
-                debug_validate_ppo_loss_inputs=True,
-            ),
-        )
-
-
-def test_compiled_ppo_loss_validates_inputs_only_when_debug_enabled(
+def test_distributed_ppo_loss_only_reduces_scalar_summaries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_compile(target: Any, *, mode: str) -> Any:
-        assert target is ppo_module._ppo_loss_tensors
-        assert mode == "default"
-        return target
-
-    monkeypatch.setattr(ppo_module.torch, "compile", fake_compile)
-    loss_fn = ppo_module._compile_ppo_loss("default")
-
-    metrics = _call_loss_with_broadcast_policy_weight(
-        loss_fn,
-        PPOConfig(),
+    context = ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=True,
     )
-    assert torch.isfinite(metrics.loss)
+    reduced_shapes: list[tuple[int, ...]] = []
 
-    with pytest.raises(ValueError, match="policy_weight must match new_logp shape"):
-        _call_loss_with_broadcast_policy_weight(
-            loss_fn,
-            PPOConfig(
-                debug_validate_ppo_loss_inputs=True,
-            ),
-        )
+    def fake_all_reduce_sum(
+        tensor: torch.Tensor,
+        _context: ppo.DistributedContext,
+    ) -> torch.Tensor:
+        assert _context is context
+        reduced_shapes.append(tuple(tensor.shape))
+        return tensor.clone()
 
+    def fake_all_reduce_max(
+        tensor: torch.Tensor,
+        _context: ppo.DistributedContext,
+    ) -> torch.Tensor:
+        assert _context is context
+        reduced_shapes.append(tuple(tensor.shape))
+        return tensor.clone()
 
-def test_validate_ppo_loss_inputs_checks_cold_path_invariants() -> None:
-    with pytest.raises(ValueError, match="policy_weight must match new_logp shape"):
-        validate_ppo_loss_inputs(
-            new_logp=torch.zeros((2, 3)),
-            entropy=torch.zeros((2, 3)),
-            new_values=torch.zeros((2, 3)),
-            old_logp=torch.zeros((2, 3)),
-            old_values=torch.zeros((2, 3)),
-            returns=torch.zeros((2, 3)),
-            advantages=torch.zeros((2, 3)),
-            policy_weight=torch.zeros((3, 2)),
-            value_weight=torch.zeros((2, 3)),
-        )
+    monkeypatch.setattr(ppo, "all_reduce_sum", fake_all_reduce_sum)
+    monkeypatch.setattr(ppo, "all_reduce_max", fake_all_reduce_max)
+    shape = (2, 3)
+    new_logp = torch.zeros(shape, requires_grad=True)
 
+    metrics, backward_loss = _ppo_loss(
+        new_logp=new_logp,
+        entropy=torch.ones(shape),
+        new_values=torch.zeros(shape, requires_grad=True),
+        old_logp=torch.zeros(shape),
+        old_values=torch.zeros(shape),
+        returns=torch.ones(shape),
+        advantages=torch.ones(shape),
+        policy_weight=torch.ones(shape),
+        value_weight=torch.ones(shape),
+        config=PPOConfig(),
+        context=context,
+    )
 
-def test_validate_ppo_loss_inputs_rejects_new_values_shape_mismatch() -> None:
-    with pytest.raises(ValueError, match="new_values must match new_logp shape"):
-        validate_ppo_loss_inputs(
-            new_logp=torch.zeros((2, 3)),
-            entropy=torch.zeros((2, 3)),
-            new_values=torch.zeros((3, 2)),
-            old_logp=torch.zeros((2, 3)),
-            old_values=torch.zeros((2, 3)),
-            returns=torch.zeros((2, 3)),
-            advantages=torch.zeros((2, 3)),
-            policy_weight=torch.zeros((2, 3)),
-            value_weight=torch.zeros((2, 3)),
-        )
+    assert backward_loss is not metrics.loss
+    backward_loss.backward()
+    assert reduced_shapes
+    assert all(prod(shape) <= 2 for shape in reduced_shapes)

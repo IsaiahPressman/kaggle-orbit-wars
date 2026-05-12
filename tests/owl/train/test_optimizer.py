@@ -10,13 +10,12 @@ from owl.model import (
 from owl.rl import ObsBatch
 from owl.train import (
     AdamWConfig,
-    CompositeOptimizer,
     LRScheduleConfig,
     MuonConfig,
     create_lr_scheduler,
     create_optimizer,
-    lr_multiplier,
 )
+from owl.train.optimizer import CompositeOptimizer, lr_multiplier
 from torch import nn
 
 

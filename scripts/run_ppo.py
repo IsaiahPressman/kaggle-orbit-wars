@@ -31,7 +31,7 @@ from owl.rl import (
     VectorizedEnv,
 )
 from owl.rs import assert_release_build
-from owl.train import FullConfig, PPOCheckpointMetadata, PPOTrainer, configure_torch
+from owl.train import FullConfig, PPOTrainer, configure_torch
 from owl.train.distributed import (
     DistributedContext,
     all_reduce_any,
@@ -45,7 +45,7 @@ from owl.train.optimizer import (
     create_lr_scheduler,
     create_optimizer,
 )
-from owl.train.ppo import _mean_env_metrics
+from owl.train.ppo import PPOCheckpointMetadata, _mean_env_metrics
 from owl.train.utils import DTypeConfig, autocast_context
 from tqdm import tqdm
 
@@ -199,19 +199,12 @@ def _run_training_session(
     env_steps_per_iteration: int,
     max_env_steps: int | None,
     max_runtime_seconds: float | None,
-    distributed: DistributedContext | None = None,
+    distributed: DistributedContext,
     start_env_steps: int = 0,
     resume_run_id: str | None = None,
     last_best_model: BaseModelAPI | None = None,
     trainable_parameters: int | None = None,
 ) -> None:
-    distributed = distributed or DistributedContext(
-        device=trainer.device,
-        rank=0,
-        local_rank=0,
-        world_size=1,
-        initialized=False,
-    )
     if not distributed.is_main_process:
         _run_training_session_worker(
             trainer=trainer,
@@ -659,26 +652,6 @@ def _checkpoint_metadata(
         env_steps=_checkpoint_nonnegative_int(
             checkpoint["env_steps"],
             name="env_steps",
-            path=path,
-        ),
-        optimizer_steps=_checkpoint_nonnegative_int(
-            checkpoint["optimizer_steps"],
-            name="optimizer_steps",
-            path=path,
-        ),
-        player_step_total=_checkpoint_nonnegative_int(
-            checkpoint["player_step_total"],
-            name="player_step_total",
-            path=path,
-        ),
-        total_games_played=_checkpoint_nonnegative_int(
-            checkpoint["total_games_played"],
-            name="total_games_played",
-            path=path,
-        ),
-        target_kl_exceeded_total=_checkpoint_nonnegative_int(
-            checkpoint["target_kl_exceeded_total"],
-            name="target_kl_exceeded_total",
             path=path,
         ),
         wandb_run_id=_checkpoint_optional_str(
