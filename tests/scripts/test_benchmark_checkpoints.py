@@ -4,6 +4,8 @@ import importlib.util
 import re
 import sys
 from argparse import Namespace
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -130,7 +132,9 @@ def test_checkpoint_config_path_rejects_missing_config(tmp_path: Path) -> None:
         benchmark_checkpoints._checkpoint_config_path(checkpoint_path)
 
 
-def test_actions_for_assignments_uses_checkpoint_autocast_context() -> None:
+def test_actions_for_assignments_uses_checkpoint_autocast_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeModel:
         def __init__(self, *, launch_value: bool, ship_value: int) -> None:
             self.launch_value = launch_value
@@ -199,6 +203,21 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context() -> None:
                 ships=ships,
             )
 
+    seen: list[tuple[str, torch.device]] = []
+
+    @contextmanager
+    def fake_autocast_context(
+        cfg: Namespace,
+        device: torch.device,
+    ) -> Iterator[None]:
+        seen.append((cfg.dtype, device))
+        yield
+
+    monkeypatch.setattr(
+        benchmark_checkpoints,
+        "autocast_context",
+        fake_autocast_context,
+    )
     env = FakeEnv()
     assignments = torch.tensor([[0, 1, 0, 1]])
 
@@ -209,17 +228,25 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context() -> None:
         model_b=FakeModel(launch_value=False, ship_value=7),
         action_spec_a=ActionPureConfig(max_per_planet_launches=1),
         action_spec_b=ActionPureConfig(max_per_planet_launches=1),
+        config_a=Namespace(dtype="bfloat16"),
+        config_b=Namespace(dtype="float32"),
         device=torch.device("cpu"),
         deterministic=True,
     )
 
     assert env.observed_specs == ["pure", "pure"]
     assert env.decoded_specs == ["pure", "pure"]
+    assert seen == [
+        ("bfloat16", torch.device("cpu")),
+        ("float32", torch.device("cpu")),
+    ]
     assert actions.valid[0, :, 0].tolist() == [True, False, True, False]
     assert actions.ships[0, :, 0].tolist() == [3, 0, 3, 0]
 
 
-def test_actions_for_assignments_uses_each_checkpoint_action_spec() -> None:
+def test_actions_for_assignments_uses_each_checkpoint_action_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeEnv:
         def __init__(self) -> None:
             self.observed_specs: list[str] = []
@@ -301,6 +328,18 @@ def test_actions_for_assignments_uses_each_checkpoint_action_spec() -> None:
                 )
             return SimpleNamespace(actions=actions)
 
+    @contextmanager
+    def fake_autocast_context(
+        cfg: Namespace,  # noqa: ARG001
+        device: torch.device,  # noqa: ARG001
+    ) -> Iterator[None]:
+        yield
+
+    monkeypatch.setattr(
+        benchmark_checkpoints,
+        "autocast_context",
+        fake_autocast_context,
+    )
     env = FakeEnv()
 
     actions = benchmark_checkpoints._actions_for_assignments(
@@ -310,6 +349,8 @@ def test_actions_for_assignments_uses_each_checkpoint_action_spec() -> None:
         model_b=FakeModel(),
         action_spec_a=ActionPureConfig(max_per_planet_launches=1),
         action_spec_b=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+        config_a=Namespace(dtype="float32"),
+        config_b=Namespace(dtype="float32"),
         device=torch.device("cpu"),
         deterministic=True,
     )

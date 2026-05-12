@@ -26,6 +26,7 @@ from owl.rl import (
 )
 from owl.rs import assert_release_build
 from owl.train import FullConfig, configure_torch
+from owl.train.utils import DTypeConfig, autocast_context
 from tqdm import tqdm
 
 MODEL_A = 0
@@ -195,6 +196,8 @@ def run_benchmark(
                 model_b=checkpoint_b.model,
                 action_spec_a=checkpoint_a.config.env.action_spec,
                 action_spec_b=checkpoint_b.config.env.action_spec,
+                config_a=checkpoint_a.config.rl,
+                config_b=checkpoint_b.config.rl,
                 device=device,
                 deterministic=deterministic,
             )
@@ -310,6 +313,8 @@ def _actions_for_assignments(
     model_b: StatelessTransformerV1,
     action_spec_a: ActionConfig,
     action_spec_b: ActionConfig,
+    config_a: DTypeConfig,
+    config_b: DTypeConfig,
     device: torch.device,
     deterministic: bool,
 ) -> DecodedLaunchActions:
@@ -317,8 +322,10 @@ def _actions_for_assignments(
     obs_b = env.observation_for_action_spec(action_spec_b)
     device_obs_a = _obs_to_device(obs_a, device)
     device_obs_b = _obs_to_device(obs_b, device)
-    output_a = model_a(device_obs_a, deterministic=deterministic)
-    output_b = model_b(device_obs_b, deterministic=deterministic)
+    with autocast_context(config_a, device):
+        output_a = model_a(device_obs_a, deterministic=deterministic)
+    with autocast_context(config_b, device):
+        output_b = model_b(device_obs_b, deterministic=deterministic)
     decoded_a = env.decode_actions(
         _model_actions_to_cpu(output_a.actions),
         action_spec=action_spec_a,

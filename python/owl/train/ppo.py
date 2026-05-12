@@ -89,7 +89,7 @@ class PPOConfig(BaseConfig):
     segment_sampling: SegmentSamplingConfig = Field(
         default_factory=SegmentSamplingConfig
     )
-    gamma: float = Field(default=1.0, ge=0.0, le=1.0)
+    gamma: float = Field(default=0.99, ge=0.0, le=1.0)
     gae_lambda: float = Field(default=0.95, ge=0.0, le=1.0)
     clip_coef: float = Field(default=0.2, ge=0.0)
     vf_clip_coef: float | None = Field(default=0.2, gt=0.0)
