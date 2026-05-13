@@ -16,7 +16,7 @@ from owl.model.actor.common import (
     sample_launch,
 )
 from owl.model.actor.config import ActorPureConfig
-from owl.model.actor.discrete_targets import (
+from owl.model.actor.logistic_mixture import (
     discretized_logistic_mixture_log_prob,
     log_interpolate,
     sample_discretized_logistic_mixture,
@@ -174,6 +174,7 @@ class PureActor(nn.Module):
             max_launch,
             min_fleet_size=min_fleet_size,
             deterministic=deterministic,
+            deterministic_mask=launch,
         )
         ships = torch.where(launch, ships, torch.zeros_like(ships))
         angle = torch.where(launch, angle, torch.zeros_like(angle))

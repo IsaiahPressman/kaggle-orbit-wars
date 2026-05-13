@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import owl.model.actor.discrete_targets as discrete_targets_impl
+import owl.model.actor.logistic_mixture as logistic_mixture_impl
 import owl.model.stateless_transformer_v1 as model_impl
 import pytest
 import torch
@@ -2256,7 +2257,7 @@ def test_stochastic_discretized_logistic_sampling_uses_inverse_cdf(
     def fail_ship_support(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("stochastic sampling should not enumerate ship support")
 
-    monkeypatch.setattr(discrete_targets_impl, "ship_support", fail_ship_support)
+    monkeypatch.setattr(logistic_mixture_impl, "ship_support", fail_ship_support)
     torch.manual_seed(5)
     residual_budget = torch.tensor([8, 20], dtype=torch.int64)
     ships = sample_discretized_logistic_mixture(
@@ -2271,6 +2272,58 @@ def test_stochastic_discretized_logistic_sampling_uses_inverse_cdf(
     assert ships.dtype == torch.int64
     assert torch.all(ships >= 6)
     assert torch.all(ships <= residual_budget)
+
+
+def test_deterministic_discretized_logistic_sampling_skips_empty_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_log_prob(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("empty deterministic mask should skip support scoring")
+
+    monkeypatch.setattr(
+        logistic_mixture_impl,
+        "discretized_logistic_mixture_log_prob",
+        fail_log_prob,
+    )
+    ships = sample_discretized_logistic_mixture(
+        mix_logits=torch.zeros((2, 2)),
+        mu=torch.tensor([[500.0, 700.0], [12.0, 14.0]]),
+        scale=torch.ones((2, 2)),
+        residual_budget=torch.tensor([1000, 20], dtype=torch.int64),
+        min_fleet_size=6,
+        deterministic=True,
+        deterministic_mask=torch.zeros(2, dtype=torch.bool),
+    )
+
+    assert torch.equal(ships, torch.zeros(2, dtype=torch.int64))
+
+
+def test_deterministic_discretized_logistic_sampling_mask_matches_full_map() -> None:
+    residual_budget = torch.tensor([[12, 100, 7]], dtype=torch.int64)
+    mix_logits = torch.tensor([[[0.0, 0.5], [1.0, -0.5], [-0.25, 0.75]]])
+    mu = torch.tensor([[[8.0, 10.0], [30.0, 95.0], [5.0, 7.0]]])
+    scale = torch.tensor([[[1.0, 2.0], [3.0, 1.5], [0.5, 1.0]]])
+    launch = torch.tensor([[True, False, True]])
+
+    full_ships = sample_discretized_logistic_mixture(
+        mix_logits,
+        mu,
+        scale,
+        residual_budget,
+        min_fleet_size=6,
+        deterministic=True,
+    )
+    masked_ships = sample_discretized_logistic_mixture(
+        mix_logits,
+        mu,
+        scale,
+        residual_budget,
+        min_fleet_size=6,
+        deterministic=True,
+        deterministic_mask=launch,
+    )
+
+    assert torch.equal(masked_ships, torch.where(launch, full_ships, 0))
 
 
 def test_ship_support_counts_only_valid_min_to_residual_entries() -> None:

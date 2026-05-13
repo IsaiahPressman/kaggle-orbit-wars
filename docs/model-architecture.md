@@ -270,6 +270,15 @@ Entropy outputs also carry policy-specific component names for logging, such as
 `launch`, `target`, `fleet_size_full`, `fleet_size_mixture`,
 `fleet_size_logistic`, or `event`.
 
+Pure and discrete-target deterministic action selection resolves the launch
+gate before computing the exact fleet-size MAP. No-launch rows skip ship-support
+enumeration entirely. On CPU, the model enumerates only each launched row's own
+`min_fleet_size..max_launch` support. On non-CPU devices, it gathers launched
+rows, scores support only for that compacted row set, and scatters the selected
+ship counts back into the action tensor. Stochastic sampling never enumerates
+integer ship support; it samples one logistic component and uses inverse-CDF
+sampling for that component.
+
 The pure actor's angle entropy is an augmented latent-mixture entropy estimate:
 mixture-label entropy plus expected von Mises component entropy. Fleet-size
 entropy uses the same deterministic truncated-logistic quantile quadrature as
@@ -316,11 +325,9 @@ a sigmoid and log-interpolated between `scale_min` and
 `max(scale_max_abs_floor, scale_max_frac * support_width)`, where
 `support_width = max_launch - min_fleet_size + 1`. This keeps very small scales
 available for near-deterministic counts while still allowing broad fractional
-exploration for large ship budgets. Stochastic sampling selects a mixture
-component and samples the truncated discretized logistic with inverse-CDF
-sampling, avoiding full ship-support enumeration in the rollout hot path. PPO
-replay uses the marginal mixture log-probability of the integer ship count, not
-the sampled component log-probability. The discrete-target entropy bonus is an
+exploration for large ship budgets. PPO replay uses the marginal mixture
+log-probability of the integer ship count, not the sampled component
+log-probability. The discrete-target entropy bonus is an
 exploration heuristic rather than the exact joint-action entropy: it sums
 launch entropy, target entropy, and a target-conditioned size entropy without
 weighting target and size entropy by launch probability. To avoid materializing
