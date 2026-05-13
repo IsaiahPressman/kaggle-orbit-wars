@@ -70,9 +70,14 @@ Training presets live in `configs/`:
   larger rollout/minibatch sizing, Muon/AdamW optimizer rates, periodic
   checkpoints every 20M environment steps, `torch.compile` default mode, and
   bfloat16 autocast.
-- `model/stateless_transformer_20m.yaml`: larger stateless transformer model
-  config used by `baseline.yaml`, with an inline discrete-target actor override
-  using eight action mixtures and `max_ship_normalizer=500.0`.
+- `model/stateless_transformer_20m_swiglu.yaml`: larger stateless transformer
+  model config used by `baseline.yaml`, with an inline discrete-target actor
+  override using eight action mixtures.
+- `model/stateless_transformer_5m_gelu.yaml` and
+  `model/stateless_transformer_20m_gelu.yaml`: GELU variants of the stateless
+  transformer presets.
+- `model/stateless_transformer_28m.yaml`: larger SwiGLU stateless transformer
+  preset with a discrete-target actor.
 
 The training entrypoint configures PyTorch for TF32 matmul/conv precision and
 cuDNN benchmarking before constructing the environment, model, and optimizer.
@@ -99,6 +104,9 @@ Run a preset with:
 ```sh
 uv run python scripts/run_ppo.py configs/baseline.yaml runs --log-mode debug --max-env-steps 16
 ```
+
+Fresh launches accept `-o`/`--overrides field.path=value`; when provided, rank 0
+prints the flattened override list before loading the config.
 
 PPO run directories save `config.yaml` alongside checkpoints. The saved config
 includes `runtime.n_runtime_gpus`, and resume fails if the current launch uses a

@@ -8,7 +8,6 @@ force_flash_attn: true
 actor:
   action_spec: discrete_targets
   n_action_mixtures: 8
-  max_ship_normalizer: 500.0
   entropy_ship_quantiles: 16
   scale_min: 0.10
   scale_max_frac: 0.5

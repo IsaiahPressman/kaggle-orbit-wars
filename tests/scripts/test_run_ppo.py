@@ -233,6 +233,16 @@ def test_validate_args_rejects_resume_overrides() -> None:
         )
 
 
+def test_parse_cli_overrides_flattens_repeated_flags() -> None:
+    assert run_ppo._parse_cli_overrides(
+        [["rl.horizon=8"], ["env.n_envs=4", "model.depth=2"]]
+    ) == {
+        "rl.horizon": 8,
+        "env.n_envs": 4,
+        "model.depth": 2,
+    }
+
+
 def test_resolve_resume_launch_prefers_final_checkpoint(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()

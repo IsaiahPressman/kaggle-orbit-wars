@@ -40,7 +40,7 @@ rl:
   vf_coef: 2.0
   ent_coef: 2e-5
   max_grad_norm: 1.0
-  target_kl: 0.1
+  target_kl: null
   normalize_advantages: true
   eval_replay_games: 8
   compile_mode: default

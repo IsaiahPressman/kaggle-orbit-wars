@@ -1,8 +1,8 @@
 model_arch: stateless_transformer_v1
 embed_dim: 384
-depth: 10
+depth: 14
 n_heads: 12
-mlp_ratio: 2.0
+mlp_ratio: 2.125
 n_scratch_tokens: 4
 activation: swiglu
 force_flash_attn: true

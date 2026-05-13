@@ -103,6 +103,7 @@ def main() -> None:
     configure_torch()
     launch = _resolve_launch(args)
     with distributed_session() as distributed:
+        _log_cli_overrides(args.overrides, distributed)
         cfg = FullConfig.from_file(
             launch.config_path,
             overrides=launch.overrides if isinstance(launch, FreshLaunch) else None,
@@ -527,6 +528,17 @@ def _parse_cli_overrides(raw_overrides: list[list[str]] | None) -> dict[str, Any
         parsed_overrides[field_path] = value
 
     return parsed_overrides
+
+
+def _log_cli_overrides(
+    raw_overrides: list[list[str]] | None,
+    distributed: DistributedContext,
+) -> None:
+    if not raw_overrides or not distributed.is_main_process:
+        return
+
+    overrides_flat = list(itertools.chain.from_iterable(raw_overrides))
+    print(f"Launched with the manual overrides: {overrides_flat}")
 
 
 def _create_run_dir(output_dir: Path) -> Path:

@@ -268,9 +268,10 @@ def test_actor_config_files_load(config_path: Path) -> None:
     ("filename", "expected_params"),
     [
         ("stateless_transformer_tiny.yaml", 1_207_182),
-        ("stateless_transformer_5m.yaml", 5_532_942),
-        ("stateless_transformer_20m.yaml", 20_093_402),
+        ("stateless_transformer_5m_gelu.yaml", 5_532_942),
+        ("stateless_transformer_20m_gelu.yaml", 20_093_402),
         ("stateless_transformer_20m_swiglu.yaml", 20_914_202),
+        ("stateless_transformer_28m.yaml", 27_785_738),
     ],
 )
 def test_model_config_file_parameter_count(

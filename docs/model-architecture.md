@@ -36,9 +36,9 @@ Actor-specific fields live inside the actor config. `ActorPureConfig` owns
 pure-head fields such as `n_action_mixtures`, `kappa_min`, `kappa_max`,
 `tau_min`, `alpha_beta_eps`, `dir_eps`, `max_ship_normalizer=500.0`, and
 `entropy_ship_support_cap`. `ActorDiscreteTargetsConfig` owns
-`n_action_mixtures`, `max_ship_normalizer=500.0`, `entropy_ship_quantiles=16`,
-and the logistic-mixture scale parameters `scale_min=0.10`,
-`scale_max_frac=0.5`, and `scale_max_abs_floor=8.0`.
+`n_action_mixtures`, `entropy_ship_quantiles=16`, and the logistic-mixture scale
+parameters `scale_min=0.10`, `scale_max_frac=0.5`, and
+`scale_max_abs_floor=8.0`.
 `ActorDiscreteTargetBinsConfig` owns `n_bins`, which must match the
 environment's `ActionDiscreteTargetBinsConfig.n_bins`.
 `kappa_max` may be `None`; when set, `kappa_min` must be less than or equal to

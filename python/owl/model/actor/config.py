@@ -28,7 +28,6 @@ class ActorPureConfig(BaseConfig):
 class ActorDiscreteTargetsConfig(BaseConfig):
     action_spec: Literal["discrete_targets"] = "discrete_targets"
     n_action_mixtures: int = Field(default=4, ge=1)
-    max_ship_normalizer: float = Field(default=500.0, gt=0.0)
     entropy_ship_quantiles: int = Field(default=16, ge=1)
     scale_min: float = Field(default=0.10, gt=0.0)
     scale_max_frac: float = Field(default=0.50, gt=0.0)

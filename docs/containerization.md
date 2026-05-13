@@ -194,9 +194,9 @@ ORBIT_WARS_CONFIG=/sw/isaiah/orbit-wars/configs/experiment.yaml \
 
 The launch script mounts the config file's parent directory read-only at
 `/config` and runs training with `/config/experiment.yaml`. If the config uses
-subconfig references such as `model: stateless_transformer_5m`, keep the
+subconfig references such as `model: stateless_transformer_5m_gelu`, keep the
 referenced subconfig directories next to the mounted file, for example
-`/sw/isaiah/orbit-wars/configs/model/stateless_transformer_5m.yaml`.
+`/sw/isaiah/orbit-wars/configs/model/stateless_transformer_5m_gelu.yaml`.
 
 Override Slurm resources either by editing `scripts/slurm/launch-train.sbatch` or
 by passing normal `sbatch` flags, for example:
