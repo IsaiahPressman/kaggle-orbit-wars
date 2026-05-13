@@ -66,7 +66,7 @@ uv run python -c 'from importlib import import_module; from pathlib import Path;
 Training presets live in `configs/`:
 
 - `baseline.yaml`: vanilla PPO with the 20m stateless transformer preset,
-  discrete-target actions, `max_entities=512`, one PPO epoch per rollout,
+  discrete-target actions, `max_entities=256`, one PPO epoch per rollout,
   larger rollout/minibatch sizing, Muon/AdamW optimizer rates, periodic
   checkpoints every 20M environment steps, `torch.compile` default mode, and
   bfloat16 autocast.

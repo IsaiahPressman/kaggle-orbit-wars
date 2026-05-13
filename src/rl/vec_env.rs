@@ -93,11 +93,7 @@ impl PyRlVecEnv {
                 "max_per_planet_launches must be between 1 and 4",
             ));
         }
-        if min_fleet_size < 1 || min_fleet_size > i64::from(i32::MAX) {
-            return Err(PyValueError::new_err(
-                "min_fleet_size must be between 1 and i32::MAX",
-            ));
-        }
+        require_min_fleet_size(min_fleet_size)?;
 
         let envs = (0..n_envs)
             .map(|_| reset_one_env(two_player_weight))
@@ -1882,12 +1878,13 @@ fn parse_action_spec_for_buffers(
 }
 
 fn require_min_fleet_size(min_fleet_size: i64) -> PyResult<()> {
-    if (1..=i64::from(i32::MAX)).contains(&min_fleet_size) {
-        return Ok(());
+    if min_fleet_size < 1 || min_fleet_size > i64::from(i32::MAX) {
+        Err(PyValueError::new_err(
+            "min_fleet_size must be between 1 and i32::MAX",
+        ))
+    } else {
+        Ok(())
     }
-    Err(PyValueError::new_err(
-        "min_fleet_size must be between 1 and i32::MAX",
-    ))
 }
 
 fn require_can_act_shape(
@@ -2081,11 +2078,9 @@ fn dense_decoded_actions_to_player_actions(
                     "player {outer_player} action {action_index} ships must be >= 1"
                 ));
             }
-            if ship_count > i64::from(i32::MAX) {
-                return Err(format!(
-                    "player {outer_player} action {action_index} ships must fit in i32"
-                ));
-            }
+            let ship_count_i32 = i32::try_from(ship_count).map_err(|_| {
+                format!("player {outer_player} action {action_index} ships must fit in i32")
+            })?;
             let spent = spent_by_planet.entry(planet_id).or_default();
             *spent += ship_count;
             if *spent > i64::from(planet.ships) {
@@ -2103,7 +2098,7 @@ fn dense_decoded_actions_to_player_actions(
             actions[internal_player].push(LaunchAction {
                 from_planet_id: planet_id,
                 angle: f64::from(launch_angle),
-                ships: ship_count as i32,
+                ships: ship_count_i32,
             });
         }
     }

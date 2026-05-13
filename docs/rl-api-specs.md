@@ -14,7 +14,7 @@ from owl.rl import ActionPureConfig, EntityBasedConfig, VectorizedEnv
 
 env = VectorizedEnv(
     n_envs=128,
-    obs_spec=EntityBasedConfig(max_entities=512),
+    obs_spec=EntityBasedConfig(max_entities=256),
     action_spec=ActionPureConfig(max_per_planet_launches=3),
 )
 ```
@@ -24,7 +24,7 @@ env = VectorizedEnv(
 - `MAX_PLANETS = 40`
 - `MAX_COMETS = 4`
 - `MAX_COMET_PATH_LENGTH = 40`
-- `DEFAULT_MAX_ENTITIES = 512`
+- `DEFAULT_MAX_ENTITIES = 256`
 - `ACTION_ENTITY_SLOTS = MAX_PLANETS + MAX_COMETS = 44`
 - `OUTER_PLAYER_SLOTS = 4`
 
@@ -34,7 +34,7 @@ env = VectorizedEnv(
 max_fleets = max_entities - (MAX_PLANETS + MAX_COMETS)
 ```
 
-The default `max_entities=512` gives `max_fleets=468`.
+The default `max_entities=256` gives `max_fleets=212`.
 
 `MAX_PLANETS` matches the current generated-map upper bound:
 `MAX_PLANET_GROUPS * 4 = 10 * 4`. `MAX_COMET_PATH_LENGTH` matches the comet
@@ -46,7 +46,7 @@ the range `5..=40` are rejected.
 Config:
 
 ```python
-{"obs_spec": "entity_based", "max_entities": 512}
+{"obs_spec": "entity_based", "max_entities": 256}
 ```
 
 `EntityBased` writes observations into reusable caller-owned buffers. The vectorized

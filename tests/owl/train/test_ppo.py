@@ -920,7 +920,6 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "optimizer/steps",
         "optimizer/learning_rate",
         "optimizer/minibatches_per_update",
-        "sampling/minibatch_exposure",
         "train/policy_active_ratio",
         "train/advantage_mean",
         "train/advantage_std",
@@ -1235,7 +1234,7 @@ def test_ppo_epoch_one_uses_shuffled_single_pass_minibatches(
 
     monkeypatch.setattr(trainer, "_update_minibatch", fake_update_minibatch)
 
-    metrics = trainer._update(
+    metrics, sampled_segments = trainer._update(
         segments,
         advantages,
         returns,
@@ -1249,7 +1248,8 @@ def test_ppo_epoch_one_uses_shuffled_single_pass_minibatches(
     assert metrics["optimizer/minibatches_per_update"] == pytest.approx(3.0)
     assert "optimizer/num_minibatches" not in metrics
     assert "optimizer/num_total_minibatches" not in metrics
-    assert metrics["sampling/minibatch_exposure"] == pytest.approx(1.0)
+    assert "sampling/minibatch_exposure" not in metrics
+    assert sampled_segments == 5
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(0.0)
 
 
@@ -1302,7 +1302,7 @@ def test_update_reports_target_kl_guard_when_exceeded(
 
     monkeypatch.setattr(trainer, "_update_minibatch", fake_update_minibatch)
 
-    metrics = trainer._update(
+    metrics, sampled_segments = trainer._update(
         segments,
         advantages,
         returns,
@@ -1313,6 +1313,7 @@ def test_update_reports_target_kl_guard_when_exceeded(
     assert update_calls == 1
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(1.0)
     assert metrics["policy/target_kl_exceeded_total"] == pytest.approx(1.0)
+    assert sampled_segments == 1
     assert trainer.target_kl_exceeded_total == 1
 
 
@@ -1362,7 +1363,7 @@ def test_train_iteration_update_sps_uses_actual_segments_when_target_kl_stops_up
 
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(1.0)
     assert metrics["policy/target_kl_exceeded_total"] == pytest.approx(1.0)
-    assert metrics["sampling/minibatch_exposure"] == pytest.approx(0.25)
+    assert "sampling/minibatch_exposure" not in metrics
     assert metrics["perf/update_sps"] == pytest.approx(2.0)
 
 

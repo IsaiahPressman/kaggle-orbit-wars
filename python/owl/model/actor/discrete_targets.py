@@ -607,10 +607,7 @@ def sample_discretized_logistic_mixture(
     )
     valid = support <= residual_budget.unsqueeze(-1)
     log_probs = log_probs.masked_fill(~valid, torch.finfo(log_probs.dtype).min)
-    if deterministic:
-        support_index = log_probs.argmax(dim=-1)
-    else:
-        support_index = Categorical(logits=log_probs).sample()
+    support_index = log_probs.argmax(dim=-1)
     support = support.expand_as(log_probs)
     return support.gather(dim=-1, index=support_index.unsqueeze(-1)).squeeze(-1)
 

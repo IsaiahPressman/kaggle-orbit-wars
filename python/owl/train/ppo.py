@@ -419,7 +419,7 @@ class PPOTrainer:
             gae_lambda=self.config.gae_lambda,
         )
         update_start = perf_counter()
-        metrics = self._update(
+        metrics, sampled_segments = self._update(
             segments,
             advantages,
             returns,
@@ -471,7 +471,7 @@ class PPOTrainer:
         rollout_elapsed = self._max_float(rollout_elapsed)
         update_elapsed = self._max_float(update_elapsed)
         rollout_steps = self.config.horizon * self.n_envs * self.world_size
-        update_steps = rollout_steps * metrics["sampling/minibatch_exposure"]
+        update_steps = self.config.horizon * sampled_segments
         metrics["time/rollout_seconds"] = float(rollout_elapsed)
         metrics["time/update_seconds"] = float(update_elapsed)
         metrics["time/iteration_seconds"] = float(elapsed)
@@ -602,7 +602,7 @@ class PPOTrainer:
         returns: torch.Tensor,
         policy_mask: torch.Tensor,
         value_mask: torch.Tensor,
-    ) -> dict[str, float]:
+    ) -> tuple[dict[str, float], int]:
         loss_metrics: list[_PPOLossMetrics] = []
         grad_norms: list[torch.Tensor] = []
         current_values = segments.values.clone()
@@ -646,16 +646,15 @@ class PPOTrainer:
         )
         metrics["optimizer/steps"] = float(self.optimizer_steps)
         metrics["optimizer/minibatches_per_update"] = float(n_minibatches)
-        metrics["sampling/minibatch_exposure"] = float(
-            self._sum_int(torch.tensor(sampled_segments, device=self.device))
-            / (self.n_envs * self.world_size)
-        )
         metrics["train/policy_active_ratio"] = float(policy_mask.float().mean().item())
         metrics["optimizer/learning_rate"] = _current_learning_rate(
             self.optimizer,
             self.lr_scheduler,
         )
-        return self._reduce_mean_metrics(metrics)
+        sampled_segment_total = self._sum_int(
+            torch.tensor(sampled_segments, device=self.device)
+        )
+        return self._reduce_mean_metrics(metrics), sampled_segment_total
 
     def _update_minibatch(
         self,
@@ -1116,9 +1115,8 @@ def _copy_action_mask_time_step(dst: ActionMask, step: int, src: ActionMask) -> 
         )
     dst.can_act[step].copy_(src.can_act)
     if isinstance(dst, PureActionMask | DiscreteTargetActionMask):
-        if not isinstance(src, PureActionMask | DiscreteTargetActionMask):
-            raise ValueError("source action mask is missing max_launch")
-        dst.max_launch[step].copy_(src.max_launch)
+        src_with_max_launch = cast(PureActionMask | DiscreteTargetActionMask, src)
+        dst.max_launch[step].copy_(src_with_max_launch.max_launch)
 
 
 def _action_mask_segment_major(action_mask: ActionMask) -> ActionMask:
@@ -1159,9 +1157,8 @@ def _copy_action_mask_to_device_(
         )
     dst.can_act.copy_(src.can_act, non_blocking=non_blocking)
     if isinstance(dst, PureActionMask | DiscreteTargetActionMask):
-        if not isinstance(src, PureActionMask | DiscreteTargetActionMask):
-            raise ValueError("source action mask is missing max_launch")
-        dst.max_launch.copy_(src.max_launch, non_blocking=non_blocking)
+        src_with_max_launch = cast(PureActionMask | DiscreteTargetActionMask, src)
+        dst.max_launch.copy_(src_with_max_launch.max_launch, non_blocking=non_blocking)
 
 
 def _action_mask_flatten_time(action_mask: ActionMask) -> ActionMask:

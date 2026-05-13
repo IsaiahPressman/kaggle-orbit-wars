@@ -192,11 +192,11 @@ pub(super) fn decode_pure_actions(
                         "player {outer_player} entity slot {entity_index} launch {launch_index} ships must be >= {min_fleet_size}"
                     ));
                 }
-                if ship_count > i64::from(i32::MAX) {
-                    return Err(format!(
+                let ship_count_i32 = i32::try_from(ship_count).map_err(|_| {
+                    format!(
                         "player {outer_player} entity slot {entity_index} launch {launch_index} ships must fit in i32"
-                    ));
-                }
+                    )
+                })?;
                 let launch_angle = angle[action_index];
                 if !launch_angle.is_finite() {
                     return Err(format!(
@@ -219,7 +219,7 @@ pub(super) fn decode_pure_actions(
                 player_actions.push(LaunchAction {
                     from_planet_id: planet.id,
                     angle: f64::from(launch_angle),
-                    ships: ship_count as i32,
+                    ships: ship_count_i32,
                 });
             }
         }
@@ -302,11 +302,11 @@ pub(super) fn decode_discrete_target_actions(
                         "player {outer_player} entity slot {entity_index} launch {launch_index} ships must be >= {min_fleet_size}"
                     ));
                 }
-                if ship_count > i64::from(i32::MAX) {
-                    return Err(format!(
+                let ship_count_i32 = i32::try_from(ship_count).map_err(|_| {
+                    format!(
                         "player {outer_player} entity slot {entity_index} launch {launch_index} ships must fit in i32"
-                    ));
-                }
+                    )
+                })?;
                 if source.owner != internal_player as i32 {
                     return Err(format!(
                         "player {outer_player} cannot launch from planet {} owned by {}",
@@ -325,7 +325,7 @@ pub(super) fn decode_discrete_target_actions(
                     state,
                     source,
                     target_planet,
-                    ship_count as i32,
+                    ship_count_i32,
                     &mut orbit_target_cache,
                     targeting_mode,
                 )?
@@ -337,7 +337,7 @@ pub(super) fn decode_discrete_target_actions(
                 player_actions.push(LaunchAction {
                     from_planet_id: source.id,
                     angle,
-                    ships: ship_count as i32,
+                    ships: ship_count_i32,
                 });
             }
         }
@@ -423,11 +423,11 @@ pub(super) fn decode_discrete_target_bin_actions(
                     "player {outer_player} entity slot {entity_index} fleet_bin {fleet_bin} maps to {ship_count} ships, below min_fleet_size {min_fleet_size}"
                 ));
             }
-            if ship_count > i64::from(i32::MAX) {
-                return Err(format!(
+            let ship_count_i32 = i32::try_from(ship_count).map_err(|_| {
+                format!(
                     "player {outer_player} entity slot {entity_index} fleet_bin {fleet_bin} maps to ships that must fit in i32"
-                ));
-            }
+                )
+            })?;
             if !fleet_bin_keeps_ship_count(fleet_bin, i64::from(source.ships), n_bins) {
                 return Err(format!(
                     "player {outer_player} entity slot {entity_index} fleet_bin {fleet_bin} duplicates a higher bin"
@@ -437,7 +437,7 @@ pub(super) fn decode_discrete_target_bin_actions(
                 state,
                 source,
                 target_planet,
-                ship_count as i32,
+                ship_count_i32,
                 &mut orbit_target_cache,
                 targeting_mode,
             )?
@@ -448,7 +448,7 @@ pub(super) fn decode_discrete_target_bin_actions(
             player_actions.push(LaunchAction {
                 from_planet_id: source.id,
                 angle,
-                ships: ship_count as i32,
+                ships: ship_count_i32,
             });
         }
     }
