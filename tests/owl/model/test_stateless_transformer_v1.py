@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import owl.model.actor.discrete_targets as discrete_targets_impl
+import owl.model.actor.logistic_mixture as logistic_mixture_impl
 import owl.model.stateless_transformer_v1 as model_impl
 import pytest
 import torch
@@ -29,12 +30,12 @@ from owl.model.stateless_transformer_v1 import (
     DiscreteTargetPolicyParams,
     DiscreteTargetsActor,
     FeedForward,
-    MinGRUCell,
     MultiHeadSelfAttention,
     OutputProjectionMLP,
     PairwiseBiasMLP,
     PolicyParams,
     PureActor,
+    PureActorInputs,
     build_pairwise_action_features,
     discrete_action_entropy,
     masked_event_log_prob_from_params,
@@ -198,6 +199,22 @@ def _discrete_actor_inputs(
     )
 
 
+def _pure_actor_inputs(
+    source: torch.Tensor,
+    target: torch.Tensor | None = None,
+    target_mask: torch.Tensor | None = None,
+) -> PureActorInputs:
+    return PureActorInputs(
+        source=source,
+        target=source if target is None else target,
+        target_mask=(
+            torch.ones(source.shape[0], ACTION_ENTITY_SLOTS, dtype=torch.bool)
+            if target_mask is None
+            else target_mask
+        ),
+    )
+
+
 def _zero_target_attention(
     actor: DiscreteTargetsActor | DiscreteTargetBinsActor,
 ) -> None:
@@ -220,8 +237,84 @@ def test_model_config_requires_positive_feedforward_width() -> None:
 
 
 def test_actor_pure_config_requires_ordered_kappa_bounds() -> None:
+    assert ActorPureConfig().kappa_max == 1_000_000.0
     with pytest.raises(ValueError, match="kappa_min must be <= kappa_max"):
         ActorPureConfig(kappa_min=2.0, kappa_max=1.0)
+
+
+def test_actor_pure_config_uses_separate_mixture_counts() -> None:
+    config = StatelessTransformerV1Config(
+        embed_dim=16,
+        depth=1,
+        n_heads=4,
+        actor=ActorPureConfig(n_angle_mixtures=3, n_fleet_size_mixtures=5),
+    )
+    actor = PureActor(
+        config.actor,
+        embed_dim=config.embed_dim,
+        max_per_planet_launches=1,
+        activation=config.activation,
+    )
+    slot_input = torch.zeros((2, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    max_launch = torch.full(slot_input.shape[:-1], 11, dtype=torch.int64)
+
+    angle_params = actor._angle_params(_pure_actor_inputs(slot_input))
+    params = actor._policy_params_for_angle(
+        angle_params,
+        _pure_actor_inputs(slot_input),
+        max_launch,
+        torch.zeros(slot_input.shape[:-1]),
+        min_fleet_size=2,
+    )
+
+    assert params.angle_mix_logits.shape == (2, 4, ACTION_ENTITY_SLOTS, 3)
+    assert params.loc.shape == (2, 4, ACTION_ENTITY_SLOTS, 3)
+    assert params.size_mix_logits.shape == (2, 4, ACTION_ENTITY_SLOTS, 5)
+    assert params.size_mu.shape == (2, 4, ACTION_ENTITY_SLOTS, 5)
+
+
+def test_pure_actor_angle_attention_selects_directional_target_context() -> None:
+    config = StatelessTransformerV1Config(embed_dim=2, depth=1, n_heads=1)
+    actor = PureActor(
+        ActorPureConfig(),
+        embed_dim=config.embed_dim,
+        max_per_planet_launches=1,
+        activation=config.activation,
+    )
+    with torch.no_grad():
+        for module in (actor.q, actor.k, actor.v, actor.out):
+            module.weight.copy_(torch.eye(config.embed_dim))
+            module.bias.zero_()
+        actor.angle_direction_proj.input.weight.copy_(torch.eye(config.embed_dim))
+        actor.angle_direction_proj.input.bias.zero_()
+        actor.angle_direction_proj.output.up.weight.copy_(torch.eye(config.embed_dim))
+        actor.angle_direction_proj.output.up.bias.zero_()
+        actor.angle_direction_proj.output.weight.copy_(torch.eye(config.embed_dim))
+        actor.angle_direction_proj.output.bias.zero_()
+        actor.source_norm.weight.fill_(1.0)
+        actor.source_norm.bias.zero_()
+        actor.target_norm.weight.fill_(1.0)
+        actor.target_norm.bias.zero_()
+
+    source = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    target = torch.zeros_like(source)
+    target[:, :, 1, 0] = 10.0
+    target[:, :, 2, 1] = 10.0
+    target_mask = torch.zeros((1, ACTION_ENTITY_SLOTS), dtype=torch.bool)
+    target_mask[:, 1:3] = True
+    actor_inputs = _pure_actor_inputs(source, target=target, target_mask=target_mask)
+
+    right_context = actor._selected_angle_target_values(
+        actor_inputs,
+        torch.zeros((1, 4, ACTION_ENTITY_SLOTS)),
+    )
+    up_context = actor._selected_angle_target_values(
+        actor_inputs,
+        torch.full((1, 4, ACTION_ENTITY_SLOTS), math.pi / 2.0),
+    )
+
+    assert right_context[0, 0, 0, 1] > right_context[0, 0, 0, 0]
+    assert up_context[0, 0, 0, 0] > up_context[0, 0, 0, 1]
 
 
 def test_model_config_has_discriminator_tag() -> None:
@@ -269,6 +362,7 @@ def test_actor_config_files_load(config_path: Path) -> None:
     [
         ("stateless_transformer_tiny.yaml", 1_207_182),
         ("stateless_transformer_5m_gelu.yaml", 5_532_942),
+        ("stateless_transformer_5m_pure.yaml", 5_804_862),
         ("stateless_transformer_20m_gelu.yaml", 20_093_402),
         ("stateless_transformer_20m_swiglu.yaml", 20_914_202),
         ("stateless_transformer_28m.yaml", 27_785_738),
@@ -281,10 +375,15 @@ def test_model_config_file_parameter_count(
     config = StatelessTransformerV1Config.from_file(
         _REPO_ROOT / "configs" / "model" / filename
     )
+    action_spec: ActionConfig
+    if isinstance(config.actor, ActorPureConfig):
+        action_spec = ActionPureConfig()
+    else:
+        action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
     model = StatelessTransformerV1(
         config,
         obs_spec=EntityBasedConfig(),
-        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+        action_spec=action_spec,
     )
 
     assert sum(parameter.numel() for parameter in model.parameters()) == expected_params
@@ -541,22 +640,6 @@ def test_model_constructor_does_not_require_flash_attn_on_cuda_hosts(
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
     _model(StatelessTransformerV1Config(embed_dim=32, depth=1, n_heads=4))
-
-
-def test_min_gru_cell_matches_paper_equation_without_candidate_tanh() -> None:
-    cell = MinGRUCell(input_dim=2, hidden_dim=2)
-    with torch.no_grad():
-        cell.update.weight.zero_()
-        cell.update.bias.copy_(torch.tensor([0.0, 2.0]))
-        cell.candidate.weight.copy_(torch.eye(2))
-        cell.candidate.bias.zero_()
-
-    x = torch.tensor([[3.0, -4.0]])
-    prev = torch.tensor([[1.0, 2.0]])
-    update = torch.sigmoid(torch.tensor([[0.0, 2.0]]))
-    expected = (1.0 - update) * prev + update * x
-
-    assert torch.allclose(cell(x, prev), expected)
 
 
 def test_pack_sequence_removes_masked_tokens_and_unpack_restores_layout() -> None:
@@ -1113,7 +1196,7 @@ def test_model_initialization_sets_stable_rl_priors() -> None:
         embed_dim=32,
         depth=2,
         n_heads=4,
-        actor=ActorPureConfig(n_action_mixtures=2),
+        actor=ActorPureConfig(n_angle_mixtures=2, n_fleet_size_mixtures=2),
     )
     model = _model(config)
 
@@ -1153,11 +1236,12 @@ def test_model_initialization_sets_stable_rl_priors() -> None:
     assert id(model.critic_head.up) not in output_layer_ids
     for head in (
         model.actor.actor_heads.continue_head,
-        model.actor.actor_heads.mix_head,
+        model.actor.actor_heads.angle_mix_head,
         model.actor.actor_heads.dir_head,
         model.actor.actor_heads.kappa_head,
-        model.actor.actor_heads.size_frac_head,
-        model.actor.actor_heads.size_conc_head,
+        model.actor.actor_heads.size_mix_head,
+        model.actor.actor_heads.mean_head,
+        model.actor.actor_heads.scale_head,
     ):
         assert id(head.out) in output_layer_ids
         assert id(head.up) not in output_layer_ids
@@ -1167,39 +1251,68 @@ def test_model_initialization_sets_stable_rl_priors() -> None:
             atol=1e-6,
         )
 
-    params = model.actor.actor_heads(torch.zeros((1, 1, 1, config.embed_dim)))
+    slot_input = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    actor_inputs = _pure_actor_inputs(slot_input)
+    max_launch = torch.full((1, 4, ACTION_ENTITY_SLOTS), 9, dtype=torch.int64)
+    angle_params = model.actor._angle_params(actor_inputs)
+    params = model.actor._policy_params_for_angle(
+        angle_params,
+        actor_inputs,
+        max_launch,
+        torch.zeros(max_launch.shape),
+        min_fleet_size=1,
+    )
     assert torch.allclose(
         params.continue_logits,
         torch.zeros_like(params.continue_logits),
     )
-    assert torch.allclose(params.mix_logits, torch.zeros_like(params.mix_logits))
-    assert torch.allclose(torch.cos(params.loc), torch.ones_like(params.loc))
     assert torch.allclose(
-        torch.sin(params.loc),
-        torch.zeros_like(params.loc),
+        angle_params.angle_mix_logits,
+        torch.zeros_like(angle_params.angle_mix_logits),
+    )
+    assert torch.allclose(
+        params.size_mix_logits,
+        torch.zeros_like(params.size_mix_logits),
+    )
+    expected_base_angles = torch.linspace(
+        0.0,
+        2.0 * math.pi,
+        params.loc.shape[-1] + 1,
+    )[:-1]
+    assert torch.allclose(
+        torch.stack((torch.cos(params.loc[0, 0, 0]), torch.sin(params.loc[0, 0, 0]))),
+        torch.stack((torch.cos(expected_base_angles), torch.sin(expected_base_angles))),
         atol=1e-6,
     )
     actor_config = config.actor
     assert isinstance(actor_config, ActorPureConfig)
-    expected_concentration = F.softplus(torch.tensor(0.0)) + actor_config.kappa_min
+    expected_concentration = (
+        math.log(actor_config.kappa_min)
+        + torch.sigmoid(torch.tensor(0.0))
+        * (math.log(actor_config.kappa_max) - math.log(actor_config.kappa_min))
+    ).exp()
     assert torch.allclose(
         params.kappa,
         torch.full_like(params.kappa, expected_concentration),
     )
-    expected_size_concentration = F.softplus(torch.tensor(0.0)) + actor_config.tau_min
+    support_lo = torch.tensor(1.0)
+    support_width = torch.tensor(9.0)
+    scale_upper = torch.maximum(
+        torch.tensor(actor_config.scale_max_abs_floor),
+        support_width * actor_config.scale_max_frac,
+    )
+    expected_scale = (
+        math.log(actor_config.scale_min)
+        + torch.sigmoid(torch.tensor(0.0))
+        * (scale_upper.log() - math.log(actor_config.scale_min))
+    ).exp()
     assert torch.allclose(
-        params.alpha,
-        torch.full_like(
-            params.alpha,
-            0.5 * expected_size_concentration + actor_config.alpha_beta_eps,
-        ),
+        params.size_mu,
+        torch.full_like(params.size_mu, support_lo + 0.5 * (9.0 - 1.0)),
     )
     assert torch.allclose(
-        params.beta,
-        torch.full_like(
-            params.beta,
-            0.5 * expected_size_concentration + actor_config.alpha_beta_eps,
-        ),
+        params.size_scale,
+        torch.full_like(params.size_scale, expected_scale),
     )
 
 
@@ -1245,7 +1358,7 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
         embed_dim=32,
         depth=1,
         n_heads=4,
-        actor=ActorPureConfig(n_action_mixtures=2),
+        actor=ActorPureConfig(n_angle_mixtures=2, n_fleet_size_mixtures=2),
     )
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
@@ -1277,7 +1390,14 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
         output.entropies.per_player_entity,
         (output.entropies.launch + output.entropies.event).sum(dim=-1),
     )
-    assert set(output.entropies.components) == {"launch", "event"}
+    assert set(output.entropies.components) == {
+        "angle",
+        "event",
+        "fleet_size_full",
+        "fleet_size_logistic",
+        "fleet_size_mixture",
+        "launch",
+    }
     assert torch.allclose(
         output.entropies.components["launch"],
         output.entropies.launch.sum(dim=-1),
@@ -1295,8 +1415,6 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert torch.all(output.winner_probabilities[~obs.still_playing] == 0)
     assert torch.all(output.actions.ships[~output.actions.launch] == 0)
     assert torch.all(output.actions.ships.sum(dim=-1) <= obs.max_launch)
-    assert model.actor.launch_slot_tokens.shape == (1, config.embed_dim)
-    assert model.actor.slot_dynamic_proj.in_features == 9
 
     evaluation = model.evaluate_actions(obs, output.actions)
     assert torch.allclose(evaluation.log_probs.launch, output.log_probs.launch)
@@ -1317,7 +1435,14 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
         evaluation.entropies.per_player_entity,
         output.entropies.per_player_entity,
     )
-    assert set(evaluation.entropies.components) == {"launch", "event"}
+    assert set(evaluation.entropies.components) == {
+        "angle",
+        "event",
+        "fleet_size_full",
+        "fleet_size_logistic",
+        "fleet_size_mixture",
+        "launch",
+    }
     assert torch.allclose(
         evaluation.entropies.components["launch"],
         output.entropies.components["launch"],
@@ -1791,7 +1916,7 @@ def test_learned_token_embeddings_are_input_layers() -> None:
     )
     pure_model = _model(
         pure_config,
-        action_spec=ActionPureConfig(max_per_planet_launches=3),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
     )
 
     pure_input_layer_ids = {id(layer) for layer in pure_model.get_input_layers()}
@@ -1801,9 +1926,24 @@ def test_learned_token_embeddings_are_input_layers() -> None:
         pure_model.board_tokens,
         pure_model.actor_plan_tokens,
         pure_model.critic_value_tokens,
-        pure_model.actor.launch_slot_tokens,
+        pure_model.actor.actor_heads.base_dirs,
     ):
         assert id(layer) in pure_input_layer_ids
+
+    expected_angles = torch.linspace(
+        0.0,
+        2.0 * math.pi,
+        pure_model.actor.actor_heads.base_dirs.shape[0] + 1,
+    )[:-1]
+    expected_dirs = torch.stack(
+        (torch.cos(expected_angles), torch.sin(expected_angles)),
+        dim=-1,
+    )
+    assert torch.allclose(
+        pure_model.actor.actor_heads.base_dirs,
+        expected_dirs,
+        atol=1e-6,
+    )
 
     discrete_config = StatelessTransformerV1Config(
         embed_dim=32,
@@ -2139,7 +2279,7 @@ def test_stochastic_discretized_logistic_sampling_uses_inverse_cdf(
     def fail_ship_support(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("stochastic sampling should not enumerate ship support")
 
-    monkeypatch.setattr(discrete_targets_impl, "ship_support", fail_ship_support)
+    monkeypatch.setattr(logistic_mixture_impl, "ship_support", fail_ship_support)
     torch.manual_seed(5)
     residual_budget = torch.tensor([8, 20], dtype=torch.int64)
     ships = sample_discretized_logistic_mixture(
@@ -2154,6 +2294,58 @@ def test_stochastic_discretized_logistic_sampling_uses_inverse_cdf(
     assert ships.dtype == torch.int64
     assert torch.all(ships >= 6)
     assert torch.all(ships <= residual_budget)
+
+
+def test_deterministic_discretized_logistic_sampling_skips_empty_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_log_prob(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("empty deterministic mask should skip support scoring")
+
+    monkeypatch.setattr(
+        logistic_mixture_impl,
+        "discretized_logistic_mixture_log_prob",
+        fail_log_prob,
+    )
+    ships = sample_discretized_logistic_mixture(
+        mix_logits=torch.zeros((2, 2)),
+        mu=torch.tensor([[500.0, 700.0], [12.0, 14.0]]),
+        scale=torch.ones((2, 2)),
+        residual_budget=torch.tensor([1000, 20], dtype=torch.int64),
+        min_fleet_size=6,
+        deterministic=True,
+        deterministic_mask=torch.zeros(2, dtype=torch.bool),
+    )
+
+    assert torch.equal(ships, torch.zeros(2, dtype=torch.int64))
+
+
+def test_deterministic_discretized_logistic_sampling_mask_matches_full_map() -> None:
+    residual_budget = torch.tensor([[12, 100, 7]], dtype=torch.int64)
+    mix_logits = torch.tensor([[[0.0, 0.5], [1.0, -0.5], [-0.25, 0.75]]])
+    mu = torch.tensor([[[8.0, 10.0], [30.0, 95.0], [5.0, 7.0]]])
+    scale = torch.tensor([[[1.0, 2.0], [3.0, 1.5], [0.5, 1.0]]])
+    launch = torch.tensor([[True, False, True]])
+
+    full_ships = sample_discretized_logistic_mixture(
+        mix_logits,
+        mu,
+        scale,
+        residual_budget,
+        min_fleet_size=6,
+        deterministic=True,
+    )
+    masked_ships = sample_discretized_logistic_mixture(
+        mix_logits,
+        mu,
+        scale,
+        residual_budget,
+        min_fleet_size=6,
+        deterministic=True,
+        deterministic_mask=launch,
+    )
+
+    assert torch.equal(masked_ships, torch.where(launch, full_ships, 0))
 
 
 def test_ship_support_counts_only_valid_min_to_residual_entries() -> None:
@@ -2237,7 +2429,7 @@ def test_min_fleet_size_masks_and_shifts_ship_distribution() -> None:
         embed_dim=32,
         depth=1,
         n_heads=4,
-        actor=ActorPureConfig(n_action_mixtures=2),
+        actor=ActorPureConfig(n_angle_mixtures=2, n_fleet_size_mixtures=2),
     )
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(batch_size=1, obs_spec=obs_spec, action_spec=action_spec)
@@ -2268,118 +2460,22 @@ def test_min_fleet_size_masks_and_shifts_ship_distribution() -> None:
         model.evaluate_actions(obs, output.actions)
 
 
-def test_launch_slot_embedding_is_added_to_each_slot_input() -> None:
+def test_pure_actor_rejects_multi_launch_action_spec() -> None:
     config = StatelessTransformerV1Config(
         embed_dim=16,
         depth=1,
         n_heads=4,
     )
-    actor = PureActor(
-        ActorPureConfig(),
-        embed_dim=config.embed_dim,
-        max_per_planet_launches=4,
-        activation=config.activation,
-    )
-    slot_input = torch.zeros((2, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
-    active = torch.zeros(slot_input.shape[:-1], dtype=torch.bool)
-    remaining = torch.zeros(slot_input.shape[:-1], dtype=torch.int64)
-    initial_max_launch = torch.zeros(slot_input.shape[:-1], dtype=torch.int64)
-    last_launch = torch.zeros(slot_input.shape[:-1], dtype=torch.bool)
-    last_angle_sin = torch.zeros(slot_input.shape[:-1])
-    last_angle_cos = torch.zeros(slot_input.shape[:-1])
-    last_ships = torch.zeros(slot_input.shape[:-1], dtype=torch.int64)
 
-    first_slot = actor._slot_gru_input(
-        slot_input,
-        0,
-        active,
-        remaining,
-        initial_max_launch,
-        last_launch,
-        last_angle_sin,
-        last_angle_cos,
-        last_ships,
-        include_dynamic_features=False,
-    )
-    second_slot = actor._slot_gru_input(
-        slot_input,
-        1,
-        active,
-        remaining,
-        initial_max_launch,
-        last_launch,
-        last_angle_sin,
-        last_angle_cos,
-        last_ships,
-        include_dynamic_features=False,
-    )
-
-    expected_first_slot = actor.launch_slot_tokens[0].view(1, 1, 1, -1)
-    assert torch.allclose(first_slot, expected_first_slot.expand_as(first_slot))
-    assert not torch.allclose(first_slot, second_slot)
-
-
-def test_slot_dynamic_features_include_relative_budget_and_slot_fraction() -> None:
-    config = StatelessTransformerV1Config(
-        embed_dim=16,
-        depth=1,
-        n_heads=4,
-    )
-    actor = PureActor(
-        ActorPureConfig(max_ship_normalizer=100.0),
-        embed_dim=config.embed_dim,
-        max_per_planet_launches=4,
-        activation=config.activation,
-    )
-    active = torch.tensor([[[True, False]]])
-    remaining = torch.tensor([[[6, 0]]])
-    initial_max_launch = torch.tensor([[[10, 0]]])
-    last_launch = torch.tensor([[[True, False]]])
-    last_angle_sin = torch.tensor([[[0.25, -0.5]]])
-    last_angle_cos = torch.tensor([[[0.75, 0.5]]])
-    last_ships = torch.tensor([[[2, 3]]])
-
-    features = actor._slot_dynamic_features(
-        2,
-        active,
-        remaining,
-        initial_max_launch,
-        last_launch,
-        last_angle_sin,
-        last_angle_cos,
-        last_ships,
-        dtype=torch.float32,
-    )
-
-    expected = torch.tensor(
-        [
-            [
-                [
-                    1.0,
-                    0.06,
-                    1.0,
-                    0.25,
-                    0.75,
-                    0.02,
-                    0.6,
-                    0.2,
-                    2.0 / 3.0,
-                ],
-                [
-                    0.0,
-                    0.0,
-                    0.0,
-                    -0.5,
-                    0.5,
-                    0.03,
-                    0.0,
-                    3.0,
-                    2.0 / 3.0,
-                ],
-            ]
-        ]
-    )
-    assert torch.allclose(features, expected)
+    with pytest.raises(
+        ValueError, match="pure actor requires max_per_planet_launches=1"
+    ):
+        PureActor(
+            ActorPureConfig(),
+            embed_dim=config.embed_dim,
+            max_per_planet_launches=4,
+            activation=config.activation,
+        )
 
 
 def test_actor_distribution_outputs_remain_fp32_under_cpu_bf16_autocast() -> None:
@@ -2390,7 +2486,7 @@ def test_actor_distribution_outputs_remain_fp32_under_cpu_bf16_autocast() -> Non
         embed_dim=32,
         depth=1,
         n_heads=4,
-        actor=ActorPureConfig(n_action_mixtures=2),
+        actor=ActorPureConfig(n_angle_mixtures=2, n_fleet_size_mixtures=2),
     )
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
@@ -2419,12 +2515,13 @@ def test_distribution_helpers_promote_lower_precision_params_to_fp32() -> None:
     mix_logits = torch.zeros(shape, dtype=torch.bfloat16)
     params = PolicyParams(
         continue_logits=torch.zeros(shape[:-1], dtype=torch.bfloat16),
-        mix_logits=mix_logits,
-        log_w=torch.log_softmax(mix_logits, dim=-1),
+        angle_mix_logits=mix_logits,
+        angle_log_w=torch.log_softmax(mix_logits, dim=-1),
         loc=torch.zeros(shape, dtype=torch.bfloat16),
         kappa=torch.ones(shape, dtype=torch.bfloat16),
-        alpha=torch.full(shape, 1.5, dtype=torch.bfloat16),
-        beta=torch.full(shape, 2.0, dtype=torch.bfloat16),
+        size_mix_logits=mix_logits,
+        size_mu=torch.full(shape, 3.0, dtype=torch.bfloat16),
+        size_scale=torch.full(shape, 1.0, dtype=torch.bfloat16),
     )
     active = torch.ones(shape[:-1], dtype=torch.bool)
     residual_budget = torch.full(shape[:-1], 5, dtype=torch.int64)
@@ -2438,10 +2535,16 @@ def test_distribution_helpers_promote_lower_precision_params_to_fp32() -> None:
         active,
         deterministic=False,
     )
-    sampled_angle, sampled_ships = model.actor._sample_event(
+    sampled_angle = model_impl.sample_angle_mixture(
         params,
+        deterministic=False,
+    )
+    sampled_ships = sample_discretized_logistic_mixture(
+        params.size_mix_logits,
+        params.size_mu,
+        params.size_scale,
         residual_budget,
-        1,
+        min_fleet_size=1,
         deterministic=False,
     )
     event_log_prob = masked_event_log_prob_from_params(
@@ -2476,25 +2579,33 @@ def test_masked_action_entropy_includes_latent_mixture_entropy() -> None:
     mix_logits = torch.zeros((2, 2))
     params = PolicyParams(
         continue_logits=torch.tensor([0.0, 10.0]),
-        mix_logits=mix_logits,
-        log_w=torch.log_softmax(mix_logits, dim=-1),
+        angle_mix_logits=mix_logits,
+        angle_log_w=torch.log_softmax(mix_logits, dim=-1),
         loc=torch.zeros((2, 2)),
         kappa=torch.zeros((2, 2)),
-        alpha=torch.ones((2, 2)),
-        beta=torch.ones((2, 2)),
+        size_mix_logits=mix_logits,
+        size_mu=torch.full((2, 2), 2.0),
+        size_scale=torch.ones((2, 2)),
     )
     residual_budget = torch.tensor([3, 3])
     active = torch.tensor([True, False])
 
-    launch_entropy, event_entropy = model_impl.masked_action_entropy_from_params(
+    launch_entropy, event_entropy, *_ = model_impl.masked_action_entropy_from_params(
         params,
         residual_budget,
         active,
         min_fleet_size=1,
-        max_ship_support=3,
+        entropy_ship_quantiles=8,
     )
 
-    expected_event_entropy = math.log(2.0) + math.log(2.0 * math.pi) + math.log(3.0)
+    angle_entropy = math.log(2.0) + math.log(2.0 * math.pi)
+    size_entropy = model_impl.event_entropy_from_params(
+        params,
+        residual_budget,
+        min_fleet_size=1,
+        entropy_ship_quantiles=8,
+    )[2]
+    expected_event_entropy = angle_entropy + size_entropy[0]
     assert torch.allclose(
         launch_entropy,
         torch.tensor([math.log(2.0), 0.0]),
@@ -2502,7 +2613,7 @@ def test_masked_action_entropy_includes_latent_mixture_entropy() -> None:
     )
     assert torch.allclose(
         event_entropy,
-        torch.tensor([0.5 * expected_event_entropy, 0.0]),
+        torch.stack((0.5 * expected_event_entropy, torch.tensor(0.0))),
         atol=1e-6,
     )
 
@@ -2515,7 +2626,7 @@ def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
         embed_dim=32,
         depth=1,
         n_heads=4,
-        actor=ActorPureConfig(n_action_mixtures=2),
+        actor=ActorPureConfig(n_angle_mixtures=2, n_fleet_size_mixtures=2),
     )
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
@@ -2535,28 +2646,56 @@ def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
     assert all(torch.isfinite(grad).all() for grad in grads)
 
 
-def test_pure_actor_supports_multi_launch_action_spec() -> None:
+def test_pure_replay_ignores_nan_angles_for_no_launch_slots() -> None:
+    torch.manual_seed(1)
     obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
-    action_spec = ActionPureConfig(max_per_planet_launches=3)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
     config = StatelessTransformerV1Config(
         embed_dim=32,
         depth=1,
         n_heads=4,
-        actor=ActorPureConfig(n_action_mixtures=2),
+        actor=ActorPureConfig(n_angle_mixtures=2, n_fleet_size_mixtures=2),
     )
-
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
-
-    output = model(obs)
-    assert output.actions.launch.shape == (2, 4, ACTION_ENTITY_SLOTS, 3)
-
-    evaluation = model.evaluate_actions(obs, output.actions)
-    assert evaluation.log_probs.per_player_entity.shape == (
-        2,
-        4,
-        ACTION_ENTITY_SLOTS,
+    action_shape = (2, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS, 1)
+    actions = PureActions(
+        launch=torch.zeros(action_shape, dtype=torch.bool),
+        angle=torch.full(action_shape, float("nan"), dtype=torch.float32),
+        ships=torch.zeros(action_shape, dtype=torch.int64),
     )
+
+    model.zero_grad()
+    evaluation = model.evaluate_actions(obs, actions)
+    evaluation.log_probs.per_player_entity.sum().backward()
+
+    grads = [param.grad for param in model.parameters() if param.grad is not None]
+    assert torch.isfinite(evaluation.log_probs.per_player_entity).all()
+    assert grads
+    assert all(torch.isfinite(grad).all() for grad in grads)
+
+
+def test_model_rejects_pure_multi_launch_action_spec() -> None:
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        actor=ActorPureConfig(n_angle_mixtures=2, n_fleet_size_mixtures=2),
+    )
+
+    with pytest.raises(
+        ValueError, match="pure actor requires max_per_planet_launches=1"
+    ):
+        StatelessTransformerV1(
+            config,
+            obs_spec=obs_spec,
+            action_spec=ActionPureConfig.model_construct(
+                action_spec="pure",
+                max_per_planet_launches=3,
+                min_fleet_size=1,
+            ),
+        )
 
 
 def test_evaluate_actions_rejects_invalid_action_dtypes() -> None:
@@ -2604,7 +2743,9 @@ def test_evaluate_actions_rejects_nonfinite_launched_angles(angle: float) -> Non
     output.actions.ships.zero_()
     output.actions.launch[0, 0, 0, 0] = True
     output.actions.angle[0, 0, 0, 0] = angle
-    output.actions.ships[0, 0, 0, 0] = 1
+    output.actions.ships[0, 0, 0, 0] = action_spec.min_fleet_size
+    assert obs.max_launch is not None
+    obs.max_launch[0, 0, 0] = action_spec.min_fleet_size
 
     with pytest.raises(ValueError, match=r"actions\.angle must be finite"):
         model.evaluate_actions(obs, output.actions)

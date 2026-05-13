@@ -80,8 +80,8 @@ class ActionPureConfig(BaseConfig):
     """
 
     action_spec: Literal["pure"] = "pure"
-    max_per_planet_launches: int = Field(default=3, ge=1, le=4)
-    min_fleet_size: int = Field(default=1, ge=1)
+    max_per_planet_launches: int = Field(default=1, ge=1, le=1)
+    min_fleet_size: int = Field(default=6, ge=1)
 
 
 TargetingMode: TypeAlias = Literal["anything_goes", "stop_bad_launch", "full_mask"]
@@ -96,7 +96,7 @@ class ActionDiscreteTargetsConfig(BaseConfig):
     """
 
     action_spec: Literal["discrete_targets"] = "discrete_targets"
-    max_per_planet_launches: int = Field(default=3, ge=1, le=4)
+    max_per_planet_launches: int = Field(default=1, ge=1, le=1)
     min_fleet_size: int = Field(default=6, ge=1)
     targeting_mode: TargetingMode = "full_mask"
 
@@ -105,7 +105,7 @@ class ActionDiscreteTargetBinsConfig(BaseConfig):
     """Discrete target plus discrete fleet-size-bin action spec."""
 
     action_spec: Literal["discrete_target_bins"] = "discrete_target_bins"
-    min_fleet_size: int = Field(default=1, ge=1)
+    min_fleet_size: int = Field(default=6, ge=1)
     n_bins: int = Field(ge=2)
     targeting_mode: TargetingMode = "full_mask"
 

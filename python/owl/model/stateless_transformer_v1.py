@@ -17,7 +17,6 @@ from owl.model.actor import (
     ActorPureConfig,
     DiscreteTargetBinsActor,
     DiscreteTargetsActor,
-    MinGRUCell,
     PureActor,
 )
 from owl.model.actor.common import (
@@ -35,8 +34,11 @@ from owl.model.actor.discrete_targets import (
 )
 from owl.model.actor.pure import (
     PolicyParams,
+    PureActorInputs,
+    event_entropy_from_params,
     masked_action_entropy_from_params,
     masked_event_log_prob_from_params,
+    sample_angle_mixture,
 )
 from owl.model.attn import use_flash_attn, varlen_attention
 from owl.model.base import (
@@ -78,7 +80,6 @@ __all__ = [
     "DiscreteTargetsActor",
     "EncodedObservations",
     "FeedForward",
-    "MinGRUCell",
     "ModelConfig",
     "MultiHeadSelfAttention",
     "OutputProjectionMLP",
@@ -86,6 +87,7 @@ __all__ = [
     "PairwiseBiasMLP",
     "PolicyParams",
     "PureActor",
+    "PureActorInputs",
     "StatelessTransformerV1",
     "StatelessTransformerV1Config",
     "binary_entropy_from_logits",
@@ -93,11 +95,13 @@ __all__ = [
     "build_pairwise_action_features",
     "discrete_action_entropy",
     "discretized_logistic_mixture_log_prob",
+    "event_entropy_from_params",
     "masked_action_entropy_from_params",
     "masked_event_log_prob_from_params",
     "masked_softmax",
     "pack_sequence",
     "pack_tensor",
+    "sample_angle_mixture",
     "sample_launch",
     "unpack_sequence",
 ]
@@ -199,6 +203,11 @@ class StatelessTransformerV1(BaseModelAPI):
             raise ValueError(
                 "discrete_targets actor requires max_per_planet_launches=1"
             )
+        if (
+            isinstance(action_spec, ActionPureConfig)
+            and action_spec.max_per_planet_launches != 1
+        ):
+            raise ValueError("pure actor requires max_per_planet_launches=1")
         if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
             actor_config = cast(ActorDiscreteTargetBinsConfig, config.actor)
             if actor_config.n_bins != action_spec.n_bins:
@@ -241,12 +250,12 @@ class StatelessTransformerV1(BaseModelAPI):
             if self.config.use_learned_pairwise_bias
             else None
         )
-        self.pure_actor_input_proj: nn.Linear | None = None
         self.source_actor_input_proj: nn.Linear | None = None
         self.target_actor_input_proj: nn.Linear | None = None
         self.actor: PureActor | DiscreteTargetsActor | DiscreteTargetBinsActor
         if isinstance(action_spec, ActionPureConfig):
-            self.pure_actor_input_proj = nn.Linear(dim * 2, dim)
+            self.source_actor_input_proj = nn.Linear(dim * 3, dim)
+            self.target_actor_input_proj = nn.Linear(dim * 3, dim)
             self.actor = PureActor(
                 cast(ActorPureConfig, self.config.actor),
                 embed_dim=dim,
@@ -272,6 +281,8 @@ class StatelessTransformerV1(BaseModelAPI):
         self.apply(_init_module)
         for layer in self.get_input_layers():
             _init_input_layer(layer)
+        if isinstance(self.actor, PureActor):
+            self.actor.reset_base_dirs()
         residual_gain = 1.0 / math.sqrt(2.0 * self.config.depth)
         for module in self.blocks:
             block = cast(TransformerBlock, module)
@@ -496,25 +507,38 @@ class StatelessTransformerV1(BaseModelAPI):
     def _pure_actor_inputs(
         self,
         encoded: EncodedObservations,
-    ) -> torch.Tensor:
+    ) -> PureActorInputs:
         action_entity_hidden = encoded.action_entity_hidden
-        player_hidden = encoded.player_hidden
         entity_features = action_entity_hidden[:, None, :, :].expand(
             -1,
             OUTER_PLAYER_SLOTS,
             -1,
             -1,
         )
-        player_features = player_hidden[:, :, None, :].expand(
+        player_features = encoded.player_hidden[:, :, None, :].expand(
             -1,
             -1,
             ACTION_ENTITY_SLOTS,
             -1,
         )
-        if self.pure_actor_input_proj is None:
-            raise RuntimeError("pure actor input projection is not initialized")
-        return self.pure_actor_input_proj(
-            torch.cat((entity_features, player_features), dim=-1)
+        plan_features = encoded.actor_plan_hidden[:, :, None, :].expand(
+            -1,
+            -1,
+            ACTION_ENTITY_SLOTS,
+            -1,
+        )
+        if self.source_actor_input_proj is None or self.target_actor_input_proj is None:
+            raise RuntimeError("pure actor input projections are not initialized")
+        source = self.source_actor_input_proj(
+            torch.cat((entity_features, player_features, plan_features), dim=-1)
+        )
+        target = self.target_actor_input_proj(
+            torch.cat((entity_features, player_features, plan_features), dim=-1)
+        )
+        return PureActorInputs(
+            source=source,
+            target=target,
+            target_mask=encoded.token_mask[:, :ACTION_ENTITY_SLOTS],
         )
 
     def _discrete_actor_inputs(

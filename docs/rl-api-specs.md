@@ -15,7 +15,7 @@ from owl.rl import ActionPureConfig, EntityBasedConfig, VectorizedEnv
 env = VectorizedEnv(
     n_envs=128,
     obs_spec=EntityBasedConfig(max_entities=256),
-    action_spec=ActionPureConfig(max_per_planet_launches=3),
+    action_spec=ActionPureConfig(max_per_planet_launches=1),
 )
 ```
 
@@ -278,17 +278,15 @@ filled with `False` / `0` in action-spec output tensors.
 Config:
 
 ```python
-{"action_spec": "pure", "max_per_planet_launches": 3, "min_fleet_size": 1}
+{"action_spec": "pure", "max_per_planet_launches": 1, "min_fleet_size": 6}
 ```
 
 The pure action spec exposes all launch decisions in direct tensor form. The
 same entity axis is used for action masks and submitted actions.
-`max_per_planet_launches` is validated in Python and Rust and must be between
-`1` and `4`, inclusive. `min_fleet_size` is validated in Python and Rust and
-must fit in the positive `i32` ship-count range. `ActionPureConfig()` defaults
-to `max_per_planet_launches=3` and `min_fleet_size=1` so callers use the
-existing multi-launch autoregressive action space unless they explicitly opt
-into a smaller action shape or larger minimum fleet.
+`max_per_planet_launches` is validated in Python and Rust and must equal `1`.
+`min_fleet_size` is validated in Python and Rust and must fit in the positive
+`i32` ship-count range. `ActionPureConfig()` defaults to
+`max_per_planet_launches=1` and `min_fleet_size=6`.
 
 ### Pure Output Tensors
 
@@ -335,8 +333,7 @@ enough remaining ships on that source are required. Invalid submitted actions
 raise `ValueError`. Invalid-action errors are not atomic across sub-envs:
 because decoding, stepping, and observation writing run in one parallel pass per
 env, other sub-envs may have advanced before the error is returned.
-For each player and source entity, decoding stops at the first `False` launch
-slot, so later slots for that source are ignored.
+Each player/source entity has one launch slot.
 
 For Kaggle submissions, `actions_to_kaggle(obs, player, actions, action_spec=...)`
 accepts a `PureActions` bundle with single batched tensors shaped
@@ -352,8 +349,8 @@ Config:
 ```python
 {
     "action_spec": "discrete_targets",
-    "max_per_planet_launches": 3,
-    "min_fleet_size": 1,
+    "max_per_planet_launches": 1,
+    "min_fleet_size": 6,
     "targeting_mode": "full_mask",
 }
 ```
@@ -441,7 +438,7 @@ Config:
 ```python
 {
     "action_spec": "discrete_target_bins",
-    "min_fleet_size": 1,
+    "min_fleet_size": 6,
     "n_bins": 11,
     "targeting_mode": "full_mask",
 }

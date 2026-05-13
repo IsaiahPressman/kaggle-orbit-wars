@@ -160,7 +160,7 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
     ships = torch.zeros(action_shape, dtype=torch.int64)
     launch[0, 0, 0, 0] = True
     angle[0, 0, 0, 0] = 0.5
-    ships[0, 0, 0, 0] = 1
+    ships[0, 0, 0, 0] = action_spec.min_fleet_size
 
     class FakeModel:
         def __call__(self, obs: object, *, deterministic: bool) -> object:
@@ -175,7 +175,7 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
 
     actions = agent.act(KaggleObservation.model_validate(_raw_observation()))
 
-    assert actions == [[0.0, 0.5, 1.0]]
+    assert actions == [[0.0, 0.5, float(action_spec.min_fleet_size)]]
 
 
 def test_agent_act_moves_action_bundle_to_cpu_before_kaggle_conversion(

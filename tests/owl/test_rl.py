@@ -238,8 +238,8 @@ def test_step_rejects_wrong_torch_action_dtypes(
 @pytest.mark.parametrize(
     ("ship_count", "angle_value", "message"),
     [
-        (0, 0.0, "ships must be >= 1"),
-        (1, np.inf, "angle must be finite"),
+        (0, 0.0, "ships must be >= 6"),
+        (6, np.inf, "angle must be finite"),
     ],
 )
 def test_step_rejects_invalid_launched_action_values(
@@ -379,7 +379,7 @@ def test_two_player_sample_marks_unused_player_slots_done() -> None:
 
 
 def test_vectorized_env_accepts_discriminated_config_dicts() -> None:
-    action_spec = ActionPureConfig(max_per_planet_launches=2, min_fleet_size=4)
+    action_spec = ActionPureConfig(max_per_planet_launches=1, min_fleet_size=4)
     env = VectorizedEnv(
         n_envs=1,
         obs_spec=EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 1),
@@ -389,17 +389,24 @@ def test_vectorized_env_accepts_discriminated_config_dicts() -> None:
 
     assert env.obs_spec.max_fleets == 1
     assert env.action_spec.action_spec == "pure"
-    assert env.action_spec.max_per_planet_launches == 2
+    assert env.action_spec.max_per_planet_launches == 1
     assert env.action_spec.min_fleet_size == 4
 
 
 def test_action_config_validates_launch_bounds() -> None:
-    assert ActionPureConfig().max_per_planet_launches == 3
-    assert ActionPureConfig(max_per_planet_launches=4).max_per_planet_launches == 4
+    assert ActionPureConfig().max_per_planet_launches == 1
+    assert ActionPureConfig(max_per_planet_launches=1).max_per_planet_launches == 1
     assert ActionPureConfig(min_fleet_size=5).min_fleet_size == 5
+    assert ActionDiscreteTargetsConfig().max_per_planet_launches == 1
+    assert (
+        ActionDiscreteTargetsConfig(max_per_planet_launches=1).max_per_planet_launches
+        == 1
+    )
 
-    with pytest.raises(ValueError, match="less than or equal to 4"):
-        ActionPureConfig(max_per_planet_launches=5)
+    with pytest.raises(ValueError, match="less than or equal to 1"):
+        ActionPureConfig(max_per_planet_launches=2)
+    with pytest.raises(ValueError, match="less than or equal to 1"):
+        ActionDiscreteTargetsConfig(max_per_planet_launches=2)
     with pytest.raises(ValueError, match="greater than or equal to 1"):
         ActionPureConfig(min_fleet_size=0)
 
@@ -417,7 +424,7 @@ def test_discrete_targets_config_and_env_shapes() -> None:
             "n_envs": 2,
             "action_spec": {
                 "action_spec": "discrete_targets",
-                "max_per_planet_launches": 2,
+                "max_per_planet_launches": 1,
                 "min_fleet_size": 4,
                 "targeting_mode": "stop_bad_launch",
             },
@@ -425,7 +432,7 @@ def test_discrete_targets_config_and_env_shapes() -> None:
         }
     )
     assert isinstance(config.action_spec, ActionDiscreteTargetsConfig)
-    assert config.action_spec.max_per_planet_launches == 2
+    assert config.action_spec.max_per_planet_launches == 1
     assert config.action_spec.min_fleet_size == 4
     assert config.action_spec.targeting_mode == "stop_bad_launch"
 
@@ -443,7 +450,7 @@ def test_discrete_targets_config_and_env_shapes() -> None:
 
 
 def test_discrete_targets_step_uses_int_target_tensor() -> None:
-    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=2)
+    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
     env = VectorizedEnv(
         n_envs=1,
         obs_spec=EntityBasedConfig(),
@@ -883,7 +890,7 @@ def test_python_observation_encoder_writes_discrete_target_bin_mask() -> None:
     ) = _encoded_python_observation(
         _python_obs(
             planets=[
-                [0, 0, 25.0, 75.0, 2.0, 5, 3],
+                [0, 0, 25.0, 75.0, 2.0, 10, 3],
                 [1, -1, 75.0, 75.0, 2.0, 10, 3],
             ]
         ),
@@ -894,7 +901,7 @@ def test_python_observation_encoder_writes_discrete_target_bin_mask() -> None:
     assert entity_mask[:2].tolist() == [True, True]
     assert can_act.shape == (4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS, 11)
     assert max_launch is None
-    assert np.nonzero(can_act[0, 0, 1])[0].tolist() == [0, 2, 4, 6, 8, 10]
+    assert np.nonzero(can_act[0, 0, 1])[0].tolist() == [0, 6, 7, 8, 9, 10]
     assert not can_act[0, 0, 0].any()
     assert not can_act[0, 0, 2].any()
 

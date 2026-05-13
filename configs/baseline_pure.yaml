@@ -4,28 +4,26 @@ env:
     obs_spec: entity_based
     max_entities: 256
   action_spec:
-    action_spec: discrete_target_bins
+    action_spec: pure
     min_fleet_size: 6
-    n_bins: 5
-    targeting_mode: anything_goes
   two_player_weight: 0.5
   pin_memory: true
 
-model: stateless_transformer_20m_swiglu_discrete_targets
+model: stateless_transformer_5m_pure
 
 optimizer:
   optimizer: muon
-  adamw_lr: 0.0002
+  adamw_lr: 0.0001
   adamw_eps: 1.0e-05
   weight_decay: 0.0
-  muon_lr: 0.005
+  muon_lr: 0.002
   muon_weight_decay: 0.05
   muon_momentum: 0.95
   lr_schedule:
     schedule: linear_warmup_cosine_decay
     warmup_steps: 200
     decay_steps: 100_000
-    lr_min_ratio: 0.1
+    lr_min_ratio: 0.02
 
 rl:
   horizon: 128
@@ -39,7 +37,7 @@ rl:
   vf_clip_coef: null
   vf_coef: 2.0
   ent_coef: 2e-5
-  max_grad_norm: 1.0
+  max_grad_norm: 5.0
   target_kl: null
   normalize_advantages: true
   eval_replay_games: 8

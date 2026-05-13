@@ -56,7 +56,7 @@ pub struct PyRlVecEnv {
 #[pymethods]
 impl PyRlVecEnv {
     #[new]
-    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="entity_based", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=3, min_fleet_size=1, n_bins=0, targeting_mode="full_mask"))]
+    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="entity_based", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=1, min_fleet_size=1, n_bins=0, targeting_mode="full_mask"))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         n_envs: usize,
@@ -91,6 +91,11 @@ impl PyRlVecEnv {
         if !(1..=4).contains(&max_per_planet_launches) {
             return Err(PyValueError::new_err(
                 "max_per_planet_launches must be between 1 and 4",
+            ));
+        }
+        if matches!(action_spec, RlActionSpec::Pure) && max_per_planet_launches != 1 {
+            return Err(PyValueError::new_err(
+                "pure action_spec requires max_per_planet_launches=1",
             ));
         }
         require_min_fleet_size(min_fleet_size)?;
@@ -534,9 +539,9 @@ impl PyRlVecEnv {
         decoded_angle: PyReadwriteArrayDyn<'_, f32>,
         decoded_ships: PyReadwriteArrayDyn<'_, i64>,
     ) -> PyResult<()> {
-        if !(1..=4).contains(&max_per_planet_launches) {
+        if max_per_planet_launches != 1 {
             return Err(PyValueError::new_err(
-                "max_per_planet_launches must be between 1 and 4",
+                "pure actions require max_per_planet_launches=1",
             ));
         }
         require_min_fleet_size(min_fleet_size)?;
