@@ -538,7 +538,7 @@ def _log_cli_overrides(
         return
 
     overrides_flat = list(itertools.chain.from_iterable(raw_overrides))
-    print(f"Launched with the manual overrides: {overrides_flat}")
+    print(f"Launched with the following raw manual overrides: '{overrides_flat}'")
 
 
 def _create_run_dir(output_dir: Path) -> Path:

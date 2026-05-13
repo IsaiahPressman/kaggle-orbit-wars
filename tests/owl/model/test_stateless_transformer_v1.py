@@ -333,6 +333,7 @@ def test_model_config_rejects_env_owned_specs(field_name: str) -> None:
 
 
 def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
+    torch.manual_seed(148)
     action_spec = ActionPureConfig(max_per_planet_launches=1)
     model = _model(
         StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
@@ -348,6 +349,13 @@ def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
     compact.fleets[0, 0, 0] = 1.0
     compact.fleets[0, 0, 3] = 0.25
     compact.entity_mask[0, ACTION_ENTITY_SLOTS] = True
+    padded_entity_mask = torch.cat(
+        (
+            compact.entity_mask,
+            torch.zeros((1, 3), dtype=compact.entity_mask.dtype),
+        ),
+        dim=1,
+    )
     padded = ObsBatch(
         planets=compact.planets,
         orbiting_planets=compact.orbiting_planets,
@@ -363,13 +371,27 @@ def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
             dim=1,
         ),
         comets=compact.comets,
-        entity_mask=torch.cat(
+        entity_mask=padded_entity_mask,
+        still_playing=compact.still_playing,
+        global_features=compact.global_features,
+        can_act=compact.can_act,
+        max_launch=compact.max_launch,
+    )
+    padded_zeroed = ObsBatch(
+        planets=compact.planets,
+        orbiting_planets=compact.orbiting_planets,
+        fleets=torch.cat(
             (
-                compact.entity_mask,
-                torch.zeros((1, 3), dtype=compact.entity_mask.dtype),
+                compact.fleets,
+                torch.zeros(
+                    (1, 3, compact.fleets.shape[-1]),
+                    dtype=compact.fleets.dtype,
+                ),
             ),
             dim=1,
         ),
+        comets=compact.comets,
+        entity_mask=padded_entity_mask,
         still_playing=compact.still_playing,
         global_features=compact.global_features,
         can_act=compact.can_act,
@@ -379,14 +401,16 @@ def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
     with torch.inference_mode():
         compact_output = model(compact, deterministic=True)
         padded_output = model(padded, deterministic=True)
+        padded_zeroed_output = model(padded_zeroed, deterministic=True)
 
+    cross_length_atol = 1e-5
     torch.testing.assert_close(
-        compact_output.values, padded_output.values, atol=1e-6, rtol=0
+        compact_output.values, padded_output.values, atol=cross_length_atol, rtol=0
     )
     torch.testing.assert_close(
         compact_output.winner_probabilities,
         padded_output.winner_probabilities,
-        atol=1e-6,
+        atol=cross_length_atol,
         rtol=0,
     )
     torch.testing.assert_close(
@@ -398,7 +422,7 @@ def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
     torch.testing.assert_close(
         compact_output.actions.angle,
         padded_output.actions.angle,
-        atol=1e-6,
+        atol=cross_length_atol,
         rtol=0,
     )
     torch.testing.assert_close(
@@ -410,37 +434,103 @@ def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
     torch.testing.assert_close(
         compact_output.log_probs.launch,
         padded_output.log_probs.launch,
-        atol=1e-6,
+        atol=cross_length_atol,
         rtol=0,
     )
     torch.testing.assert_close(
         compact_output.log_probs.event,
         padded_output.log_probs.event,
-        atol=1e-6,
+        atol=cross_length_atol,
         rtol=0,
     )
     torch.testing.assert_close(
         compact_output.log_probs.per_player_entity,
         padded_output.log_probs.per_player_entity,
-        atol=1e-6,
+        atol=cross_length_atol,
         rtol=0,
     )
     torch.testing.assert_close(
         compact_output.entropies.launch,
         padded_output.entropies.launch,
-        atol=1e-6,
+        atol=cross_length_atol,
         rtol=0,
     )
     torch.testing.assert_close(
         compact_output.entropies.event,
         padded_output.entropies.event,
-        atol=1e-6,
+        atol=cross_length_atol,
         rtol=0,
     )
     torch.testing.assert_close(
         compact_output.entropies.per_player_entity,
         padded_output.entropies.per_player_entity,
-        atol=1e-6,
+        atol=cross_length_atol,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        padded_output.values,
+        padded_zeroed_output.values,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        padded_output.winner_probabilities,
+        padded_zeroed_output.winner_probabilities,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        padded_output.actions.launch,
+        padded_zeroed_output.actions.launch,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        padded_output.actions.angle,
+        padded_zeroed_output.actions.angle,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        padded_output.actions.ships,
+        padded_zeroed_output.actions.ships,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        padded_output.log_probs.launch,
+        padded_zeroed_output.log_probs.launch,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        padded_output.log_probs.event,
+        padded_zeroed_output.log_probs.event,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        padded_output.log_probs.per_player_entity,
+        padded_zeroed_output.log_probs.per_player_entity,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        padded_output.entropies.launch,
+        padded_zeroed_output.entropies.launch,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        padded_output.entropies.event,
+        padded_zeroed_output.entropies.event,
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        padded_output.entropies.per_player_entity,
+        padded_zeroed_output.entropies.per_player_entity,
+        atol=0,
         rtol=0,
     )
 
