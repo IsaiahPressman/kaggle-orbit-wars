@@ -292,11 +292,13 @@ class PureActor(nn.Module):
             active,
             min_fleet_size,
         )
+        event_mask = active & launch
+        safe_angle = torch.where(event_mask, angle, torch.zeros_like(angle))
         params = self._policy_params_for_angle(
             angle_params,
             actor_inputs,
             max_launch,
-            angle,
+            safe_angle,
             min_fleet_size=min_fleet_size,
         )
         launch_log_prob = -F.binary_cross_entropy_with_logits(
@@ -309,10 +311,9 @@ class PureActor(nn.Module):
             launch_log_prob,
             torch.zeros_like(launch_log_prob),
         )
-        event_mask = active & launch
         event_log_prob = masked_event_log_prob_from_params(
             params,
-            angle,
+            safe_angle,
             ships,
             max_launch,
             min_fleet_size,

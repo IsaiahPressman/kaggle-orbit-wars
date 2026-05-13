@@ -2640,6 +2640,35 @@ def test_actor_log_probs_have_finite_gradients_for_masked_slots() -> None:
     assert all(torch.isfinite(grad).all() for grad in grads)
 
 
+def test_pure_replay_ignores_nan_angles_for_no_launch_slots() -> None:
+    torch.manual_seed(1)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        actor=ActorPureConfig(n_angle_mixtures=2, n_fleet_size_mixtures=2),
+    )
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    action_shape = (2, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS, 1)
+    actions = PureActions(
+        launch=torch.zeros(action_shape, dtype=torch.bool),
+        angle=torch.full(action_shape, float("nan"), dtype=torch.float32),
+        ships=torch.zeros(action_shape, dtype=torch.int64),
+    )
+
+    model.zero_grad()
+    evaluation = model.evaluate_actions(obs, actions)
+    evaluation.log_probs.per_player_entity.sum().backward()
+
+    grads = [param.grad for param in model.parameters() if param.grad is not None]
+    assert torch.isfinite(evaluation.log_probs.per_player_entity).all()
+    assert grads
+    assert all(torch.isfinite(grad).all() for grad in grads)
+
+
 def test_model_rejects_pure_multi_launch_action_spec() -> None:
     obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
     config = StatelessTransformerV1Config(
