@@ -48,7 +48,7 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
                 "obs_spec": {"obs_spec": "entity_based", "max_entities": 45},
                 "action_spec": {
                     "action_spec": "pure",
-                    "max_per_planet_launches": 2,
+                    "max_per_planet_launches": 1,
                     "min_fleet_size": 4,
                 },
             },
@@ -83,7 +83,7 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
     assert config.runtime.n_runtime_gpus == 1
 
 
-def test_full_config_defaults_to_multi_launch_actions() -> None:
+def test_full_config_defaults_to_single_launch_actions() -> None:
     config = FullConfig.model_validate(
         {
             "env": {
@@ -105,7 +105,7 @@ def test_full_config_defaults_to_multi_launch_actions() -> None:
         }
     )
 
-    assert config.env.action_spec.max_per_planet_launches == 3
+    assert config.env.action_spec.max_per_planet_launches == 1
     assert config.env.action_spec.min_fleet_size == 1
 
 
@@ -149,7 +149,7 @@ def test_full_config_rejects_model_owned_obs_spec() -> None:
                     "n_envs": 2,
                     "action_spec": {
                         "action_spec": "pure",
-                        "max_per_planet_launches": 2,
+                        "max_per_planet_launches": 1,
                     },
                 },
                 "model": {

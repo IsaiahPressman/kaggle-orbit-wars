@@ -1295,9 +1295,9 @@ fn require_kaggle_action_args(
             "player must be < {OUTER_PLAYER_SLOTS}, got {player}"
         )));
     }
-    if !(1..=4).contains(&max_per_planet_launches) {
+    if max_per_planet_launches != 1 {
         return Err(PyValueError::new_err(
-            "max_per_planet_launches must be between 1 and 4",
+            "action conversion requires max_per_planet_launches=1",
         ));
     }
     if min_fleet_size < 1 || min_fleet_size > i64::from(i32::MAX) {

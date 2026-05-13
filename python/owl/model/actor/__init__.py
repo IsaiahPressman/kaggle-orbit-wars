@@ -6,7 +6,7 @@ from owl.model.actor.config import (
 )
 from owl.model.actor.discrete_target_bins import DiscreteTargetBinsActor
 from owl.model.actor.discrete_targets import DiscreteActorInputs, DiscreteTargetsActor
-from owl.model.actor.pure import MinGRUCell, PureActor
+from owl.model.actor.pure import PureActor, PureActorInputs
 
 __all__ = [
     "ActorConfig",
@@ -16,6 +16,6 @@ __all__ = [
     "DiscreteActorInputs",
     "DiscreteTargetBinsActor",
     "DiscreteTargetsActor",
-    "MinGRUCell",
     "PureActor",
+    "PureActorInputs",
 ]

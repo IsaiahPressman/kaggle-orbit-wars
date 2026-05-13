@@ -567,7 +567,7 @@ def test_create_model_uses_env_owned_specs() -> None:
     assert model.obs_spec == obs_spec
     assert model.action_spec == action_spec
     assert model.fleet_proj.in_features == obs_spec.fleet_channels
-    assert model.actor.launch_slot_tokens.shape[0] == 1
+    assert model.actor.max_per_planet_launches == 1
 
 
 def test_trainable_parameter_count_ignores_frozen_parameters() -> None:

@@ -80,7 +80,7 @@ class ActionPureConfig(BaseConfig):
     """
 
     action_spec: Literal["pure"] = "pure"
-    max_per_planet_launches: int = Field(default=3, ge=1, le=4)
+    max_per_planet_launches: int = Field(default=1, ge=1, le=1)
     min_fleet_size: int = Field(default=1, ge=1)
 
 

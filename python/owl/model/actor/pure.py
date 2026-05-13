@@ -7,14 +7,21 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributions import Beta, Binomial, Categorical, VonMises
+from torch.distributions import Categorical, VonMises
 
 from owl.model.actor.common import (
+    FeedForward,
     OutputProjectionMLP,
     binary_entropy_from_logits,
     sample_launch,
 )
 from owl.model.actor.config import ActorPureConfig
+from owl.model.actor.discrete_targets import (
+    discretized_logistic_mixture_log_prob,
+    log_interpolate,
+    sample_discretized_logistic_mixture,
+    truncated_logistic_mixture_entropy,
+)
 from owl.model.base import (
     InputLayer,
     ModelActionEntropies,
@@ -24,25 +31,67 @@ from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS, PureActions
 
 
 @dataclass(frozen=True)
-class PolicyParams:
+class PureActorInputs:
+    source: torch.Tensor
+    target: torch.Tensor
+    target_mask: torch.Tensor
+
+
+@dataclass(frozen=True)
+class AnglePolicyParams:
     continue_logits: torch.Tensor
-    mix_logits: torch.Tensor
-    log_w: torch.Tensor
+    angle_mix_logits: torch.Tensor
+    angle_log_w: torch.Tensor
     loc: torch.Tensor
     kappa: torch.Tensor
-    alpha: torch.Tensor
-    beta: torch.Tensor
 
-    def to_distribution_dtype(self) -> PolicyParams:
-        mix_logits = self.mix_logits.float()
-        return PolicyParams(
+    def to_distribution_dtype(self) -> AnglePolicyParams:
+        angle_mix_logits = self.angle_mix_logits.float()
+        return AnglePolicyParams(
             continue_logits=self.continue_logits.float(),
-            mix_logits=mix_logits,
-            log_w=F.log_softmax(mix_logits, dim=-1),
+            angle_mix_logits=angle_mix_logits,
+            angle_log_w=F.log_softmax(angle_mix_logits, dim=-1),
             loc=self.loc.float(),
             kappa=self.kappa.float(),
-            alpha=self.alpha.float(),
-            beta=self.beta.float(),
+        )
+
+
+@dataclass(frozen=True)
+class SizePolicyParams:
+    size_mix_logits: torch.Tensor
+    size_mu: torch.Tensor
+    size_scale: torch.Tensor
+
+    def to_distribution_dtype(self) -> SizePolicyParams:
+        return SizePolicyParams(
+            size_mix_logits=self.size_mix_logits.float(),
+            size_mu=self.size_mu.float(),
+            size_scale=self.size_scale.float(),
+        )
+
+
+@dataclass(frozen=True)
+class PolicyParams:
+    continue_logits: torch.Tensor
+    angle_mix_logits: torch.Tensor
+    angle_log_w: torch.Tensor
+    loc: torch.Tensor
+    kappa: torch.Tensor
+    size_mix_logits: torch.Tensor
+    size_mu: torch.Tensor
+    size_scale: torch.Tensor
+
+    def to_distribution_dtype(self) -> PolicyParams:
+        angle_mix_logits = self.angle_mix_logits.float()
+        return PolicyParams(
+            continue_logits=self.continue_logits.float(),
+            angle_mix_logits=angle_mix_logits,
+            angle_log_w=F.log_softmax(angle_mix_logits, dim=-1),
+            loc=self.loc.float(),
+            kappa=self.kappa.float(),
+            size_mix_logits=self.size_mix_logits.float(),
+            size_mu=self.size_mu.float(),
+            size_scale=self.size_scale.float(),
         )
 
 
@@ -56,14 +105,24 @@ class PureActor(nn.Module):
         activation: Literal["gelu", "silu", "swiglu"],
     ) -> None:
         super().__init__()
+        if max_per_planet_launches != 1:
+            raise ValueError("pure actor requires max_per_planet_launches=1")
         self.config = config
         self.max_per_planet_launches = max_per_planet_launches
-        self.launch_slot_tokens = nn.Parameter(
-            torch.empty(max_per_planet_launches, embed_dim)
-        )
-        _init_token_parameter(self.launch_slot_tokens)
-        self.slot_dynamic_proj = nn.Linear(9, embed_dim)
-        self.actor_gru = MinGRUStack(embed_dim, embed_dim, n_layers=2)
+        head_config = _OutputHeadConfig(activation, embed_dim)
+        self.head_dim = embed_dim
+        self.source_norm = nn.LayerNorm(embed_dim)
+        self.target_norm = nn.LayerNorm(embed_dim)
+        self.q = nn.Linear(embed_dim, embed_dim)
+        self.k = nn.Linear(embed_dim, embed_dim)
+        self.v = nn.Linear(embed_dim, embed_dim)
+        self.out = nn.Linear(embed_dim, embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.mlp = FeedForward(head_config)
+        self.continue_source_proj = nn.Linear(embed_dim, embed_dim)
+        self.angle_source_proj = nn.Linear(embed_dim, embed_dim)
+        self.angle_direction_proj = AngleDirectionProjection(head_config)
+        self.size_pair_proj = nn.Linear(embed_dim, embed_dim)
         self.actor_heads = LaunchPolicyHeads(
             config,
             embed_dim=embed_dim,
@@ -71,150 +130,102 @@ class PureActor(nn.Module):
         )
 
     def get_input_layers(self) -> tuple[InputLayer, ...]:
-        return (self.launch_slot_tokens, self.slot_dynamic_proj)
+        return ()
 
     def get_output_layers(self) -> tuple[nn.Linear, ...]:
         return (
             self.actor_heads.continue_head.out,
-            self.actor_heads.mix_head.out,
+            self.actor_heads.angle_mix_head.out,
             self.actor_heads.dir_head.out,
             self.actor_heads.kappa_head.out,
-            self.actor_heads.size_frac_head.out,
-            self.actor_heads.size_conc_head.out,
+            self.actor_heads.size_mix_head.out,
+            self.actor_heads.mean_head.out,
+            self.actor_heads.scale_head.out,
         )
 
     def forward(
         self,
-        slot_input: torch.Tensor,
+        actor_inputs: PureActorInputs,
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
         *,
         min_fleet_size: int,
         deterministic: bool,
     ) -> tuple[PureActions, ModelActionLogProbs, ModelActionEntropies]:
-        max_slots = self.max_per_planet_launches
-        launch_slots: list[torch.Tensor] = []
-        angle_slots: list[torch.Tensor] = []
-        ship_slots: list[torch.Tensor] = []
-        launch_log_slots: list[torch.Tensor] = []
-        event_log_slots: list[torch.Tensor] = []
-        launch_entropy_slots: list[torch.Tensor] = []
-        event_entropy_slots: list[torch.Tensor] = []
-
-        hidden_state = self.actor_gru.initial_state(
-            (*slot_input.shape[:-1],),
-            dtype=slot_input.dtype,
-            device=slot_input.device,
+        active = can_act & (max_launch >= min_fleet_size)
+        angle_params = self._angle_params(actor_inputs)
+        launch = sample_launch(
+            angle_params.continue_logits,
+            active,
+            deterministic=deterministic,
         )
-        remaining = max_launch.clone()
-        active = can_act & (remaining >= min_fleet_size)
-        last_launch = torch.zeros_like(can_act)
-        last_angle_sin = torch.zeros_like(slot_input[..., 0])
-        last_angle_cos = torch.zeros_like(slot_input[..., 0])
-        last_ships = torch.zeros_like(max_launch)
-
-        for slot in range(max_slots):
-            slot_hidden, hidden_state = self.actor_gru(
-                self._slot_gru_input(
-                    slot_input,
-                    slot,
-                    active,
-                    remaining,
-                    max_launch,
-                    last_launch,
-                    last_angle_sin,
-                    last_angle_cos,
-                    last_ships,
-                    include_dynamic_features=slot > 0,
-                ),
-                hidden_state,
-            )
-            params = self.actor_heads(slot_hidden).to_distribution_dtype()
-            launch = sample_launch(
-                params.continue_logits,
-                active,
-                deterministic=deterministic,
-            )
-            angle, ships = self._sample_event(
-                params,
-                remaining,
-                min_fleet_size,
-                deterministic,
-            )
-            event_mask = active & launch
-            ships = torch.where(
-                launch,
-                ships.clamp_min(min_fleet_size),
-                torch.zeros_like(ships),
-            )
-            ships = torch.minimum(ships, remaining)
-            angle = torch.where(launch, angle, torch.zeros_like(angle))
-
-            launch_log_prob = -F.binary_cross_entropy_with_logits(
-                params.continue_logits,
-                launch.to(dtype=params.continue_logits.dtype),
-                reduction="none",
-            )
-            launch_log_prob = torch.where(
-                active,
-                launch_log_prob,
-                torch.zeros_like(launch_log_prob),
-            )
-            event_log_prob = masked_event_log_prob_from_params(
-                params,
-                angle,
-                ships,
-                remaining,
-                min_fleet_size,
-                event_mask,
-            )
-            launch_entropy, event_entropy = masked_action_entropy_from_params(
-                params,
-                remaining,
-                active,
-                min_fleet_size=min_fleet_size,
-                max_ship_support=self.config.entropy_ship_support_cap,
-            )
-
-            launch_slots.append(launch)
-            angle_slots.append(angle)
-            ship_slots.append(ships)
-            launch_log_slots.append(launch_log_prob)
-            event_log_slots.append(event_log_prob)
-            launch_entropy_slots.append(launch_entropy)
-            event_entropy_slots.append(event_entropy)
-
-            remaining = (remaining - ships).clamp_min(0)
-            active = active & launch & (remaining >= min_fleet_size)
-            last_launch = launch
-            last_angle_sin = torch.where(
-                launch,
-                torch.sin(angle),
-                torch.zeros_like(angle),
-            ).to(dtype=slot_input.dtype)
-            last_angle_cos = torch.where(
-                launch,
-                torch.cos(angle),
-                torch.zeros_like(angle),
-            ).to(dtype=slot_input.dtype)
-            last_ships = ships
-
-        launch_tensor = torch.stack(launch_slots, dim=-1)
-        angle_tensor = torch.stack(angle_slots, dim=-1)
-        ship_tensor = torch.stack(ship_slots, dim=-1)
-        launch_log_tensor = torch.stack(launch_log_slots, dim=-1)
-        event_log_tensor = torch.stack(event_log_slots, dim=-1)
-        launch_entropy_tensor = torch.stack(launch_entropy_slots, dim=-1)
-        event_entropy_tensor = torch.stack(event_entropy_slots, dim=-1)
-
-        per_player_entity_log_prob = _per_player_action_entity_log_prob(
-            launch_log_tensor,
-            event_log_tensor,
+        angle = sample_angle_mixture(angle_params, deterministic=deterministic)
+        params = self._policy_params_for_angle(
+            angle_params,
+            actor_inputs,
+            max_launch,
+            angle,
+            min_fleet_size=min_fleet_size,
         )
-        per_player_entity_entropy = _per_player_action_entity_log_prob(
-            launch_entropy_tensor,
-            event_entropy_tensor,
+        ships = sample_discretized_logistic_mixture(
+            params.size_mix_logits,
+            params.size_mu,
+            params.size_scale,
+            max_launch,
+            min_fleet_size=min_fleet_size,
+            deterministic=deterministic,
         )
+        ships = torch.where(launch, ships, torch.zeros_like(ships))
+        angle = torch.where(launch, angle, torch.zeros_like(angle))
+
+        launch_log_prob = -F.binary_cross_entropy_with_logits(
+            params.continue_logits,
+            launch.to(dtype=params.continue_logits.dtype),
+            reduction="none",
+        )
+        launch_log_prob = torch.where(
+            active,
+            launch_log_prob,
+            torch.zeros_like(launch_log_prob),
+        )
+        event_mask = active & launch
+        event_log_prob = masked_event_log_prob_from_params(
+            params,
+            angle,
+            ships,
+            max_launch,
+            min_fleet_size,
+            event_mask,
+        )
+        entropy_params = self._policy_params_for_entropy(
+            angle_params,
+            actor_inputs,
+            max_launch,
+            min_fleet_size=min_fleet_size,
+        )
+        (
+            launch_entropy,
+            event_entropy,
+            angle_entropy,
+            size_entropy,
+            size_mixture_entropy,
+            size_logistic_entropy,
+        ) = masked_action_entropy_from_params(
+            entropy_params,
+            max_launch,
+            active,
+            min_fleet_size=min_fleet_size,
+            entropy_ship_quantiles=self.config.entropy_ship_quantiles,
+        )
+        launch_tensor = launch.unsqueeze(-1)
+        angle_tensor = angle.unsqueeze(-1)
+        ship_tensor = ships.unsqueeze(-1)
+        launch_log_tensor = launch_log_prob.unsqueeze(-1)
+        event_log_tensor = event_log_prob.unsqueeze(-1)
+        launch_entropy_tensor = launch_entropy.unsqueeze(-1)
+        event_entropy_tensor = event_entropy.unsqueeze(-1)
+        per_player_entity_log_prob = launch_log_prob + event_log_prob
+        per_player_entity_entropy = launch_entropy + event_entropy
 
         return (
             PureActions(
@@ -232,15 +243,19 @@ class PureActor(nn.Module):
                 event=event_entropy_tensor,
                 per_player_entity=per_player_entity_entropy,
                 components={
-                    "launch": launch_entropy_tensor.sum(dim=-1),
-                    "event": event_entropy_tensor.sum(dim=-1),
+                    "launch": launch_entropy,
+                    "angle": angle_entropy,
+                    "fleet_size_full": size_entropy,
+                    "fleet_size_mixture": size_mixture_entropy,
+                    "fleet_size_logistic": size_logistic_entropy,
+                    "event": event_entropy,
                 },
             ),
         )
 
     def log_prob(
         self,
-        slot_input: torch.Tensor,
+        actor_inputs: PureActorInputs,
         can_act: torch.Tensor,
         max_launch: torch.Tensor,
         actions: PureActions,
@@ -250,7 +265,7 @@ class PureActor(nn.Module):
         _require_actions_shape(
             actions,
             (
-                slot_input.shape[0],
+                actor_inputs.source.shape[0],
                 OUTER_PLAYER_SLOTS,
                 ACTION_ENTITY_SLOTS,
                 self.max_per_planet_launches,
@@ -260,112 +275,71 @@ class PureActor(nn.Module):
         action_angle = actions.angle
         action_ships = actions.ships
 
-        launch_log_slots: list[torch.Tensor] = []
-        event_log_slots: list[torch.Tensor] = []
-        launch_entropy_slots: list[torch.Tensor] = []
-        event_entropy_slots: list[torch.Tensor] = []
-
-        hidden_state = self.actor_gru.initial_state(
-            (*slot_input.shape[:-1],),
-            dtype=slot_input.dtype,
-            device=slot_input.device,
+        active = can_act & (max_launch >= min_fleet_size)
+        angle_params = self._angle_params(actor_inputs)
+        launch = action_launch[..., 0]
+        angle = action_angle[..., 0]
+        ships = action_ships[..., 0]
+        _require_valid_action_slot(
+            launch,
+            angle,
+            ships,
+            max_launch,
+            active,
+            min_fleet_size,
         )
-        remaining = max_launch.clone()
-        active = can_act & (remaining >= min_fleet_size)
-        last_launch = torch.zeros_like(can_act)
-        last_angle_sin = torch.zeros_like(slot_input[..., 0])
-        last_angle_cos = torch.zeros_like(slot_input[..., 0])
-        last_ships = torch.zeros_like(max_launch)
-
-        for slot in range(self.max_per_planet_launches):
-            slot_hidden, hidden_state = self.actor_gru(
-                self._slot_gru_input(
-                    slot_input,
-                    slot,
-                    active,
-                    remaining,
-                    max_launch,
-                    last_launch,
-                    last_angle_sin,
-                    last_angle_cos,
-                    last_ships,
-                    include_dynamic_features=slot > 0,
-                ),
-                hidden_state,
-            )
-            params = self.actor_heads(slot_hidden).to_distribution_dtype()
-            launch = action_launch[..., slot]
-            angle = action_angle[..., slot]
-            ships = action_ships[..., slot]
-            event_mask = active & launch
-            _require_valid_action_slot(
-                launch,
-                angle,
-                ships,
-                remaining,
-                active,
-                min_fleet_size,
-            )
-
-            launch_log_prob = -F.binary_cross_entropy_with_logits(
-                params.continue_logits,
-                launch.to(dtype=params.continue_logits.dtype),
-                reduction="none",
-            )
-            launch_log_prob = torch.where(
-                active,
-                launch_log_prob,
-                torch.zeros_like(launch_log_prob),
-            )
-            event_log_prob = masked_event_log_prob_from_params(
-                params,
-                angle,
-                ships,
-                remaining,
-                min_fleet_size,
-                event_mask,
-            )
-            launch_entropy, event_entropy = masked_action_entropy_from_params(
-                params,
-                remaining,
-                active,
-                min_fleet_size=min_fleet_size,
-                max_ship_support=self.config.entropy_ship_support_cap,
-            )
-
-            launch_log_slots.append(launch_log_prob)
-            event_log_slots.append(event_log_prob)
-            launch_entropy_slots.append(launch_entropy)
-            event_entropy_slots.append(event_entropy)
-
-            ships_used = torch.where(launch, ships, torch.zeros_like(ships))
-            remaining = (remaining - ships_used).clamp_min(0)
-            active = active & launch & (remaining >= min_fleet_size)
-            last_launch = launch
-            last_angle_sin = torch.where(
-                launch,
-                torch.sin(angle),
-                torch.zeros_like(angle),
-            ).to(dtype=slot_input.dtype)
-            last_angle_cos = torch.where(
-                launch,
-                torch.cos(angle),
-                torch.zeros_like(angle),
-            ).to(dtype=slot_input.dtype)
-            last_ships = ships_used
-
-        launch_log_tensor = torch.stack(launch_log_slots, dim=-1)
-        event_log_tensor = torch.stack(event_log_slots, dim=-1)
-        launch_entropy_tensor = torch.stack(launch_entropy_slots, dim=-1)
-        event_entropy_tensor = torch.stack(event_entropy_slots, dim=-1)
-        per_player_entity_log_prob = _per_player_action_entity_log_prob(
-            launch_log_tensor,
-            event_log_tensor,
+        params = self._policy_params_for_angle(
+            angle_params,
+            actor_inputs,
+            max_launch,
+            angle,
+            min_fleet_size=min_fleet_size,
         )
-        per_player_entity_entropy = _per_player_action_entity_log_prob(
-            launch_entropy_tensor,
-            event_entropy_tensor,
+        launch_log_prob = -F.binary_cross_entropy_with_logits(
+            params.continue_logits,
+            launch.to(dtype=params.continue_logits.dtype),
+            reduction="none",
         )
+        launch_log_prob = torch.where(
+            active,
+            launch_log_prob,
+            torch.zeros_like(launch_log_prob),
+        )
+        event_mask = active & launch
+        event_log_prob = masked_event_log_prob_from_params(
+            params,
+            angle,
+            ships,
+            max_launch,
+            min_fleet_size,
+            event_mask,
+        )
+        entropy_params = self._policy_params_for_entropy(
+            angle_params,
+            actor_inputs,
+            max_launch,
+            min_fleet_size=min_fleet_size,
+        )
+        (
+            launch_entropy,
+            event_entropy,
+            angle_entropy,
+            size_entropy,
+            size_mixture_entropy,
+            size_logistic_entropy,
+        ) = masked_action_entropy_from_params(
+            entropy_params,
+            max_launch,
+            active,
+            min_fleet_size=min_fleet_size,
+            entropy_ship_quantiles=self.config.entropy_ship_quantiles,
+        )
+        launch_log_tensor = launch_log_prob.unsqueeze(-1)
+        event_log_tensor = event_log_prob.unsqueeze(-1)
+        launch_entropy_tensor = launch_entropy.unsqueeze(-1)
+        event_entropy_tensor = event_entropy.unsqueeze(-1)
+        per_player_entity_log_prob = launch_log_prob + event_log_prob
+        per_player_entity_entropy = launch_entropy + event_entropy
         return (
             ModelActionLogProbs(
                 launch=launch_log_tensor,
@@ -377,161 +351,159 @@ class PureActor(nn.Module):
                 event=event_entropy_tensor,
                 per_player_entity=per_player_entity_entropy,
                 components={
-                    "launch": launch_entropy_tensor.sum(dim=-1),
-                    "event": event_entropy_tensor.sum(dim=-1),
+                    "launch": launch_entropy,
+                    "angle": angle_entropy,
+                    "fleet_size_full": size_entropy,
+                    "fleet_size_mixture": size_mixture_entropy,
+                    "fleet_size_logistic": size_logistic_entropy,
+                    "event": event_entropy,
                 },
             ),
         )
 
-    def _sample_event(
+    def _angle_params(
         self,
-        params: PolicyParams,
-        remaining: torch.Tensor,
+        actor_inputs: PureActorInputs,
+    ) -> AnglePolicyParams:
+        source_input = actor_inputs.source
+        target_input = actor_inputs.target
+        expected_input_shape = (
+            source_input.shape[0],
+            OUTER_PLAYER_SLOTS,
+            ACTION_ENTITY_SLOTS,
+            self.head_dim,
+        )
+        if source_input.shape != expected_input_shape:
+            raise ValueError(
+                "pure actor source input must have shape "
+                f"{expected_input_shape}, got {tuple(source_input.shape)}"
+            )
+        if target_input.shape != expected_input_shape:
+            raise ValueError(
+                "pure actor target input must have shape "
+                f"{expected_input_shape}, got {tuple(target_input.shape)}"
+            )
+        if actor_inputs.target_mask.shape != (
+            source_input.shape[0],
+            ACTION_ENTITY_SLOTS,
+        ):
+            expected_shape = (source_input.shape[0], ACTION_ENTITY_SLOTS)
+            raise ValueError(
+                "pure actor target_mask must have shape "
+                f"{expected_shape}, got {tuple(actor_inputs.target_mask.shape)}"
+            )
+        continue_hidden = self.continue_source_proj(source_input)
+        angle_hidden = self.angle_source_proj(source_input)
+        return self.actor_heads.angle_params(
+            continue_hidden,
+            angle_hidden,
+        ).to_distribution_dtype()
+
+    def _policy_params_for_angle(
+        self,
+        angle_params: AnglePolicyParams,
+        actor_inputs: PureActorInputs,
+        max_launch: torch.Tensor,
+        angle: torch.Tensor,
+        *,
         min_fleet_size: int,
-        deterministic: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        params = params.to_distribution_dtype()
-        if deterministic:
-            mixture = params.mix_logits.argmax(dim=-1)
-        else:
-            mixture = Categorical(logits=params.mix_logits).sample()
+    ) -> PolicyParams:
+        selected_target_values = self._selected_angle_target_values(actor_inputs, angle)
+        size_params = self._size_params_from_target_values(
+            actor_inputs.source,
+            max_launch,
+            selected_target_values,
+            min_fleet_size=min_fleet_size,
+        )
+        return PolicyParams(
+            continue_logits=angle_params.continue_logits,
+            angle_mix_logits=angle_params.angle_mix_logits,
+            angle_log_w=angle_params.angle_log_w,
+            loc=angle_params.loc,
+            kappa=angle_params.kappa,
+            size_mix_logits=size_params.size_mix_logits,
+            size_mu=size_params.size_mu,
+            size_scale=size_params.size_scale,
+        ).to_distribution_dtype()
 
-        gather_index = mixture.unsqueeze(-1)
-        loc = torch.gather(params.loc, -1, gather_index).squeeze(-1)
-        kappa = torch.gather(params.kappa, -1, gather_index).squeeze(-1)
-        alpha = torch.gather(params.alpha, -1, gather_index).squeeze(-1)
-        beta = torch.gather(params.beta, -1, gather_index).squeeze(-1)
-
-        if deterministic:
-            angle = loc.remainder(2.0 * math.pi)
-            ship_mean = (remaining - min_fleet_size).clamp_min(0).to(dtype=alpha.dtype)
-            ship_mean = ship_mean * alpha / (alpha + beta)
-            ships = ship_mean.round().to(dtype=remaining.dtype) + min_fleet_size
-        else:
-            angle = VonMises(loc, kappa).sample().remainder(2.0 * math.pi)
-            probs = Beta(alpha, beta).sample()
-            trials = (remaining - min_fleet_size).clamp_min(0).to(dtype=probs.dtype)
-            ships = Binomial(total_count=trials, probs=probs).sample()
-            ships = ships.to(dtype=remaining.dtype) + min_fleet_size
-
-        return angle, torch.minimum(ships, remaining.clamp_min(min_fleet_size))
-
-    def _slot_gru_input(
+    def _policy_params_for_entropy(
         self,
-        slot_input: torch.Tensor,
-        slot: int,
-        active: torch.Tensor,
-        remaining: torch.Tensor,
-        initial_max_launch: torch.Tensor,
-        last_launch: torch.Tensor,
-        last_angle_sin: torch.Tensor,
-        last_angle_cos: torch.Tensor,
-        last_ships: torch.Tensor,
+        angle_params: AnglePolicyParams,
+        actor_inputs: PureActorInputs,
+        max_launch: torch.Tensor,
         *,
-        include_dynamic_features: bool,
+        min_fleet_size: int,
+    ) -> PolicyParams:
+        angle = sample_angle_mixture(angle_params, deterministic=True)
+        return self._policy_params_for_angle(
+            angle_params,
+            actor_inputs,
+            max_launch,
+            angle,
+            min_fleet_size=min_fleet_size,
+        )
+
+    def _selected_angle_target_values(
+        self,
+        actor_inputs: PureActorInputs,
+        angle: torch.Tensor,
     ) -> torch.Tensor:
-        slot_token = self.launch_slot_tokens[slot].to(dtype=slot_input.dtype)
-        slot_context = slot_input + slot_token
-        if not include_dynamic_features:
-            return slot_context
-        dynamic_features = self._slot_dynamic_features(
-            slot,
-            active,
-            remaining,
-            initial_max_launch,
-            last_launch,
-            last_angle_sin,
-            last_angle_cos,
-            last_ships,
-            dtype=slot_input.dtype,
+        source_input = actor_inputs.source
+        target_input = actor_inputs.target
+        angle_features = torch.stack((torch.sin(angle), torch.cos(angle)), dim=-1)
+        angle_hidden = self.angle_direction_proj(
+            angle_features.to(dtype=source_input.dtype)
         )
-        return slot_context + self.slot_dynamic_proj(dynamic_features)
+        source_x = self.source_norm(source_input + angle_hidden)
+        target_x = self.target_norm(target_input)
+        q = self.q(source_x)
+        k = self.k(target_x)
+        v = self.v(target_x)
+        target_logits = torch.einsum("bpsd,bptd->bpst", q, k)
+        target_logits = target_logits / math.sqrt(self.head_dim)
 
-    def _slot_dynamic_features(
+        target_mask = actor_inputs.target_mask[:, None, None, :].expand_as(
+            target_logits
+        )
+        source_indices = torch.arange(ACTION_ENTITY_SLOTS, device=target_logits.device)
+        target_mask = target_mask.clone()
+        target_mask[:, :, source_indices, source_indices] = False
+        target_logits = target_logits.masked_fill(
+            ~target_mask,
+            torch.finfo(target_logits.dtype).min,
+        )
+        safe_target_logits = torch.where(
+            target_mask.any(dim=-1, keepdim=True),
+            target_logits,
+            torch.zeros_like(target_logits),
+        )
+        target_weights = F.softmax(safe_target_logits.float(), dim=-1).to(
+            dtype=target_input.dtype
+        )
+        target_weights = torch.where(
+            target_mask,
+            target_weights,
+            torch.zeros_like(target_weights),
+        )
+        return torch.einsum("bpst,bptd->bpsd", target_weights, v)
+
+    def _size_params_from_target_values(
         self,
-        slot: int,
-        active: torch.Tensor,
-        remaining: torch.Tensor,
-        initial_max_launch: torch.Tensor,
-        last_launch: torch.Tensor,
-        last_angle_sin: torch.Tensor,
-        last_angle_cos: torch.Tensor,
-        last_ships: torch.Tensor,
+        source_input: torch.Tensor,
+        max_launch: torch.Tensor,
+        target_values: torch.Tensor,
         *,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        initial_available_ships = initial_max_launch.clamp_min(1).to(dtype=dtype)
-        slot_denominator = max(self.max_per_planet_launches - 1, 1)
-        slot_fraction = torch.full_like(
-            remaining,
-            fill_value=slot / slot_denominator,
-            dtype=dtype,
-        )
-        return torch.stack(
-            (
-                active.to(dtype=dtype),
-                remaining.to(dtype=dtype) / self.config.max_ship_normalizer,
-                last_launch.to(dtype=dtype),
-                last_angle_sin.to(dtype=dtype),
-                last_angle_cos.to(dtype=dtype),
-                last_ships.to(dtype=dtype) / self.config.max_ship_normalizer,
-                remaining.to(dtype=dtype) / initial_available_ships,
-                last_ships.to(dtype=dtype) / initial_available_ships,
-                slot_fraction,
-            ),
-            dim=-1,
-        )
-
-
-def _init_token_parameter(parameter: nn.Parameter) -> None:
-    nn.init.normal_(parameter, mean=0.0, std=parameter.shape[-1] ** -0.5)
-
-
-class MinGRUStack(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, *, n_layers: int) -> None:
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.cells = nn.ModuleList(
-            MinGRUCell(input_dim if layer == 0 else hidden_dim, hidden_dim)
-            for layer in range(n_layers)
-        )
-
-    def initial_state(
-        self,
-        leading_shape: tuple[int, ...],
-        *,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> list[torch.Tensor]:
-        return [
-            torch.zeros((*leading_shape, self.hidden_dim), dtype=dtype, device=device)
-            for _ in self.cells
-        ]
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        state: list[torch.Tensor],
-    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        next_state = []
-        layer_input = x
-        for cell, layer_state in zip(self.cells, state, strict=True):
-            layer_output = cell(layer_input, layer_state)
-            next_state.append(layer_output)
-            layer_input = layer_output
-        return layer_input, next_state
-
-
-class MinGRUCell(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int) -> None:
-        super().__init__()
-        self.update = nn.Linear(input_dim, hidden_dim)
-        self.candidate = nn.Linear(input_dim, hidden_dim)
-
-    def forward(self, x: torch.Tensor, prev: torch.Tensor) -> torch.Tensor:
-        update = torch.sigmoid(self.update(x))
-        candidate = self.candidate(x)
-        return torch.lerp(prev, candidate, update)
+        min_fleet_size: int,
+    ) -> SizePolicyParams:
+        selected_v = self.out(target_values)
+        enriched = source_input + selected_v
+        enriched = enriched + self.mlp(self.norm2(enriched))
+        source_hidden = self.size_pair_proj(enriched)
+        return self.actor_heads.size_params(
+            source_hidden,
+            max_launch,
+            min_fleet_size=min_fleet_size,
+        ).to_distribution_dtype()
 
 
 class LaunchPolicyHeads(nn.Module):
@@ -544,46 +516,127 @@ class LaunchPolicyHeads(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        mixtures = config.n_action_mixtures
         head_config = _OutputHeadConfig(activation, embed_dim)
         self.continue_head = OutputProjectionMLP(head_config, 1)
-        self.mix_head = OutputProjectionMLP(head_config, mixtures)
-        self.dir_head = OutputProjectionMLP(head_config, mixtures * 2)
-        self.kappa_head = OutputProjectionMLP(head_config, mixtures)
-        self.size_frac_head = OutputProjectionMLP(head_config, mixtures)
-        self.size_conc_head = OutputProjectionMLP(head_config, mixtures)
+        self.angle_mix_head = OutputProjectionMLP(
+            head_config,
+            config.n_angle_mixtures,
+        )
+        self.base_dirs = nn.Parameter(torch.empty(config.n_angle_mixtures, 2))
+        _init_evenly_spaced_directions(self.base_dirs)
+        self.dir_head = OutputProjectionMLP(head_config, config.n_angle_mixtures * 2)
+        self.kappa_head = OutputProjectionMLP(head_config, config.n_angle_mixtures)
+        self.size_mix_head = OutputProjectionMLP(
+            head_config,
+            config.n_fleet_size_mixtures,
+        )
+        self.mean_head = OutputProjectionMLP(head_config, config.n_fleet_size_mixtures)
+        self.scale_head = OutputProjectionMLP(head_config, config.n_fleet_size_mixtures)
 
-    def forward(self, x: torch.Tensor) -> PolicyParams:
-        mixtures = self.config.n_action_mixtures
-        raw_dir = self.dir_head(x).view(*x.shape[:-1], mixtures, 2)
-        unit_dir = F.normalize(raw_dir, dim=-1, eps=self.config.dir_eps)
+    def angle_params(
+        self,
+        continue_hidden: torch.Tensor,
+        angle_hidden: torch.Tensor,
+    ) -> AnglePolicyParams:
+        angle_mixtures = self.config.n_angle_mixtures
+        raw_dir = self.dir_head(angle_hidden).view(
+            *angle_hidden.shape[:-1],
+            angle_mixtures,
+            2,
+        )
+        base_dirs = self.base_dirs.to(dtype=raw_dir.dtype, device=raw_dir.device)
+        unit_dir = F.normalize(raw_dir + base_dirs, dim=-1, eps=self.config.dir_eps)
         loc = torch.atan2(unit_dir[..., 1], unit_dir[..., 0])
 
-        kappa = self.config.kappa_min + F.softplus(self.kappa_head(x))
-        if self.config.kappa_max is not None:
-            kappa = kappa.clamp_max(self.config.kappa_max)
-
-        rho = torch.sigmoid(self.size_frac_head(x))
-        tau = self.config.tau_min + F.softplus(self.size_conc_head(x))
-        alpha = rho * tau + self.config.alpha_beta_eps
-        beta = (1.0 - rho) * tau + self.config.alpha_beta_eps
-
-        mix_logits = self.mix_head(x)
-        return PolicyParams(
-            continue_logits=self.continue_head(x).squeeze(-1),
-            mix_logits=mix_logits,
-            log_w=F.log_softmax(mix_logits, dim=-1),
+        kappa = log_interpolate(
+            self.config.kappa_min,
+            torch.full_like(loc, self.config.kappa_max),
+            torch.sigmoid(self.kappa_head(angle_hidden).float()),
+        )
+        angle_mix_logits = self.angle_mix_head(angle_hidden)
+        return AnglePolicyParams(
+            continue_logits=self.continue_head(continue_hidden).squeeze(-1),
+            angle_mix_logits=angle_mix_logits,
+            angle_log_w=F.log_softmax(angle_mix_logits, dim=-1),
             loc=loc,
             kappa=kappa,
-            alpha=alpha,
-            beta=beta,
         )
+
+    def size_params(
+        self,
+        size_hidden: torch.Tensor,
+        max_launch: torch.Tensor,
+        *,
+        min_fleet_size: int,
+    ) -> SizePolicyParams:
+        residual_budget = max_launch.to(dtype=torch.float32).unsqueeze(-1)
+        support_lo = torch.full_like(residual_budget, float(min_fleet_size))
+        support_width = (residual_budget - support_lo + 1.0).clamp_min(1.0)
+        rho = torch.sigmoid(self.mean_head(size_hidden).float())
+        mu = support_lo + rho * (residual_budget - support_lo).clamp_min(0.0)
+        scale_upper = torch.maximum(
+            torch.full_like(residual_budget, self.config.scale_max_abs_floor),
+            support_width * self.config.scale_max_frac,
+        )
+        scale = log_interpolate(
+            self.config.scale_min,
+            scale_upper,
+            torch.sigmoid(self.scale_head(size_hidden).float()),
+        )
+        return SizePolicyParams(
+            size_mix_logits=self.size_mix_head(size_hidden),
+            size_mu=mu,
+            size_scale=scale,
+        )
+
+
+def _init_evenly_spaced_directions(parameter: nn.Parameter) -> None:
+    angles = torch.linspace(
+        0.0,
+        2.0 * math.pi,
+        parameter.shape[0] + 1,
+        dtype=parameter.dtype,
+        device=parameter.device,
+    )[:-1]
+    with torch.no_grad():
+        parameter[:, 0].copy_(torch.cos(angles))
+        parameter[:, 1].copy_(torch.sin(angles))
 
 
 @dataclass(frozen=True)
 class _OutputHeadConfig:
     activation: Literal["gelu", "silu", "swiglu"]
     embed_dim: int
+    mlp_ratio: float = 1.0
+
+
+class AngleDirectionProjection(nn.Module):
+    def __init__(self, config: _OutputHeadConfig) -> None:
+        super().__init__()
+        self.input = nn.Linear(2, config.embed_dim)
+        self.output = OutputProjectionMLP(config, config.embed_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.output(self.input(x))
+
+
+def sample_angle_mixture(
+    params: AnglePolicyParams | PolicyParams,
+    *,
+    deterministic: bool,
+) -> torch.Tensor:
+    params = params.to_distribution_dtype()
+    if deterministic:
+        mixture = params.angle_mix_logits.argmax(dim=-1)
+    else:
+        mixture = Categorical(logits=params.angle_mix_logits).sample()
+
+    gather_index = mixture.unsqueeze(-1)
+    loc = torch.gather(params.loc, -1, gather_index).squeeze(-1)
+    kappa = torch.gather(params.kappa, -1, gather_index).squeeze(-1)
+    if deterministic:
+        return loc.remainder(2.0 * math.pi)
+    return VonMises(loc, kappa).sample().remainder(2.0 * math.pi)
 
 
 def masked_event_log_prob_from_params(
@@ -628,14 +681,16 @@ def event_log_prob_from_params(
 ) -> torch.Tensor:
     params = params.to_distribution_dtype()
     log_angle = von_mises_log_prob(angle, params.loc, params.kappa)
-    log_size = shifted_beta_binomial_log_prob(
+    angle_log_prob = torch.logsumexp(params.angle_log_w + log_angle, dim=-1)
+    size_log_prob = discretized_logistic_mixture_log_prob(
         ships,
         residual_budget,
-        min_fleet_size,
-        params.alpha,
-        params.beta,
+        params.size_mix_logits,
+        params.size_mu,
+        params.size_scale,
+        min_fleet_size=min_fleet_size,
     )
-    return torch.logsumexp(params.log_w + log_angle + log_size, dim=-1)
+    return angle_log_prob + size_log_prob
 
 
 def masked_action_entropy_from_params(
@@ -644,15 +699,28 @@ def masked_action_entropy_from_params(
     active: torch.Tensor,
     *,
     min_fleet_size: int,
-    max_ship_support: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    entropy_ship_quantiles: int,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     params = params.to_distribution_dtype()
     launch_entropy = binary_entropy_from_logits(params.continue_logits)
-    event_entropy = event_entropy_from_params(
+    (
+        event_entropy,
+        angle_entropy,
+        size_entropy,
+        size_mixture_entropy,
+        size_logistic_entropy,
+    ) = event_entropy_from_params(
         params,
         residual_budget.clamp_min(min_fleet_size),
         min_fleet_size=min_fleet_size,
-        max_ship_support=max_ship_support,
+        entropy_ship_quantiles=entropy_ship_quantiles,
     )
     launch_probability = torch.sigmoid(params.continue_logits)
     return (
@@ -662,6 +730,18 @@ def masked_action_entropy_from_params(
             launch_probability * event_entropy,
             torch.zeros_like(event_entropy),
         ),
+        torch.where(active, angle_entropy, torch.zeros_like(angle_entropy)),
+        torch.where(active, size_entropy, torch.zeros_like(size_entropy)),
+        torch.where(
+            active,
+            size_mixture_entropy,
+            torch.zeros_like(size_mixture_entropy),
+        ),
+        torch.where(
+            active,
+            size_logistic_entropy,
+            torch.zeros_like(size_logistic_entropy),
+        ),
     )
 
 
@@ -670,62 +750,40 @@ def event_entropy_from_params(
     residual_budget: torch.Tensor,
     *,
     min_fleet_size: int,
-    max_ship_support: int,
-) -> torch.Tensor:
-    mix_probabilities = torch.softmax(params.mix_logits, dim=-1)
-    mixture_entropy = -(mix_probabilities * params.log_w).sum(dim=-1)
-    component_entropy = von_mises_entropy(params.kappa) + beta_binomial_entropy(
+    entropy_ship_quantiles: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    angle_mix_probabilities = torch.softmax(params.angle_mix_logits, dim=-1)
+    angle_mixture_entropy = -(angle_mix_probabilities * params.angle_log_w).sum(dim=-1)
+    angle_entropy = angle_mixture_entropy + (
+        angle_mix_probabilities * von_mises_entropy(params.kappa)
+    ).sum(dim=-1)
+    size_entropy = truncated_logistic_mixture_entropy(
+        params.size_mix_logits,
+        params.size_mu,
+        params.size_scale,
         residual_budget,
-        min_fleet_size,
-        params.alpha,
-        params.beta,
-        max_ship_support=max_ship_support,
+        min_fleet_size=min_fleet_size,
+        entropy_ship_quantiles=entropy_ship_quantiles,
     )
-    return mixture_entropy + (mix_probabilities * component_entropy).sum(dim=-1)
+    size_mix_log_prob = F.log_softmax(params.size_mix_logits.float(), dim=-1)
+    size_mix_prob = size_mix_log_prob.exp()
+    size_mixture_entropy = -(size_mix_prob * size_mix_log_prob).sum(dim=-1)
+    size_logistic_entropy = (
+        size_mix_prob * (params.size_scale.float().log() + 2.0)
+    ).sum(dim=-1)
+    return (
+        angle_entropy + size_entropy,
+        angle_entropy,
+        size_entropy,
+        size_mixture_entropy,
+        size_logistic_entropy,
+    )
 
 
 def von_mises_entropy(kappa: torch.Tensor) -> torch.Tensor:
     log_i0 = torch.log(torch.special.i0e(kappa)) + kappa
     i1_over_i0 = torch.special.i1e(kappa) / torch.special.i0e(kappa)
     return math.log(2.0 * math.pi) + log_i0 - kappa * i1_over_i0
-
-
-def beta_binomial_entropy(
-    residual_budget: torch.Tensor,
-    min_fleet_size: int,
-    alpha: torch.Tensor,
-    beta: torch.Tensor,
-    *,
-    max_ship_support: int,
-) -> torch.Tensor:
-    successes = torch.arange(
-        0,
-        max_ship_support,
-        dtype=alpha.dtype,
-        device=alpha.device,
-    )
-    trials = (residual_budget - min_fleet_size).clamp_min(0).unsqueeze(-1).unsqueeze(-1)
-    successes = successes.view(*((1,) * residual_budget.ndim), max_ship_support, 1)
-    alpha = alpha.unsqueeze(-2)
-    beta = beta.unsqueeze(-2)
-    valid = successes <= trials
-    successes_safe = torch.minimum(successes, trials)
-    log_comb = (
-        torch.lgamma(trials + 1.0)
-        - torch.lgamma(successes_safe + 1.0)
-        - torch.lgamma(trials - successes_safe + 1.0)
-    )
-    log_prob = (
-        log_comb
-        + log_beta(successes_safe + alpha, trials - successes_safe + beta)
-        - log_beta(alpha, beta)
-    )
-    log_prob = torch.where(valid, log_prob, torch.full_like(log_prob, -torch.inf))
-    probabilities = torch.where(valid, log_prob.exp(), torch.zeros_like(log_prob))
-    entropy = -(
-        probabilities * torch.where(valid, log_prob, torch.zeros_like(log_prob))
-    )
-    return entropy.sum(dim=-2)
 
 
 def von_mises_log_prob(
@@ -737,44 +795,6 @@ def von_mises_log_prob(
         theta = theta.unsqueeze(-1)
     log_i0 = torch.log(torch.special.i0e(kappa)) + kappa
     return kappa * torch.cos(theta - loc) - math.log(2.0 * math.pi) - log_i0
-
-
-def shifted_beta_binomial_log_prob(
-    ships: torch.Tensor,
-    residual_budget: torch.Tensor,
-    min_fleet_size: int,
-    alpha: torch.Tensor,
-    beta: torch.Tensor,
-) -> torch.Tensor:
-    dtype = alpha.dtype
-    residual = residual_budget.to(device=alpha.device)
-    n_ships = ships.to(device=alpha.device)
-
-    trials = (residual - min_fleet_size).clamp_min(0).unsqueeze(-1).to(dtype=dtype)
-    successes_raw = (n_ships - min_fleet_size).unsqueeze(-1).to(dtype=dtype)
-    valid = (
-        residual.unsqueeze(-1).ge(min_fleet_size)
-        & n_ships.unsqueeze(-1).ge(min_fleet_size)
-        & n_ships.unsqueeze(-1).le(residual.unsqueeze(-1))
-    )
-
-    successes = successes_raw.clamp_min(0.0)
-    successes = torch.minimum(successes, trials)
-    log_comb = (
-        torch.lgamma(trials + 1.0)
-        - torch.lgamma(successes + 1.0)
-        - torch.lgamma(trials - successes + 1.0)
-    )
-    log_prob = (
-        log_comb
-        + log_beta(successes + alpha, trials - successes + beta)
-        - log_beta(alpha, beta)
-    )
-    return torch.where(valid, log_prob, torch.full_like(log_prob, -torch.inf))
-
-
-def log_beta(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return torch.lgamma(a) + torch.lgamma(b) - torch.lgamma(a + b)
 
 
 def _per_player_action_entity_log_prob(

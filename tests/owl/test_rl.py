@@ -379,7 +379,7 @@ def test_two_player_sample_marks_unused_player_slots_done() -> None:
 
 
 def test_vectorized_env_accepts_discriminated_config_dicts() -> None:
-    action_spec = ActionPureConfig(max_per_planet_launches=2, min_fleet_size=4)
+    action_spec = ActionPureConfig(max_per_planet_launches=1, min_fleet_size=4)
     env = VectorizedEnv(
         n_envs=1,
         obs_spec=EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 1),
@@ -389,17 +389,17 @@ def test_vectorized_env_accepts_discriminated_config_dicts() -> None:
 
     assert env.obs_spec.max_fleets == 1
     assert env.action_spec.action_spec == "pure"
-    assert env.action_spec.max_per_planet_launches == 2
+    assert env.action_spec.max_per_planet_launches == 1
     assert env.action_spec.min_fleet_size == 4
 
 
 def test_action_config_validates_launch_bounds() -> None:
-    assert ActionPureConfig().max_per_planet_launches == 3
-    assert ActionPureConfig(max_per_planet_launches=4).max_per_planet_launches == 4
+    assert ActionPureConfig().max_per_planet_launches == 1
+    assert ActionPureConfig(max_per_planet_launches=1).max_per_planet_launches == 1
     assert ActionPureConfig(min_fleet_size=5).min_fleet_size == 5
 
-    with pytest.raises(ValueError, match="less than or equal to 4"):
-        ActionPureConfig(max_per_planet_launches=5)
+    with pytest.raises(ValueError, match="less than or equal to 1"):
+        ActionPureConfig(max_per_planet_launches=2)
     with pytest.raises(ValueError, match="greater than or equal to 1"):
         ActionPureConfig(min_fleet_size=0)
 

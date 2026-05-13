@@ -1,9 +1,10 @@
 action_spec: pure
-n_action_mixtures: 4
+n_angle_mixtures: 4
+n_fleet_size_mixtures: 4
 kappa_min: 1.0e-03
-kappa_max: 200.0
-tau_min: 1.0e-03
-alpha_beta_eps: 1.0e-04
+kappa_max: 1000000.0
 dir_eps: 1.0e-06
-max_ship_normalizer: 500.0
-entropy_ship_support_cap: 256
+entropy_ship_quantiles: 16
+scale_min: 0.10
+scale_max_frac: 0.5
+scale_max_abs_floor: 8.0
