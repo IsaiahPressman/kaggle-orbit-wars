@@ -106,7 +106,7 @@ def test_full_config_defaults_to_single_launch_actions() -> None:
     )
 
     assert config.env.action_spec.max_per_planet_launches == 1
-    assert config.env.action_spec.min_fleet_size == 1
+    assert config.env.action_spec.min_fleet_size == 6
 
 
 def test_full_config_accepts_single_launch_training_actions() -> None:

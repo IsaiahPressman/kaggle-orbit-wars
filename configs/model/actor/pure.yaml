@@ -1,5 +1,5 @@
 action_spec: pure
-n_angle_mixtures: 4
+n_angle_mixtures: 8
 n_fleet_size_mixtures: 4
 kappa_min: 1.0e-03
 kappa_max: 1000000.0

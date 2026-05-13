@@ -362,6 +362,7 @@ def test_actor_config_files_load(config_path: Path) -> None:
     [
         ("stateless_transformer_tiny.yaml", 1_207_182),
         ("stateless_transformer_5m_gelu.yaml", 5_532_942),
+        ("stateless_transformer_5m_pure.yaml", 5_804_862),
         ("stateless_transformer_20m_gelu.yaml", 20_093_402),
         ("stateless_transformer_20m_swiglu.yaml", 20_914_202),
         ("stateless_transformer_28m.yaml", 27_785_738),
@@ -374,10 +375,15 @@ def test_model_config_file_parameter_count(
     config = StatelessTransformerV1Config.from_file(
         _REPO_ROOT / "configs" / "model" / filename
     )
+    action_spec: ActionConfig
+    if isinstance(config.actor, ActorPureConfig):
+        action_spec = ActionPureConfig()
+    else:
+        action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
     model = StatelessTransformerV1(
         config,
         obs_spec=EntityBasedConfig(),
-        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+        action_spec=action_spec,
     )
 
     assert sum(parameter.numel() for parameter in model.parameters()) == expected_params
@@ -2678,8 +2684,6 @@ def test_model_rejects_pure_multi_launch_action_spec() -> None:
         actor=ActorPureConfig(n_angle_mixtures=2, n_fleet_size_mixtures=2),
     )
 
-    with pytest.raises(ValueError, match="Input should be less than or equal to 1"):
-        ActionPureConfig(max_per_planet_launches=3)
     with pytest.raises(
         ValueError, match="pure actor requires max_per_planet_launches=1"
     ):
@@ -2739,7 +2743,9 @@ def test_evaluate_actions_rejects_nonfinite_launched_angles(angle: float) -> Non
     output.actions.ships.zero_()
     output.actions.launch[0, 0, 0, 0] = True
     output.actions.angle[0, 0, 0, 0] = angle
-    output.actions.ships[0, 0, 0, 0] = 1
+    output.actions.ships[0, 0, 0, 0] = action_spec.min_fleet_size
+    assert obs.max_launch is not None
+    obs.max_launch[0, 0, 0] = action_spec.min_fleet_size
 
     with pytest.raises(ValueError, match=r"actions\.angle must be finite"):
         model.evaluate_actions(obs, output.actions)

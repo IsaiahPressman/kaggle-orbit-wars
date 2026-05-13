@@ -278,7 +278,7 @@ filled with `False` / `0` in action-spec output tensors.
 Config:
 
 ```python
-{"action_spec": "pure", "max_per_planet_launches": 1, "min_fleet_size": 1}
+{"action_spec": "pure", "max_per_planet_launches": 1, "min_fleet_size": 6}
 ```
 
 The pure action spec exposes all launch decisions in direct tensor form. The
@@ -286,7 +286,7 @@ same entity axis is used for action masks and submitted actions.
 `max_per_planet_launches` is validated in Python and Rust and must equal `1`.
 `min_fleet_size` is validated in Python and Rust and must fit in the positive
 `i32` ship-count range. `ActionPureConfig()` defaults to
-`max_per_planet_launches=1` and `min_fleet_size=1`.
+`max_per_planet_launches=1` and `min_fleet_size=6`.
 
 ### Pure Output Tensors
 
@@ -349,8 +349,8 @@ Config:
 ```python
 {
     "action_spec": "discrete_targets",
-    "max_per_planet_launches": 3,
-    "min_fleet_size": 1,
+    "max_per_planet_launches": 1,
+    "min_fleet_size": 6,
     "targeting_mode": "full_mask",
 }
 ```
@@ -438,7 +438,7 @@ Config:
 ```python
 {
     "action_spec": "discrete_target_bins",
-    "min_fleet_size": 1,
+    "min_fleet_size": 6,
     "n_bins": 11,
     "targeting_mode": "full_mask",
 }

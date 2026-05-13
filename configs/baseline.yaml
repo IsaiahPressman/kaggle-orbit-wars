@@ -5,7 +5,6 @@ env:
     max_entities: 256
   action_spec:
     action_spec: discrete_targets
-    max_per_planet_launches: 1
     min_fleet_size: 6
     targeting_mode: anything_goes
   two_player_weight: 0.5
@@ -39,7 +38,7 @@ rl:
   vf_clip_coef: null
   vf_coef: 2.0
   ent_coef: 2e-5
-  max_grad_norm: 1.0
+  max_grad_norm: 5.0
   target_kl: null
   normalize_advantages: true
   eval_replay_games: 8

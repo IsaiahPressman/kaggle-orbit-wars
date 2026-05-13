@@ -217,7 +217,7 @@ gain extra parameters.
 The pure actor supports `ActionPureConfig`.
 
 The pure actor supports `max_per_planet_launches=1`. `ActionPureConfig()`
-defaults to `max_per_planet_launches=1` and `min_fleet_size=1`; Python config
+defaults to `max_per_planet_launches=1` and `min_fleet_size=6`. Python config
 validation and model construction both reject larger pure launch counts.
 
 For the launch slot, the policy emits:

@@ -9,7 +9,7 @@ from owl.config import BaseConfig
 
 class ActorPureConfig(BaseConfig):
     action_spec: Literal["pure"] = "pure"
-    n_angle_mixtures: int = Field(default=4, ge=1)
+    n_angle_mixtures: int = Field(default=8, ge=1)
     n_fleet_size_mixtures: int = Field(default=4, ge=1)
     kappa_min: float = Field(default=1e-3, gt=0.0)
     kappa_max: float = Field(default=1_000_000.0, gt=0.0)
