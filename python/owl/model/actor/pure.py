@@ -130,7 +130,10 @@ class PureActor(nn.Module):
         )
 
     def get_input_layers(self) -> tuple[InputLayer, ...]:
-        return ()
+        return (self.actor_heads.base_dirs,)
+
+    def reset_base_dirs(self) -> None:
+        _init_evenly_spaced_directions(self.actor_heads.base_dirs)
 
     def get_output_layers(self) -> tuple[nn.Linear, ...]:
         return (

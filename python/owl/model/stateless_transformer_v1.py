@@ -281,6 +281,8 @@ class StatelessTransformerV1(BaseModelAPI):
         self.apply(_init_module)
         for layer in self.get_input_layers():
             _init_input_layer(layer)
+        if isinstance(self.actor, PureActor):
+            self.actor.reset_base_dirs()
         residual_gain = 1.0 / math.sqrt(2.0 * self.config.depth)
         for module in self.blocks:
             block = cast(TransformerBlock, module)

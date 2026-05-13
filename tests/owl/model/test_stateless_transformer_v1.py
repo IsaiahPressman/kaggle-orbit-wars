@@ -1920,8 +1920,24 @@ def test_learned_token_embeddings_are_input_layers() -> None:
         pure_model.board_tokens,
         pure_model.actor_plan_tokens,
         pure_model.critic_value_tokens,
+        pure_model.actor.actor_heads.base_dirs,
     ):
         assert id(layer) in pure_input_layer_ids
+
+    expected_angles = torch.linspace(
+        0.0,
+        2.0 * math.pi,
+        pure_model.actor.actor_heads.base_dirs.shape[0] + 1,
+    )[:-1]
+    expected_dirs = torch.stack(
+        (torch.cos(expected_angles), torch.sin(expected_angles)),
+        dim=-1,
+    )
+    assert torch.allclose(
+        pure_model.actor.actor_heads.base_dirs,
+        expected_dirs,
+        atol=1e-6,
+    )
 
     discrete_config = StatelessTransformerV1Config(
         embed_dim=32,
