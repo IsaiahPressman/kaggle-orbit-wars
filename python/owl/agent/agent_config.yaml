@@ -1,4 +1,4 @@
 deterministic: true
-max_entities_override: null
+max_entities_override: 128
 targeting_mode_override: full_mask
 min_overage_time: 1.0

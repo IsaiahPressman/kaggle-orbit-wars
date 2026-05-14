@@ -293,11 +293,13 @@ def test_agent_log_prints_one_line_with_metrics(capsys) -> None:
     agent = Agent.__new__(Agent)
 
     agent.log(
+        step=7,
         total_ms=10,
         encode_ms=2,
         inference_ms=7,
         conversion_ms=1,
         self_value=0.25,
+        advantage=-0.5,
         player_values=[0.25, -0.5, 0.0, 0.75],
         entity_count=3,
         remaining_overage_time=59.5,
@@ -340,8 +342,67 @@ def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
 
     log_line = capsys.readouterr().out
     assert re.fullmatch(
-        r"total_ms=\d+ - encode_ms=\d+ - inference_ms=\d+ - conversion_ms=\d+ - "
-        r"value_self=0\.250 - values=\[0\.250,-0\.500,0\.000,0\.750\] - "
+        r"step=0 - total_ms=\d+ - encode_ms=\d+ - inference_ms=\d+ - "
+        r"conversion_ms=\d+ - value_self=0\.250 - advantage=0\.250 - "
+        r"values=\[0\.250,-0\.500,0\.000,0\.750\] - "
         r"entities=1 - remaining_overage_s=60\.0\n",
         log_line,
     )
+
+
+def test_agent_act_logs_step_and_value_advantage(capsys) -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    agent = Agent.__new__(Agent)
+    agent.checkpoint_config = SimpleNamespace(
+        env=SimpleNamespace(
+            obs_spec=EntityBasedConfig(),
+            action_spec=action_spec,
+        )
+    )
+    agent.config = AgentConfig(deterministic=False)
+    agent.device = torch.device("cpu")
+    agent._last_turn_value = float("nan")
+    action_shape = (1, 4, ACTION_ENTITY_SLOTS, action_spec.max_per_planet_launches)
+    values = iter(
+        [
+            torch.tensor([[0.25, -0.5, 0.0, 0.75]]),
+            torch.tensor([[0.10, -0.5, 0.0, 0.75]]),
+        ]
+    )
+
+    class FakeModel:
+        def __call__(self, _obs: object, *, deterministic: bool) -> object:
+            assert not deterministic
+            return SimpleNamespace(
+                actions=PureActions(
+                    launch=torch.zeros(action_shape, dtype=torch.bool),
+                    angle=torch.zeros(action_shape, dtype=torch.float32),
+                    ships=torch.zeros(action_shape, dtype=torch.int64),
+                ),
+                values=next(values),
+            )
+
+    agent.model = FakeModel()
+
+    first_observation = _raw_observation()
+    first_observation["step"] = 0
+    first_observation["planets"] = [
+        [0, 0, 25.0, 50.0, 2.0, 10, 3],
+        [1, 1, 50.0, 50.0, 2.0, 10, 3],
+        [2, 2, 75.0, 50.0, 2.0, 10, 3],
+        [3, 3, 90.0, 50.0, 2.0, 10, 3],
+    ]
+    first_observation["initial_planets"] = first_observation["planets"]
+    agent.act(KaggleObservation.model_validate(first_observation))
+    second_observation = _raw_observation()
+    second_observation["step"] = 5
+    second_observation["planets"] = first_observation["planets"]
+    second_observation["initial_planets"] = first_observation["planets"]
+    agent.act(KaggleObservation.model_validate(second_observation))
+
+    log_lines = capsys.readouterr().out.splitlines()
+    assert len(log_lines) == 2
+    assert "step=0" in log_lines[0]
+    assert "advantage=0.750" in log_lines[0]
+    assert "step=5" in log_lines[1]
+    assert "advantage=-0.150" in log_lines[1]

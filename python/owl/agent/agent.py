@@ -69,6 +69,7 @@ class Agent:
             self.checkpoint_config,
             self.config.targeting_mode_override,
         )
+        self._last_turn_value = float("nan")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = StatelessTransformerV1(
             self.checkpoint_config.model,
@@ -115,6 +116,12 @@ class Agent:
         )
         self._synchronize_device()
         values = output.values.detach().cpu()[0]
+        self_value = float(values[observation.player].item())
+        if observation.step == 0:
+            n_players = _observation_player_count(observation)
+            self._last_turn_value = (2.0 - n_players) / n_players
+
+        advantage = self_value - self._last_turn_value
         inference_ms = _elapsed_ms(inference_start)
 
         conversion_start = perf_counter()
@@ -128,15 +135,18 @@ class Agent:
         total_ms = _elapsed_ms(total_start)
 
         self.log(
+            step=observation.step,
             total_ms=total_ms,
             encode_ms=encode_ms,
             inference_ms=inference_ms,
             conversion_ms=conversion_ms,
-            self_value=float(values[observation.player].item()),
+            self_value=self_value,
+            advantage=advantage,
             player_values=[float(value) for value in values.tolist()],
             entity_count=int(obs.entity_mask.sum().item()),
             remaining_overage_time=observation.remaining_overage_time,
         )
+        self._last_turn_value = self_value
         return actions
 
     def _obs_to_device(self, obs: ObsBatch) -> ObsBatch:
@@ -156,22 +166,26 @@ class Agent:
     def log(
         self,
         *,
+        step: int,
         total_ms: int,
         encode_ms: int,
         inference_ms: int,
         conversion_ms: int,
         self_value: float,
+        advantage: float,
         player_values: list[float],
         entity_count: int,
         remaining_overage_time: float,
     ) -> None:
         values = ",".join(f"{value:.3f}" for value in player_values)
         print(
+            f"step={step} - "
             f"total_ms={total_ms} - "
             f"encode_ms={encode_ms} - "
             f"inference_ms={inference_ms} - "
             f"conversion_ms={conversion_ms} - "
             f"value_self={self_value:.3f} - "
+            f"advantage={advantage:.3f} - "
             f"values=[{values}] - "
             f"entities={entity_count} - "
             f"remaining_overage_s={remaining_overage_time:.1f}",
@@ -181,6 +195,20 @@ class Agent:
 
 def _elapsed_ms(start: float) -> int:
     return round((perf_counter() - start) * 1000)
+
+
+def _observation_player_count(observation: KaggleObservation) -> int:
+    player_indexes = [observation.player]
+    player_indexes.extend(
+        owner
+        for _, owner, *_ in [
+            *observation.initial_planets,
+            *observation.planets,
+            *observation.fleets,
+        ]
+        if owner >= 0
+    )
+    return 4 if max(player_indexes) >= 2 else 2
 
 
 def _model_actions_to_cpu(actions: ActionBundle) -> ActionBundle:
