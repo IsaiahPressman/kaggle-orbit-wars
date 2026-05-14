@@ -12,6 +12,7 @@ from owl.agent.agent import (
     AgentCheckpointConfig,
     AgentConfig,
     apply_max_entities_override,
+    apply_targeting_mode_override,
     compact_entities,
 )
 from owl.model import StatelessTransformerV1Config
@@ -23,6 +24,8 @@ from owl.rl import (
     MAX_COMETS,
     MAX_PLANETS,
     PLANET_CHANNELS,
+    ActionDiscreteTargetBinsConfig,
+    ActionDiscreteTargetsConfig,
     ActionPureConfig,
     EntityBasedConfig,
     EnvConfig,
@@ -82,6 +85,55 @@ def test_agent_config_max_entities_override_uses_obs_spec_validation() -> None:
             config,
             2,
         )
+
+
+def test_agent_config_targeting_mode_override_updates_checkpoint_action_spec() -> None:
+    config = AgentCheckpointConfig(
+        env=EnvConfig(
+            action_spec=ActionDiscreteTargetsConfig(targeting_mode="full_mask")
+        ),
+        model=StatelessTransformerV1Config(actor={"action_spec": "discrete_targets"}),
+    )
+
+    overridden = apply_targeting_mode_override(config, "stop_bad_launch")
+
+    assert config.env.action_spec.targeting_mode == "full_mask"
+    assert overridden.env.action_spec.targeting_mode == "stop_bad_launch"
+
+
+def test_agent_config_targeting_mode_override_updates_target_bins_spec() -> None:
+    config = AgentCheckpointConfig(
+        env=EnvConfig(
+            action_spec=ActionDiscreteTargetBinsConfig(
+                n_bins=7,
+                targeting_mode="full_mask",
+            )
+        ),
+        model=StatelessTransformerV1Config(
+            actor={"action_spec": "discrete_target_bins", "n_bins": 7}
+        ),
+    )
+
+    overridden = apply_targeting_mode_override(config, "anything_goes")
+
+    assert config.env.action_spec.targeting_mode == "full_mask"
+    assert overridden.env.action_spec.targeting_mode == "anything_goes"
+
+
+def test_agent_config_targeting_mode_override_warns_for_pure_action_spec(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = AgentCheckpointConfig(
+        env=EnvConfig(action_spec=ActionPureConfig()),
+        model=StatelessTransformerV1Config(),
+    )
+
+    overridden = apply_targeting_mode_override(config, "full_mask")
+
+    assert overridden == config
+    assert "warning: targeting_mode_override is ignored for pure action_spec" in (
+        capsys.readouterr().out
+    )
 
 
 def test_compact_runtime_entities_keeps_action_slots_and_active_fleets() -> None:

@@ -19,6 +19,7 @@ from owl.rl import (
     ObsBatch,
     PureActionMask,
     PureActions,
+    TargetingMode,
     actions_to_kaggle,
     encode_python_observation,
 )
@@ -33,6 +34,7 @@ class AgentConfig(BaseConfig):
 
     deterministic: bool
     max_entities_override: int | None = None
+    targeting_mode_override: TargetingMode | None = None
     min_overage_time: float = Field(default=0.0, ge=0.0, le=60.0)
 
 
@@ -62,6 +64,10 @@ class Agent:
         self.checkpoint_config = apply_max_entities_override(
             self.checkpoint_config,
             self.config.max_entities_override,
+        )
+        self.checkpoint_config = apply_targeting_mode_override(
+            self.checkpoint_config,
+            self.config.targeting_mode_override,
         )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = StatelessTransformerV1(
@@ -261,6 +267,35 @@ def apply_max_entities_override(
     env = config.env.model_copy(
         update={
             "obs_spec": override_obs_spec,
+        }
+    )
+    return config.model_copy(update={"env": env})
+
+
+def apply_targeting_mode_override(
+    config: AgentCheckpointConfig,
+    targeting_mode_override: TargetingMode | None,
+) -> AgentCheckpointConfig:
+    if targeting_mode_override is None:
+        return config
+
+    action_spec = config.env.action_spec
+    if action_spec.action_spec == "pure":
+        print(
+            "warning: targeting_mode_override is ignored for pure action_spec",
+            flush=True,
+        )
+        return config
+
+    override_action_spec = type(action_spec).model_validate(
+        {
+            **action_spec.model_dump(mode="python"),
+            "targeting_mode": targeting_mode_override,
+        }
+    )
+    env = config.env.model_copy(
+        update={
+            "action_spec": override_action_spec,
         }
     )
     return config.model_copy(update={"env": env})
