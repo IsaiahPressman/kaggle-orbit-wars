@@ -862,7 +862,8 @@ fn dynamic_target_angle(
     orbit_target_cache: &mut OrbitTargetCache<'_>,
     targeting_mode: TargetingMode,
 ) -> Option<f64> {
-    if let Some(path) = orbit_target_cache.comet_path_for(target) {
+    if state.comet_planet_ids.contains(&target.id) {
+        let path = orbit_target_cache.comet_path_for(target)?;
         let windows = piecewise_linear_target_windows(source, target.radius, speed, path);
         if windows.is_empty() {
             return None;
@@ -5061,6 +5062,43 @@ mod tests {
             assert_eq!(decoded.launch_failures, 1);
             assert!(decoded.actions.iter().all(Vec::is_empty));
         }
+    }
+
+    #[test]
+    fn discrete_comet_target_with_exhausted_path_is_no_op() {
+        let mut state = state_from_planets(vec![
+            planet(0, 0, 10.0, 80.0, 2.0, 500),
+            planet(10, -1, 70.0, 80.0, 1.0, 20),
+        ]);
+        state.comet_planet_ids = vec![10];
+        state.comets = vec![CometGroup {
+            planet_ids: vec![10],
+            paths: vec![vec![Point::new(70.0, 80.0), Point::new(70.0, 80.0)]],
+            path_index: 2,
+        }];
+        let entities = action_entity_slots(&state);
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+        let mut targets = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        targets[0] = MAX_PLANETS as i64;
+        ships[0] = 100;
+
+        let decoded = decode_discrete_target_actions(
+            &state,
+            &PlayerMap::identity(),
+            &entities,
+            &launch,
+            &targets,
+            &ships,
+            1,
+            1,
+            TargetingMode::FullMask,
+        )
+        .expect("exhausted comet path should decode as a no-op");
+
+        assert_eq!(decoded.launch_failures, 1);
+        assert!(decoded.actions.iter().all(Vec::is_empty));
     }
 
     #[test]
