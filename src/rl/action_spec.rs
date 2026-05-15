@@ -800,12 +800,14 @@ impl<'a> OrbitTargetCache<'a> {
         self.paths.last().map(|(_, path)| path.as_slice())
     }
 
-    fn dynamic_path_for(&mut self, blocker: &Planet) -> Option<&[Point]> {
-        if let Some(path) = self
-            .comet_paths
-            .get(blocker.id as usize)
+    fn comet_path_for(&self, target: &Planet) -> Option<&'a [Point]> {
+        self.comet_paths
+            .get(target.id as usize)
             .and_then(|path| *path)
-        {
+    }
+
+    fn dynamic_path_for(&mut self, blocker: &Planet) -> Option<&[Point]> {
+        if let Some(path) = self.comet_path_for(blocker) {
             return Some(path);
         }
         self.path_for(blocker)
@@ -861,8 +863,11 @@ fn dynamic_target_angle(
     orbit_target_cache: &mut OrbitTargetCache<'_>,
     targeting_mode: TargetingMode,
 ) -> Option<f64> {
-    if state.comet_planet_ids.contains(&target.id) {
-        let windows = comet_target_windows(state, source, target, speed)?;
+    if let Some(path) = orbit_target_cache.comet_path_for(target) {
+        let windows = piecewise_linear_target_windows(source, target.radius, speed, path);
+        if windows.is_empty() {
+            return None;
+        }
         return choose_dynamic_window_angle(
             state,
             source,
@@ -1273,29 +1278,6 @@ fn orbit_time_bounds(
         ((min_distance - clearance) / speed).max(0.0),
         ((max_distance - clearance) / speed).max(0.0),
     )
-}
-
-fn comet_target_windows(
-    state: &State,
-    source: &Planet,
-    target: &Planet,
-    speed: f64,
-) -> Option<Vec<TargetWindow>> {
-    let (group, path_offset) = state.comets.iter().find_map(|group| {
-        group
-            .planet_ids
-            .iter()
-            .position(|planet_id| *planet_id == target.id)
-            .map(|path_offset| (group, path_offset))
-    })?;
-    let path = group.paths.get(path_offset)?;
-    let path_start = group.path_index.max(0) as usize;
-    if path_start >= path.len() {
-        return None;
-    }
-    let remaining = &path[path_start..];
-    let windows = piecewise_linear_target_windows(source, target.radius, speed, remaining);
-    (!windows.is_empty()).then_some(windows)
 }
 
 #[cfg(test)]
