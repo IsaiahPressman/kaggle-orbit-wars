@@ -918,6 +918,22 @@ fn static_target_angle(
     let reference_angle = direct_target_angle(source, target);
     let max_time = static_target_max_time(source, target, speed);
     let midpoint_candidate = static_target_candidate(source, target, reference_angle, speed);
+    if !is_dynamic_planet_cached(state, source)
+        && static_target_cache_contains(state, source.id, target.id, 0.0)
+        && !goes_out_of_bounds(source, midpoint_candidate)
+        && static_candidate_has_target_margin(source, target, reference_angle, midpoint_candidate)
+        && !shot_hits_dynamic_blocker(
+            state,
+            source,
+            target,
+            reference_angle,
+            speed,
+            midpoint_candidate.time,
+            orbit_target_cache,
+        )
+    {
+        return Some(reference_angle);
+    }
     if !goes_out_of_bounds(source, midpoint_candidate)
         && static_candidate_has_target_margin(source, target, reference_angle, midpoint_candidate)
         && !shot_hits_sun(source, reference_angle, speed, midpoint_candidate.time)
@@ -1045,47 +1061,34 @@ fn cached_static_target_angle(
     {
         return None;
     }
-    let cached_spans =
-        cached_static_target_spans(state.static_target_cache.arcs(source.id, target.id));
-    choose_center_first_with(&cached_spans, |relative_angle| {
-        let angle = normalize_angle(reference_angle + relative_angle);
-        !goes_out_of_bounds(
-            source,
-            static_target_candidate(source, target, angle, speed),
-        ) && static_candidate_has_target_margin(
-            source,
-            target,
-            angle,
-            static_target_candidate(source, target, angle, speed),
-        ) && !shot_hits_dynamic_blocker_at_time(
-            state,
-            source,
-            target,
-            angle,
-            speed,
-            max_time,
-            orbit_target_cache,
-        ) && !shot_hits_blocker(
-            state,
-            source,
-            target,
-            angle,
-            speed,
-            max_time,
-            orbit_target_cache,
-        )
-    })
+    choose_center_first_static_arcs(
+        state.static_target_cache.arcs(source.id, target.id),
+        |relative_angle| {
+            let angle = normalize_angle(reference_angle + relative_angle);
+            let candidate = static_target_candidate(source, target, angle, speed);
+            !goes_out_of_bounds(source, candidate)
+                && static_candidate_has_target_margin(source, target, angle, candidate)
+                && !shot_hits_dynamic_blocker(
+                    state,
+                    source,
+                    target,
+                    angle,
+                    speed,
+                    max_time.min(candidate.time),
+                    orbit_target_cache,
+                )
+        },
+    )
     .map(|relative_angle| normalize_angle(reference_angle + relative_angle))
 }
 
-fn cached_static_target_spans(spans: &[StaticTargetArc]) -> Vec<AngleSpan> {
-    spans
-        .iter()
-        .map(|span| AngleSpan {
-            start: span.start,
-            end: span.end,
-        })
-        .collect()
+fn static_target_cache_contains(state: &State, source_id: u32, target_id: u32, angle: f64) -> bool {
+    !state.static_target_cache.is_empty()
+        && state
+            .static_target_cache
+            .arcs(source_id, target_id)
+            .iter()
+            .any(|span| span.start <= angle && angle <= span.end)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1105,6 +1108,20 @@ fn optimistic_static_target_angle(
             reference_angle
         };
     let candidate = static_target_candidate(source, target, candidate_angle, speed);
+    if !is_dynamic_planet_cached(state, source) && !state.static_target_cache.is_empty() {
+        return (!goes_out_of_bounds(source, candidate)
+            && static_candidate_has_target_margin(source, target, candidate_angle, candidate)
+            && !shot_hits_dynamic_blocker(
+                state,
+                source,
+                target,
+                candidate_angle,
+                speed,
+                max_time.min(candidate.time),
+                orbit_target_cache,
+            ))
+        .then_some(candidate_angle);
+    }
     (!goes_out_of_bounds(source, candidate)
         && static_candidate_has_target_margin(source, target, candidate_angle, candidate)
         && !shot_hits_sun(source, candidate_angle, speed, candidate.time)
@@ -1126,11 +1143,12 @@ fn static_candidate_has_target_margin(
     angle: f64,
     _candidate: TargetCandidate,
 ) -> bool {
+    let start = launch_start(source, angle);
     let radius = (target.radius - DYNAMIC_TARGET_EPS).max(0.0);
     point_to_segment_distance(
         target.position(),
-        launch_start(source, angle),
-        point_along(launch_start(source, angle), angle, BOARD_SIZE * 2.0),
+        start,
+        point_along(start, angle, BOARD_SIZE * 2.0),
     ) <= radius
 }
 
@@ -1863,11 +1881,10 @@ fn shot_hits_circle(
     center: Point,
     radius: f64,
 ) -> bool {
-    point_to_segment_distance(
-        center,
-        launch_start(source, angle),
-        point_along(launch_start(source, angle), angle, speed * time),
-    ) < radius
+    let start = launch_start(source, angle);
+    let end = point_along(start, angle, speed * time);
+    swept_aabb_overlaps(start, end, center, center, radius)
+        && point_to_segment_distance(center, start, end) < radius
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1915,7 +1932,7 @@ fn shot_hits_blocker(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn shot_hits_dynamic_blocker_at_time(
+fn shot_hits_dynamic_blocker(
     state: &State,
     source: &Planet,
     target: &Planet,
@@ -1934,12 +1951,12 @@ fn shot_hits_dynamic_blocker_at_time(
         }
         let path = orbit_target_cache.dynamic_path_for(blocker);
         if path.is_some_and(|path| {
-            shot_hits_circle(
+            shot_hits_moving_circle(
                 source,
                 angle,
                 speed,
                 time,
-                path_position_at(path, time),
+                path,
                 blocker.radius + COLLISION_EPS,
             )
         }) {
@@ -1971,8 +1988,15 @@ fn shot_hits_moving_circle(
         }
         let fleet_start = point_along(start, angle, speed * start_time);
         let fleet_end = point_along(start, angle, speed * end_time);
-        let blocker_start = path_position_at(path, start_time);
-        let blocker_end = path_position_at(path, end_time);
+        let blocker_start = path[segment_index];
+        let blocker_end = lerp(
+            path[segment_index],
+            path[segment_index + 1],
+            end_time - start_time,
+        );
+        if !swept_aabb_overlaps(fleet_start, fleet_end, blocker_start, blocker_end, radius) {
+            continue;
+        }
         if blocker_start == blocker_end {
             if point_to_segment_distance(blocker_start, fleet_start, fleet_end) < radius {
                 return true;
@@ -1982,6 +2006,28 @@ fn shot_hits_moving_circle(
         }
     }
     false
+}
+
+fn swept_aabb_overlaps(
+    fleet_start: Point,
+    fleet_end: Point,
+    blocker_start: Point,
+    blocker_end: Point,
+    radius: f64,
+) -> bool {
+    let fleet_min_x = fleet_start.x.min(fleet_end.x);
+    let fleet_max_x = fleet_start.x.max(fleet_end.x);
+    let fleet_min_y = fleet_start.y.min(fleet_end.y);
+    let fleet_max_y = fleet_start.y.max(fleet_end.y);
+    let blocker_min_x = blocker_start.x.min(blocker_end.x) - radius;
+    let blocker_max_x = blocker_start.x.max(blocker_end.x) + radius;
+    let blocker_min_y = blocker_start.y.min(blocker_end.y) - radius;
+    let blocker_max_y = blocker_start.y.max(blocker_end.y) + radius;
+
+    !(fleet_max_x < blocker_min_x
+        || fleet_min_x > blocker_max_x
+        || fleet_max_y < blocker_min_y
+        || fleet_min_y > blocker_max_y)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2007,6 +2053,9 @@ fn subtract_blocker_forbidden_spans(
             max_ray_distance,
             reference_angle,
         );
+        if blocker_spans.is_empty() || !spans_overlap(feasible, &blocker_spans) {
+            continue;
+        }
         *feasible = subtract_spans(feasible, &blocker_spans);
         if feasible.is_empty() {
             return;
@@ -2035,6 +2084,9 @@ fn subtract_blocker_forbidden_spans(
             })
             .unwrap_or_default();
 
+        if blocker_spans.is_empty() || !spans_overlap(feasible, &blocker_spans) {
+            continue;
+        }
         *feasible = subtract_spans(feasible, &blocker_spans);
         if feasible.is_empty() {
             return;
@@ -2183,6 +2235,14 @@ fn subtract_spans(spans: &[AngleSpan], forbidden: &[AngleSpan]) -> Vec<AngleSpan
     current
 }
 
+fn spans_overlap(left: &[AngleSpan], right: &[AngleSpan]) -> bool {
+    left.iter().any(|left_span| {
+        right
+            .iter()
+            .any(|right_span| right_span.end > left_span.start && right_span.start < left_span.end)
+    })
+}
+
 fn merge_spans(mut spans: Vec<AngleSpan>) -> Vec<AngleSpan> {
     spans.sort_by(|left, right| left.start.total_cmp(&right.start));
     let mut merged: Vec<AngleSpan> = Vec::with_capacity(spans.len());
@@ -2203,6 +2263,47 @@ fn merge_spans(mut spans: Vec<AngleSpan>) -> Vec<AngleSpan> {
 
 fn choose_center_first_with(
     spans: &[AngleSpan],
+    mut is_valid: impl FnMut(f64) -> bool,
+) -> Option<f64> {
+    let mut best = None;
+    for span in spans {
+        let width = span.end - span.start;
+        if width <= ANGLE_EPS {
+            continue;
+        }
+        let edge_margin = (width * 0.25).min(MAX_ANGLE_EDGE_MARGIN);
+        let center_candidate = 0.0_f64.clamp(span.start, span.end);
+        let center_candidate = if (center_candidate - span.start).abs() <= ANGLE_EPS {
+            (span.start + edge_margin).min((span.start + span.end) / 2.0)
+        } else if (center_candidate - span.end).abs() <= ANGLE_EPS {
+            (span.end - edge_margin).max((span.start + span.end) / 2.0)
+        } else {
+            center_candidate
+        };
+        for candidate in [
+            center_candidate,
+            span.start + width * 0.25,
+            (span.start + span.end) / 2.0,
+            span.start + width * 0.75,
+            (span.start + edge_margin).min((span.start + span.end) / 2.0),
+            (span.end - edge_margin).max((span.start + span.end) / 2.0),
+            (span.start + ANGLE_CHOICE_EPS).min((span.start + span.end) / 2.0),
+            (span.end - ANGLE_CHOICE_EPS).max((span.start + span.end) / 2.0),
+        ] {
+            if !is_valid(candidate) {
+                continue;
+            }
+            let score = candidate.abs();
+            if best.is_none_or(|(best_score, _)| score < best_score) {
+                best = Some((score, candidate));
+            }
+        }
+    }
+    best.map(|(_, angle)| angle)
+}
+
+fn choose_center_first_static_arcs(
+    spans: &[StaticTargetArc],
     mut is_valid: impl FnMut(f64) -> bool,
 ) -> Option<f64> {
     let mut best = None;
