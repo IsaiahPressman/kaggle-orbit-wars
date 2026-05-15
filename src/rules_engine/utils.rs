@@ -1,6 +1,14 @@
-use super::state::{Planet, Point, BOARD_SIZE, CENTER, ROTATION_RADIUS_LIMIT, SUN_RADIUS};
+use std::f64::consts::PI;
+
+use super::state::{
+    Planet, Point, StaticTargetArc, BOARD_SIZE, CENTER, ROTATION_RADIUS_LIMIT, SUN_RADIUS,
+};
 
 const TARGET_EPS: f64 = 1e-6;
+const AVOIDANCE_EPS: f64 = 1e-6;
+const ANGLE_EPS: f64 = 1e-9;
+const ANGLE_CHOICE_EPS: f64 = 1e-4;
+const TAU: f64 = PI * 2.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StaticTargetRay {
@@ -103,15 +111,85 @@ pub fn best_static_target_angle<'a, I>(
 where
     I: Iterator<Item = &'a Planet> + Clone,
 {
-    let rays = static_target_rays(source, target);
-    rays.into_iter()
-        .find(|ray| {
-            !static_ray_hits_sun(source, *ray)
-                && !static_blockers
-                    .clone()
-                    .any(|blocker| static_ray_hits_planet(source, *ray, blocker))
-        })
-        .map(|ray| ray.angle)
+    let base_angle = angle_between(source.position(), target.position());
+    let feasible = static_target_angle_spans(source, target, static_blockers.clone());
+    if let Some(relative_angle) = choose_center_first(&feasible) {
+        return Some(normalize_angle(base_angle + relative_angle));
+    }
+    choose_center_first(&static_target_sun_safe_angle_spans(source, target))
+        .map(|relative_angle| normalize_angle(base_angle + relative_angle))
+}
+
+pub fn static_target_arcs<'a, I>(
+    source: &Planet,
+    target: &Planet,
+    static_blockers: I,
+) -> Vec<StaticTargetArc>
+where
+    I: Iterator<Item = &'a Planet>,
+{
+    static_target_angle_spans(source, target, static_blockers)
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+fn static_target_angle_spans<'a, I>(
+    source: &Planet,
+    target: &Planet,
+    static_blockers: I,
+) -> Vec<AngleSpan>
+where
+    I: Iterator<Item = &'a Planet>,
+{
+    let source_pos = source.position();
+    let target_pos = target.position();
+    let base_angle = angle_between(source_pos, target_pos);
+    let max_ray_distance = distance(source_pos, target_pos) + target.radius;
+    let mut feasible = static_target_sun_safe_angle_spans(source, target);
+    for blocker in static_blockers {
+        let blocker_arc = forbidden_circle_arc(
+            source_pos,
+            blocker.position(),
+            blocker.radius + AVOIDANCE_EPS,
+            max_ray_distance,
+            base_angle,
+        );
+        feasible = subtract_spans(&feasible, &blocker_arc);
+        if feasible.is_empty() {
+            break;
+        }
+    }
+    feasible
+}
+
+fn static_target_sun_safe_angle_spans(source: &Planet, target: &Planet) -> Vec<AngleSpan> {
+    let source_pos = source.position();
+    let target_pos = target.position();
+    let base_angle = angle_between(source_pos, target_pos);
+    let target_distance = distance(source_pos, target_pos);
+    let target_radius = (target.radius - TARGET_EPS).max(0.0);
+    let target_half_angle = if target_distance <= target_radius {
+        PI
+    } else if target_radius > 0.0 {
+        (target_radius / target_distance).asin()
+    } else {
+        0.0
+    };
+    let target_arc = vec![AngleSpan {
+        start: -target_half_angle,
+        end: target_half_angle,
+    }];
+    let max_ray_distance = target_distance + target.radius;
+
+    let sun_arc = forbidden_circle_arc(
+        source_pos,
+        Point::new(CENTER, CENTER),
+        SUN_RADIUS + AVOIDANCE_EPS,
+        max_ray_distance,
+        base_angle,
+    );
+    subtract_spans(&target_arc, &sun_arc)
 }
 
 pub fn static_ray_hits_sun(source: &Planet, ray: StaticTargetRay) -> bool {
@@ -145,6 +223,159 @@ fn static_target_ray_for_angle(source: &Planet, target: &Planet, angle: f64) -> 
         angle,
         end: point_along(start, angle, hit_distance),
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AngleSpan {
+    start: f64,
+    end: f64,
+}
+
+impl From<AngleSpan> for StaticTargetArc {
+    fn from(span: AngleSpan) -> Self {
+        Self {
+            start: span.start,
+            end: span.end,
+        }
+    }
+}
+
+impl From<StaticTargetArc> for AngleSpan {
+    fn from(span: StaticTargetArc) -> Self {
+        Self {
+            start: span.start,
+            end: span.end,
+        }
+    }
+}
+
+fn forbidden_circle_arc(
+    source_pos: Point,
+    center: Point,
+    radius: f64,
+    max_ray_distance: f64,
+    reference_angle: f64,
+) -> Vec<AngleSpan> {
+    let center_distance = distance(source_pos, center);
+    if center_distance <= radius {
+        return vec![AngleSpan {
+            start: -PI,
+            end: PI,
+        }];
+    }
+    if center_distance - radius > max_ray_distance {
+        return Vec::new();
+    }
+    let half_angle = (radius / center_distance).clamp(-1.0, 1.0).asin();
+    arc_to_spans(
+        angle_between(source_pos, center),
+        half_angle,
+        reference_angle,
+    )
+}
+
+fn arc_to_spans(center: f64, half_angle: f64, reference_angle: f64) -> Vec<AngleSpan> {
+    if half_angle >= PI {
+        return vec![AngleSpan {
+            start: -PI,
+            end: PI,
+        }];
+    }
+
+    let center = angle_delta(center, reference_angle);
+    let raw_start = center - half_angle;
+    let raw_end = center + half_angle;
+    let mut spans = Vec::with_capacity(2);
+    for offset in [-TAU, 0.0, TAU] {
+        let start = raw_start + offset;
+        let end = raw_end + offset;
+        let clipped_start = start.max(-PI);
+        let clipped_end = end.min(PI);
+        if clipped_start <= clipped_end {
+            spans.push(AngleSpan {
+                start: clipped_start,
+                end: clipped_end,
+            });
+        }
+    }
+    merge_spans(spans)
+}
+
+fn subtract_spans(spans: &[AngleSpan], forbidden: &[AngleSpan]) -> Vec<AngleSpan> {
+    let mut current = spans.to_vec();
+    for forbidden_span in forbidden {
+        let mut next = Vec::with_capacity(current.len() + 1);
+        for span in current {
+            if forbidden_span.end <= span.start || forbidden_span.start >= span.end {
+                next.push(span);
+                continue;
+            }
+            if forbidden_span.start > span.start {
+                next.push(AngleSpan {
+                    start: span.start,
+                    end: forbidden_span.start,
+                });
+            }
+            if forbidden_span.end < span.end {
+                next.push(AngleSpan {
+                    start: forbidden_span.end,
+                    end: span.end,
+                });
+            }
+        }
+        current = next;
+        if current.is_empty() {
+            break;
+        }
+    }
+    current
+}
+
+fn merge_spans(mut spans: Vec<AngleSpan>) -> Vec<AngleSpan> {
+    spans.sort_by(|left, right| left.start.total_cmp(&right.start));
+    let mut merged: Vec<AngleSpan> = Vec::with_capacity(spans.len());
+    for span in spans {
+        if span.end < span.start {
+            continue;
+        }
+        if let Some(last) = merged.last_mut() {
+            if span.start <= last.end + ANGLE_EPS {
+                last.end = last.end.max(span.end);
+                continue;
+            }
+        }
+        merged.push(span);
+    }
+    merged
+}
+
+fn choose_center_first(spans: &[AngleSpan]) -> Option<f64> {
+    spans
+        .iter()
+        .filter_map(|span| {
+            let width = span.end - span.start;
+            (width > ANGLE_EPS).then(|| {
+                let candidate = 0.0_f64.clamp(span.start, span.end);
+                let candidate = if (candidate - span.start).abs() <= ANGLE_EPS {
+                    (span.start + ANGLE_CHOICE_EPS).min((span.start + span.end) / 2.0)
+                } else if (candidate - span.end).abs() <= ANGLE_EPS {
+                    (span.end - ANGLE_CHOICE_EPS).max((span.start + span.end) / 2.0)
+                } else {
+                    candidate
+                };
+                (candidate.abs(), candidate)
+            })
+        })
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, angle)| angle)
+}
+
+fn normalize_angle(angle: f64) -> f64 {
+    (angle + PI).rem_euclid(TAU) - PI
+}
+
+fn angle_delta(angle: f64, reference_angle: f64) -> f64 {
+    normalize_angle(angle - reference_angle)
 }
 
 pub fn swept_pair_hit(

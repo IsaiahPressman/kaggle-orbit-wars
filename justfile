@@ -88,6 +88,10 @@ prepare-rl: prepare build-release
 prepare-container: _prepare_base build-release
 
 [group: 'misc']
+audit-selected-target-angles:
+    cargo test --lib rl::action_spec::tests::audit_selected_target_angle_quality -- --ignored --nocapture
+
+[group: 'misc']
 clean:
     cargo clean
     rm -rf .mypy_cache .pytest_cache .ruff_cache .venv/
