@@ -2024,12 +2024,14 @@ fn subtract_blocker_forbidden_spans(
     feasible: &mut Vec<AngleSpan>,
 ) {
     let max_ray_distance = source.radius + 0.1 + speed * time;
+    let source_pos = source.position();
     for blocker in &orbit_target_cache.static_blockers {
         if blocker.id == source.id || blocker.id == target.id {
             continue;
         }
-        let blocker_spans = forbidden_circle_spans(
-            source.position(),
+        let blocker_spans = forbidden_circle_spans_overlapping(
+            feasible,
+            source_pos,
             blocker.center,
             blocker.radius,
             max_ray_distance,
@@ -2062,6 +2064,7 @@ fn subtract_blocker_forbidden_spans(
                     path,
                     time,
                     reference_angle,
+                    feasible,
                 )
             })
             .unwrap_or_default();
@@ -2083,9 +2086,10 @@ fn moving_circle_forbidden_spans(
     path: &[Point],
     max_time: f64,
     reference_angle: f64,
+    feasible: &[AngleSpan],
 ) -> Vec<AngleSpan> {
     let mut spans = Vec::new();
-    if path.is_empty() || max_time <= 0.0 {
+    if path.is_empty() || max_time <= 0.0 || feasible.is_empty() {
         return spans;
     }
 
@@ -2113,6 +2117,9 @@ fn moving_circle_forbidden_spans(
             time,
             reference_angle,
         ) {
+            if !arc_overlaps_spans(arc.center, arc.half_angle, feasible) {
+                continue;
+            }
             spans.extend(arc_to_spans(
                 normalize_angle(reference_angle + arc.center),
                 arc.half_angle,
@@ -2132,6 +2139,39 @@ fn path_position_at(path: &[Point], time: f64) -> Point {
         path[segment_index],
         path[segment_index + 1],
         (time - segment_index as f64).clamp(0.0, 1.0),
+    )
+}
+
+fn forbidden_circle_spans_overlapping(
+    feasible: &[AngleSpan],
+    source_pos: Point,
+    center: Point,
+    radius: f64,
+    max_ray_distance: f64,
+    reference_angle: f64,
+) -> Vec<AngleSpan> {
+    if feasible.is_empty() {
+        return Vec::new();
+    }
+    let center_distance = distance(source_pos, center);
+    if center_distance <= radius {
+        return vec![AngleSpan {
+            start: -PI,
+            end: PI,
+        }];
+    }
+    if center_distance - radius > max_ray_distance {
+        return Vec::new();
+    }
+    let half_angle = (radius / center_distance).clamp(-1.0, 1.0).asin();
+    let center = angle_delta(angle_between(source_pos, center), reference_angle);
+    if !arc_overlaps_spans(center, half_angle, feasible) {
+        return Vec::new();
+    }
+    arc_to_spans(
+        normalize_angle(reference_angle + center),
+        half_angle,
+        reference_angle,
     )
 }
 
@@ -2158,6 +2198,28 @@ fn forbidden_circle_spans(
         half_angle,
         reference_angle,
     )
+}
+
+fn arc_overlaps_spans(center: f64, half_angle: f64, spans: &[AngleSpan]) -> bool {
+    if half_angle >= PI {
+        return !spans.is_empty();
+    }
+    let raw_start = center - half_angle;
+    let raw_end = center + half_angle;
+    for offset in [-TAU, 0.0, TAU] {
+        let start = (raw_start + offset).max(-PI);
+        let end = (raw_end + offset).min(PI);
+        if end - start <= ANGLE_EPS {
+            continue;
+        }
+        if spans
+            .iter()
+            .any(|span| end > span.start && start < span.end)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn arc_to_spans(center: f64, half_angle: f64, reference_angle: f64) -> Vec<AngleSpan> {
