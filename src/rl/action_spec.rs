@@ -1023,8 +1023,9 @@ fn static_target_angle(
     })
     .map(|relative_angle| normalize_angle(reference_angle + relative_angle))
     .or_else(|| {
-        matches!(targeting_mode, TargetingMode::AnythingGoes)
-            .then_some(first_sun_avoiding.unwrap_or(reference_angle))
+        first_sun_avoiding.or_else(|| {
+            matches!(targeting_mode, TargetingMode::AnythingGoes).then_some(reference_angle)
+        })
     })
 }
 
@@ -1636,10 +1637,10 @@ fn choose_dynamic_window_angle(
         }
     }
 
+    if let Some(angle) = first_sun_avoiding {
+        return Some(angle);
+    }
     if matches!(targeting_mode, TargetingMode::AnythingGoes) {
-        if let Some(angle) = first_sun_avoiding {
-            return Some(angle);
-        }
         return first_midpoint.map(normalize_angle);
     }
     None
@@ -3987,6 +3988,78 @@ mod tests {
     }
 
     #[test]
+    fn stop_bad_launch_falls_back_to_sun_safe_blocked_static_target() {
+        let state = state_from_planets(vec![
+            planet(0, 0, 10.0, 96.0, 2.0, 100),
+            planet(1, -1, 35.0, 96.0, 8.0, 20),
+            planet(2, -1, 70.0, 96.0, 2.0, 20),
+        ]);
+        let entities = action_entity_slots(&state);
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+        let mut targets = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        targets[0] = 2;
+        ships[0] = 100;
+
+        let decoded = decode_discrete_target_actions(
+            &state,
+            &PlayerMap::identity(),
+            &entities,
+            &launch,
+            &targets,
+            &ships,
+            1,
+            1,
+            TargetingMode::StopBadLaunch,
+        )
+        .expect("stop_bad_launch should submit a blocker-only fallback");
+
+        assert_eq!(decoded.launch_failures, 0);
+        assert_eq!(decoded.actions[0].len(), 1);
+        assert!(decoded.actions[0][0].angle.abs() <= 1e-6);
+    }
+
+    #[test]
+    fn full_mask_falls_back_to_sun_safe_blocked_dynamic_target() {
+        let mut state = state_from_planets(vec![
+            planet(0, 0, 10.0, 96.0, 2.0, 100),
+            planet(1, -1, 35.0, 96.0, 8.0, 20),
+            planet(10, -1, 70.0, 96.0, 2.0, 20),
+        ]);
+        state.comet_planet_ids = vec![10];
+        state.comets = vec![CometGroup {
+            planet_ids: vec![10],
+            paths: vec![vec![Point::new(70.0, 96.0); 40]],
+            path_index: 0,
+        }];
+        let entities = action_entity_slots(&state);
+        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
+        let mut targets = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
+        launch[0] = true;
+        targets[0] = MAX_PLANETS as i64;
+        ships[0] = 100;
+
+        let decoded = decode_discrete_target_actions(
+            &state,
+            &PlayerMap::identity(),
+            &entities,
+            &launch,
+            &targets,
+            &ships,
+            1,
+            1,
+            TargetingMode::FullMask,
+        )
+        .expect("full_mask should submit a blocker-only dynamic fallback");
+
+        assert_eq!(decoded.launch_failures, 0);
+        assert_eq!(decoded.actions[0].len(), 1);
+        assert!(decoded.actions[0][0].angle.abs() <= 1e-6);
+    }
+
+    #[test]
     fn anything_goes_submits_sun_crossing_static_target() {
         let state = state_from_planets(vec![
             planet(0, 0, 0.0, 50.0, 2.0, 100),
@@ -4823,21 +4896,27 @@ mod tests {
         targets[0] = MAX_PLANETS as i64;
         ships[0] = 1;
 
-        let decoded = decode_discrete_target_actions(
-            &state,
-            &PlayerMap::identity(),
-            &entities,
-            &launch,
-            &targets,
-            &ships,
-            1,
-            1,
+        for targeting_mode in [
+            TargetingMode::AnythingGoes,
+            TargetingMode::StopBadLaunch,
             TargetingMode::FullMask,
-        )
-        .expect("unreachable comet target should decode as a no-op");
+        ] {
+            let decoded = decode_discrete_target_actions(
+                &state,
+                &PlayerMap::identity(),
+                &entities,
+                &launch,
+                &targets,
+                &ships,
+                1,
+                1,
+                targeting_mode,
+            )
+            .expect("unreachable comet target should decode as a no-op");
 
-        assert_eq!(decoded.launch_failures, 1);
-        assert!(decoded.actions.iter().all(Vec::is_empty));
+            assert_eq!(decoded.launch_failures, 1);
+            assert!(decoded.actions.iter().all(Vec::is_empty));
+        }
     }
 
     #[test]

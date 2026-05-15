@@ -373,7 +373,7 @@ train against this action spec when the model actor config also uses
 | Mode | Target mask | Bad selected target launch |
 | --- | --- | --- |
 | `"full_mask"` | Existing targets except self, plus the simulator's full static-target eligibility filter. | Selected targets are replaced with no-op when no allowed or fallback ray exists. |
-| `"stop_bad_launch"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Replaced with no-op when the computed ray crosses the sun. |
+| `"stop_bad_launch"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Falls back through the target cone for a sun-avoiding ray and is replaced with no-op only when no sun-avoiding target ray exists. |
 | `"anything_goes"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Submitted even when the computed ray crosses the sun. Dynamic targets with no target-hit window still become no-ops because no launch angle is defined. |
 
 In `"full_mask"`, static-source to static-target pairs use the reset-time
