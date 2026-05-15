@@ -20,8 +20,7 @@ const ANGLE_EPS: f64 = 1e-9;
 const ANGLE_CHOICE_EPS: f64 = 1e-4;
 const MAX_ANGLE_EDGE_MARGIN: f64 = 2e-2;
 const TARGET_WINDOW_LIMIT: usize = 32;
-const DYNAMIC_BLOCKER_SAMPLE_FRACTIONS: [f64; 9] =
-    [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0];
+const DYNAMIC_BLOCKER_SAMPLE_FRACTIONS: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
 const TAU: f64 = PI * 2.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RlActionSpec {
