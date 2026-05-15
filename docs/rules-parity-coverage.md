@@ -68,6 +68,9 @@ Rust unit tests cover focused rules behavior that is hard to isolate from full
 replays:
 
 - geometry helpers
+- RL discrete-target launch-angle selection for static target cones, dynamic
+  target-hit windows, sun avoidance, static and dynamic blocker arc
+  subtraction, static arc caching, and no-op fallback accounting
 - fleet speed curve
 - launch validation and side effects
 - production order

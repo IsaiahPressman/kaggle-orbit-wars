@@ -372,13 +372,16 @@ train against this action spec when the model actor config also uses
 
 | Mode | Target mask | Bad selected target launch |
 | --- | --- | --- |
-| `"full_mask"` | Existing targets except self, plus the simulator's full static-target eligibility filter. | Dynamic targets are replaced with no-op when no allowed ray exists. Invalid masked static targets fail fast if submitted. This is the default and preserves the original behavior. |
-| `"stop_bad_launch"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Replaced with no-op when the computed ray crosses the sun. |
-| `"anything_goes"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Submitted even when the computed ray crosses the sun. Comet targets that cannot be intercepted before leaving the board still become no-ops because no launch angle is defined. |
+| `"full_mask"` | Existing targets except self, plus the simulator's full static-target eligibility filter. | Selected targets are replaced with no-op when no allowed or fallback ray exists. |
+| `"stop_bad_launch"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Falls back through the target cone for a sun-avoiding ray and is replaced with no-op only when no sun-avoiding target ray exists. |
+| `"anything_goes"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Submitted even when the computed ray crosses the sun. Dynamic targets with no target-hit window still become no-ops because no launch angle is defined. |
 
 In `"full_mask"`, static-source to static-target pairs use the reset-time
-cached unobstructed 3-ray result. Dynamic-source to static-target pairs
-recompute the same 3-ray sun/static-blocker check for the current step.
+cached static target-cone result for masking. Selected static-source to
+static-target launches also reuse the cached static-safe target arcs, then only
+check dynamic blockers at launch time. Dynamic-source to static-target pairs
+recompute the same static target-cone sun/static-blocker check for the current
+step while masking.
 Dynamic targets remain eligible in the mask because full obstruction checks are
 deferred until the selected launch is decoded. In the loose modes,
 `can_act[player, source, target]` is true when the source entity is owned by
@@ -409,27 +412,39 @@ uses the Rust target decoder to convert discrete target slots into submitted
 
 ### Targeting Rules
 
-For static planets in `"full_mask"`, the 3-ray check tries the centerline plus
-both edge paths using `target_radius - eps`, then selects the first ray
-unobstructed by the sun and other static planets. Reset precomputes this best
-angle for every static-source/static-target planet ID pair in a contiguous
-cache and reuses the cached angle during discrete target decoding.
-Dynamic-source/static-target pairs run the same check live. In
-`"stop_bad_launch"` and `"anything_goes"`, static targets use the direct
-source-to-target angle instead of searching for an unobstructed ray.
+For static planets, decoding uses the fixed target angular cone with
+`target_radius - eps`, subtracts sun plus static and dynamic blocker forbidden
+arcs inflated by small avoidance epsilons, then chooses the feasible angle
+closest to the target centerline. Static-source/static-target selected launches
+start from the cached static-safe arc and only check dynamic blockers at the
+shot horizon. Other static-target selected launches recompute sun/static arcs
+live, with cached static blocker geometry reused per decode. Dynamic blockers
+use their cached orbit paths or comet path segments up to the selected shot's
+impact horizon. If the sun removes the whole eligible arc, decoding skips
+blocker search and falls back immediately. If blockers cover the whole target
+cone, decoding falls back to the closest sun-avoiding angle. If no sun-avoiding
+angle exists, `"full_mask"` and `"stop_bad_launch"` decode the launch as a
+no-op, while `"anything_goes"` uses the centerline.
 
 For orbiting non-comet planets, reset caches future tick positions across the
-episode horizon, and decoding solves inflated-radius intercepts against the
-cached linear segments for the selected target. Manually reconstructed states
-without that cache build the selected target path lazily during decode. For
-comets, decoding solves inflated-radius intercepts against each stored linear
-path segment. In
-`"full_mask"`, selected dynamic candidates are filtered for sun crossing,
-out-of-bounds impact, and static blockers. In `"stop_bad_launch"`, only
-sun-crossing candidates are filtered. In `"anything_goes"`, the earliest
-computed candidate is submitted. Submitted discrete-target launches that cannot
-produce an allowed or defined ray are treated as no-ops and counted in
-`launch_failures_per_game`.
+episode horizon, and decoding solves target-hit time windows against the cached
+linear segments for the selected target. Manually reconstructed states without
+that cache build the selected target path lazily during decode. For comets,
+decoding solves bounded target-hit time windows against each stored linear path
+segment. Windows are processed in increasing impact time and capped to avoid
+searching a hopeless long tail. Within each window, the decoder first tries the
+window midpoint angle against sun, bounds, and cached blocker metadata. Only if
+that optimistic path fails does it compute the target's eligible angular arc,
+subtract sun and static/dynamic blocker forbidden arcs up to the window end
+with the same avoidance epsilons, and choose the closest feasible angle for
+that window. Dynamic blockers use the same orbit/comet path sources as dynamic
+targets, sampled at fixed horizon fractions plus radial crossing times. If no
+window has a collision-avoidance angle, decoding falls back to the first
+sun-avoiding, in-bounds target arc. If no such fallback exists,
+`"anything_goes"` fires along the first window midpoint and
+`"full_mask"`/`"stop_bad_launch"` decode the launch as a no-op. Submitted
+discrete-target launches that cannot produce an allowed or defined ray are
+counted in `launch_failures_per_game`.
 
 ## Discrete Target Bins Action Spec
 
@@ -559,7 +574,7 @@ Terminal episode metrics:
 | `terminal_ship_count` | Total ships on planets and in active fleets at terminal. |
 | `planets_captured_per_game` | Total planet captures over the episode, counting repeat captures. |
 | `comets_captured_per_game` | Total comet planet captures over the episode, counting repeat captures. |
-| `launch_failures_per_game` | Submitted discrete-target launches skipped because no valid selected ray exists, including dynamic targets with no intercept, sun-crossing rays, or out-of-bounds impact points. Python training logs this as `train/launch_failures_per_game`. |
+| `launch_failures_per_game` | Submitted discrete-target launches skipped because no valid selected ray exists, including static targets with no sun-avoiding ray and dynamic targets with no intercept, no allowed fallback, or out-of-bounds impact points. Python training logs this as `train/launch_failures_per_game`. |
 | `launches_per_turn` | Mean launches per player per turn. |
 | `fleet_size_max` | Largest fleet launched during the episode. |
 | `fleet_size_min` | Smallest fleet launched during the episode, or `0.0` when no fleets launched. |

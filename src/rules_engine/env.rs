@@ -11,7 +11,7 @@ use super::state::{
 };
 use super::utils::{
     best_static_target_angle, fleet_speed, is_orbiting, orbit_position, point_to_segment_distance,
-    swept_pair_hit,
+    static_target_arcs, swept_pair_hit,
 };
 pub type PlayerAction = Vec<LaunchAction>;
 
@@ -106,6 +106,8 @@ fn precompute_static_target_cache(
                 .iter()
                 .filter_map(|planet_id| planets.get(*planet_id))
                 .filter(|planet| planet.id != source.id && planet.id != target.id);
+            let arcs = static_target_arcs(source, target, blockers.clone());
+            cache.set_arcs(source.id, target.id, arcs);
             if let Some(angle) = best_static_target_angle(source, target, blockers) {
                 cache.set(source.id, target.id, angle);
             }

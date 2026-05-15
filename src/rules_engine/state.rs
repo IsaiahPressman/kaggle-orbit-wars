@@ -194,10 +194,17 @@ pub struct OrbitPath {
     pub points: Vec<Point>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StaticTargetArc {
+    pub start: f64,
+    pub end: f64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaticTargetCache {
     side: usize,
     angles: Vec<Option<f64>>,
+    arcs: Vec<Vec<StaticTargetArc>>,
 }
 
 impl StaticTargetCache {
@@ -205,6 +212,7 @@ impl StaticTargetCache {
         Self {
             side: 0,
             angles: Vec::new(),
+            arcs: Vec::new(),
         }
     }
 
@@ -212,6 +220,7 @@ impl StaticTargetCache {
         Self {
             side,
             angles: vec![None; side * side],
+            arcs: vec![Vec::new(); side * side],
         }
     }
 
@@ -229,6 +238,18 @@ impl StaticTargetCache {
             .index(source_id, target_id)
             .expect("static target cache ids must be in bounds");
         self.angles[index] = Some(angle);
+    }
+
+    pub fn arcs(&self, source_id: u32, target_id: u32) -> &[StaticTargetArc] {
+        self.index(source_id, target_id)
+            .map_or(&[], |index| self.arcs[index].as_slice())
+    }
+
+    pub fn set_arcs(&mut self, source_id: u32, target_id: u32, arcs: Vec<StaticTargetArc>) {
+        let index = self
+            .index(source_id, target_id)
+            .expect("static target cache ids must be in bounds");
+        self.arcs[index] = arcs;
     }
 
     fn index(&self, source_id: u32, target_id: u32) -> Option<usize> {

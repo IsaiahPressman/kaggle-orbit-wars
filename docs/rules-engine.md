@@ -36,8 +36,9 @@ Planets and initial planets are stored in ID-indexed slots (`PlanetVector`,
 backed by `Vec<Option<Planet>>`) so direct ID lookup is the normal path.
 Planet IDs must be unique and less than `MAX_PLANET_ID = 100`; removed comet
 planets leave empty slots. Generated/reset states also cache orbiting planet
-positions across the episode horizon and static-source/static-target best
-launch angles in an ID-indexed contiguous cache for RL target decoding.
+positions across the episode horizon and static-source/static-target
+target-cone launch angles plus static-safe target arcs in an ID-indexed
+contiguous cache for RL target decoding.
 Manually constructed or replay-loaded states may leave those caches empty
 because core rules progression still derives orbit positions from
 `initial_planets`, `angular_velocity`, and `step`.
