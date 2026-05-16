@@ -30,7 +30,7 @@ class ActorPureConfig(BaseConfig):
 
 class ActorDiscreteTargetsConfig(BaseConfig):
     action_spec: Literal["discrete_targets"] = "discrete_targets"
-    launch_mode: Literal["binary", "target_token"] = "binary"
+    launch_mode: Literal["binary", "binary_after", "target_token"] = "binary"
     n_action_mixtures: int = Field(default=4, ge=1)
     entropy_ship_quantiles: int = Field(default=16, ge=1)
     scale_min: float = Field(default=0.10, gt=0.0)

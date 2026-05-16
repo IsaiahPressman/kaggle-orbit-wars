@@ -67,6 +67,7 @@ class DiscreteTargetSizeParams:
     size_mix_logits: torch.Tensor
     size_mu: torch.Tensor
     size_scale: torch.Tensor
+    continue_logits: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,9 @@ class DiscreteTargetsActor(nn.Module):
                 transformer_config.embed_dim,
             )
             self.continue_head = OutputProjectionMLP(transformer_config, 1)
+        elif config.launch_mode == "binary_after":
+            self.continue_source_proj = None
+            self.continue_head = OutputProjectionMLP(transformer_config, 1)
         else:
             self.continue_source_proj = None
             self.continue_head = None
@@ -164,6 +168,13 @@ class DiscreteTargetsActor(nn.Module):
                 logits=selection.target_logits.float()
             ).sample()
 
+        params = self._policy_params_for_selected_target(
+            selection,
+            actor_inputs.source,
+            max_launch,
+            selected_target,
+            min_fleet_size=min_fleet_size,
+        )
         if self.config.launch_mode == "target_token":
             no_launch_target = selection.target_logits.shape[-1] - 1
             launch = (selected_target != no_launch_target) & source_active
@@ -173,24 +184,20 @@ class DiscreteTargetsActor(nn.Module):
                 torch.zeros_like(selected_target),
             )
         else:
-            continue_logits = _require_continue_logits(selection.continue_logits)
+            continue_logits = _require_continue_logits(params.continue_logits)
             launch = sample_launch(
                 continue_logits,
                 source_active,
                 deterministic=deterministic,
             )
-            target = torch.where(
-                launch,
-                selected_target,
-                torch.zeros_like(selected_target),
-            )
-        params = self._policy_params_for_selected_target(
-            selection,
-            actor_inputs.source,
-            max_launch,
-            selected_target,
-            min_fleet_size=min_fleet_size,
-        )
+            if self.config.launch_mode == "binary_after":
+                target = selected_target
+            else:
+                target = torch.where(
+                    launch,
+                    selected_target,
+                    torch.zeros_like(selected_target),
+                )
         ships = sample_discretized_logistic_mixture(
             params.size_mix_logits,
             params.size_mu,
@@ -298,6 +305,12 @@ class DiscreteTargetsActor(nn.Module):
             can_act,
             min_fleet_size,
         )
+        if self.config.launch_mode == "binary_after":
+            _require_valid_discrete_action_target(
+                target,
+                source_active,
+                can_act,
+            )
         params = self._policy_params_for_selected_target(
             selection,
             actor_inputs.source,
@@ -486,12 +499,40 @@ class DiscreteTargetsActor(nn.Module):
         min_fleet_size: int,
     ) -> DiscreteTargetPolicyParams:
         target_index = selection.target_logits.argmax(dim=-1)
-        return self._policy_params_for_selected_target(
+        params = self._policy_params_for_selected_target(
             selection,
             source_input,
             max_launch,
             target_index,
             min_fleet_size=min_fleet_size,
+        )
+        if self.config.launch_mode != "binary_after":
+            return params
+        return DiscreteTargetPolicyParams(
+            target_logits=params.target_logits,
+            size_mix_logits=params.size_mix_logits,
+            size_mu=params.size_mu,
+            size_scale=params.size_scale,
+            continue_logits=self._all_continue_logits(selection, source_input),
+        )
+
+    def _all_continue_logits(
+        self,
+        selection: DiscreteTargetSelectionParams,
+        source_input: torch.Tensor,
+    ) -> torch.Tensor:
+        batch, players, source_slots, _ = source_input.shape
+        target_slots = selection.target_values.shape[2]
+        target_values = selection.target_values.unsqueeze(2).expand(
+            batch,
+            players,
+            source_slots,
+            target_slots,
+            self.head_dim,
+        )
+        return self._continue_logits_from_target_values(
+            source_input.unsqueeze(3),
+            target_values,
         )
 
     def _all_size_params(
@@ -526,10 +567,7 @@ class DiscreteTargetsActor(nn.Module):
         *,
         min_fleet_size: int,
     ) -> DiscreteTargetSizeParams:
-        selected_v = self.out(target_values)
-        enriched = source_input + selected_v
-        enriched = enriched + self.mlp(self.norm2(enriched))
-        source_hidden = self.size_pair_proj(enriched)
+        source_hidden = self._target_conditioned_hidden(source_input, target_values)
 
         residual_budget = max_launch.to(dtype=torch.float32).view(
             *max_launch.shape,
@@ -548,11 +586,35 @@ class DiscreteTargetsActor(nn.Module):
             scale_upper,
             torch.sigmoid(self.scale_head(source_hidden).float()),
         )
+        continue_logits = None
+        if self.config.launch_mode == "binary_after":
+            continue_head = _require_continue_head(self.continue_head)
+            continue_logits = continue_head(source_hidden).squeeze(-1)
         return DiscreteTargetSizeParams(
             size_mix_logits=self.mix_head(source_hidden),
             size_mu=mu,
             size_scale=scale,
+            continue_logits=continue_logits,
         )
+
+    def _continue_logits_from_target_values(
+        self,
+        source_input: torch.Tensor,
+        target_values: torch.Tensor,
+    ) -> torch.Tensor:
+        continue_head = _require_continue_head(self.continue_head)
+        source_hidden = self._target_conditioned_hidden(source_input, target_values)
+        return continue_head(source_hidden).squeeze(-1)
+
+    def _target_conditioned_hidden(
+        self,
+        source_input: torch.Tensor,
+        target_values: torch.Tensor,
+    ) -> torch.Tensor:
+        selected_v = self.out(target_values)
+        enriched = source_input + selected_v
+        enriched = enriched + self.mlp(self.norm2(enriched))
+        return self.size_pair_proj(enriched)
 
 
 def _init_token_parameter(parameter: nn.Parameter) -> None:
@@ -568,7 +630,11 @@ def policy_params_for_selected_target(
         size_mix_logits=size_params.size_mix_logits,
         size_mu=size_params.size_mu,
         size_scale=size_params.size_scale,
-        continue_logits=selection.continue_logits,
+        continue_logits=(
+            size_params.continue_logits
+            if size_params.continue_logits is not None
+            else selection.continue_logits
+        ),
     )
 
 
@@ -629,7 +695,9 @@ def discrete_action_log_probs(
         min_fleet_size=min_fleet_size,
     )
     target_mask = (
-        source_active if launch_mode == "target_token" else launch & source_active
+        source_active
+        if launch_mode in {"binary_after", "target_token"}
+        else launch & source_active
     )
     event_mask = launch & source_active
     return (
@@ -653,6 +721,13 @@ def discrete_action_entropy(
         launch_entropy = torch.zeros_like(params.target_logits[..., 0].float())
         no_launch_valid = can_act.any(dim=-1, keepdim=True)
         can_act = torch.cat((can_act, no_launch_valid), dim=-1)
+    elif launch_mode == "binary_after":
+        continue_logits = _require_continue_logits(params.continue_logits)
+        target_prob = torch.softmax(params.target_logits.float(), dim=-1)
+        launch_probability = (target_prob * torch.sigmoid(continue_logits.float())).sum(
+            dim=-1
+        )
+        launch_entropy = binary_entropy_from_probability(launch_probability)
     else:
         continue_logits = _require_continue_logits(params.continue_logits)
         launch_entropy = binary_entropy_from_logits(continue_logits.float())
@@ -703,8 +778,26 @@ def discrete_action_entropy(
 
 def _require_continue_logits(continue_logits: torch.Tensor | None) -> torch.Tensor:
     if continue_logits is None:
-        raise RuntimeError("binary launch mode requires continue logits")
+        raise RuntimeError("binary launch modes require continue logits")
     return continue_logits
+
+
+def _require_continue_head(
+    continue_head: OutputProjectionMLP | None,
+) -> OutputProjectionMLP:
+    if continue_head is None:
+        raise RuntimeError("binary_after launch mode requires a continue head")
+    return continue_head
+
+
+def binary_entropy_from_probability(probability: torch.Tensor) -> torch.Tensor:
+    probability = probability.float()
+    eps = torch.finfo(probability.dtype).eps
+    probability = probability.clamp(eps, 1.0 - eps)
+    return -(
+        probability * probability.log()
+        + (1.0 - probability) * (1.0 - probability).log()
+    )
 
 
 def _require_discrete_actions_shape(
@@ -759,3 +852,15 @@ def _require_valid_discrete_action_slot(
     target_valid = can_act.gather(-1, safe_target.unsqueeze(-1)).squeeze(-1)
     if (launch & (~target_in_range | ~target_valid)).any().item():
         raise ValueError("actions.target must select a valid target for launched slots")
+
+
+def _require_valid_discrete_action_target(
+    target: torch.Tensor,
+    active: torch.Tensor,
+    can_act: torch.Tensor,
+) -> None:
+    target_in_range = target.ge(0) & target.lt(ACTION_ENTITY_SLOTS)
+    safe_target = target.clamp(0, ACTION_ENTITY_SLOTS - 1)
+    target_valid = can_act.gather(-1, safe_target.unsqueeze(-1)).squeeze(-1)
+    if (active & (~target_in_range | ~target_valid)).any().item():
+        raise ValueError("actions.target must select a valid target for active slots")

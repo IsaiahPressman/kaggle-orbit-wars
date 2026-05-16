@@ -42,7 +42,9 @@ pure-head fields such as `n_angle_mixtures`, `n_fleet_size_mixtures`,
 `entropy_ship_quantiles=16`, and the same logistic-mixture scale parameters.
 Set `launch_mode="target_token"` to replace the separate Bernoulli
 launch/stop choice with a learned no-launch target candidate in the target
-categorical.
+categorical. Set `launch_mode="binary_after"` to keep a Bernoulli launch/stop
+choice but project its logits from the selected target-conditioned hidden
+representation used by the fleet-size heads.
 `ActorDiscreteTargetBinsConfig` owns `n_bins`, which must match the
 environment's `ActionDiscreteTargetBinsConfig.n_bins`.
 `kappa_min` must be less than or equal to `kappa_max`.
@@ -327,6 +329,18 @@ With the default `launch_mode="binary"`, each source emits:
 - Bernoulli launch/stop logits
 - masked categorical target logits over the 44 action entity slots
 - mixture parameters for a truncated discretized logistic fleet-size policy
+
+With `launch_mode="binary_after"`, the target categorical remains over the
+44 action entity slots and no no-launch target is added. The actor samples or
+replays the selected target first, gathers that target's value, applies the
+same residual feedforward and size-pair projection used by the fleet-size
+heads, then projects Bernoulli launch/stop logits from that target-conditioned
+representation. No-launch actions retain the sampled target in
+`DiscreteTargetActions.target` so replay can score
+`log P(target) + log P(no-launch | target)`; the environment still ignores the
+target when `launch=False`. Launch entropy uses the Bernoulli entropy of the
+target-marginalized launch probability while fleet-size entropy keeps the
+selected-target approximation.
 
 With `launch_mode="target_token"`, the actor appends one learned
 no-launch token to the target/key/value stream only; the source/query stream

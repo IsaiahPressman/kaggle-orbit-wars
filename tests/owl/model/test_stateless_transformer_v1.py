@@ -16,6 +16,7 @@ from owl.model import (
 )
 from owl.model.actor import ActorConfig
 from owl.model.actor.discrete_targets import (
+    DiscreteTargetSelectionParams,
     discretized_logistic_mixture_log_prob,
     logsubexp,
     sample_discretized_logistic_mixture,
@@ -2036,6 +2037,202 @@ def test_discrete_targets_default_binary_mode_has_no_no_launch_token() -> None:
     assert "no_launch_target" not in actor.state_dict()
     assert actor.continue_source_proj is not None
     assert actor.continue_head is not None
+
+
+def test_discrete_targets_binary_after_mode_has_target_conditioned_continue_head() -> (
+    None
+):
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(
+            launch_mode="binary_after",
+            n_action_mixtures=1,
+        ),
+        embed_dim=4,
+        depth=1,
+        n_heads=1,
+    )
+    actor = DiscreteTargetsActor(config.actor, transformer_config=config)
+    assert actor.no_launch_target is None
+    assert actor.continue_source_proj is None
+    assert actor.continue_head is not None
+    assert "continue_source_proj.weight" not in actor.state_dict()
+    assert "continue_head.out.weight" in actor.state_dict()
+
+    with torch.no_grad():
+        for module in (actor.out, actor.size_pair_proj):
+            module.weight.copy_(torch.eye(config.embed_dim))
+            module.bias.zero_()
+        for parameter in actor.mlp.parameters():
+            parameter.zero_()
+        actor.continue_head.up.weight.copy_(torch.eye(config.embed_dim))
+        actor.continue_head.up.bias.zero_()
+        actor.continue_head.out.weight.zero_()
+        actor.continue_head.out.bias.zero_()
+        actor.continue_head.out.weight[0, 0] = 1.0
+
+    target_values = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    target_values[0, 0, 1, 0] = 2.0
+    target_values[0, 0, 2, 0] = -2.0
+    selection = DiscreteTargetSelectionParams(
+        target_logits=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS)),
+        target_values=target_values,
+    )
+    source_input = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    max_launch = torch.full((1, 4, ACTION_ENTITY_SLOTS), 10, dtype=torch.int64)
+
+    target_one = actor._policy_params_for_selected_target(
+        selection,
+        source_input,
+        max_launch,
+        torch.ones((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+        min_fleet_size=1,
+    )
+    target_two = actor._policy_params_for_selected_target(
+        selection,
+        source_input,
+        max_launch,
+        torch.full((1, 4, ACTION_ENTITY_SLOTS), 2, dtype=torch.int64),
+        min_fleet_size=1,
+    )
+
+    assert target_one.continue_logits is not None
+    assert target_two.continue_logits is not None
+    assert target_one.continue_logits[0, 0, 0] > target_two.continue_logits[0, 0, 0]
+
+
+def test_discrete_targets_binary_after_keeps_no_launch_target_log_prob(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(
+            launch_mode="binary_after",
+            n_action_mixtures=1,
+        ),
+        embed_dim=4,
+        depth=1,
+        n_heads=1,
+    )
+    actor = DiscreteTargetsActor(config.actor, transformer_config=config)
+    batch_shape = (1, 4, ACTION_ENTITY_SLOTS)
+    target_logits = torch.full((*batch_shape, ACTION_ENTITY_SLOTS), -10.0)
+    target_logits[0, 0, 0, 2] = 3.0
+    selection = DiscreteTargetSelectionParams(
+        target_logits=target_logits,
+        target_values=torch.zeros((*batch_shape, config.embed_dim)),
+    )
+    source_input = torch.zeros((*batch_shape, config.embed_dim))
+    can_act = torch.zeros((*batch_shape, ACTION_ENTITY_SLOTS), dtype=torch.bool)
+    can_act[0, 0, 0, 2] = True
+    max_launch = torch.zeros(batch_shape, dtype=torch.int64)
+    max_launch[0, 0, 0] = 10
+
+    def selected_policy_params(
+        _selection: DiscreteTargetSelectionParams,
+        _source_input: torch.Tensor,
+        _max_launch: torch.Tensor,
+        _target_index: torch.Tensor,
+        *,
+        min_fleet_size: int,
+    ) -> DiscreteTargetPolicyParams:
+        return DiscreteTargetPolicyParams(
+            target_logits=target_logits,
+            continue_logits=torch.full(batch_shape, -10.0),
+            size_mix_logits=torch.zeros((*batch_shape, 1)),
+            size_mu=torch.full((*batch_shape, 1), float(min_fleet_size)),
+            size_scale=torch.ones((*batch_shape, 1)),
+        )
+
+    def entropy_policy_params(
+        _selection: DiscreteTargetSelectionParams,
+        _source_input: torch.Tensor,
+        _max_launch: torch.Tensor,
+        *,
+        min_fleet_size: int,
+    ) -> DiscreteTargetPolicyParams:
+        params = selected_policy_params(
+            _selection,
+            _source_input,
+            _max_launch,
+            torch.zeros(batch_shape, dtype=torch.int64),
+            min_fleet_size=min_fleet_size,
+        )
+        return DiscreteTargetPolicyParams(
+            target_logits=params.target_logits,
+            continue_logits=torch.full((*batch_shape, ACTION_ENTITY_SLOTS), -10.0),
+            size_mix_logits=params.size_mix_logits,
+            size_mu=params.size_mu,
+            size_scale=params.size_scale,
+        )
+
+    monkeypatch.setattr(
+        actor,
+        "_selection_params",
+        lambda _actor_inputs, _can_act: selection,
+    )
+    monkeypatch.setattr(
+        actor,
+        "_policy_params_for_selected_target",
+        selected_policy_params,
+    )
+    monkeypatch.setattr(
+        actor,
+        "_policy_params_for_entropy",
+        entropy_policy_params,
+    )
+
+    actions, log_probs, _entropies = actor(
+        _discrete_actor_inputs(source_input),
+        can_act,
+        max_launch,
+        min_fleet_size=1,
+        deterministic=True,
+    )
+
+    expected_target_log_prob = F.log_softmax(target_logits[0, 0, 0], dim=-1)[2]
+    assert not actions.launch[0, 0, 0, 0]
+    assert actions.target[0, 0, 0, 0] == 2
+    assert torch.allclose(log_probs.target[0, 0, 0, 0], expected_target_log_prob)
+
+
+def test_discrete_targets_binary_after_entropy_uses_marginal_launch_probability() -> (
+    None
+):
+    batch_shape = (1, 4, ACTION_ENTITY_SLOTS)
+    target_logits = torch.full((*batch_shape, ACTION_ENTITY_SLOTS), -100.0)
+    target_logits[0, 0, 0, 1] = 0.0
+    target_logits[0, 0, 0, 2] = 0.0
+    continue_logits = torch.zeros((*batch_shape, ACTION_ENTITY_SLOTS))
+    continue_logits[0, 0, 0, 1] = -100.0
+    continue_logits[0, 0, 0, 2] = 100.0
+    params = DiscreteTargetPolicyParams(
+        target_logits=target_logits,
+        continue_logits=continue_logits,
+        size_mix_logits=torch.zeros((*batch_shape, 1)),
+        size_mu=torch.full((*batch_shape, 1), 3.0),
+        size_scale=torch.ones((*batch_shape, 1)),
+    )
+    residual_budget = torch.full(batch_shape, 10, dtype=torch.int64)
+    source_active = torch.zeros(batch_shape, dtype=torch.bool)
+    source_active[0, 0, 0] = True
+    can_act = torch.zeros((*batch_shape, ACTION_ENTITY_SLOTS), dtype=torch.bool)
+    can_act[0, 0, 0, 1] = True
+    can_act[0, 0, 0, 2] = True
+
+    launch_entropy, *_ = discrete_action_entropy(
+        params,
+        residual_budget,
+        source_active,
+        can_act,
+        "binary_after",
+        min_fleet_size=1,
+        entropy_ship_quantiles=4,
+    )
+
+    assert torch.allclose(
+        launch_entropy[0, 0, 0],
+        torch.tensor(math.log(2.0)),
+        atol=1e-5,
+    )
 
 
 def test_discrete_targets_target_token_mode_adds_no_launch_target() -> None:
