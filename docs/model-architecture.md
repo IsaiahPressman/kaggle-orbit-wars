@@ -38,8 +38,11 @@ pure-head fields such as `n_angle_mixtures`, `n_fleet_size_mixtures`,
 `entropy_ship_quantiles=16`, and the logistic-mixture scale parameters
 `scale_min=0.10`, `scale_max_frac=0.5`, and `scale_max_abs_floor=8.0`.
 `ActorDiscreteTargetsConfig` owns
-`n_action_mixtures`, `entropy_ship_quantiles=16`, and the same logistic-mixture
-scale parameters.
+`launch_mode="binary"`, `n_action_mixtures`,
+`entropy_ship_quantiles=16`, and the same logistic-mixture scale parameters.
+Set `launch_mode="target_token"` to replace the separate Bernoulli
+launch/stop choice with a learned no-launch target candidate in the target
+categorical.
 `ActorDiscreteTargetBinsConfig` owns `n_bins`, which must match the
 environment's `ActionDiscreteTargetBinsConfig.n_bins`.
 `kappa_min` must be less than or equal to `kappa_max`.
@@ -313,11 +316,23 @@ instead of a softmax-weighted average. The launch/stop decision and selected
 target-conditioned size decision use separate source projections so the
 source-only continue gate is not coupled to the pair-conditioned size head.
 
-For each source, the discrete actor emits:
+With the default `launch_mode="binary"`, each source emits:
 
 - Bernoulli launch/stop logits
 - masked categorical target logits over the 44 action entity slots
 - mixture parameters for a truncated discretized logistic fleet-size policy
+
+With `launch_mode="target_token"`, the actor appends one learned
+no-launch token to the target/key/value stream only; the source/query stream
+remains the 44 actionable entity slots. Selecting that extra target maps back
+to `launch=False` in the external `DiscreteTargetActions` bundle; selecting any
+real target maps to `launch=True`. Pairwise source-target bias is still defined
+only over the 44 real target slots, and the actor appends a zero-bias column for
+the no-launch target before masking. In this mode the binary continue
+projection/head is not allocated, and the launch log-probability and launch
+entropy tensors are zero while target log-probability and target entropy include
+the no-launch candidate. The default binary mode does not allocate the extra
+learned token, so existing default model parameter shapes are unchanged.
 
 The fleet-size mixture maps raw means through a sigmoid into the current
 `min_fleet_size..max_launch` budget range. Raw scale outputs are passed through

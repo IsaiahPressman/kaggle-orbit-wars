@@ -1851,6 +1851,35 @@ def test_discrete_targets_actor_adds_pairwise_bias_before_masking() -> None:
     assert selection.target_logits[0, 0, 1].eq(0).all()
 
 
+def test_discrete_targets_target_token_mode_appends_zero_pairwise_bias() -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(launch_mode="target_token"),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    actor = DiscreteTargetsActor(config.actor, transformer_config=config)
+    _zero_target_attention(actor)
+    slot_input = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    can_act = torch.zeros(
+        (1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
+        dtype=torch.bool,
+    )
+    can_act[0, 0, 0, 1] = True
+    pairwise_bias = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS))
+    pairwise_bias[0, 0, 0, 1] = 3.0
+
+    selection = actor._selection_params(
+        _discrete_actor_inputs(slot_input, pairwise_bias=pairwise_bias),
+        can_act,
+    )
+
+    assert selection.target_logits.shape[-1] == ACTION_ENTITY_SLOTS + 1
+    assert selection.target_logits[0, 0, 0, 1] == 3.0
+    assert selection.target_logits[0, 0, 0, ACTION_ENTITY_SLOTS] == 0.0
+    assert selection.target_logits[0, 0, 1].eq(0).all()
+
+
 def test_discrete_target_bins_actor_adds_pairwise_bias_before_masking() -> None:
     config = StatelessTransformerV1Config(
         actor=ActorDiscreteTargetBinsConfig(n_bins=3),
@@ -1992,6 +2021,112 @@ def test_discrete_targets_actor_masks_target_logits_under_bfloat16_autocast() ->
     assert selection.target_logits.dtype == torch.bfloat16
     assert selection.target_logits[0, 0, 0, 0] == torch.finfo(torch.bfloat16).min
     assert selection.target_logits[0, 0, 1].eq(0).all()
+
+
+def test_discrete_targets_default_binary_mode_has_no_no_launch_token() -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    actor = DiscreteTargetsActor(config.actor, transformer_config=config)
+
+    assert actor.no_launch_target is None
+    assert "no_launch_target" not in actor.state_dict()
+    assert actor.continue_source_proj is not None
+    assert actor.continue_head is not None
+
+
+def test_discrete_targets_target_token_mode_adds_no_launch_target() -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(launch_mode="target_token"),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    actor = DiscreteTargetsActor(config.actor, transformer_config=config)
+    assert actor.no_launch_target is not None
+    assert id(actor.no_launch_target) in {
+        id(layer) for layer in actor.get_input_layers()
+    }
+    assert actor.continue_source_proj is None
+    assert actor.continue_head is None
+    assert "continue_source_proj.weight" not in actor.state_dict()
+    assert "continue_head.out.weight" not in actor.state_dict()
+    slot_input = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    can_act = torch.zeros(
+        (1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
+        dtype=torch.bool,
+    )
+    can_act[0, 0, 0, 1] = True
+
+    selection = actor._selection_params(_discrete_actor_inputs(slot_input), can_act)
+
+    assert selection.target_logits.shape == (
+        1,
+        4,
+        ACTION_ENTITY_SLOTS,
+        ACTION_ENTITY_SLOTS + 1,
+    )
+    assert selection.target_values.shape == (
+        1,
+        4,
+        ACTION_ENTITY_SLOTS + 1,
+        config.embed_dim,
+    )
+    assert selection.target_logits[0, 0, 0, ACTION_ENTITY_SLOTS].isfinite()
+    assert selection.target_logits[0, 0, 1].eq(0).all()
+    assert selection.continue_logits is None
+
+
+def test_discrete_targets_target_token_mode_scores_no_launch_as_target() -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(
+            launch_mode="target_token",
+            n_action_mixtures=1,
+        ),
+        embed_dim=8,
+        depth=1,
+        n_heads=1,
+    )
+    actor = DiscreteTargetsActor(config.actor, transformer_config=config)
+    batch_shape = (1, 4, ACTION_ENTITY_SLOTS)
+    target_logits = torch.full((*batch_shape, ACTION_ENTITY_SLOTS + 1), -10.0)
+    target_logits[0, 0, 0, 1] = 2.0
+    target_logits[0, 0, 0, ACTION_ENTITY_SLOTS] = 5.0
+    params = DiscreteTargetPolicyParams(
+        target_logits=target_logits,
+        size_mix_logits=torch.zeros((*batch_shape, 1)),
+        size_mu=torch.full((*batch_shape, 1), 3.0),
+        size_scale=torch.ones((*batch_shape, 1)),
+    )
+    launch = torch.zeros(batch_shape, dtype=torch.bool)
+    target = torch.ones(batch_shape, dtype=torch.int64)
+    ships = torch.zeros(batch_shape, dtype=torch.int64)
+    residual_budget = torch.full(batch_shape, 10, dtype=torch.int64)
+    source_active = torch.zeros(batch_shape, dtype=torch.bool)
+    source_active[0, 0, 0] = True
+
+    launch_log_prob, target_log_prob, size_log_prob = (
+        discrete_targets_impl.discrete_action_log_probs(
+            params,
+            launch,
+            target,
+            ships,
+            residual_budget,
+            source_active,
+            actor.config.launch_mode,
+            min_fleet_size=1,
+        )
+    )
+
+    expected_no_launch = F.log_softmax(target_logits[0, 0, 0].float(), dim=-1)[
+        ACTION_ENTITY_SLOTS
+    ]
+    assert launch_log_prob[0, 0, 0] == 0.0
+    assert torch.allclose(target_log_prob[0, 0, 0], expected_no_launch)
+    assert size_log_prob[0, 0, 0] == 0.0
 
 
 def test_discrete_targets_actor_rejects_invalid_replay_target() -> None:
