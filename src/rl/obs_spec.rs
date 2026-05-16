@@ -71,6 +71,9 @@ pub(super) fn encode_state(
     state: &State,
     player_map: &PlayerMap,
     max_fleets: usize,
+    planet_channels: usize,
+    fleet_channels: usize,
+    ship_count_one_hot_max: Option<i32>,
     planet_obs: &mut [f32],
     orbiting_planet_obs: &mut [bool],
     fleet_obs: &mut [f32],
@@ -89,6 +92,9 @@ pub(super) fn encode_state(
         state,
         player_map,
         max_fleets,
+        planet_channels,
+        fleet_channels,
+        ship_count_one_hot_max,
         planet_obs,
         orbiting_planet_obs,
         fleet_obs,
@@ -110,6 +116,9 @@ pub(super) fn encode_state_with_action_slots(
     state: &State,
     player_map: &PlayerMap,
     max_fleets: usize,
+    planet_channels: usize,
+    fleet_channels: usize,
+    ship_count_one_hot_max: Option<i32>,
     planet_obs: &mut [f32],
     orbiting_planet_obs: &mut [bool],
     fleet_obs: &mut [f32],
@@ -160,8 +169,8 @@ pub(super) fn encode_state_with_action_slots(
 
     for (planet_index, planet) in non_comet_planets.iter().enumerate() {
         planet_mask[planet_index] = true;
-        let row_start = planet_index * PLANET_CHANNELS;
-        let row = &mut planet_obs[row_start..row_start + PLANET_CHANNELS];
+        let row_start = planet_index * planet_channels;
+        let row = &mut planet_obs[row_start..row_start + planet_channels];
 
         let owner_index = player_map.owner_channel(planet.owner);
         row[owner_index] = 1.0;
@@ -207,19 +216,26 @@ pub(super) fn encode_state_with_action_slots(
         );
         let orbiting = is_orbiting(planet.position(), planet.radius);
         encode_planet_orbital_velocity(
-            &mut row[spatial_start + spatial_feature_count()..],
+            &mut row[spatial_start + spatial_feature_count()..PLANET_CHANNELS],
             position_x,
             position_y,
             state.angular_velocity,
             orbiting,
         );
+        if let Some(max_ship_count) = ship_count_one_hot_max {
+            encode_planet_ship_count_one_hot(
+                &mut row[PLANET_CHANNELS..],
+                planet.ships,
+                max_ship_count,
+            );
+        }
         orbiting_planet_obs[planet_index] = orbiting;
     }
 
     for (fleet_index, fleet) in fleets.iter().take(max_fleets).enumerate() {
         fleet_mask[fleet_index] = true;
-        let row_start = fleet_index * FLEET_CHANNELS;
-        let row = &mut fleet_obs[row_start..row_start + FLEET_CHANNELS];
+        let row_start = fleet_index * fleet_channels;
+        let row = &mut fleet_obs[row_start..row_start + fleet_channels];
 
         row[player_map.owner_channel(fleet.owner)] = 1.0;
         row[OWNER_CHANNELS] = normalize_position(fleet.x);
@@ -247,12 +263,19 @@ pub(super) fn encode_state_with_action_slots(
             position_y,
         );
         encode_fleet_motion_features(
-            &mut row[spatial_start + spatial_feature_count()..],
+            &mut row[spatial_start + spatial_feature_count()..FLEET_CHANNELS],
             position_x,
             position_y,
             velocity_x,
             velocity_y,
         );
+        if let Some(max_ship_count) = ship_count_one_hot_max {
+            encode_fleet_ship_count_one_hot(
+                &mut row[FLEET_CHANNELS..],
+                fleet.ships,
+                max_ship_count,
+            );
+        }
     }
 
     encode_comets(state, player_map, comet_obs, comet_mask);
@@ -592,6 +615,27 @@ fn encode_fleet_ship_count_features(row: &mut [f32], ships: i32, min_fleet_size:
     row[FLEET_SHIP_COUNT_BUCKET_CAPACITY * 2 + 1] = active[bucket_count * 2 + 1];
 }
 
+fn encode_planet_ship_count_one_hot(row: &mut [f32], ships: i32, max_ship_count: i32) {
+    let expected_len =
+        usize::try_from(max_ship_count).expect("ship-count one-hot max is non-negative") + 1;
+    assert_eq!(row.len(), expected_len);
+    row.fill(0.0);
+    let index = ships.clamp(0, max_ship_count) as usize;
+    row[index] = 1.0;
+}
+
+fn encode_fleet_ship_count_one_hot(row: &mut [f32], ships: i32, max_ship_count: i32) {
+    let expected_len =
+        usize::try_from(max_ship_count).expect("ship-count one-hot max is non-negative");
+    assert_eq!(row.len(), expected_len);
+    row.fill(0.0);
+    if ships <= 0 {
+        return;
+    }
+    let index = (ships - 1).min(max_ship_count - 1) as usize;
+    row[index] = 1.0;
+}
+
 fn fleet_ship_count_buckets(min_fleet_size: i64, buckets: &mut [i32; 10]) -> usize {
     buckets[0] = 1;
     let mut len = 1;
@@ -856,7 +900,8 @@ fn require_shape_suffix(name: &str, actual: &[usize], expected_last_dim: usize) 
     step=0,
     episode_steps=500,
     max_entities=DEFAULT_MAX_ENTITIES,
-    min_fleet_size=1
+    min_fleet_size=1,
+    ship_count_one_hot_max=0
 ))]
 pub fn encode_entity_based<'py>(
     py: Python<'py>,
@@ -872,6 +917,7 @@ pub fn encode_entity_based<'py>(
     episode_steps: u32,
     max_entities: usize,
     min_fleet_size: i64,
+    ship_count_one_hot_max: usize,
 ) -> PyResult<EncodedEntityBased<'py>> {
     if max_entities <= MAX_PLANETS + MAX_COMETS {
         return Err(PyValueError::new_err(format!(
@@ -884,6 +930,14 @@ pub fn encode_entity_based<'py>(
             "min_fleet_size must be between 1 and i32::MAX",
         ));
     }
+    let ship_count_one_hot_max = if ship_count_one_hot_max == 0 {
+        None
+    } else {
+        Some(
+            i32::try_from(ship_count_one_hot_max)
+                .map_err(|_| PyValueError::new_err("ship_count_one_hot_max must fit in i32"))?,
+        )
+    };
     require_shape_suffix("planets", planets.shape(), 7)?;
     require_shape_suffix("initial_planets", initial_planets.shape(), 7)?;
     require_shape_suffix("fleets", fleets.shape(), 7)?;
@@ -922,9 +976,13 @@ pub fn encode_entity_based<'py>(
         episode_steps,
     )?;
     let max_fleets = max_entities - (MAX_PLANETS + MAX_COMETS);
-    let mut planet_obs = Array2::<f32>::zeros((MAX_PLANETS, PLANET_CHANNELS));
+    let planet_extra_ship_count_channels = ship_count_one_hot_max.map_or(0, |max| max as usize + 1);
+    let fleet_extra_ship_count_channels = ship_count_one_hot_max.map_or(0, |max| max as usize);
+    let planet_channels = PLANET_CHANNELS + planet_extra_ship_count_channels;
+    let fleet_channels = FLEET_CHANNELS + fleet_extra_ship_count_channels;
+    let mut planet_obs = Array2::<f32>::zeros((MAX_PLANETS, planet_channels));
     let mut orbiting_planet_obs = Array1::<bool>::from_elem(MAX_PLANETS, false);
-    let mut fleet_obs = Array2::<f32>::zeros((max_fleets, FLEET_CHANNELS));
+    let mut fleet_obs = Array2::<f32>::zeros((max_fleets, fleet_channels));
     let mut comet_obs = Array2::<f32>::zeros((MAX_COMETS, COMET_CHANNELS));
     let mut entity_mask = Array1::<bool>::from_elem(max_entities, false);
     let mut global_obs = Array1::<f32>::zeros(GLOBAL_CHANNELS);
@@ -945,6 +1003,9 @@ pub fn encode_entity_based<'py>(
         &state,
         &PlayerMap::identity(),
         max_fleets,
+        planet_channels,
+        fleet_channels,
+        ship_count_one_hot_max,
         planet_obs
             .as_slice_mut()
             .expect("newly allocated planet array is contiguous"),
@@ -1544,6 +1605,9 @@ mod tests {
             &state,
             &PlayerMap::identity(),
             0,
+            PLANET_CHANNELS,
+            FLEET_CHANNELS,
+            None,
             &mut planet_obs,
             &mut orbiting_planet_obs,
             &mut fleet_obs,
@@ -1609,6 +1673,9 @@ mod tests {
             &state,
             &player_map,
             1,
+            PLANET_CHANNELS,
+            FLEET_CHANNELS,
+            None,
             &mut planet_obs,
             &mut orbiting_planet_obs,
             &mut fleet_obs,
@@ -1670,6 +1737,9 @@ mod tests {
             &state,
             &PlayerMap::identity(),
             0,
+            PLANET_CHANNELS,
+            FLEET_CHANNELS,
+            None,
             &mut planet_obs,
             &mut orbiting_planet_obs,
             &mut fleet_obs,

@@ -41,6 +41,9 @@ pub struct PyRlVecEnv {
     two_player_weight: f64,
     max_entities: usize,
     max_fleets: usize,
+    planet_channels: usize,
+    fleet_channels: usize,
+    ship_count_one_hot_max: Option<i32>,
     action_spec: RlActionSpec,
     max_per_planet_launches: usize,
     min_fleet_size: i64,
@@ -56,7 +59,7 @@ pub struct PyRlVecEnv {
 #[pymethods]
 impl PyRlVecEnv {
     #[new]
-    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="entity_based", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, max_per_planet_launches=1, min_fleet_size=1, n_bins=0, targeting_mode="full_mask"))]
+    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="entity_based", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, ship_count_one_hot_max=0, max_per_planet_launches=1, min_fleet_size=1, n_bins=0, targeting_mode="full_mask"))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         n_envs: usize,
@@ -64,6 +67,7 @@ impl PyRlVecEnv {
         obs_spec: &str,
         action_spec: &str,
         max_entities: usize,
+        ship_count_one_hot_max: usize,
         max_per_planet_launches: usize,
         min_fleet_size: i64,
         n_bins: usize,
@@ -75,11 +79,32 @@ impl PyRlVecEnv {
         if !(0.0..=1.0).contains(&two_player_weight) {
             return Err(PyValueError::new_err("two_player_weight must be in [0, 1]"));
         }
-        if obs_spec != "entity_based" {
+        if obs_spec != "entity_based" && obs_spec != "entity_based_ext_v1" {
             return Err(PyValueError::new_err(format!(
-                "unsupported obs_spec {obs_spec:?}; expected \"entity_based\""
+                "unsupported obs_spec {obs_spec:?}; expected \"entity_based\" or \"entity_based_ext_v1\""
             )));
         }
+        if obs_spec == "entity_based" && ship_count_one_hot_max != 0 {
+            return Err(PyValueError::new_err(
+                "entity_based requires ship_count_one_hot_max=0",
+            ));
+        }
+        if obs_spec == "entity_based_ext_v1" && ship_count_one_hot_max == 0 {
+            return Err(PyValueError::new_err(
+                "entity_based_ext_v1 requires ship_count_one_hot_max > 0",
+            ));
+        }
+        let ship_count_one_hot_max = if ship_count_one_hot_max == 0 {
+            None
+        } else {
+            Some(
+                i32::try_from(ship_count_one_hot_max)
+                    .map_err(|_| PyValueError::new_err("ship_count_one_hot_max must fit in i32"))?,
+            )
+        };
+        let planet_extra_ship_count_channels =
+            ship_count_one_hot_max.map_or(0, |max| max as usize + 1);
+        let fleet_extra_ship_count_channels = ship_count_one_hot_max.map_or(0, |max| max as usize);
         let action_spec = RlActionSpec::parse(action_spec, n_bins, targeting_mode)
             .map_err(PyValueError::new_err)?;
         if max_entities <= MAX_PLANETS + MAX_COMETS {
@@ -111,6 +136,9 @@ impl PyRlVecEnv {
             two_player_weight,
             max_entities,
             max_fleets: max_entities - (MAX_PLANETS + MAX_COMETS),
+            planet_channels: PLANET_CHANNELS + planet_extra_ship_count_channels,
+            fleet_channels: FLEET_CHANNELS + fleet_extra_ship_count_channels,
+            ship_count_one_hot_max,
             action_spec,
             max_per_planet_launches,
             min_fleet_size,
@@ -194,13 +222,16 @@ impl PyRlVecEnv {
         let mut can_act = can_act;
         let mut max_launch = max_launch;
 
-        let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
+        let planets_per_env = MAX_PLANETS * self.planet_channels;
         let orbiting_planets_per_env = MAX_PLANETS;
-        let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
+        let fleets_per_env = self.max_fleets * self.fleet_channels;
         let comets_per_env = MAX_COMETS * COMET_CHANNELS;
         let action_masks_per_env = self.action_spec.can_act_len();
         let two_player_weight = self.two_player_weight;
         let max_fleets = self.max_fleets;
+        let planet_channels = self.planet_channels;
+        let fleet_channels = self.fleet_channels;
+        let ship_count_one_hot_max = self.ship_count_one_hot_max;
         let min_fleet_size = self.min_fleet_size;
         let action_spec = self.action_spec;
         let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
@@ -262,6 +293,9 @@ impl PyRlVecEnv {
                         player_finished,
                         action_spec,
                         max_fleets,
+                        planet_channels,
+                        fleet_channels,
+                        ship_count_one_hot_max,
                         min_fleet_size,
                         planet_obs,
                         orbiting_planet_obs,
@@ -320,13 +354,16 @@ impl PyRlVecEnv {
         let mut global_obs = global_obs;
         let mut can_act = can_act;
 
-        let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
+        let planets_per_env = MAX_PLANETS * self.planet_channels;
         let orbiting_planets_per_env = MAX_PLANETS;
-        let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
+        let fleets_per_env = self.max_fleets * self.fleet_channels;
         let comets_per_env = MAX_COMETS * COMET_CHANNELS;
         let action_masks_per_env = self.action_spec.can_act_len();
         let two_player_weight = self.two_player_weight;
         let max_fleets = self.max_fleets;
+        let planet_channels = self.planet_channels;
+        let fleet_channels = self.fleet_channels;
+        let ship_count_one_hot_max = self.ship_count_one_hot_max;
         let min_fleet_size = self.min_fleet_size;
         let action_spec = self.action_spec;
 
@@ -380,6 +417,9 @@ impl PyRlVecEnv {
                     player_finished,
                     action_spec,
                     max_fleets,
+                    planet_channels,
+                    fleet_channels,
+                    ship_count_one_hot_max,
                     min_fleet_size,
                     planet_obs,
                     orbiting_planet_obs,
@@ -923,15 +963,18 @@ impl PyRlVecEnv {
         let angle_chunks = angle.as_slice()?.par_chunks(actions_per_env);
         let ship_chunks = ships.as_slice()?.par_chunks(actions_per_env);
 
-        let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
+        let planets_per_env = MAX_PLANETS * self.planet_channels;
         let orbiting_planets_per_env = MAX_PLANETS;
-        let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
+        let fleets_per_env = self.max_fleets * self.fleet_channels;
         let comets_per_env = MAX_COMETS * COMET_CHANNELS;
         let action_masks_per_env = self.action_spec.can_act_len();
         let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
         let max_per_planet_launches = self.max_per_planet_launches;
         let min_fleet_size = self.min_fleet_size;
         let max_fleets = self.max_fleets;
+        let planet_channels = self.planet_channels;
+        let fleet_channels = self.fleet_channels;
+        let ship_count_one_hot_max = self.ship_count_one_hot_max;
         let two_player_weight = self.two_player_weight;
         let action_spec = self.action_spec;
 
@@ -1020,6 +1063,9 @@ impl PyRlVecEnv {
                         player_finished,
                         action_spec,
                         max_fleets,
+                        planet_channels,
+                        fleet_channels,
+                        ship_count_one_hot_max,
                         min_fleet_size,
                         planet_obs,
                         orbiting_planet_obs,
@@ -1124,15 +1170,18 @@ impl PyRlVecEnv {
         let target_chunks = target.as_slice()?.par_chunks(actions_per_env);
         let ship_chunks = ships.as_slice()?.par_chunks(actions_per_env);
 
-        let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
+        let planets_per_env = MAX_PLANETS * self.planet_channels;
         let orbiting_planets_per_env = MAX_PLANETS;
-        let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
+        let fleets_per_env = self.max_fleets * self.fleet_channels;
         let comets_per_env = MAX_COMETS * COMET_CHANNELS;
         let action_masks_per_env = self.action_spec.can_act_len();
         let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
         let max_per_planet_launches = self.max_per_planet_launches;
         let min_fleet_size = self.min_fleet_size;
         let max_fleets = self.max_fleets;
+        let planet_channels = self.planet_channels;
+        let fleet_channels = self.fleet_channels;
+        let ship_count_one_hot_max = self.ship_count_one_hot_max;
         let two_player_weight = self.two_player_weight;
         let action_spec = self.action_spec;
 
@@ -1223,6 +1272,9 @@ impl PyRlVecEnv {
                         player_finished,
                         action_spec,
                         max_fleets,
+                        planet_channels,
+                        fleet_channels,
+                        ship_count_one_hot_max,
                         min_fleet_size,
                         planet_obs,
                         orbiting_planet_obs,
@@ -1319,13 +1371,16 @@ impl PyRlVecEnv {
         let target_chunks = target.as_slice()?.par_chunks(actions_per_env);
         let fleet_bin_chunks = fleet_bin.as_slice()?.par_chunks(actions_per_env);
 
-        let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
+        let planets_per_env = MAX_PLANETS * self.planet_channels;
         let orbiting_planets_per_env = MAX_PLANETS;
-        let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
+        let fleets_per_env = self.max_fleets * self.fleet_channels;
         let comets_per_env = MAX_COMETS * COMET_CHANNELS;
         let action_masks_per_env = self.action_spec.can_act_len();
         let min_fleet_size = self.min_fleet_size;
         let max_fleets = self.max_fleets;
+        let planet_channels = self.planet_channels;
+        let fleet_channels = self.fleet_channels;
+        let ship_count_one_hot_max = self.ship_count_one_hot_max;
         let two_player_weight = self.two_player_weight;
         let action_spec = self.action_spec;
 
@@ -1406,6 +1461,9 @@ impl PyRlVecEnv {
                     player_finished,
                     action_spec,
                     max_fleets,
+                    planet_channels,
+                    fleet_channels,
+                    ship_count_one_hot_max,
                     min_fleet_size,
                     planet_obs,
                     orbiting_planet_obs,
@@ -1525,14 +1583,17 @@ impl PyRlVecEnv {
         let angle_slice = angle.as_slice()?;
         let ship_slice = ships.as_slice()?;
 
-        let planets_per_env = MAX_PLANETS * PLANET_CHANNELS;
+        let planets_per_env = MAX_PLANETS * self.planet_channels;
         let orbiting_planets_per_env = MAX_PLANETS;
-        let fleets_per_env = self.max_fleets * FLEET_CHANNELS;
+        let fleets_per_env = self.max_fleets * self.fleet_channels;
         let comets_per_env = MAX_COMETS * COMET_CHANNELS;
         let action_masks_per_env = self.action_spec.can_act_len();
         let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
         let min_fleet_size = self.min_fleet_size;
         let max_fleets = self.max_fleets;
+        let planet_channels = self.planet_channels;
+        let fleet_channels = self.fleet_channels;
+        let ship_count_one_hot_max = self.ship_count_one_hot_max;
         let two_player_weight = self.two_player_weight;
         let action_spec = self.action_spec;
 
@@ -1618,6 +1679,9 @@ impl PyRlVecEnv {
                         Some(max_launch),
                         action_spec,
                         max_fleets,
+                        planet_channels,
+                        fleet_channels,
+                        ship_count_one_hot_max,
                         min_fleet_size,
                         two_player_weight,
                     )
@@ -1700,6 +1764,9 @@ impl PyRlVecEnv {
                         None,
                         action_spec,
                         max_fleets,
+                        planet_channels,
+                        fleet_channels,
+                        ship_count_one_hot_max,
                         min_fleet_size,
                         two_player_weight,
                     )
@@ -1722,9 +1789,9 @@ impl PyRlVecEnv {
 
     fn obs_shapes(&self) -> ObsShapes {
         (
-            (self.n_envs, MAX_PLANETS, PLANET_CHANNELS),
+            (self.n_envs, MAX_PLANETS, self.planet_channels),
             (self.n_envs, MAX_PLANETS),
-            (self.n_envs, self.max_fleets, FLEET_CHANNELS),
+            (self.n_envs, self.max_fleets, self.fleet_channels),
             (self.n_envs, MAX_COMETS, COMET_CHANNELS),
             (self.n_envs, self.max_entities),
             (self.n_envs, OUTER_PLAYER_SLOTS),
@@ -1819,7 +1886,7 @@ impl PyRlVecEnv {
         require_shape(
             "planet_obs",
             planet_obs.shape(),
-            &[self.n_envs, MAX_PLANETS, PLANET_CHANNELS],
+            &[self.n_envs, MAX_PLANETS, self.planet_channels],
         )?;
         require_shape(
             "orbiting_planet_obs",
@@ -1829,7 +1896,7 @@ impl PyRlVecEnv {
         require_shape(
             "fleet_obs",
             fleet_obs.shape(),
-            &[self.n_envs, self.max_fleets, FLEET_CHANNELS],
+            &[self.n_envs, self.max_fleets, self.fleet_channels],
         )?;
         require_shape(
             "comet_obs",
@@ -2136,6 +2203,9 @@ fn step_one_decoded_env(
     max_launch: Option<&mut [i64]>,
     action_spec: RlActionSpec,
     max_fleets: usize,
+    planet_channels: usize,
+    fleet_channels: usize,
+    ship_count_one_hot_max: Option<i32>,
     min_fleet_size: i64,
     two_player_weight: f64,
 ) -> Result<StepOneOutput, String> {
@@ -2167,6 +2237,9 @@ fn step_one_decoded_env(
         player_finished,
         action_spec,
         max_fleets,
+        planet_channels,
+        fleet_channels,
+        ship_count_one_hot_max,
         min_fleet_size,
         planet_obs,
         orbiting_planet_obs,
@@ -2755,6 +2828,9 @@ fn write_one_obs(
     player_finished: &[bool],
     action_spec: RlActionSpec,
     max_fleets: usize,
+    planet_channels: usize,
+    fleet_channels: usize,
+    ship_count_one_hot_max: Option<i32>,
     min_fleet_size: i64,
     planet_obs: &mut [f32],
     orbiting_planet_obs: &mut [bool],
@@ -2774,6 +2850,9 @@ fn write_one_obs(
         state,
         player_map,
         max_fleets,
+        planet_channels,
+        fleet_channels,
+        ship_count_one_hot_max,
         planet_obs,
         orbiting_planet_obs,
         fleet_obs,

@@ -62,7 +62,7 @@ from owl.rl import (
     DiscreteTargetActions,
     DiscreteTargetBinActionMask,
     DiscreteTargetBinActions,
-    EntityBasedConfig,
+    EntityBasedBaseConfig,
     ObsBatch,
     PureActionMask,
     PureActions,
@@ -184,7 +184,7 @@ class StatelessTransformerV1(BaseModelAPI):
         self,
         config: StatelessTransformerV1Config,
         *,
-        obs_spec: EntityBasedConfig,
+        obs_spec: EntityBasedBaseConfig,
         action_spec: ActionConfig,
     ) -> None:
         super().__init__()

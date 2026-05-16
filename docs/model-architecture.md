@@ -75,6 +75,12 @@ Each observation tensor receives a small MLP stem from raw channels to
 - comets: `(batch, MAX_COMETS, 330) -> (batch, MAX_COMETS, embed_dim)`
 - globals: `(batch, 3) -> (batch, embed_dim)`
 
+For `EntityBasedExtV1`, planet input widths append
+`ship_count_one_hot_max + 1` channels and fleet input widths append
+`ship_count_one_hot_max` channels. With the default `ship_count_one_hot_max=50`,
+the planet width is `158` and the fleet width is `129`; comet and global widths
+are unchanged.
+
 The boolean `orbiting_planets` mask selects the orbiting-planet projection for
 orbiting rows and the static-planet projection for all other planet rows.
 Planet, comet, and fleet tokens are concatenated on the entity axis in that

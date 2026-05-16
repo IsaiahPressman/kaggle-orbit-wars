@@ -84,6 +84,25 @@ auto-reset, `still_playing` describes the returned reset observation, while
 properties. For target-bin observations, `ObsBatch.max_launch` is `None`;
 `DiscreteTargetBinActionMask` itself has no `max_launch` member.
 
+## EntityBasedExtV1
+
+Config:
+
+```python
+{"obs_spec": "entity_based_ext_v1", "max_entities": 256, "ship_count_one_hot_max": 50}
+```
+
+`EntityBasedExtV1` includes every `EntityBased` feature and appends configurable
+ship-count one-hot vectors to planet and fleet rows only. Comet rows are
+unchanged.
+
+With `ship_count_one_hot_max=N`, planet rows append `N + 1` channels: bin `0`
+is exact zero ships, bins `1..N-1` are exact ship counts, and bin `N` is the
+overflow bin for `ships >= N`. Fleet rows append `N` channels because fleets
+cannot have zero ships: bins `0..N-2` represent exact ship counts `1..N-1`, and
+bin `N-1` is the overflow bin for `ships >= N`. The default is `N=50`, so
+planet rows have `158` channels and fleet rows have `129` channels by default.
+
 ### Normalization
 
 - Positions use `x_norm = (x / BOARD_SIZE) * 2 - 1`, with `BOARD_SIZE = 100`.

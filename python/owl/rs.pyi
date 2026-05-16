@@ -16,6 +16,7 @@ class RlVecEnv:
         obs_spec: str = ...,
         action_spec: str = ...,
         max_entities: int = ...,
+        ship_count_one_hot_max: int = ...,
         max_per_planet_launches: int = ...,
         min_fleet_size: int = ...,
         n_bins: int = ...,
@@ -196,6 +197,7 @@ def encode_entity_based(
     episode_steps: int = ...,
     max_entities: int = ...,
     min_fleet_size: int = ...,
+    ship_count_one_hot_max: int = ...,
 ) -> tuple[
     np.ndarray,
     np.ndarray,

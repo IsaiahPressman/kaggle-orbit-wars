@@ -38,8 +38,7 @@ from owl.rs import (
 ) = rl_obs_constants()
 
 
-class EntityBasedConfig(BaseConfig):
-    obs_spec: Literal["entity_based"] = "entity_based"
+class EntityBasedBaseConfig(BaseConfig):
     max_entities: int = Field(default=DEFAULT_MAX_ENTITIES, gt=MAX_PLANETS + MAX_COMETS)
 
     @property
@@ -52,11 +51,11 @@ class EntityBasedConfig(BaseConfig):
 
     @property
     def planet_channels(self) -> int:
-        return PLANET_CHANNELS
+        return PLANET_CHANNELS + self._planet_ship_count_one_hot_channels
 
     @property
     def fleet_channels(self) -> int:
-        return FLEET_CHANNELS
+        return FLEET_CHANNELS + self._fleet_ship_count_one_hot_channels
 
     @property
     def max_comets(self) -> int:
@@ -69,6 +68,33 @@ class EntityBasedConfig(BaseConfig):
     @property
     def global_channels(self) -> int:
         return GLOBAL_CHANNELS
+
+    @property
+    def ship_count_one_hot_encoder_max(self) -> int:
+        return 0
+
+    @property
+    def _planet_ship_count_one_hot_channels(self) -> int:
+        if self.ship_count_one_hot_encoder_max == 0:
+            return 0
+        return self.ship_count_one_hot_encoder_max + 1
+
+    @property
+    def _fleet_ship_count_one_hot_channels(self) -> int:
+        return self.ship_count_one_hot_encoder_max
+
+
+class EntityBasedConfig(EntityBasedBaseConfig):
+    obs_spec: Literal["entity_based"] = "entity_based"
+
+
+class EntityBasedExtV1Config(EntityBasedBaseConfig):
+    obs_spec: Literal["entity_based_ext_v1"] = "entity_based_ext_v1"
+    ship_count_one_hot_max: int = Field(default=50, ge=1)
+
+    @property
+    def ship_count_one_hot_encoder_max(self) -> int:
+        return self.ship_count_one_hot_max
 
 
 class ActionPureConfig(BaseConfig):
@@ -110,7 +136,10 @@ class ActionDiscreteTargetBinsConfig(BaseConfig):
     targeting_mode: TargetingMode = "full_mask"
 
 
-ObsConfig: TypeAlias = Annotated[EntityBasedConfig, Field(discriminator="obs_spec")]
+ObsConfig: TypeAlias = Annotated[
+    EntityBasedConfig | EntityBasedExtV1Config,
+    Field(discriminator="obs_spec"),
+]
 ActionConfig: TypeAlias = Annotated[
     ActionPureConfig | ActionDiscreteTargetsConfig | ActionDiscreteTargetBinsConfig,
     Field(discriminator="action_spec"),
@@ -261,6 +290,7 @@ class VectorizedEnv:
             self.obs_spec.obs_spec,
             self.action_spec.action_spec,
             self.obs_spec.max_entities,
+            self.obs_spec.ship_count_one_hot_encoder_max,
             getattr(self.action_spec, "max_per_planet_launches", 1),
             self.action_spec.min_fleet_size,
             getattr(self.action_spec, "n_bins", 0),
@@ -756,7 +786,7 @@ class VectorizedEnv:
 
 def encode_python_observation(
     obs: dict[str, Any],
-    obs_spec: EntityBasedConfig,
+    obs_spec: EntityBasedBaseConfig,
     action_spec: ActionConfig,
 ) -> ObsBatch:
     (
@@ -789,6 +819,7 @@ def encode_python_observation(
         episode_steps,
         obs_spec.max_entities,
         action_spec.min_fleet_size,
+        obs_spec.ship_count_one_hot_encoder_max,
     )
     (
         planets,

@@ -14,7 +14,7 @@ from owl.rl import (
     DiscreteTargetActions,
     DiscreteTargetBinActionMask,
     DiscreteTargetBinActions,
-    EntityBasedConfig,
+    EntityBasedBaseConfig,
     EnvConfig,
     ObsBatch,
     PureActionMask,
@@ -283,13 +283,13 @@ def apply_max_entities_override(
         return config
 
     obs_spec = config.env.obs_spec
-    if not isinstance(obs_spec, EntityBasedConfig):
+    if not isinstance(obs_spec, EntityBasedBaseConfig):
         raise TypeError(
-            "max_entities_override requires entity_based obs_spec, "
+            "max_entities_override requires entity-based obs_spec, "
             f"got {type(obs_spec).__name__}"
         )
 
-    override_obs_spec = EntityBasedConfig.model_validate(
+    override_obs_spec = type(obs_spec).model_validate(
         {**obs_spec.model_dump(mode="python"), "max_entities": max_entities_override}
     )
     env = config.env.model_copy(

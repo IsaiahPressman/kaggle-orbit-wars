@@ -19,6 +19,7 @@ from owl.rl import (
     DiscreteTargetActions,
     DiscreteTargetBinActions,
     EntityBasedConfig,
+    EntityBasedExtV1Config,
     EnvConfig,
     ObsBatch,
     PureActions,
@@ -170,6 +171,55 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     assert episode_metrics == {}
     assert torch.equal(rewards, torch.zeros_like(rewards))
     assert torch.equal(dones, torch.zeros_like(dones))
+
+
+def test_entity_based_ext_v1_adds_ship_count_one_hot_channels() -> None:
+    spec = EntityBasedExtV1Config(
+        max_entities=MAX_PLANETS + MAX_COMETS + 2,
+        ship_count_one_hot_max=3,
+    )
+
+    assert spec.planet_channels == PLANET_CHANNELS + 4
+    assert spec.fleet_channels == FLEET_CHANNELS + 3
+
+    encoded = encode_python_observation(
+        _python_obs(
+            planets=[
+                [0, 0, 25.0, 75.0, 2.0, 0, 3],
+                [1, 1, 75.0, 25.0, 2.0, 2, 3],
+                [2, 1, 50.0, 50.0, 2.0, 4, 3],
+            ],
+            fleets=[
+                [10, 1, 0.0, 100.0, 0.0, 0, 1],
+                [11, 1, 100.0, 0.0, 0.0, 1, 5],
+            ],
+        ),
+        obs_spec=spec,
+        action_spec=ActionPureConfig(),
+    )
+
+    np.testing.assert_array_equal(encoded.planets[0, 0, PLANET_CHANNELS:], [1, 0, 0, 0])
+    np.testing.assert_array_equal(encoded.planets[0, 1, PLANET_CHANNELS:], [0, 0, 1, 0])
+    np.testing.assert_array_equal(encoded.planets[0, 2, PLANET_CHANNELS:], [0, 0, 0, 1])
+    np.testing.assert_array_equal(encoded.fleets[0, 0, FLEET_CHANNELS:], [1, 0, 0])
+    np.testing.assert_array_equal(encoded.fleets[0, 1, FLEET_CHANNELS:], [0, 0, 1])
+    np.testing.assert_array_equal(encoded.comets.shape, (1, MAX_COMETS, COMET_CHANNELS))
+
+
+def test_vectorized_env_accepts_entity_based_ext_v1_shapes() -> None:
+    spec = EntityBasedExtV1Config(ship_count_one_hot_max=5)
+    env = VectorizedEnv(
+        n_envs=2,
+        obs_spec=spec,
+        action_spec=ActionPureConfig(),
+        pin_memory=False,
+    )
+
+    obs = env.reset()
+
+    assert obs.planets.shape == (2, MAX_PLANETS, spec.planet_channels)
+    assert obs.fleets.shape == (2, spec.max_fleets, spec.fleet_channels)
+    assert obs.comets.shape == (2, MAX_COMETS, COMET_CHANNELS)
 
 
 @pytest.mark.parametrize(

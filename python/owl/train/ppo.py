@@ -25,7 +25,7 @@ from owl.rl import (
     DiscreteTargetActions,
     DiscreteTargetBinActionMask,
     DiscreteTargetBinActions,
-    EntityBasedConfig,
+    EntityBasedBaseConfig,
     ObsBatch,
     PureActionMask,
     PureActions,
@@ -154,7 +154,7 @@ class _PPORolloutBuffer:
         *,
         horizon: int,
         n_envs: int,
-        obs_spec: EntityBasedConfig,
+        obs_spec: EntityBasedBaseConfig,
         action_spec: ActionConfig,
         device: torch.device,
     ) -> None:
