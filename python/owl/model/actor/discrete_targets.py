@@ -499,40 +499,12 @@ class DiscreteTargetsActor(nn.Module):
         min_fleet_size: int,
     ) -> DiscreteTargetPolicyParams:
         target_index = selection.target_logits.argmax(dim=-1)
-        params = self._policy_params_for_selected_target(
+        return self._policy_params_for_selected_target(
             selection,
             source_input,
             max_launch,
             target_index,
             min_fleet_size=min_fleet_size,
-        )
-        if self.config.launch_mode != "binary_after":
-            return params
-        return DiscreteTargetPolicyParams(
-            target_logits=params.target_logits,
-            size_mix_logits=params.size_mix_logits,
-            size_mu=params.size_mu,
-            size_scale=params.size_scale,
-            continue_logits=self._all_continue_logits(selection, source_input),
-        )
-
-    def _all_continue_logits(
-        self,
-        selection: DiscreteTargetSelectionParams,
-        source_input: torch.Tensor,
-    ) -> torch.Tensor:
-        batch, players, source_slots, _ = source_input.shape
-        target_slots = selection.target_values.shape[2]
-        target_values = selection.target_values.unsqueeze(2).expand(
-            batch,
-            players,
-            source_slots,
-            target_slots,
-            self.head_dim,
-        )
-        return self._continue_logits_from_target_values(
-            source_input.unsqueeze(3),
-            target_values,
         )
 
     def _all_size_params(
@@ -596,15 +568,6 @@ class DiscreteTargetsActor(nn.Module):
             size_scale=scale,
             continue_logits=continue_logits,
         )
-
-    def _continue_logits_from_target_values(
-        self,
-        source_input: torch.Tensor,
-        target_values: torch.Tensor,
-    ) -> torch.Tensor:
-        continue_head = _require_continue_head(self.continue_head)
-        source_hidden = self._target_conditioned_hidden(source_input, target_values)
-        return continue_head(source_hidden).squeeze(-1)
 
     def _target_conditioned_hidden(
         self,
@@ -721,13 +684,6 @@ def discrete_action_entropy(
         launch_entropy = torch.zeros_like(params.target_logits[..., 0].float())
         no_launch_valid = can_act.any(dim=-1, keepdim=True)
         can_act = torch.cat((can_act, no_launch_valid), dim=-1)
-    elif launch_mode == "binary_after":
-        continue_logits = _require_continue_logits(params.continue_logits)
-        target_prob = torch.softmax(params.target_logits.float(), dim=-1)
-        launch_probability = (target_prob * torch.sigmoid(continue_logits.float())).sum(
-            dim=-1
-        )
-        launch_entropy = binary_entropy_from_probability(launch_probability)
     else:
         continue_logits = _require_continue_logits(params.continue_logits)
         launch_entropy = binary_entropy_from_logits(continue_logits.float())
@@ -788,16 +744,6 @@ def _require_continue_head(
     if continue_head is None:
         raise RuntimeError("binary_after launch mode requires a continue head")
     return continue_head
-
-
-def binary_entropy_from_probability(probability: torch.Tensor) -> torch.Tensor:
-    probability = probability.float()
-    eps = torch.finfo(probability.dtype).eps
-    probability = probability.clamp(eps, 1.0 - eps)
-    return -(
-        probability * probability.log()
-        + (1.0 - probability) * (1.0 - probability).log()
-    )
 
 
 def _require_discrete_actions_shape(

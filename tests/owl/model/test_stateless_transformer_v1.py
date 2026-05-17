@@ -2158,7 +2158,7 @@ def test_discrete_targets_binary_after_keeps_no_launch_target_log_prob(
         )
         return DiscreteTargetPolicyParams(
             target_logits=params.target_logits,
-            continue_logits=torch.full((*batch_shape, ACTION_ENTITY_SLOTS), -10.0),
+            continue_logits=torch.full(batch_shape, -10.0),
             size_mix_logits=params.size_mix_logits,
             size_mu=params.size_mu,
             size_scale=params.size_scale,
@@ -2194,16 +2194,14 @@ def test_discrete_targets_binary_after_keeps_no_launch_target_log_prob(
     assert torch.allclose(log_probs.target[0, 0, 0, 0], expected_target_log_prob)
 
 
-def test_discrete_targets_binary_after_entropy_uses_marginal_launch_probability() -> (
+def test_discrete_targets_binary_after_entropy_uses_selected_target_approximation() -> (
     None
 ):
     batch_shape = (1, 4, ACTION_ENTITY_SLOTS)
     target_logits = torch.full((*batch_shape, ACTION_ENTITY_SLOTS), -100.0)
     target_logits[0, 0, 0, 1] = 0.0
     target_logits[0, 0, 0, 2] = 0.0
-    continue_logits = torch.zeros((*batch_shape, ACTION_ENTITY_SLOTS))
-    continue_logits[0, 0, 0, 1] = -100.0
-    continue_logits[0, 0, 0, 2] = 100.0
+    continue_logits = torch.full(batch_shape, -100.0)
     params = DiscreteTargetPolicyParams(
         target_logits=target_logits,
         continue_logits=continue_logits,
@@ -2230,8 +2228,76 @@ def test_discrete_targets_binary_after_entropy_uses_marginal_launch_probability(
 
     assert torch.allclose(
         launch_entropy[0, 0, 0],
-        torch.tensor(math.log(2.0)),
+        torch.tensor(0.0),
         atol=1e-5,
+    )
+
+
+def test_discrete_targets_binary_after_entropy_params_use_argmax_target() -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(
+            launch_mode="binary_after",
+            n_action_mixtures=1,
+            entropy_ship_quantiles=4,
+        ),
+        embed_dim=4,
+        depth=1,
+        n_heads=1,
+    )
+    actor = DiscreteTargetsActor(config.actor, transformer_config=config)
+    with torch.no_grad():
+        for module in (actor.out, actor.size_pair_proj):
+            module.weight.copy_(torch.eye(config.embed_dim))
+            module.bias.zero_()
+        for parameter in actor.mlp.parameters():
+            parameter.zero_()
+        actor.continue_head.up.weight.copy_(torch.eye(config.embed_dim))
+        actor.continue_head.up.bias.zero_()
+        actor.continue_head.out.weight.zero_()
+        actor.continue_head.out.bias.zero_()
+        actor.continue_head.out.weight[0, 0] = 1.0
+
+    batch_shape = (1, 4, ACTION_ENTITY_SLOTS)
+    target_logits = torch.full((*batch_shape, ACTION_ENTITY_SLOTS), -100.0)
+    target_logits[0, 0, 0, 1] = 0.0
+    target_logits[0, 0, 0, 2] = 1.0
+    target_values = torch.zeros((*batch_shape, config.embed_dim))
+    target_values[0, 0, 1, 0] = -10.0
+    target_values[0, 0, 2, 0] = 10.0
+    selection = DiscreteTargetSelectionParams(
+        target_logits=target_logits,
+        target_values=target_values,
+    )
+    source_input = torch.zeros((*batch_shape, config.embed_dim))
+    max_launch = torch.full(batch_shape, 10, dtype=torch.int64)
+    source_active = torch.zeros(batch_shape, dtype=torch.bool)
+    source_active[0, 0, 0] = True
+    can_act = torch.zeros((*batch_shape, ACTION_ENTITY_SLOTS), dtype=torch.bool)
+    can_act[0, 0, 0, 1] = True
+    can_act[0, 0, 0, 2] = True
+
+    params = actor._policy_params_for_entropy(
+        selection,
+        source_input,
+        max_launch,
+        min_fleet_size=1,
+    )
+    launch_entropy, *_ = discrete_action_entropy(
+        params,
+        max_launch,
+        source_active,
+        can_act,
+        "binary_after",
+        min_fleet_size=1,
+        entropy_ship_quantiles=4,
+    )
+
+    assert params.continue_logits is not None
+    assert params.continue_logits.shape == batch_shape
+    assert params.continue_logits[0, 0, 0] > 5.0
+    assert torch.allclose(
+        launch_entropy[0, 0, 0],
+        model_impl.binary_entropy_from_logits(params.continue_logits.float())[0, 0, 0],
     )
 
 

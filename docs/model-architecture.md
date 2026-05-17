@@ -339,8 +339,7 @@ representation. No-launch actions retain the sampled target in
 `DiscreteTargetActions.target` so replay can score
 `log P(target) + log P(no-launch | target)`; the environment still ignores the
 target when `launch=False`. Launch entropy uses the Bernoulli entropy of the
-target-marginalized launch probability while fleet-size entropy keeps the
-selected-target approximation.
+selected target approximation, matching the fleet-size entropy approximation.
 
 With `launch_mode="target_token"`, the actor appends one learned
 no-launch token to the target/key/value stream only; the source/query stream
