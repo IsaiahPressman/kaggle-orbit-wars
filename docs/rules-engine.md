@@ -47,7 +47,8 @@ because core rules progression still derives orbit positions from
 returns auxiliary counters for fleets and ships removed by the sun or by leaving
 the board, fleets removed during planet/combat resolution, ships removed during
 combat resolution, plus the number of planets and comet planets captured during
-the step. This matches the
+the step. Neutral planet and comet arrivals also count successful captures and
+undershoots separately for RL terminal undershot-rate metrics. This matches the
 actual player count without making 2-player games carry ignored entries. Orbit
 Wars' Python reference leaves nonterminal eliminated players in Kaggle `ACTIVE`
 status until global termination; this simulator intentionally marks those
@@ -184,7 +185,10 @@ The current downloaded reference episodes are:
   counts fleets removed during planet/combat resolution, and
   `StepResult.ships_lost_in_combat` counts ships destroyed by fleet-vs-fleet
   and fleet-vs-planet combat resolution; sun and out-of-bounds losses remain in
-  `FleetLossStats`.
+  `FleetLossStats`. Neutral undershot counters are based on the post
+  fleet-vs-fleet surviving incoming force: if it fails to exceed neutral planet
+  or comet ships, it is an undershot; if it exceeds them, it is a successful
+  neutral capture for the rate denominator.
 - Fleet movement queues swept planet/comet collisions before checking
   out-of-bounds or sun removal, matching the reference behavior for fast fleets
   that cross multiple collision/removal zones in one step.

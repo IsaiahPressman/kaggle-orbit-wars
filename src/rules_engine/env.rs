@@ -186,6 +186,10 @@ pub fn step_with_injections(
         fleet_losses,
         planets_captured: captures.planets_captured,
         comets_captured: captures.comets_captured,
+        neutral_planets_captured: captures.neutral_planets_captured,
+        neutral_comets_captured: captures.neutral_comets_captured,
+        neutral_planet_undershots: captures.neutral_planet_undershots,
+        neutral_comet_undershots: captures.neutral_comet_undershots,
         fleets_lost_in_combat: captures.fleets_lost_in_combat,
         ships_lost_in_combat: captures.ships_lost_in_combat,
     }
@@ -531,6 +535,10 @@ fn swept_aabb_overlaps(
 struct CaptureStats {
     planets_captured: u32,
     comets_captured: u32,
+    neutral_planets_captured: u32,
+    neutral_comets_captured: u32,
+    neutral_planet_undershots: u32,
+    neutral_comet_undershots: u32,
     fleets_lost_in_combat: u32,
     ships_lost_in_combat: i64,
 }
@@ -602,17 +610,31 @@ fn resolve_combats(state: &mut State, combat_lists: CombatLists) -> CaptureStats
             continue;
         }
 
+        let is_comet = comet_ids.contains(&planet_id);
+        let was_neutral = planet.owner == -1;
         if planet.owner == survivor_owner {
             planet.ships += survivor_ships;
         } else {
+            if was_neutral && survivor_ships <= planet.ships {
+                if is_comet {
+                    captures.neutral_comet_undershots += 1;
+                } else {
+                    captures.neutral_planet_undershots += 1;
+                }
+            }
             captures.ships_lost_in_combat += i64::from(planet.ships.min(survivor_ships)) * 2;
             planet.ships -= survivor_ships;
             if planet.ships < 0 {
                 planet.owner = survivor_owner;
                 planet.ships = planet.ships.abs();
                 captures.planets_captured += 1;
-                if comet_ids.contains(&planet_id) {
+                if is_comet {
                     captures.comets_captured += 1;
+                    if was_neutral {
+                        captures.neutral_comets_captured += 1;
+                    }
+                } else if was_neutral {
+                    captures.neutral_planets_captured += 1;
                 }
             }
         }
@@ -1004,6 +1026,10 @@ mod tests {
         assert_eq!(state.planets[1].ships, 15);
         assert_eq!(result.planets_captured, 1);
         assert_eq!(result.comets_captured, 0);
+        assert_eq!(result.neutral_planets_captured, 1);
+        assert_eq!(result.neutral_comets_captured, 0);
+        assert_eq!(result.neutral_planet_undershots, 0);
+        assert_eq!(result.neutral_comet_undershots, 0);
         assert_eq!(result.fleets_lost_in_combat, 1);
         assert_eq!(result.ships_lost_in_combat, 10);
     }
@@ -1035,6 +1061,68 @@ mod tests {
         assert_eq!(state.planets[1].owner, 0);
         assert_eq!(result.planets_captured, 1);
         assert_eq!(result.comets_captured, 1);
+        assert_eq!(result.neutral_planets_captured, 0);
+        assert_eq!(result.neutral_comets_captured, 1);
+        assert_eq!(result.neutral_planet_undershots, 0);
+        assert_eq!(result.neutral_comet_undershots, 0);
+    }
+
+    #[test]
+    fn neutral_arrival_with_too_few_ships_counts_undershot() {
+        let mut state = base_state(2);
+        state.planets[1].x = 25.0;
+        state.planets[1].ships = 20;
+        state.initial_planets = state.planets.clone();
+
+        let result = step(
+            &mut state,
+            &[
+                vec![LaunchAction {
+                    from_planet_id: 0,
+                    angle: 0.0,
+                    ships: 20,
+                }],
+                vec![],
+            ],
+        );
+
+        assert_eq!(state.planets[1].owner, -1);
+        assert_eq!(state.planets[1].ships, 0);
+        assert_eq!(result.planets_captured, 0);
+        assert_eq!(result.neutral_planets_captured, 0);
+        assert_eq!(result.neutral_planet_undershots, 1);
+        assert_eq!(result.neutral_comet_undershots, 0);
+    }
+
+    #[test]
+    fn neutral_comet_arrival_with_too_few_ships_counts_comet_undershot() {
+        let mut state = base_state(2);
+        state.planets[1].x = 25.0;
+        state.planets[1].ships = 20;
+        state.comet_planet_ids = vec![1];
+        state.comets = vec![CometGroup {
+            planet_ids: vec![1],
+            paths: vec![vec![Point::new(25.0, 20.0)]],
+            path_index: -1,
+        }];
+
+        let result = step(
+            &mut state,
+            &[
+                vec![LaunchAction {
+                    from_planet_id: 0,
+                    angle: 0.0,
+                    ships: 20,
+                }],
+                vec![],
+            ],
+        );
+
+        assert_eq!(state.planets[1].owner, -1);
+        assert_eq!(result.planets_captured, 0);
+        assert_eq!(result.neutral_comets_captured, 0);
+        assert_eq!(result.neutral_planet_undershots, 0);
+        assert_eq!(result.neutral_comet_undershots, 1);
     }
 
     #[test]

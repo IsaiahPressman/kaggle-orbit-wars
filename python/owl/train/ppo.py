@@ -1359,7 +1359,10 @@ def _mean_env_metrics(
         )
 
     logged: dict[str, float] = {}
+    _add_neutral_undershot_rates(logged, metrics, prefix="train/")
     for key, values in metrics.items():
+        if key.startswith("_") or key in _NEUTRAL_UNDERSHOT_RATE_KEYS:
+            continue
         if not values:
             continue
         local = torch.tensor(
@@ -1394,7 +1397,14 @@ def _distributed_mean_env_metrics(
     )
     totals = all_reduce_sum(local, context)
     logged: dict[str, float] = {}
+    metric_totals = {
+        key: (float(total[0].item()), float(total[1].item()))
+        for key, total in zip(keys, totals, strict=True)
+    }
+    _add_neutral_undershot_rates_from_totals(logged, metric_totals, prefix="train/")
     for key, total in zip(keys, totals, strict=True):
+        if key.startswith("_") or key in _NEUTRAL_UNDERSHOT_RATE_KEYS:
+            continue
         if total[1].item() == 0:
             continue
         if key == "total_games_played":
@@ -1402,6 +1412,52 @@ def _distributed_mean_env_metrics(
         else:
             logged[f"train/{key}"] = float((total[0] / total[1]).item())
     return logged
+
+
+_NEUTRAL_UNDERSHOT_RATE_KEYS = {
+    "neutral_planet_undershot_rate",
+    "neutral_comet_undershot_rate",
+}
+
+_NEUTRAL_UNDERSHOT_RATE_INPUTS = {
+    "neutral_planet_undershot_rate": (
+        "_neutral_planet_undershots_per_game",
+        "_neutral_planets_captured_per_game",
+    ),
+    "neutral_comet_undershot_rate": (
+        "_neutral_comet_undershots_per_game",
+        "_neutral_comets_captured_per_game",
+    ),
+}
+
+
+def _add_neutral_undershot_rates(
+    logged: dict[str, float],
+    metrics: dict[str, list[float]],
+    *,
+    prefix: str,
+) -> None:
+    totals = {
+        key: (float(sum(values)), float(len(values))) for key, values in metrics.items()
+    }
+    _add_neutral_undershot_rates_from_totals(logged, totals, prefix=prefix)
+
+
+def _add_neutral_undershot_rates_from_totals(
+    logged: dict[str, float],
+    totals: dict[str, tuple[float, float]],
+    *,
+    prefix: str,
+) -> None:
+    for rate_key, (
+        undershot_key,
+        captured_key,
+    ) in _NEUTRAL_UNDERSHOT_RATE_INPUTS.items():
+        undershots = totals.get(undershot_key, (0.0, 0.0))[0]
+        captures = totals.get(captured_key, (0.0, 0.0))[0]
+        denominator = undershots + captures
+        if denominator > 0.0:
+            logged[f"{prefix}{rate_key}"] = max(0.0, min(1.0, undershots / denominator))
 
 
 def _player_segment_returns(

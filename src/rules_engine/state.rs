@@ -335,6 +335,10 @@ pub struct StepResult {
     pub fleet_losses: FleetLossStats,
     pub planets_captured: u32,
     pub comets_captured: u32,
+    pub neutral_planets_captured: u32,
+    pub neutral_comets_captured: u32,
+    pub neutral_planet_undershots: u32,
+    pub neutral_comet_undershots: u32,
     pub fleets_lost_in_combat: u32,
     pub ships_lost_in_combat: i64,
 }

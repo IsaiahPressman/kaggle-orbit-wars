@@ -146,8 +146,8 @@ Training logs terminal environment metrics under `train/` when episodes finish
 during a rollout, including game length, per-player win rates, launch density,
 planet occupancy for 2-player and 4-player games, max-entity overflow counts,
 terminal ship counts, completed game counts, planet captures, launch and fleet-size statistics,
-full-length game rate, cumulative active player-step totals, and fleet/ship
-losses in combat, the sun, or out of bounds.
+neutral planet/comet undershot rates, full-length game rate, cumulative active
+player-step totals, and fleet/ship losses in combat, the sun, or out of bounds.
 Planet occupancy is reported at terminal as
 `train/terminal_planet_occupancy_rate_2p` and
 `train/terminal_planet_occupancy_rate_4p`.

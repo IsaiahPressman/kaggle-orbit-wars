@@ -36,8 +36,9 @@ The replay parity test checks each transition against the Python reference for:
 
 Auxiliary Rust `StepResult` counters for fleets and ships lost in the sun, out
 of bounds, or combat resolution, and for planets and comet planets captured,
-are not fields in the Kaggle rows. They are covered by focused Rust unit tests
-rather than replay parity assertions.
+plus neutral capture/undershot counters, are not fields in the Kaggle rows.
+They are covered by focused Rust unit tests rather than replay parity
+assertions.
 
 The current local replay set covers both 2-player and 4-player games, launches,
 production, fleet movement, collisions, captures, and comet movement and expiry.
@@ -79,6 +80,7 @@ replays:
   or sun removal
 - sun, planet, out-of-bounds, and simultaneous swept-pair collisions
 - combat resolution, ties, and reinforcement
+- neutral non-comet planet and comet undershot counters
 - comet spawning before same-step movement
 - comet movement and expiry
 - terminal score ties where all tied players win
@@ -112,7 +114,8 @@ recorded reference streams can be large. A fresh checkout must run
 running required parity. Use `REQUIRE_PARITY_FIXTURES=0 just rs-test` only when
 intentionally skipping replay parity or missing generation fixtures.
 
-RL-only terminal metrics such as `ships_lost_in_combat_per_game` and
-`fleets_lost_in_combat_per_game` are derived from simulator step results and
-are covered by focused Rust/Python metric tests, not by replay fixture parity
+RL-only terminal metrics such as `ships_lost_in_combat_per_game`,
+`fleets_lost_in_combat_per_game`, `neutral_planet_undershot_rate`, and
+`neutral_comet_undershot_rate` are derived from simulator step results and are
+covered by focused Rust/Python metric tests, not by replay fixture parity
 assertions.

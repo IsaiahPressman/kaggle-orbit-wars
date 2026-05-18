@@ -579,6 +579,12 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
             "launches_per_game": [3.0, 7.0],
             "launch_failures_per_game": [2.0, 4.0],
             "comets_captured_per_game": [1.0, 3.0],
+            "_neutral_planets_captured_per_game": [1.0, 3.0],
+            "_neutral_comets_captured_per_game": [2.0, 0.0],
+            "_neutral_planet_undershots_per_game": [3.0, 1.0],
+            "_neutral_comet_undershots_per_game": [4.0, 0.0],
+            "neutral_planet_undershot_rate": [0.75, 0.25],
+            "neutral_comet_undershot_rate": [2.0 / 3.0],
             "ships_lost_in_combat_per_game": [5.0, 15.0],
             "terminal_planet_occupancy_rate_2p": [0.5, 0.75],
             "terminal_planet_occupancy_rate_4p": [1.0],
@@ -593,6 +599,9 @@ def test_env_metrics_are_logged_under_train_prefix() -> None:
     assert metrics["train/launches_per_game"] == 5.0
     assert metrics["train/launch_failures_per_game"] == 3.0
     assert metrics["train/comets_captured_per_game"] == 2.0
+    assert metrics["train/neutral_planet_undershot_rate"] == 0.5
+    assert metrics["train/neutral_comet_undershot_rate"] == 4.0 / 6.0
+    assert "train/_neutral_planets_captured_per_game" not in metrics
     assert metrics["train/ships_lost_in_combat_per_game"] == 10.0
     assert metrics["train/terminal_planet_occupancy_rate_2p"] == 0.625
     assert metrics["train/terminal_planet_occupancy_rate_4p"] == 1.0

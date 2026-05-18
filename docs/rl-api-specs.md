@@ -593,6 +593,8 @@ Terminal episode metrics:
 | `terminal_ship_count` | Total ships on planets and in active fleets at terminal. |
 | `planets_captured_per_game` | Total planet captures over the episode, counting repeat captures. |
 | `comets_captured_per_game` | Total comet planet captures over the episode, counting repeat captures. |
+| `neutral_planet_undershot_rate` | Neutral non-comet planet capture undershots divided by successful neutral non-comet planet captures plus those undershots. An undershot is a neutral arrival whose surviving incoming ships are less than or equal to the neutral planet ship count. Omitted when no neutral non-comet planet capture or undershot occurred. |
+| `neutral_comet_undershot_rate` | Neutral comet capture undershots divided by successful neutral comet captures plus those undershots. An undershot is a neutral arrival whose surviving incoming ships are less than or equal to the neutral comet ship count. Omitted when no neutral comet capture or undershot occurred. |
 | `launch_failures_per_game` | Submitted discrete-target launches skipped because no valid selected ray exists, including static targets with no sun-avoiding ray and dynamic targets with no intercept, no allowed fallback, or out-of-bounds impact points. Python training logs this as `train/launch_failures_per_game`. |
 | `launches_per_turn` | Mean launches per player per turn. |
 | `fleet_size_max` | Largest fleet launched during the episode. |

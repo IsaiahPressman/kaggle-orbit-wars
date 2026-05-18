@@ -2273,6 +2273,10 @@ struct EpisodeStats {
     min_fleet_size: Option<i32>,
     planets_captured: u32,
     comets_captured: u32,
+    neutral_planets_captured: u32,
+    neutral_comets_captured: u32,
+    neutral_planet_undershots: u32,
+    neutral_comet_undershots: u32,
     fleets_lost_in_combat: u32,
     ships_lost_in_combat: i64,
     max_entities_exceeded_turns: u32,
@@ -2283,6 +2287,10 @@ struct EpisodeStats {
 struct TerminalEpisodeMetrics {
     values: Vec<(&'static str, f64)>,
     win_rates: Vec<(usize, f64)>,
+    neutral_planets_captured: u32,
+    neutral_comets_captured: u32,
+    neutral_planet_undershots: u32,
+    neutral_comet_undershots: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -2560,6 +2568,19 @@ impl EpisodeStats {
         self.comets_captured += comets_captured;
     }
 
+    fn record_neutral_arrivals(
+        &mut self,
+        neutral_planets_captured: u32,
+        neutral_comets_captured: u32,
+        neutral_planet_undershots: u32,
+        neutral_comet_undershots: u32,
+    ) {
+        self.neutral_planets_captured += neutral_planets_captured;
+        self.neutral_comets_captured += neutral_comets_captured;
+        self.neutral_planet_undershots += neutral_planet_undershots;
+        self.neutral_comet_undershots += neutral_comet_undershots;
+    }
+
     fn record_ships_lost_in_combat(&mut self, ships_lost_in_combat: i64) {
         self.ships_lost_in_combat += ships_lost_in_combat;
     }
@@ -2662,6 +2683,18 @@ impl EpisodeStats {
         {
             values.push(("fleets_lost_to_sun_or_oob_rate", rate));
         }
+        if let Some(rate) = loss_rate(
+            f64::from(self.neutral_planet_undershots),
+            f64::from(self.neutral_planets_captured + self.neutral_planet_undershots),
+        ) {
+            values.push(("neutral_planet_undershot_rate", rate));
+        }
+        if let Some(rate) = loss_rate(
+            f64::from(self.neutral_comet_undershots),
+            f64::from(self.neutral_comets_captured + self.neutral_comet_undershots),
+        ) {
+            values.push(("neutral_comet_undershot_rate", rate));
+        }
         if self.launched_planet_turns > 0 {
             values.push((
                 "launches_per_launch_mean",
@@ -2688,7 +2721,14 @@ impl EpisodeStats {
             })
             .collect();
 
-        TerminalEpisodeMetrics { values, win_rates }
+        TerminalEpisodeMetrics {
+            values,
+            win_rates,
+            neutral_planets_captured: self.neutral_planets_captured,
+            neutral_comets_captured: self.neutral_comets_captured,
+            neutral_planet_undershots: self.neutral_planet_undershots,
+            neutral_comet_undershots: self.neutral_comet_undershots,
+        }
     }
 
     fn fleet_size_std(&self) -> f64 {
@@ -2760,21 +2800,46 @@ fn collect_terminal_metrics(
 ) -> HashMap<String, Vec<f64>> {
     let mut metrics = HashMap::<String, Vec<f64>>::new();
     for terminal in terminals.into_iter().flatten() {
-        for (key, value) in terminal.values {
+        let TerminalEpisodeMetrics {
+            values,
+            win_rates,
+            neutral_planets_captured,
+            neutral_comets_captured,
+            neutral_planet_undershots,
+            neutral_comet_undershots,
+        } = terminal;
+        for (key, value) in values {
             metrics.entry(key.to_string()).or_default().push(value);
         }
-        for (player, win_rate) in terminal.win_rates {
+        for (player, win_rate) in win_rates {
             metrics
                 .entry(format!("win_rate_player_{player}"))
                 .or_default()
                 .push(win_rate);
         }
+        metrics
+            .entry("_neutral_planets_captured_per_game".to_string())
+            .or_default()
+            .push(f64::from(neutral_planets_captured));
+        metrics
+            .entry("_neutral_comets_captured_per_game".to_string())
+            .or_default()
+            .push(f64::from(neutral_comets_captured));
+        metrics
+            .entry("_neutral_planet_undershots_per_game".to_string())
+            .or_default()
+            .push(f64::from(neutral_planet_undershots));
+        metrics
+            .entry("_neutral_comet_undershots_per_game".to_string())
+            .or_default()
+            .push(f64::from(neutral_comet_undershots));
     }
     if metrics.contains_key("ships_lost_per_game_mean")
         || metrics.contains_key("fleets_lost_per_game_mean")
     {
         add_loss_rate_metrics(&mut metrics);
     }
+    add_neutral_undershot_rate_metrics(&mut metrics);
     metrics
 }
 
@@ -2799,6 +2864,34 @@ fn metric_sum(metrics: &HashMap<String, Vec<f64>>, key: &str) -> f64 {
         .get(key)
         .map(|values| values.iter().sum())
         .unwrap_or(0.0)
+}
+
+fn add_neutral_undershot_rate_metrics(metrics: &mut HashMap<String, Vec<f64>>) {
+    add_neutral_undershot_rate_metric(
+        metrics,
+        "neutral_planet_undershot_rate",
+        "_neutral_planet_undershots_per_game",
+        "_neutral_planets_captured_per_game",
+    );
+    add_neutral_undershot_rate_metric(
+        metrics,
+        "neutral_comet_undershot_rate",
+        "_neutral_comet_undershots_per_game",
+        "_neutral_comets_captured_per_game",
+    );
+}
+
+fn add_neutral_undershot_rate_metric(
+    metrics: &mut HashMap<String, Vec<f64>>,
+    rate_key: &str,
+    undershot_key: &str,
+    captured_key: &str,
+) {
+    let undershots = metric_sum(metrics, undershot_key);
+    let captures = metric_sum(metrics, captured_key);
+    if let Some(rate) = loss_rate(undershots, undershots + captures) {
+        metrics.insert(rate_key.to_string(), vec![rate]);
+    }
 }
 
 fn loss_rate(numerator: f64, denominator: f64) -> Option<f64> {
@@ -2885,6 +2978,12 @@ fn step_one_env(
     episode_stats.record_step_result(state, result.fleet_losses, max_fleets);
     episode_stats.record_planets_captured(result.planets_captured);
     episode_stats.record_comets_captured(result.comets_captured);
+    episode_stats.record_neutral_arrivals(
+        result.neutral_planets_captured,
+        result.neutral_comets_captured,
+        result.neutral_planet_undershots,
+        result.neutral_comet_undershots,
+    );
     episode_stats.record_fleets_lost_in_combat(result.fleets_lost_in_combat);
     episode_stats.record_ships_lost_in_combat(result.ships_lost_in_combat);
     let should_reset = result_is_terminal(&result.player_results);
@@ -3338,6 +3437,7 @@ mod tests {
         );
         episode_stats.record_ships_lost_in_combat(11);
         episode_stats.record_fleets_lost_in_combat(4);
+        episode_stats.record_neutral_arrivals(1, 2, 3, 4);
         let metrics = episode_stats.terminal_metrics(
             &state,
             &player_map,
@@ -3361,6 +3461,7 @@ mod tests {
         );
         second_episode_stats.record_ships_lost_in_combat(90);
         second_episode_stats.record_fleets_lost_in_combat(9);
+        second_episode_stats.record_neutral_arrivals(3, 0, 1, 0);
         let second_metrics = second_episode_stats.terminal_metrics(
             &state,
             &player_map,
@@ -3410,6 +3511,24 @@ mod tests {
         assert_eq!(collected["fleet_size_std"], vec![1.0, 0.0]);
         assert_eq!(collected["planets_captured_per_game"], vec![0.0, 0.0]);
         assert_eq!(collected["comets_captured_per_game"], vec![0.0, 0.0]);
+        assert_eq!(collected["neutral_planet_undershot_rate"], vec![4.0 / 8.0]);
+        assert_eq!(collected["neutral_comet_undershot_rate"], vec![4.0 / 6.0]);
+        assert_eq!(
+            collected["_neutral_planets_captured_per_game"],
+            vec![1.0, 3.0]
+        );
+        assert_eq!(
+            collected["_neutral_comets_captured_per_game"],
+            vec![2.0, 0.0]
+        );
+        assert_eq!(
+            collected["_neutral_planet_undershots_per_game"],
+            vec![3.0, 1.0]
+        );
+        assert_eq!(
+            collected["_neutral_comet_undershots_per_game"],
+            vec![4.0, 0.0]
+        );
         assert!(!collected.contains_key("fleets_per_launch_mean"));
     }
 
