@@ -110,6 +110,20 @@ def _actions(n_envs: int) -> PureActions:
     )
 
 
+def _obs(n_envs: int) -> ObsBatch:
+    return ObsBatch(
+        planets=torch.zeros((n_envs, 1, 1)),
+        orbiting_planets=torch.zeros((n_envs, 1), dtype=torch.bool),
+        fleets=torch.zeros((n_envs, 1, 1)),
+        comets=torch.zeros((n_envs, 1, 1)),
+        entity_mask=torch.ones((n_envs, 1), dtype=torch.bool),
+        still_playing=torch.ones((n_envs, 4), dtype=torch.bool),
+        global_features=torch.zeros((n_envs, 1)),
+        can_act=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
+        max_launch=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+    )
+
+
 def _log_probs(per_player: torch.Tensor) -> ModelActionLogProbs:
     n_envs = per_player.shape[0]
     action_shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
@@ -361,6 +375,49 @@ def test_wrap_model_for_distributed_uses_ddp_adapter(
     assert wrapped._ddp.device_ids == [3]
     assert wrapped._ddp.output_device == 3
     assert wrapped.action_spec == model.action_spec
+
+
+def test_distributed_evaluate_actions_forwards_dones_without_hidden_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RecordingDonesModel(_TinyModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen_dones: torch.Tensor | None = None
+
+        def evaluate_actions(
+            self,
+            obs: ObsBatch,
+            actions: ActionBundle,
+            *,
+            hidden_state: object | None = None,  # noqa: ARG002
+            dones: torch.Tensor | None = None,
+        ) -> ModelEvaluation:
+            self.seen_dones = dones
+            return super().evaluate_actions(obs, actions)
+
+    monkeypatch.setattr(distributed_module, "DistributedDataParallel", _FakeDDP)
+    model = _RecordingDonesModel()
+    wrapped = wrap_model_for_distributed(
+        model,
+        DistributedContext(
+            device=torch.device("cuda", 0),
+            rank=0,
+            local_rank=0,
+            world_size=2,
+            initialized=True,
+        ),
+    )
+    dones = torch.tensor(
+        [
+            [False, True, False, False],
+            [True, True, True, True],
+        ]
+    )
+
+    wrapped.evaluate_actions(_obs(2), _actions(2), dones=dones)
+
+    assert model.seen_dones is dones
 
 
 def test_wrap_model_for_distributed_requires_cuda_device() -> None:

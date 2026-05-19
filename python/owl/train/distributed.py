@@ -186,7 +186,7 @@ class _DistributedModelDispatch(nn.Module):
         if mode == "evaluate_actions":
             if actions is None:
                 raise ValueError("actions are required for evaluate_actions")
-            if hidden_state is None:
+            if hidden_state is None and dones is None:
                 return self.model.evaluate_actions(
                     cast(ObsBatch, obs),
                     cast(ModelActions, actions),
