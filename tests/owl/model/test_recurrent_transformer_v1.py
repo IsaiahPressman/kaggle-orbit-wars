@@ -115,6 +115,27 @@ def _stack_obs(obs: ObsBatch, time_steps: int) -> ObsBatch:
     )
 
 
+def _compact_obs(obs: ObsBatch, fleet_indices: torch.Tensor) -> ObsBatch:
+    if not isinstance(obs.action_mask, DiscreteTargetActionMask):
+        raise TypeError("expected discrete target action mask")
+    return ObsBatch(
+        planets=obs.planets,
+        orbiting_planets=obs.orbiting_planets,
+        fleets=obs.fleets[:, fleet_indices, :],
+        comets=obs.comets,
+        entity_mask=torch.cat(
+            (
+                obs.entity_mask[:, :ACTION_ENTITY_SLOTS],
+                obs.entity_mask[:, ACTION_ENTITY_SLOTS:][:, fleet_indices],
+            ),
+            dim=1,
+        ),
+        still_playing=obs.still_playing,
+        global_features=obs.global_features,
+        action_mask=obs.action_mask,
+    )
+
+
 def _obs_step(obs: ObsBatch, step: int) -> ObsBatch:
     if not isinstance(obs.action_mask, DiscreteTargetActionMask):
         raise TypeError("expected discrete target action mask")
@@ -234,6 +255,37 @@ def test_recurrent_hidden_reset_uses_env_and_player_dones() -> None:
             assert reset.hidden[0, 0, token].eq(0.0).all()
         elif player >= 0:
             assert reset.hidden[0, 0, token].eq(1.0).all()
+
+
+def test_recurrent_forward_supports_compacted_runtime_entity_counts() -> None:
+    torch.manual_seed(0)
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 3)
+    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+    model = RecurrentTransformerV1(
+        RecurrentTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    model.reset_parameters()
+    obs = _obs_batch(batch_size=1, obs_spec=obs_spec, action_spec=action_spec)
+    obs.entity_mask[0, ACTION_ENTITY_SLOTS] = True
+    compacted = _compact_obs(obs, torch.tensor([], dtype=torch.long))
+    hidden = model.initial_hidden_state(1, device=torch.device("cpu"))
+
+    output = model(compacted, hidden_state=hidden)
+    assert output.next_hidden_state is not None
+    next_output = model(
+        _compact_obs(obs, torch.tensor([0], dtype=torch.long)),
+        hidden_state=output.next_hidden_state,
+    )
+
+    assert output.next_hidden_state.hidden.shape == hidden.hidden.shape
+    assert next_output.next_hidden_state is not None
+    assert next_output.next_hidden_state.hidden.shape == hidden.hidden.shape
+    cached_layout = model._recurrent_layout_for_entity_count(ACTION_ENTITY_SLOTS)
+    assert cached_layout is model._recurrent_layout_for_entity_count(
+        ACTION_ENTITY_SLOTS
+    )
 
 
 def test_recurrent_sequence_evaluation_matches_stepwise_evaluation() -> None:

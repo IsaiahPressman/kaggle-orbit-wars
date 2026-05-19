@@ -119,9 +119,9 @@ class RecurrentTransformerV1(StatelessTransformerV1):
         self.blocks = nn.ModuleList(
             RecurrentTransformerBlock(config) for _ in range(config.depth)
         )
-        self._recurrent_layout = _build_recurrent_token_layout(
-            entity_count=obs_spec.max_entities,
-            n_scratch_tokens=config.n_scratch_tokens,
+        self._recurrent_layout_cache: dict[int, _RecurrentTokenLayout] = {}
+        self._recurrent_layout = self._recurrent_layout_for_entity_count(
+            obs_spec.max_entities
         )
 
     def reset_parameters(self) -> None:
@@ -141,6 +141,19 @@ class RecurrentTransformerV1(StatelessTransformerV1):
                 else _ACTOR_HEAD_INIT_GAIN
             )
             _init_linear(layer, gain=gain)
+
+    def _recurrent_layout_for_entity_count(
+        self,
+        entity_count: int,
+    ) -> _RecurrentTokenLayout:
+        layout = self._recurrent_layout_cache.get(entity_count)
+        if layout is None:
+            layout = _build_recurrent_token_layout(
+                entity_count=entity_count,
+                n_scratch_tokens=self.config.n_scratch_tokens,
+            )
+            self._recurrent_layout_cache[entity_count] = layout
+        return layout
 
     def initial_hidden_state(
         self,
@@ -304,10 +317,11 @@ class RecurrentTransformerV1(StatelessTransformerV1):
             time_steps = 1
         else:
             batch_size, time_steps = sequence_shape
+        layout = self._recurrent_layout_for_entity_count(obs.entity_mask.shape[1])
         expected_hidden_shape = (
             self.config.depth,
             batch_size,
-            self._recurrent_layout.token_indices.numel(),
+            layout.token_indices.numel(),
             self.config.embed_dim,
         )
         if hidden_state.hidden.shape != expected_hidden_shape:
@@ -322,10 +336,10 @@ class RecurrentTransformerV1(StatelessTransformerV1):
             dones,
             batch_size=batch_size,
             time_steps=time_steps,
-            layout=self._recurrent_layout,
+            layout=layout,
             device=token_mask.device,
         )
-        recurrent_active = token_mask[:, self._recurrent_layout.token_indices].view(
+        recurrent_active = token_mask[:, layout.token_indices].view(
             batch_size,
             time_steps,
             -1,
@@ -347,7 +361,7 @@ class RecurrentTransformerV1(StatelessTransformerV1):
             x = pack_tensor(x, packed)
             packed_recurrent_index = _build_packed_recurrent_index(
                 packed,
-                self._recurrent_layout.token_indices,
+                layout.token_indices,
                 device=x.device,
             )
             block_token_mask = None
@@ -366,7 +380,7 @@ class RecurrentTransformerV1(StatelessTransformerV1):
                 hidden_state.hidden[layer_index],
                 reset=recurrent_reset,
                 active=recurrent_active,
-                layout=self._recurrent_layout,
+                layout=layout,
                 packed_recurrent_index=packed_recurrent_index,
                 batch_size=batch_size,
                 time_steps=time_steps,

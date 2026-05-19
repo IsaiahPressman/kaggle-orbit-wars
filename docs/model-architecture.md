@@ -169,6 +169,9 @@ The recurrent token set is:
 
 Planet, comet, and fleet tokens are not recurrent. This keeps entity ordering
 and ownership changes out of the first recurrent state contract.
+The recurrent token layout is memoized per runtime entity count, so inference
+paths that compact inactive fleet rows can shift non-entity token positions
+without changing the hidden-state contract.
 
 The recurrent hidden state has shape:
 
