@@ -12,6 +12,8 @@ from owl.model import (
     ModelActionLogProbs,
     ModelEvaluation,
     ModelOutput,
+    RecurrentTransformerV1,
+    RecurrentTransformerV1Config,
     StatelessTransformerV1,
     StatelessTransformerV1Config,
 )
@@ -411,6 +413,7 @@ class AutocastRecordingModel(TinyOrbitModel):
         self.device_type = device_type
         self.forward_autocast_enabled: list[bool] = []
         self.evaluate_autocast_enabled: list[bool] = []
+        self.compute_value_autocast_enabled: list[bool] = []
 
     def forward(
         self,
@@ -432,6 +435,12 @@ class AutocastRecordingModel(TinyOrbitModel):
             torch.is_autocast_enabled(self.device_type)
         )
         return super().evaluate_actions(obs, actions)
+
+    def compute_value(self, obs: ObsBatch) -> torch.Tensor:
+        self.compute_value_autocast_enabled.append(
+            torch.is_autocast_enabled(self.device_type)
+        )
+        return super().compute_value(obs)
 
 
 class FixedEvaluationModel(BaseModelAPI):
@@ -1009,7 +1018,8 @@ def test_rollout_and_update_model_calls_run_under_autocast() -> None:
         value_clip_anchor=segments.values,
     )
 
-    assert model.forward_autocast_enabled == [True, True, True]
+    assert model.forward_autocast_enabled == [True, True]
+    assert model.compute_value_autocast_enabled == [True]
     assert model.evaluate_autocast_enabled == [True]
 
 
@@ -1638,6 +1648,45 @@ def test_discrete_target_transformer_train_iteration_keeps_parameters_finite() -
     assert "policy/fleet_size_mixture_entropy" in metrics
     assert "policy/fleet_size_logistic_entropy" in metrics
     assert "policy/event_entropy" not in metrics
+    for parameter in model.parameters():
+        assert torch.isfinite(parameter).all()
+        if parameter.grad is not None:
+            assert torch.isfinite(parameter.grad).all()
+
+
+def test_recurrent_transformer_train_iteration_keeps_parameters_finite() -> None:
+    torch.manual_seed(0)
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model = RecurrentTransformerV1(
+        RecurrentTransformerV1Config(
+            actor=ActorDiscreteTargetsConfig(
+                n_action_mixtures=2,
+                entropy_ship_quantiles=8,
+            ),
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+        ),
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    model.reset_parameters()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segments_per_minibatch=1,
+        ),
+        device=torch.device("cpu"),
+    )
+
+    metrics = trainer.train_iteration()
+
+    assert env.last_target is not None
+    assert torch.isfinite(torch.tensor(list(metrics.values()))).all()
+    assert trainer.rollout.initial_hidden_state is not None
     for parameter in model.parameters():
         assert torch.isfinite(parameter).all()
         if parameter.grad is not None:

@@ -5,15 +5,22 @@ Wars RL API.
 
 ## Tagged Config
 
-The current model config is `StatelessTransformerV1Config` with discriminator:
+The stateless model config is `StatelessTransformerV1Config` with discriminator:
 
 ```python
 {"model_arch": "stateless_transformer_v1"}
 ```
 
-The exported `ModelConfig` type is a pydantic discriminated union alias over the
-current config. It is intentionally shaped so future model configs can be added
-without changing callers that validate config dictionaries through the union.
+The recurrent model config is `RecurrentTransformerV1Config` with discriminator:
+
+```python
+{"model_arch": "recurrent_transformer_v1"}
+```
+
+The exported `ModelConfig` type is a pydantic discriminated union alias over
+both configs. Callers should construct models through the shared model factory
+instead of instantiating `StatelessTransformerV1` directly when checkpoint
+configs may contain either architecture.
 
 ## Config Reference
 
@@ -58,6 +65,12 @@ the regular SDPA fallback path.
 `FullConfig` validates that `env.action_spec.action_spec` matches
 `model.actor.action_spec`. Direct model construction performs the same check
 against the supplied environment action spec.
+
+`RecurrentTransformerV1Config` intentionally supports only the
+`"discrete_targets"` actor with `launch_mode="binary"`. The policy first samples
+whether to launch, then samples the target, then samples fleet size. Pure,
+target-bin, `binary_after`, and `target_token` actor modes are rejected for this
+architecture.
 
 Observation and action specs are owned by `EnvConfig`. `StatelessTransformerV1`
 receives `env.obs_spec` and `env.action_spec` when it is instantiated, so model
@@ -137,6 +150,46 @@ Attention uses separate `q`, `k`, and `v` linear layers instead of one packed
 QKV projection. SwiGLU also uses separate gate and value projections. This keeps
 each weight matrix tied to one projection role, which is a better fit for Muon
 optimizer assumptions than packing multiple operations into one parameter.
+
+## Recurrent Transformer V1
+
+`RecurrentTransformerV1` reuses the stateless input stems, token layout,
+discrete-target actor, critic, pairwise-bias option, and masked attention
+behavior. Its trunk replaces each stateless transformer block with:
+
+```text
+transformer block over all current observation tokens
+minGRU block over recurrent non-entity tokens only
+```
+
+The recurrent token set is:
+
+- shared tokens: global-feature token and board scratch tokens
+- per-player tokens: player tokens, actor-plan tokens, and critic-value tokens
+
+Planet, comet, and fleet tokens are not recurrent. This keeps entity ordering
+and ownership changes out of the first recurrent state contract.
+The recurrent token layout is memoized per runtime entity count, so inference
+paths that compact inactive fleet rows can shift non-entity token positions
+without changing the hidden-state contract.
+
+The recurrent hidden state has shape:
+
+```text
+(depth, batch, recurrent_tokens, embed_dim)
+```
+
+Shared token state resets when the whole environment episode resets. Per-player
+token state resets when that player slot is done. During PPO updates,
+minGRU uses an affine parallel scan over the segment time dimension, with
+`dones[:, t]` applied as the reset boundary before processing observation
+`t + 1`.
+
+For packed flash-attention execution, the recurrent block builds an inverse map
+from padded token coordinates to packed rows, gathers only recurrent token rows,
+runs the dense recurrent scan as `(batch, time, recurrent_tokens, dim)`, and
+scatters the updated recurrent rows back into the packed tensor. Missing masked
+player tokens do not scatter back and their recurrent state is zeroed.
 
 ## Initialization
 

@@ -11,7 +11,13 @@ import torch
 from pydantic import Field, field_validator
 
 from owl.config import BaseConfig
-from owl.model import BaseModelAPI, ModelActions, ModelEvaluation, ModelOutput
+from owl.model import (
+    BaseModelAPI,
+    ModelActions,
+    ModelEvaluation,
+    ModelHiddenState,
+    ModelOutput,
+)
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     OUTER_PLAYER_SLOTS,
@@ -138,6 +144,7 @@ class _PPORolloutSegments:
     values: torch.Tensor
     rewards: torch.Tensor
     dones: torch.Tensor
+    initial_hidden_state: ModelHiddenState | None = None
 
 
 @dataclass(frozen=True)
@@ -311,6 +318,7 @@ class _PPORolloutBuffer:
             dtype=torch.bool,
             device=device,
         )
+        self.initial_hidden_state: ModelHiddenState | None = None
 
     def write_step(
         self,
@@ -341,6 +349,7 @@ class _PPORolloutBuffer:
             values=self.values.transpose(0, 1).contiguous(),
             rewards=self.rewards.transpose(0, 1).contiguous(),
             dones=self.dones.transpose(0, 1).contiguous(),
+            initial_hidden_state=self.initial_hidden_state,
         )
 
 
@@ -387,6 +396,7 @@ class PPOTrainer:
             device,
             non_blocking=self._non_blocking_env_to_device,
         )
+        self._hidden_state = model.initial_hidden_state(env.n_envs, device=device)
         self.rollout = _PPORolloutBuffer(
             horizon=config.horizon,
             n_envs=env.n_envs,
@@ -558,11 +568,19 @@ class PPOTrainer:
     def _collect_rollout(self) -> torch.Tensor:
         self.rollout.rewards.zero_()
         self.rollout.dones.zero_()
+        self.rollout.initial_hidden_state = self.model.detach_hidden_state(
+            self._hidden_state
+        )
         env_metrics: dict[str, list[float]] = {}
         with torch.no_grad():
             for step in range(self.config.horizon):
                 with _autocast_context(self.config, self.device):
-                    output = self.model(self._obs)
+                    output = _model_forward(
+                        self.model,
+                        self._obs,
+                        hidden_state=self._hidden_state,
+                    )
+                self._hidden_state = output.next_hidden_state
                 actions = _output_actions(output)
                 next_obs, rewards, dones, step_env_metrics = _step_env(
                     self.env, actions
@@ -585,15 +603,23 @@ class PPOTrainer:
                     rewards=rewards,
                     dones=dones,
                 )
+                self._hidden_state = self.model.reset_hidden_state(
+                    self._hidden_state,
+                    dones,
+                )
                 _copy_obs_to_device_(
                     self._obs,
                     next_obs,
                     non_blocking=self._non_blocking_env_to_device,
                 )
             with _autocast_context(self.config, self.device):
-                bootstrap = self.model(self._obs)
+                last_values = _model_compute_value(
+                    self.model,
+                    self._obs,
+                    hidden_state=self._hidden_state,
+                )
             self._last_env_metrics = env_metrics
-            return _output_values(bootstrap).detach()
+            return last_values.detach()
 
     def _update(
         self,
@@ -668,8 +694,18 @@ class PPOTrainer:
         value_clip_anchor: torch.Tensor,
     ) -> _PPOUpdateResult:
         idx = indices
-        batch_actions = _flatten_actions_time(_actions_index(segments.actions, idx))
-        batch_obs = _flatten_obs_time(_obs_index(segments.obs, idx))
+        batch_segment_actions = _actions_index(segments.actions, idx)
+        batch_segment_obs = _obs_index(segments.obs, idx)
+        batch_hidden_state = self.model.index_hidden_state(
+            segments.initial_hidden_state,
+            idx,
+        )
+        if batch_hidden_state is None:
+            batch_actions = _flatten_actions_time(batch_segment_actions)
+            batch_obs = _flatten_obs_time(batch_segment_obs)
+        else:
+            batch_actions = batch_segment_actions
+            batch_obs = batch_segment_obs
         batch_old_logp = segments.logp[idx]
         batch_old_values = value_clip_anchor[idx]
         batch_returns = returns[idx]
@@ -685,7 +721,13 @@ class PPOTrainer:
         batch_value_weight = batch_value_mask.to(dtype=batch_advantages.dtype)
 
         with _autocast_context(self.config, self.device):
-            output = self.model.evaluate_actions(batch_obs, batch_actions)
+            output = _model_evaluate_actions(
+                self.model,
+                batch_obs,
+                batch_actions,
+                hidden_state=batch_hidden_state,
+                dones=segments.dones[idx],
+            )
         new_logp = _output_logp(output).view_as(batch_old_logp)
         entropy = _output_entropy(output, batch_old_logp)
         entropy_components = _output_entropy_components(output, batch_old_logp)
@@ -1506,6 +1548,41 @@ def _checkpoint_optional_str(value: object, *, name: str) -> str | None:
     return value
 
 
+def _model_forward(
+    model: BaseModelAPI,
+    obs: ObsBatch,
+    *,
+    hidden_state: ModelHiddenState | None,
+) -> ModelOutput:
+    if hidden_state is None:
+        return model(obs)
+    return model(obs, hidden_state=hidden_state)
+
+
+def _model_compute_value(
+    model: BaseModelAPI,
+    obs: ObsBatch,
+    *,
+    hidden_state: ModelHiddenState | None,
+) -> torch.Tensor:
+    if hidden_state is None:
+        return model.compute_value(obs)
+    return model.compute_value(obs, hidden_state=hidden_state)
+
+
+def _model_evaluate_actions(
+    model: BaseModelAPI,
+    obs: ObsBatch,
+    actions: ModelActions,
+    *,
+    hidden_state: ModelHiddenState | None,
+    dones: torch.Tensor,
+) -> ModelEvaluation:
+    if hidden_state is None:
+        return model.evaluate_actions(obs, actions)
+    return model.evaluate_actions(obs, actions, hidden_state=hidden_state, dones=dones)
+
+
 def _output_actions(output: ModelOutput) -> ModelActions:
     return output.actions
 
@@ -1545,6 +1622,8 @@ def _output_entropy_components(
 def _sum_entropy_component(tensor: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
     if tensor.shape == like.shape:
         return tensor.view_as(like)
+    if tensor.shape[: like.ndim] == like.shape:
+        return tensor.flatten(start_dim=like.ndim).sum(dim=-1).view_as(like)
     return tensor.flatten(start_dim=2).sum(dim=-1).view_as(like)
 
 

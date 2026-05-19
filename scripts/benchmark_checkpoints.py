@@ -6,9 +6,10 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
-from owl.model import StatelessTransformerV1
+from owl.model import BaseModelAPI, ModelHiddenState, create_model
 from owl.replay import ReplayRecorder
 from owl.rl import (
     ActionBundle,
@@ -39,7 +40,7 @@ PLAYER_COUNTS = (2, 4)
 class LoadedCheckpoint:
     path: Path
     config: FullConfig
-    model: StatelessTransformerV1
+    model: BaseModelAPI
     env_steps: int
 
 
@@ -180,6 +181,8 @@ def run_benchmark(
     games = 0
     steps = 0
     stats = MatchupStats.empty()
+    hidden_a = checkpoint_a.model.initial_hidden_state(n_envs, device=device)
+    hidden_b = checkpoint_b.model.initial_hidden_state(n_envs, device=device)
     progress = tqdm(
         total=n_games,
         desc=f"{player_count}p games",
@@ -189,11 +192,13 @@ def run_benchmark(
     started_at = time.perf_counter()
     try:
         while games < n_games:
-            actions = _actions_for_assignments(
+            actions, hidden_a, hidden_b = _actions_for_assignments_and_hidden(
                 env,
                 assignments,
                 model_a=checkpoint_a.model,
                 model_b=checkpoint_b.model,
+                hidden_a=hidden_a,
+                hidden_b=hidden_b,
                 obs_spec_a=checkpoint_a.config.env.obs_spec,
                 obs_spec_b=checkpoint_b.config.env.obs_spec,
                 action_spec_a=checkpoint_a.config.env.action_spec,
@@ -204,6 +209,8 @@ def run_benchmark(
                 deterministic=deterministic,
             )
             obs, rewards, dones, _episode_metrics = env.step_decoded_actions(actions)
+            hidden_a = checkpoint_a.model.reset_hidden_state(hidden_a, dones)
+            hidden_b = checkpoint_b.model.reset_hidden_state(hidden_b, dones)
             steps += n_envs
             terminal_envs = torch.nonzero(dones.all(dim=1), as_tuple=False).flatten()
             terminal_env_set = {int(env_index.item()) for env_index in terminal_envs}
@@ -276,7 +283,7 @@ def _load_checkpoint(path: Path, *, device: torch.device) -> LoadedCheckpoint:
         raise ValueError(f"{path} must contain a checkpoint mapping")
 
     config = FullConfig.from_file(_checkpoint_config_path(path))
-    model = StatelessTransformerV1(
+    model = create_model(
         config.model,
         obs_spec=config.env.obs_spec,
         action_spec=config.env.action_spec,
@@ -299,8 +306,8 @@ def _actions_for_assignments(
     env: VectorizedEnv,
     assignments: torch.Tensor,
     *,
-    model_a: StatelessTransformerV1,
-    model_b: StatelessTransformerV1,
+    model_a: BaseModelAPI,
+    model_b: BaseModelAPI,
     obs_spec_a: ObsConfig,
     obs_spec_b: ObsConfig,
     action_spec_a: ActionConfig,
@@ -310,14 +317,61 @@ def _actions_for_assignments(
     device: torch.device,
     deterministic: bool,
 ) -> DecodedLaunchActions:
+    actions, _hidden_a, _hidden_b = _actions_for_assignments_and_hidden(
+        env,
+        assignments,
+        model_a=model_a,
+        model_b=model_b,
+        hidden_a=None,
+        hidden_b=None,
+        obs_spec_a=obs_spec_a,
+        obs_spec_b=obs_spec_b,
+        action_spec_a=action_spec_a,
+        action_spec_b=action_spec_b,
+        config_a=config_a,
+        config_b=config_b,
+        device=device,
+        deterministic=deterministic,
+    )
+    return actions
+
+
+@torch.inference_mode()
+def _actions_for_assignments_and_hidden(
+    env: VectorizedEnv,
+    assignments: torch.Tensor,
+    *,
+    model_a: BaseModelAPI,
+    model_b: BaseModelAPI,
+    hidden_a: ModelHiddenState | None,
+    hidden_b: ModelHiddenState | None,
+    obs_spec_a: ObsConfig,
+    obs_spec_b: ObsConfig,
+    action_spec_a: ActionConfig,
+    action_spec_b: ActionConfig,
+    config_a: DTypeConfig,
+    config_b: DTypeConfig,
+    device: torch.device,
+    deterministic: bool,
+) -> tuple[DecodedLaunchActions, ModelHiddenState | None, ModelHiddenState | None]:
     obs_a = env.observation_for_spec(obs_spec_a, action_spec_a)
     obs_b = env.observation_for_spec(obs_spec_b, action_spec_b)
     device_obs_a = _obs_to_device(obs_a, device)
     device_obs_b = _obs_to_device(obs_b, device)
     with autocast_context(config_a, device):
-        output_a = model_a(device_obs_a, deterministic=deterministic)
+        output_a = _model_output_for_assignment(
+            model_a,
+            device_obs_a,
+            deterministic=deterministic,
+            hidden_state=hidden_a,
+        )
     with autocast_context(config_b, device):
-        output_b = model_b(device_obs_b, deterministic=deterministic)
+        output_b = _model_output_for_assignment(
+            model_b,
+            device_obs_b,
+            deterministic=deterministic,
+            hidden_state=hidden_b,
+        )
     decoded_a = env.decode_actions(
         _model_actions_to_cpu(output_a.actions),
         action_spec=action_spec_a,
@@ -326,7 +380,23 @@ def _actions_for_assignments(
         _model_actions_to_cpu(output_b.actions),
         action_spec=action_spec_b,
     )
-    return _select_decoded_actions(decoded_a, decoded_b, assignments.eq(MODEL_A))
+    return (
+        _select_decoded_actions(decoded_a, decoded_b, assignments.eq(MODEL_A)),
+        getattr(output_a, "next_hidden_state", None),
+        getattr(output_b, "next_hidden_state", None),
+    )
+
+
+def _model_output_for_assignment(
+    model: BaseModelAPI,
+    obs: ObsBatch,
+    *,
+    deterministic: bool,
+    hidden_state: ModelHiddenState | None,
+) -> Any:
+    if hidden_state is None:
+        return model(obs, deterministic=deterministic)
+    return model(obs, deterministic=deterministic, hidden_state=hidden_state)
 
 
 def _obs_to_device(obs: ObsBatch, device: torch.device) -> ObsBatch:

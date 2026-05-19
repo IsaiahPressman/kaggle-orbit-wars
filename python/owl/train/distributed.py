@@ -16,6 +16,7 @@ from owl.model import (
     InputLayer,
     ModelActions,
     ModelEvaluation,
+    ModelHiddenState,
     ModelOutput,
 )
 from owl.rl import ActionConfig, ObsBatch
@@ -171,18 +172,38 @@ class _DistributedModelDispatch(nn.Module):
         obs: object,
         actions: object | None = None,
         deterministic: bool = False,
+        hidden_state: object | None = None,
+        dones: object | None = None,
     ) -> object:
         if mode == "forward":
-            return self.model(cast(ObsBatch, obs), deterministic=deterministic)
+            if hidden_state is None:
+                return self.model(cast(ObsBatch, obs), deterministic=deterministic)
+            return self.model(
+                cast(ObsBatch, obs),
+                deterministic=deterministic,
+                hidden_state=hidden_state,
+            )
         if mode == "evaluate_actions":
             if actions is None:
                 raise ValueError("actions are required for evaluate_actions")
+            if hidden_state is None and dones is None:
+                return self.model.evaluate_actions(
+                    cast(ObsBatch, obs),
+                    cast(ModelActions, actions),
+                )
             return self.model.evaluate_actions(
                 cast(ObsBatch, obs),
                 cast(ModelActions, actions),
+                hidden_state=hidden_state,
+                dones=cast(torch.Tensor | None, dones),
             )
         if mode == "compute_value":
-            return self.model.compute_value(cast(ObsBatch, obs))
+            if hidden_state is None:
+                return self.model.compute_value(cast(ObsBatch, obs))
+            return self.model.compute_value(
+                cast(ObsBatch, obs),
+                hidden_state=hidden_state,
+            )
         raise ValueError(f"unknown distributed model mode: {mode}")
 
 
@@ -216,21 +237,36 @@ class DistributedModelAdapter(BaseModelAPI):
         obs: ObsBatch,
         *,
         deterministic: bool = False,
+        hidden_state: ModelHiddenState | None = None,
     ) -> ModelOutput:
-        return cast(ModelOutput, self._ddp("forward", obs, None, deterministic))
+        return cast(
+            ModelOutput,
+            self._ddp("forward", obs, None, deterministic, hidden_state, None),
+        )
 
     def evaluate_actions(
         self,
         obs: ObsBatch,
         actions: ModelActions,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+        dones: torch.Tensor | None = None,
     ) -> ModelEvaluation:
         return cast(
             ModelEvaluation,
-            self._ddp("evaluate_actions", obs, actions, False),
+            self._ddp("evaluate_actions", obs, actions, False, hidden_state, dones),
         )
 
-    def compute_value(self, obs: ObsBatch) -> torch.Tensor:
-        return cast(torch.Tensor, self._ddp("compute_value", obs, None, False))
+    def compute_value(
+        self,
+        obs: ObsBatch,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+    ) -> torch.Tensor:
+        return cast(
+            torch.Tensor,
+            self._ddp("compute_value", obs, None, False, hidden_state, None),
+        )
 
     def reset_parameters(self) -> None:
         self.wrapped_model.reset_parameters()
@@ -240,6 +276,34 @@ class DistributedModelAdapter(BaseModelAPI):
 
     def get_output_layers(self) -> tuple[nn.Module, ...]:
         return self.wrapped_model.get_output_layers()
+
+    def initial_hidden_state(
+        self,
+        batch_size: int,
+        *,
+        device: torch.device,
+    ) -> ModelHiddenState | None:
+        return self.wrapped_model.initial_hidden_state(batch_size, device=device)
+
+    def detach_hidden_state(
+        self,
+        hidden_state: ModelHiddenState | None,
+    ) -> ModelHiddenState | None:
+        return self.wrapped_model.detach_hidden_state(hidden_state)
+
+    def index_hidden_state(
+        self,
+        hidden_state: ModelHiddenState | None,
+        indices: torch.Tensor,
+    ) -> ModelHiddenState | None:
+        return self.wrapped_model.index_hidden_state(hidden_state, indices)
+
+    def reset_hidden_state(
+        self,
+        hidden_state: ModelHiddenState | None,
+        dones: torch.Tensor,
+    ) -> ModelHiddenState | None:
+        return self.wrapped_model.reset_hidden_state(hidden_state, dones)
 
 
 def wrap_model_for_distributed(
