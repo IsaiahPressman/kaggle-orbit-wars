@@ -11,6 +11,7 @@ from owl.rl import ActionBundle, ObsBatch
 
 InputLayer = nn.Module | nn.Parameter
 ModelActions: TypeAlias = ActionBundle
+ModelHiddenState: TypeAlias = object
 
 
 @dataclass
@@ -37,6 +38,7 @@ class ModelOutput:
     entropies: ModelActionEntropies
     values: torch.Tensor
     winner_probabilities: torch.Tensor
+    next_hidden_state: ModelHiddenState | None = None
 
 
 @dataclass
@@ -45,6 +47,7 @@ class ModelEvaluation:
     entropies: ModelActionEntropies
     values: torch.Tensor
     winner_probabilities: torch.Tensor
+    next_hidden_state: ModelHiddenState | None = None
 
 
 class BaseModelAPI(nn.Module, ABC):
@@ -54,6 +57,7 @@ class BaseModelAPI(nn.Module, ABC):
         obs: ObsBatch,
         *,
         deterministic: bool = False,
+        hidden_state: ModelHiddenState | None = None,
     ) -> ModelOutput: ...
 
     @abstractmethod
@@ -61,10 +65,18 @@ class BaseModelAPI(nn.Module, ABC):
         self,
         obs: ObsBatch,
         actions: ModelActions,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+        dones: torch.Tensor | None = None,
     ) -> ModelEvaluation: ...
 
     @abstractmethod
-    def compute_value(self, obs: ObsBatch) -> torch.Tensor: ...
+    def compute_value(
+        self,
+        obs: ObsBatch,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+    ) -> torch.Tensor: ...
 
     @abstractmethod
     def reset_parameters(self) -> None: ...
@@ -74,3 +86,31 @@ class BaseModelAPI(nn.Module, ABC):
 
     @abstractmethod
     def get_output_layers(self) -> tuple[nn.Module, ...]: ...
+
+    def initial_hidden_state(
+        self,
+        batch_size: int,  # noqa: ARG002
+        *,
+        device: torch.device,  # noqa: ARG002
+    ) -> ModelHiddenState | None:
+        return None
+
+    def detach_hidden_state(
+        self,
+        hidden_state: ModelHiddenState | None,
+    ) -> ModelHiddenState | None:
+        return hidden_state
+
+    def index_hidden_state(
+        self,
+        hidden_state: ModelHiddenState | None,
+        indices: torch.Tensor,  # noqa: ARG002
+    ) -> ModelHiddenState | None:
+        return hidden_state
+
+    def reset_hidden_state(
+        self,
+        hidden_state: ModelHiddenState | None,
+        dones: torch.Tensor,  # noqa: ARG002
+    ) -> ModelHiddenState | None:
+        return hidden_state

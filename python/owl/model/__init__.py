@@ -5,6 +5,7 @@ from owl.model.base import (
     ModelActionLogProbs,
     ModelActions,
     ModelEvaluation,
+    ModelHiddenState,
     ModelOutput,
 )
 from owl.model.stateless_transformer_v1 import (
@@ -36,6 +37,7 @@ __all__ = [
     "ModelActions",
     "ModelConfig",
     "ModelEvaluation",
+    "ModelHiddenState",
     "ModelOutput",
     "PureActions",
     "StatelessTransformerV1",
