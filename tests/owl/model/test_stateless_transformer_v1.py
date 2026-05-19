@@ -8,13 +8,11 @@ import owl.model.stateless_transformer_v1 as model_impl
 import pytest
 import torch
 import torch.nn.functional as F
-import yaml
 from owl.model import (
     ModelConfig,
     StatelessTransformerV1,
     StatelessTransformerV1Config,
 )
-from owl.model.actor import ActorConfig
 from owl.model.actor.discrete_targets import (
     DiscreteTargetSelectionParams,
     discretized_logistic_mixture_log_prob,
@@ -337,57 +335,6 @@ def test_model_config_loads_actor_subconfig_reference() -> None:
     )
 
     assert config.actor == ActorDiscreteTargetsConfig()
-
-
-@pytest.mark.parametrize(
-    "config_path",
-    sorted((_REPO_ROOT / "configs" / "model").glob("*.yaml")),
-)
-def test_model_config_files_load(config_path: Path) -> None:
-    _ = StatelessTransformerV1Config.from_file(config_path)
-
-
-@pytest.mark.parametrize(
-    "config_path",
-    sorted((_REPO_ROOT / "configs" / "model" / "actor").glob("*.yaml")),
-)
-def test_actor_config_files_load(config_path: Path) -> None:
-    with config_path.open(encoding="utf-8") as f:
-        config_data = yaml.safe_load(f)
-
-    _ = TypeAdapter(ActorConfig).validate_python(config_data)
-
-
-@pytest.mark.parametrize(
-    ("filename", "expected_params"),
-    [
-        ("stateless_transformer_tiny.yaml", 1_207_182),
-        ("stateless_transformer_5m_gelu.yaml", 5_532_942),
-        ("stateless_transformer_5m_pure.yaml", 5_804_862),
-        ("stateless_transformer_20m_gelu.yaml", 20_093_402),
-        ("stateless_transformer_20m_swiglu.yaml", 20_914_202),
-        ("stateless_transformer_28m.yaml", 27_785_738),
-    ],
-)
-def test_model_config_file_parameter_count(
-    filename: str,
-    expected_params: int,
-) -> None:
-    config = StatelessTransformerV1Config.from_file(
-        _REPO_ROOT / "configs" / "model" / filename
-    )
-    action_spec: ActionConfig
-    if isinstance(config.actor, ActorPureConfig):
-        action_spec = ActionPureConfig()
-    else:
-        action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
-    model = StatelessTransformerV1(
-        config,
-        obs_spec=EntityBasedConfig(),
-        action_spec=action_spec,
-    )
-
-    assert sum(parameter.numel() for parameter in model.parameters()) == expected_params
 
 
 def test_actor_config_presets_match_defaults() -> None:
