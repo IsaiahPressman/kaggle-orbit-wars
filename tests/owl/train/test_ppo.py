@@ -413,6 +413,7 @@ class AutocastRecordingModel(TinyOrbitModel):
         self.device_type = device_type
         self.forward_autocast_enabled: list[bool] = []
         self.evaluate_autocast_enabled: list[bool] = []
+        self.compute_value_autocast_enabled: list[bool] = []
 
     def forward(
         self,
@@ -434,6 +435,12 @@ class AutocastRecordingModel(TinyOrbitModel):
             torch.is_autocast_enabled(self.device_type)
         )
         return super().evaluate_actions(obs, actions)
+
+    def compute_value(self, obs: ObsBatch) -> torch.Tensor:
+        self.compute_value_autocast_enabled.append(
+            torch.is_autocast_enabled(self.device_type)
+        )
+        return super().compute_value(obs)
 
 
 class FixedEvaluationModel(BaseModelAPI):
@@ -1011,7 +1018,8 @@ def test_rollout_and_update_model_calls_run_under_autocast() -> None:
         value_clip_anchor=segments.values,
     )
 
-    assert model.forward_autocast_enabled == [True, True, True]
+    assert model.forward_autocast_enabled == [True, True]
+    assert model.compute_value_autocast_enabled == [True]
     assert model.evaluate_autocast_enabled == [True]
 
 

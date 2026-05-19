@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal, Self, cast
+from typing import Any, Literal, Self, cast
 
 import torch
 from pydantic import Field, model_validator
@@ -22,6 +22,7 @@ from owl.model.base import (
 from owl.model.stateless_transformer_v1 import (
     _ACTOR_HEAD_INIT_GAIN,
     _CRITIC_HEAD_INIT_GAIN,
+    EncodedObservations,
     PackedSequence,
     StatelessTransformerV1,
     TransformerBlock,
@@ -114,8 +115,7 @@ class RecurrentTransformerV1(StatelessTransformerV1):
             raise ValueError("recurrent_transformer_v1 requires discrete_targets actor")
         if config.actor.launch_mode != "binary":
             raise ValueError("recurrent_transformer_v1 requires binary launch mode")
-        super().__init__(config, obs_spec=obs_spec, action_spec=action_spec)
-        self.config = config
+        super().__init__(cast(Any, config), obs_spec=obs_spec, action_spec=action_spec)
         self.blocks = nn.ModuleList(
             RecurrentTransformerBlock(config) for _ in range(config.depth)
         )
@@ -298,7 +298,7 @@ class RecurrentTransformerV1(StatelessTransformerV1):
         hidden_state: RecurrentTransformerV1HiddenState,
         dones: torch.Tensor | None,
         sequence_shape: tuple[int, int] | None = None,
-    ) -> tuple[object, RecurrentTransformerV1HiddenState]:
+    ) -> tuple[EncodedObservations, RecurrentTransformerV1HiddenState]:
         if sequence_shape is None:
             batch_size = obs.planets.shape[0]
             time_steps = 1
@@ -448,15 +448,13 @@ class RecurrentTransformerV1(StatelessTransformerV1):
         x: torch.Tensor,
         token_mask: torch.Tensor,
         obs: ObsBatch,
-    ) -> object:
+    ) -> EncodedObservations:
         entity_count = obs.entity_mask.shape[1]
         player_start = entity_count
         global_start = player_start + OUTER_PLAYER_SLOTS
         board_start = global_start + 1
         actor_plan_start = board_start + self.config.n_scratch_tokens
         critic_value_start = actor_plan_start + OUTER_PLAYER_SLOTS
-        from owl.model.stateless_transformer_v1 import EncodedObservations
-
         return EncodedObservations(
             hidden=x,
             token_mask=token_mask,
@@ -482,7 +480,7 @@ class _EncodedInputs:
 class RecurrentTransformerBlock(nn.Module):
     def __init__(self, config: RecurrentTransformerV1Config) -> None:
         super().__init__()
-        self.transformer = TransformerBlock(config)
+        self.transformer = TransformerBlock(cast(Any, config))
         self.recurrent_norm = nn.LayerNorm(config.embed_dim)
         self.recurrent = MinGRU(config.embed_dim)
 
@@ -674,8 +672,7 @@ def _build_packed_recurrent_index(
     )
     rows = torch.arange(packed.batch_size, dtype=torch.long, device=device)
     flat_recurrent = (
-        rows[:, None] * packed.padded_seq_len
-        + token_indices.to(device=device)[None, :]
+        rows[:, None] * packed.padded_seq_len + token_indices.to(device=device)[None, :]
     )
     positions = inverse[flat_recurrent]
     return _PackedRecurrentIndex(

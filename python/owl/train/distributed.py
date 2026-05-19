@@ -181,7 +181,7 @@ class _DistributedModelDispatch(nn.Module):
             return self.model(
                 cast(ObsBatch, obs),
                 deterministic=deterministic,
-                hidden_state=cast(ModelHiddenState | None, hidden_state),
+                hidden_state=hidden_state,
             )
         if mode == "evaluate_actions":
             if actions is None:
@@ -194,7 +194,7 @@ class _DistributedModelDispatch(nn.Module):
             return self.model.evaluate_actions(
                 cast(ObsBatch, obs),
                 cast(ModelActions, actions),
-                hidden_state=cast(ModelHiddenState | None, hidden_state),
+                hidden_state=hidden_state,
                 dones=cast(torch.Tensor | None, dones),
             )
         if mode == "compute_value":
@@ -202,7 +202,7 @@ class _DistributedModelDispatch(nn.Module):
                 return self.model.compute_value(cast(ObsBatch, obs))
             return self.model.compute_value(
                 cast(ObsBatch, obs),
-                hidden_state=cast(ModelHiddenState | None, hidden_state),
+                hidden_state=hidden_state,
             )
         raise ValueError(f"unknown distributed model mode: {mode}")
 

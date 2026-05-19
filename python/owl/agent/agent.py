@@ -111,14 +111,24 @@ class Agent:
         encode_ms = _elapsed_ms(encode_start)
 
         inference_start = perf_counter()
-        if observation.step == 0 or self.hidden_state is None:
-            self.hidden_state = self.model.initial_hidden_state(1, device=self.device)
-        output = self.model(
-            device_obs,
-            deterministic=self.config.deterministic,
-            hidden_state=self.hidden_state,
-        )
-        self.hidden_state = output.next_hidden_state
+        hidden_state = getattr(self, "hidden_state", None)
+        initial_hidden_state = getattr(self.model, "initial_hidden_state", None)
+        if callable(initial_hidden_state):
+            if observation.step == 0 or hidden_state is None:
+                hidden_state = initial_hidden_state(1, device=self.device)
+            output = (
+                self.model(device_obs, deterministic=self.config.deterministic)
+                if hidden_state is None
+                else self.model(
+                    device_obs,
+                    deterministic=self.config.deterministic,
+                    hidden_state=hidden_state,
+                )
+            )
+            self.hidden_state = getattr(output, "next_hidden_state", None)
+        else:
+            output = self.model(device_obs, deterministic=self.config.deterministic)
+            self.hidden_state = None
         self._synchronize_device()
         values = output.values.detach().cpu()[0]
         self_value = float(values[observation.player].item())

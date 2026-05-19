@@ -6,6 +6,7 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
 from owl.model import BaseModelAPI, ModelHiddenState, create_model
@@ -191,7 +192,7 @@ def run_benchmark(
     started_at = time.perf_counter()
     try:
         while games < n_games:
-            actions, hidden_a, hidden_b = _actions_for_assignments(
+            actions, hidden_a, hidden_b = _actions_for_assignments_and_hidden(
                 env,
                 assignments,
                 model_a=checkpoint_a.model,
@@ -307,6 +308,41 @@ def _actions_for_assignments(
     *,
     model_a: BaseModelAPI,
     model_b: BaseModelAPI,
+    obs_spec_a: ObsConfig,
+    obs_spec_b: ObsConfig,
+    action_spec_a: ActionConfig,
+    action_spec_b: ActionConfig,
+    config_a: DTypeConfig,
+    config_b: DTypeConfig,
+    device: torch.device,
+    deterministic: bool,
+) -> DecodedLaunchActions:
+    actions, _hidden_a, _hidden_b = _actions_for_assignments_and_hidden(
+        env,
+        assignments,
+        model_a=model_a,
+        model_b=model_b,
+        hidden_a=None,
+        hidden_b=None,
+        obs_spec_a=obs_spec_a,
+        obs_spec_b=obs_spec_b,
+        action_spec_a=action_spec_a,
+        action_spec_b=action_spec_b,
+        config_a=config_a,
+        config_b=config_b,
+        device=device,
+        deterministic=deterministic,
+    )
+    return actions
+
+
+@torch.inference_mode()
+def _actions_for_assignments_and_hidden(
+    env: VectorizedEnv,
+    assignments: torch.Tensor,
+    *,
+    model_a: BaseModelAPI,
+    model_b: BaseModelAPI,
     hidden_a: ModelHiddenState | None,
     hidden_b: ModelHiddenState | None,
     obs_spec_a: ObsConfig,
@@ -323,13 +359,15 @@ def _actions_for_assignments(
     device_obs_a = _obs_to_device(obs_a, device)
     device_obs_b = _obs_to_device(obs_b, device)
     with autocast_context(config_a, device):
-        output_a = model_a(
+        output_a = _model_output_for_assignment(
+            model_a,
             device_obs_a,
             deterministic=deterministic,
             hidden_state=hidden_a,
         )
     with autocast_context(config_b, device):
-        output_b = model_b(
+        output_b = _model_output_for_assignment(
+            model_b,
             device_obs_b,
             deterministic=deterministic,
             hidden_state=hidden_b,
@@ -344,9 +382,21 @@ def _actions_for_assignments(
     )
     return (
         _select_decoded_actions(decoded_a, decoded_b, assignments.eq(MODEL_A)),
-        output_a.next_hidden_state,
-        output_b.next_hidden_state,
+        getattr(output_a, "next_hidden_state", None),
+        getattr(output_b, "next_hidden_state", None),
     )
+
+
+def _model_output_for_assignment(
+    model: BaseModelAPI,
+    obs: ObsBatch,
+    *,
+    deterministic: bool,
+    hidden_state: ModelHiddenState | None,
+) -> Any:
+    if hidden_state is None:
+        return model(obs, deterministic=deterministic)
+    return model(obs, deterministic=deterministic, hidden_state=hidden_state)
 
 
 def _obs_to_device(obs: ObsBatch, device: torch.device) -> ObsBatch:

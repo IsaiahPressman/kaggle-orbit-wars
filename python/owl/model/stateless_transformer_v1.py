@@ -152,6 +152,7 @@ class StatelessTransformerV1Config(BaseConfig):
             raise ValueError("embed_dim * mlp_ratio must be at least 1")
         return self
 
+
 @dataclass(frozen=True)
 class PackedSequence:
     indices: torch.Tensor
