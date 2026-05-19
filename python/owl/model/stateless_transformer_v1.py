@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Annotated, Literal, Self, TypeAlias, assert_never, cast
+from typing import Literal, Self, assert_never, cast
 
 import torch
 import torch.nn.functional as F
@@ -46,7 +46,9 @@ from owl.model.base import (
     InputLayer,
     ModelActionEntropies,
     ModelActionLogProbs,
+    ModelActions,
     ModelEvaluation,
+    ModelHiddenState,
     ModelOutput,
 )
 from owl.rl import (
@@ -80,7 +82,6 @@ __all__ = [
     "DiscreteTargetsActor",
     "EncodedObservations",
     "FeedForward",
-    "ModelConfig",
     "MultiHeadSelfAttention",
     "OutputProjectionMLP",
     "PackedSequence",
@@ -150,12 +151,6 @@ class StatelessTransformerV1Config(BaseConfig):
         if int(self.embed_dim * self.mlp_ratio) < 1:
             raise ValueError("embed_dim * mlp_ratio must be at least 1")
         return self
-
-
-ModelConfig: TypeAlias = Annotated[
-    StatelessTransformerV1Config, Field(discriminator="model_arch")
-]
-
 
 @dataclass(frozen=True)
 class PackedSequence:
@@ -435,7 +430,10 @@ class StatelessTransformerV1(BaseModelAPI):
         obs: ObsBatch,
         *,
         deterministic: bool = False,
+        hidden_state: ModelHiddenState | None = None,
     ) -> ModelOutput:
+        if hidden_state is not None:
+            raise ValueError("StatelessTransformerV1 does not accept hidden_state")
         encoded = self.encode_observations(obs)
         values, winner_probabilities = self._value_from_encoded(encoded, obs)
         actions, log_probs, entropies = self._actor(
@@ -455,8 +453,15 @@ class StatelessTransformerV1(BaseModelAPI):
     def evaluate_actions(
         self,
         obs: ObsBatch,
-        actions: ActionBundle,
+        actions: ModelActions,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+        dones: torch.Tensor | None = None,
     ) -> ModelEvaluation:
+        if hidden_state is not None:
+            raise ValueError("StatelessTransformerV1 does not accept hidden_state")
+        if dones is not None:
+            raise ValueError("StatelessTransformerV1 does not accept dones")
         encoded = self.encode_observations(obs)
         values, winner_probabilities = self._value_from_encoded(encoded, obs)
         log_probs, entropies = self._actor_log_prob(
@@ -472,7 +477,14 @@ class StatelessTransformerV1(BaseModelAPI):
             winner_probabilities=winner_probabilities,
         )
 
-    def compute_value(self, obs: ObsBatch) -> torch.Tensor:
+    def compute_value(
+        self,
+        obs: ObsBatch,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+    ) -> torch.Tensor:
+        if hidden_state is not None:
+            raise ValueError("StatelessTransformerV1 does not accept hidden_state")
         encoded = self.encode_observations(obs)
         values, _winner_probabilities = self._value_from_encoded(encoded, obs)
         return values

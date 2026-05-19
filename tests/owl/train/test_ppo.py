@@ -12,6 +12,8 @@ from owl.model import (
     ModelActionLogProbs,
     ModelEvaluation,
     ModelOutput,
+    RecurrentTransformerV1,
+    RecurrentTransformerV1Config,
     StatelessTransformerV1,
     StatelessTransformerV1Config,
 )
@@ -1638,6 +1640,45 @@ def test_discrete_target_transformer_train_iteration_keeps_parameters_finite() -
     assert "policy/fleet_size_mixture_entropy" in metrics
     assert "policy/fleet_size_logistic_entropy" in metrics
     assert "policy/event_entropy" not in metrics
+    for parameter in model.parameters():
+        assert torch.isfinite(parameter).all()
+        if parameter.grad is not None:
+            assert torch.isfinite(parameter.grad).all()
+
+
+def test_recurrent_transformer_train_iteration_keeps_parameters_finite() -> None:
+    torch.manual_seed(0)
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model = RecurrentTransformerV1(
+        RecurrentTransformerV1Config(
+            actor=ActorDiscreteTargetsConfig(
+                n_action_mixtures=2,
+                entropy_ship_quantiles=8,
+            ),
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+        ),
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    model.reset_parameters()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segments_per_minibatch=1,
+        ),
+        device=torch.device("cpu"),
+    )
+
+    metrics = trainer.train_iteration()
+
+    assert env.last_target is not None
+    assert torch.isfinite(torch.tensor(list(metrics.values()))).all()
+    assert trainer.rollout.initial_hidden_state is not None
     for parameter in model.parameters():
         assert torch.isfinite(parameter).all()
         if parameter.grad is not None:

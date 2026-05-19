@@ -10,11 +10,11 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, assert_never
+from typing import Any
 
 import torch
 import yaml
-from owl.model import BaseModelAPI, ModelConfig, StatelessTransformerV1
+from owl.model import BaseModelAPI, ModelConfig, create_model
 from owl.replay import ReplayRecorder
 from owl.rl import (
     ActionBundle,
@@ -560,16 +560,8 @@ def _create_model(
     *,
     obs_spec: ObsConfig,
     action_spec: ActionConfig,
-) -> StatelessTransformerV1:
-    match config.model_arch:
-        case "stateless_transformer_v1":
-            return StatelessTransformerV1(
-                config,
-                obs_spec=obs_spec,
-                action_spec=action_spec,
-            )
-        case _:
-            assert_never(config)
+) -> BaseModelAPI:
+    return create_model(config, obs_spec=obs_spec, action_spec=action_spec)
 
 
 def _with_runtime_gpus(cfg: FullConfig, world_size: int) -> FullConfig:

@@ -83,6 +83,69 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
     assert config.runtime.n_runtime_gpus == 1
 
 
+def test_full_config_accepts_recurrent_transformer_discrete_targets() -> None:
+    config = FullConfig.model_validate(
+        {
+            "env": {
+                "n_envs": 2,
+                "action_spec": {
+                    "action_spec": "discrete_targets",
+                    "max_per_planet_launches": 1,
+                },
+            },
+            "model": {
+                "model_arch": "recurrent_transformer_v1",
+                "embed_dim": 32,
+                "depth": 1,
+                "n_heads": 4,
+                "actor": {"action_spec": "discrete_targets"},
+            },
+            "optimizer": {
+                "optimizer": "adamw",
+                "learning_rate": 0.001,
+            },
+            "rl": {
+                "horizon": 4,
+            },
+        }
+    )
+
+    assert config.model.model_arch == "recurrent_transformer_v1"
+    assert config.model.actor.launch_mode == "binary"
+
+
+def test_full_config_rejects_recurrent_transformer_non_binary_launch_mode() -> None:
+    with pytest.raises(ValueError, match="binary launch mode"):
+        FullConfig.model_validate(
+            {
+                "env": {
+                    "n_envs": 2,
+                    "action_spec": {
+                        "action_spec": "discrete_targets",
+                        "max_per_planet_launches": 1,
+                    },
+                },
+                "model": {
+                    "model_arch": "recurrent_transformer_v1",
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                    "actor": {
+                        "action_spec": "discrete_targets",
+                        "launch_mode": "target_token",
+                    },
+                },
+                "optimizer": {
+                    "optimizer": "adamw",
+                    "learning_rate": 0.001,
+                },
+                "rl": {
+                    "horizon": 4,
+                },
+            }
+        )
+
+
 def test_full_config_defaults_to_single_launch_actions() -> None:
     config = FullConfig.model_validate(
         {

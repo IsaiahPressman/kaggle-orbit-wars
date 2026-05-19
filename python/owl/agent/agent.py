@@ -5,7 +5,7 @@ import torch
 from pydantic import ConfigDict, Field
 
 from owl.config import BaseConfig
-from owl.model import ModelConfig, StatelessTransformerV1
+from owl.model import ModelConfig, ModelHiddenState, create_model
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     ActionBundle,
@@ -71,11 +71,12 @@ class Agent:
         )
         self._last_turn_value = float("nan")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = StatelessTransformerV1(
+        self.model = create_model(
             self.checkpoint_config.model,
             obs_spec=self.checkpoint_config.env.obs_spec,
             action_spec=self.checkpoint_config.env.action_spec,
         ).to(self.device)
+        self.hidden_state: ModelHiddenState | None = None
         checkpoint = torch.load(
             checkpoint_path,
             map_location=self.device,
@@ -110,10 +111,14 @@ class Agent:
         encode_ms = _elapsed_ms(encode_start)
 
         inference_start = perf_counter()
+        if observation.step == 0 or self.hidden_state is None:
+            self.hidden_state = self.model.initial_hidden_state(1, device=self.device)
         output = self.model(
             device_obs,
             deterministic=self.config.deterministic,
+            hidden_state=self.hidden_state,
         )
+        self.hidden_state = output.next_hidden_state
         self._synchronize_device()
         values = output.values.detach().cpu()[0]
         self_value = float(values[observation.player].item())
