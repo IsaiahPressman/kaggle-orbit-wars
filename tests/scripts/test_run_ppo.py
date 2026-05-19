@@ -336,6 +336,10 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
             stats,
             {
                 "game_length_mean": [12.0],
+                "_neutral_planets_captured_per_game": [1.0],
+                "_neutral_comets_captured_per_game": [2.0],
+                "_neutral_planet_undershots_per_game": [3.0],
+                "_neutral_comet_undershots_per_game": [4.0],
             },
             6,
         )
@@ -358,6 +362,9 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
     assert metrics["eval/win_rate_against_last_best_2p"] == pytest.approx(1.0)
     assert metrics["eval/win_rate_against_last_best_4p"] == pytest.approx(0.0)
     assert metrics["eval/game_length_mean"] == pytest.approx(12.0)
+    assert metrics["eval/neutral_planet_undershot_rate"] == pytest.approx(0.75)
+    assert metrics["eval/neutral_comet_undershot_rate"] == pytest.approx(2.0 / 3.0)
+    assert "eval/_neutral_planets_captured_per_game" not in metrics
     assert metrics["time/eval_seconds"] == pytest.approx(4.0)
     assert metrics["perf/eval_sps"] == pytest.approx(3.0)
     assert seen_eval_sizes == [(2, 2), (2, 2)]

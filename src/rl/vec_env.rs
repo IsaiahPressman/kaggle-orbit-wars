@@ -2647,6 +2647,22 @@ fn terminal_metrics_to_py(py: Python<'_>, metrics: &TerminalEpisodeMetrics) -> P
     for (player, win_rate) in &metrics.win_rates {
         dict.set_item(format!("win_rate_player_{player}"), *win_rate)?;
     }
+    dict.set_item(
+        "_neutral_planets_captured_per_game",
+        metrics.neutral_planets_captured,
+    )?;
+    dict.set_item(
+        "_neutral_comets_captured_per_game",
+        metrics.neutral_comets_captured,
+    )?;
+    dict.set_item(
+        "_neutral_planet_undershots_per_game",
+        metrics.neutral_planet_undershots,
+    )?;
+    dict.set_item(
+        "_neutral_comet_undershots_per_game",
+        metrics.neutral_comet_undershots,
+    )?;
     Ok(dict.into_any().unbind())
 }
 

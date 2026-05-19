@@ -396,6 +396,10 @@ def test_vectorized_env_terminal_snapshot_preserves_pre_reset_state() -> None:
     assert terminal_snapshot is not None
     terminal_metrics = env.terminal_metrics(0)
     assert terminal_metrics is not None
+    assert "_neutral_planets_captured_per_game" in terminal_metrics
+    assert "_neutral_comets_captured_per_game" in terminal_metrics
+    assert "_neutral_planet_undershots_per_game" in terminal_metrics
+    assert "_neutral_comet_undershots_per_game" in terminal_metrics
     assert terminal_snapshot["step"] > obs.global_features[0, 0].item()
     assert terminal_snapshot["player_count"] == 2
 
