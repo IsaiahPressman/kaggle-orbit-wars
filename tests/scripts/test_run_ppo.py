@@ -516,6 +516,125 @@ def test_eval_actions_for_assignments_uses_stochastic_model_outputs() -> None:
     assert actions.ships[0, :, 0, 0].tolist() == [3, 7, 3, 7]
 
 
+def test_evaluate_player_count_carries_recurrent_hidden_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def obs_batch(n_envs: int) -> ObsBatch:
+        return ObsBatch(
+            planets=torch.zeros((n_envs, 1, 1)),
+            orbiting_planets=torch.zeros((n_envs, 1), dtype=torch.bool),
+            fleets=torch.zeros((n_envs, 1, 1)),
+            comets=torch.zeros((n_envs, 1, 1)),
+            entity_mask=torch.zeros((n_envs, 1), dtype=torch.bool),
+            still_playing=torch.tensor(
+                [[True, True, False, False] for _ in range(n_envs)],
+                dtype=torch.bool,
+            ),
+            global_features=torch.zeros((n_envs, 1)),
+            can_act=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
+            max_launch=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+        )
+
+    class FakeEnv:
+        def __init__(self, *, n_envs: int, **_kwargs: object) -> None:
+            self.n_envs = n_envs
+            self.steps = 0
+
+        def reset(self) -> ObsBatch:
+            return obs_batch(self.n_envs)
+
+        def step(
+            self,
+            actions: run_ppo.ActionBundle,  # noqa: ARG002
+        ) -> tuple[ObsBatch, torch.Tensor, torch.Tensor, dict[str, list[float]]]:
+            self.steps += 1
+            rewards = torch.zeros((self.n_envs, 4), dtype=torch.float32)
+            dones = torch.zeros((self.n_envs, 4), dtype=torch.bool)
+            if self.steps == 2:
+                dones.fill_(True)
+            return obs_batch(self.n_envs), rewards, dones, {}
+
+        def terminal_metrics(self, env_index: int) -> dict[str, float]:  # noqa: ARG002
+            return {"game_length_mean": 2.0}
+
+    class RecordingRecurrentModel:
+        def __init__(self, *, initial: float, launch_value: bool) -> None:
+            self.initial = initial
+            self.launch_value = launch_value
+            self.seen_hidden: list[torch.Tensor] = []
+            self.reset_dones: list[torch.Tensor] = []
+
+        def initial_hidden_state(
+            self,
+            batch_size: int,
+            *,
+            device: torch.device,
+        ) -> torch.Tensor:
+            return torch.full((batch_size,), self.initial, device=device)
+
+        def __call__(
+            self,
+            obs: ObsBatch,
+            *,
+            deterministic: bool = False,
+            hidden_state: torch.Tensor | None = None,
+        ) -> SimpleNamespace:
+            assert not deterministic
+            assert hidden_state is not None
+            self.seen_hidden.append(hidden_state.detach().cpu().clone())
+            n_envs = obs.global_features.shape[0]
+            shape = (n_envs, 4, ACTION_ENTITY_SLOTS, 1)
+            actions = run_ppo.PureActions(
+                launch=torch.full(shape, self.launch_value, dtype=torch.bool),
+                angle=torch.zeros(shape, dtype=torch.float32),
+                ships=torch.ones(shape, dtype=torch.int64),
+            )
+            return SimpleNamespace(
+                actions=actions,
+                next_hidden_state=hidden_state + 1.0,
+            )
+
+        def reset_hidden_state(
+            self,
+            hidden_state: torch.Tensor | None,
+            dones: torch.Tensor,
+        ) -> torch.Tensor | None:
+            assert hidden_state is not None
+            self.reset_dones.append(dones.detach().cpu().clone())
+            keep = ~dones.all(dim=1).to(device=hidden_state.device)
+            return hidden_state * keep.to(dtype=hidden_state.dtype)
+
+    monkeypatch.setattr(run_ppo, "VectorizedEnv", FakeEnv)
+    current_model = RecordingRecurrentModel(initial=0.0, launch_value=True)
+    last_best_model = RecordingRecurrentModel(initial=10.0, launch_value=False)
+
+    stats, env_metrics, steps = run_ppo._evaluate_player_count(
+        current_model=current_model,
+        last_best_model=last_best_model,
+        cfg=_config_with_envs(2),
+        player_count=2,
+        n_games=2,
+        n_envs=2,
+        device=torch.device("cpu"),
+    )
+
+    assert steps == 4
+    assert env_metrics == {"game_length_mean": [2.0, 2.0]}
+    assert stats.model_games == [2, 2]
+    assert [hidden.tolist() for hidden in current_model.seen_hidden] == [
+        [0.0, 0.0],
+        [1.0, 1.0],
+    ]
+    assert [hidden.tolist() for hidden in last_best_model.seen_hidden] == [
+        [10.0, 10.0],
+        [11.0, 11.0],
+    ]
+    assert [dones.any().item() for dones in current_model.reset_dones] == [
+        False,
+        True,
+    ]
+
+
 def test_select_actions_handles_discrete_target_bundles() -> None:
     shape = (1, 4, ACTION_ENTITY_SLOTS, 1)
     actions_a = run_ppo.DiscreteTargetActions(

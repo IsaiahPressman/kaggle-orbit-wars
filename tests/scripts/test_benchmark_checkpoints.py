@@ -374,6 +374,124 @@ def test_actions_for_assignments_uses_each_checkpoint_action_spec(
     assert actions.ships[0, :, 0].tolist() == [3, 7, 3, 7]
 
 
+def test_actions_for_assignments_and_hidden_returns_next_hidden_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeModel:
+        def __init__(self, *, launch_value: bool, initial_seen: float) -> None:
+            self.launch_value = launch_value
+            self.initial_seen = initial_seen
+            self.seen_hidden: list[torch.Tensor] = []
+
+        def __call__(
+            self,
+            obs: ObsBatch,
+            *,
+            deterministic: bool = False,
+            hidden_state: torch.Tensor | None = None,
+        ) -> SimpleNamespace:
+            assert deterministic
+            assert hidden_state is not None
+            self.seen_hidden.append(hidden_state.detach().cpu().clone())
+            shape = (obs.global_features.shape[0], 4, ACTION_ENTITY_SLOTS, 1)
+            actions = benchmark_checkpoints.PureActions(
+                launch=torch.full(shape, self.launch_value, dtype=torch.bool),
+                angle=torch.zeros(shape, dtype=torch.float32),
+                ships=torch.ones(shape, dtype=torch.int64),
+            )
+            return SimpleNamespace(
+                actions=actions,
+                next_hidden_state=hidden_state + self.initial_seen,
+            )
+
+    class FakeEnv:
+        def observation_for_spec(
+            self,
+            obs_spec: benchmark_checkpoints.ObsConfig,
+            action_spec: ActionPureConfig,  # noqa: ARG002
+        ) -> ObsBatch:
+            return ObsBatch(
+                planets=torch.zeros((2, 1, obs_spec.planet_channels)),
+                orbiting_planets=torch.zeros((2, 1), dtype=torch.bool),
+                fleets=torch.zeros((2, 1, obs_spec.fleet_channels)),
+                comets=torch.zeros((2, 1, obs_spec.comet_channels)),
+                entity_mask=torch.zeros((2, obs_spec.max_entities), dtype=torch.bool),
+                still_playing=torch.ones((2, 4), dtype=torch.bool),
+                global_features=torch.zeros((2, obs_spec.global_channels)),
+                action_mask=PureActionMask(
+                    can_act=torch.zeros((2, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
+                    max_launch=torch.zeros(
+                        (2, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64
+                    ),
+                ),
+            )
+
+        def decode_actions(
+            self,
+            actions: benchmark_checkpoints.ActionBundle,
+            *,
+            action_spec: ActionPureConfig,  # noqa: ARG002
+        ) -> DecodedLaunchActions:
+            valid = torch.zeros((2, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool)
+            valid[:, :, 0] = actions.launch[:, :, 0, 0]
+            ships = torch.zeros((2, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
+            ships[:, :, 0] = actions.ships[:, :, 0, 0]
+            return DecodedLaunchActions(
+                valid=valid,
+                from_planet_id=torch.zeros_like(ships),
+                angle=torch.zeros((2, 4, ACTION_ENTITY_SLOTS), dtype=torch.float32),
+                ships=ships,
+            )
+
+    @contextmanager
+    def fake_autocast_context(
+        cfg: Namespace,  # noqa: ARG001
+        device: torch.device,  # noqa: ARG001
+    ) -> Iterator[None]:
+        yield
+
+    monkeypatch.setattr(
+        benchmark_checkpoints,
+        "autocast_context",
+        fake_autocast_context,
+    )
+    model_a = FakeModel(launch_value=True, initial_seen=1.0)
+    model_b = FakeModel(launch_value=False, initial_seen=10.0)
+
+    actions, hidden_a, hidden_b = (
+        benchmark_checkpoints._actions_for_assignments_and_hidden(
+            FakeEnv(),
+            torch.tensor(
+                [
+                    [0, 1, 0, 1],
+                    [1, 0, 1, 0],
+                ]
+            ),
+            model_a=model_a,
+            model_b=model_b,
+            hidden_a=torch.tensor([1.0, 2.0]),
+            hidden_b=torch.tensor([3.0, 4.0]),
+            obs_spec_a=EntityBasedConfig(),
+            obs_spec_b=EntityBasedConfig(),
+            action_spec_a=ActionPureConfig(max_per_planet_launches=1),
+            action_spec_b=ActionPureConfig(max_per_planet_launches=1),
+            config_a=Namespace(dtype="float32"),
+            config_b=Namespace(dtype="float32"),
+            device=torch.device("cpu"),
+            deterministic=True,
+        )
+    )
+
+    assert [hidden.tolist() for hidden in model_a.seen_hidden] == [[1.0, 2.0]]
+    assert [hidden.tolist() for hidden in model_b.seen_hidden] == [[3.0, 4.0]]
+    assert hidden_a.tolist() == [2.0, 3.0]
+    assert hidden_b.tolist() == [13.0, 14.0]
+    assert actions.valid[:, :, 0].tolist() == [
+        [True, False, True, False],
+        [False, True, False, True],
+    ]
+
+
 def test_select_decoded_actions_pads_to_larger_action_capacity() -> None:
     actions_a = DecodedLaunchActions(
         valid=torch.ones((1, 4, 1), dtype=torch.bool),

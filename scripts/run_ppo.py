@@ -14,7 +14,13 @@ from typing import Any
 
 import torch
 import yaml
-from owl.model import BaseModelAPI, ModelConfig, create_model
+from owl.model import (
+    BaseModelAPI,
+    ModelConfig,
+    ModelHiddenState,
+    ModelOutput,
+    create_model,
+)
 from owl.replay import ReplayRecorder
 from owl.rl import (
     ActionBundle,
@@ -839,16 +845,24 @@ def _evaluate_player_count(
     steps = 0
     stats = _EvalStats.empty()
     env_metrics: dict[str, list[float]] = {}
+    hidden_current = current_model.initial_hidden_state(n_envs, device=device)
+    hidden_last_best = last_best_model.initial_hidden_state(n_envs, device=device)
     while games < n_games:
-        actions = _eval_actions_for_assignments(
-            obs,
-            assignments,
-            current_model=current_model,
-            last_best_model=last_best_model,
-            config=cfg.rl,
-            device=device,
+        actions, hidden_current, hidden_last_best = (
+            _eval_actions_for_assignments_and_hidden(
+                obs,
+                assignments,
+                current_model=current_model,
+                last_best_model=last_best_model,
+                hidden_current=hidden_current,
+                hidden_last_best=hidden_last_best,
+                config=cfg.rl,
+                device=device,
+            )
         )
         obs, rewards, dones, _step_env_metrics = env.step(actions)
+        hidden_current = current_model.reset_hidden_state(hidden_current, dones)
+        hidden_last_best = last_best_model.reset_hidden_state(hidden_last_best, dones)
         steps += n_envs
         terminal_envs = torch.nonzero(dones.all(dim=1), as_tuple=False).flatten()
         terminal_env_set = {int(env_index.item()) for env_index in terminal_envs}
@@ -1000,14 +1014,64 @@ def _eval_actions_for_assignments(
     config: DTypeConfig,
     device: torch.device,
 ) -> ActionBundle:
+    actions, _hidden_current, _hidden_last_best = (
+        _eval_actions_for_assignments_and_hidden(
+            obs,
+            assignments,
+            current_model=current_model,
+            last_best_model=last_best_model,
+            hidden_current=None,
+            hidden_last_best=None,
+            config=config,
+            device=device,
+        )
+    )
+    return actions
+
+
+def _eval_actions_for_assignments_and_hidden(
+    obs: ObsBatch,
+    assignments: torch.Tensor,
+    *,
+    current_model: BaseModelAPI,
+    last_best_model: BaseModelAPI,
+    hidden_current: ModelHiddenState | None,
+    hidden_last_best: ModelHiddenState | None,
+    config: DTypeConfig,
+    device: torch.device,
+) -> tuple[ActionBundle, ModelHiddenState | None, ModelHiddenState | None]:
     device_obs = _obs_to_device(obs, device)
     with autocast_context(config, device):
-        current_output = current_model(device_obs, deterministic=False)
-        last_best_output = last_best_model(device_obs, deterministic=False)
+        current_output = _model_output_for_eval(
+            current_model,
+            device_obs,
+            deterministic=False,
+            hidden_state=hidden_current,
+        )
+        last_best_output = _model_output_for_eval(
+            last_best_model,
+            device_obs,
+            deterministic=False,
+            hidden_state=hidden_last_best,
+        )
     use_current = assignments.to(device=device).eq(MODEL_CURRENT)
-    return _select_actions(
-        current_output.actions, last_best_output.actions, use_current
+    return (
+        _select_actions(current_output.actions, last_best_output.actions, use_current),
+        getattr(current_output, "next_hidden_state", None),
+        getattr(last_best_output, "next_hidden_state", None),
     )
+
+
+def _model_output_for_eval(
+    model: BaseModelAPI,
+    obs: ObsBatch,
+    *,
+    deterministic: bool,
+    hidden_state: ModelHiddenState | None,
+) -> ModelOutput:
+    if hidden_state is None:
+        return model(obs, deterministic=deterministic)
+    return model(obs, deterministic=deterministic, hidden_state=hidden_state)
 
 
 def _obs_to_device(obs: ObsBatch, device: torch.device) -> ObsBatch:
