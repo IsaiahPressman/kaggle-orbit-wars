@@ -410,6 +410,49 @@ class VectorizedEnv:
             action_mask=self.action_mask_for_spec(action_spec),
         )
 
+    def observation_for_spec(
+        self,
+        obs_spec: ObsConfig,
+        action_spec: ActionConfig,
+    ) -> ObsBatch:
+        if self._uses_cached_observation(obs_spec, action_spec):
+            return self.observation_for_action_spec(action_spec)
+
+        obs = self._allocate_observations(
+            pin_memory=self.pin_memory_enabled,
+            obs_spec=obs_spec,
+            action_spec=action_spec,
+        )
+        self._rust.write_observation(
+            obs_spec.obs_spec,
+            action_spec.action_spec,
+            obs_spec.max_entities,
+            obs_spec.ship_count_one_hot_encoder_max,
+            action_spec.min_fleet_size,
+            getattr(action_spec, "n_bins", 0),
+            getattr(action_spec, "targeting_mode", "full_mask"),
+            obs.planets.numpy(),
+            obs.orbiting_planets.numpy(),
+            obs.fleets.numpy(),
+            obs.comets.numpy(),
+            obs.entity_mask.numpy(),
+            obs.still_playing.numpy(),
+            obs.global_features.numpy(),
+            obs.can_act.numpy(),
+            None if obs.max_launch is None else obs.max_launch.numpy(),
+        )
+        return obs
+
+    def _uses_cached_observation(
+        self,
+        obs_spec: ObsConfig,
+        action_spec: ActionConfig,
+    ) -> bool:
+        return (
+            obs_spec == self.obs_spec
+            and action_spec.min_fleet_size == self.action_spec.min_fleet_size
+        )
+
     def decode_actions(
         self,
         actions: ActionBundle,
@@ -687,8 +730,16 @@ class VectorizedEnv:
         )
         return self.observations, self.rewards, self.dones, episode_metrics
 
-    def _allocate_observations(self, *, pin_memory: bool) -> ObsBatch:
-        can_act_shape = _can_act_shape(self.n_envs, self.n_players, self.action_spec)
+    def _allocate_observations(
+        self,
+        *,
+        pin_memory: bool,
+        obs_spec: ObsConfig | None = None,
+        action_spec: ActionConfig | None = None,
+    ) -> ObsBatch:
+        obs_spec = self.obs_spec if obs_spec is None else obs_spec
+        action_spec = self.action_spec if action_spec is None else action_spec
+        can_act_shape = _can_act_shape(self.n_envs, self.n_players, action_spec)
         can_act = torch.zeros(
             can_act_shape,
             dtype=torch.bool,
@@ -696,19 +747,19 @@ class VectorizedEnv:
         )
         max_launch = (
             None
-            if isinstance(self.action_spec, ActionDiscreteTargetBinsConfig)
+            if isinstance(action_spec, ActionDiscreteTargetBinsConfig)
             else torch.zeros(
                 (self.n_envs, self.n_players, ACTION_ENTITY_SLOTS),
                 dtype=torch.int64,
                 pin_memory=pin_memory,
             )
         )
-        if isinstance(self.action_spec, ActionPureConfig):
+        if isinstance(action_spec, ActionPureConfig):
             action_mask: ActionMask = PureActionMask(
                 can_act=can_act,
                 max_launch=cast(torch.Tensor, max_launch),
             )
-        elif isinstance(self.action_spec, ActionDiscreteTargetsConfig):
+        elif isinstance(action_spec, ActionDiscreteTargetsConfig):
             action_mask = DiscreteTargetActionMask(
                 can_act=can_act,
                 max_launch=cast(torch.Tensor, max_launch),
@@ -719,22 +770,22 @@ class VectorizedEnv:
             planets=torch.zeros(
                 (
                     self.n_envs,
-                    self.obs_spec.max_planets,
-                    self.obs_spec.planet_channels,
+                    obs_spec.max_planets,
+                    obs_spec.planet_channels,
                 ),
                 dtype=torch.float32,
                 pin_memory=pin_memory,
             ),
             orbiting_planets=torch.zeros(
-                (self.n_envs, self.obs_spec.max_planets),
+                (self.n_envs, obs_spec.max_planets),
                 dtype=torch.bool,
                 pin_memory=pin_memory,
             ),
             fleets=torch.zeros(
                 (
                     self.n_envs,
-                    self.obs_spec.max_fleets,
-                    self.obs_spec.fleet_channels,
+                    obs_spec.max_fleets,
+                    obs_spec.fleet_channels,
                 ),
                 dtype=torch.float32,
                 pin_memory=pin_memory,
@@ -742,14 +793,14 @@ class VectorizedEnv:
             comets=torch.zeros(
                 (
                     self.n_envs,
-                    self.obs_spec.max_comets,
-                    self.obs_spec.comet_channels,
+                    obs_spec.max_comets,
+                    obs_spec.comet_channels,
                 ),
                 dtype=torch.float32,
                 pin_memory=pin_memory,
             ),
             entity_mask=torch.zeros(
-                (self.n_envs, self.obs_spec.max_entities),
+                (self.n_envs, obs_spec.max_entities),
                 dtype=torch.bool,
                 pin_memory=pin_memory,
             ),
@@ -759,7 +810,7 @@ class VectorizedEnv:
                 pin_memory=pin_memory,
             ),
             global_features=torch.zeros(
-                (self.n_envs, self.obs_spec.global_channels),
+                (self.n_envs, obs_spec.global_channels),
                 dtype=torch.float32,
                 pin_memory=pin_memory,
             ),

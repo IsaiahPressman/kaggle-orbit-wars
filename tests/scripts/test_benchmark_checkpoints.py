@@ -17,6 +17,8 @@ from owl.rl import (
     ActionPureConfig,
     DecodedLaunchActions,
     DiscreteTargetActionMask,
+    EntityBasedConfig,
+    EntityBasedExtV1Config,
     ObsBatch,
     PureActionMask,
 )
@@ -157,14 +159,15 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context(
 
     class FakeEnv:
         def __init__(self) -> None:
-            self.observed_specs: list[str] = []
+            self.observed_specs: list[tuple[str, str]] = []
             self.decoded_specs: list[str] = []
 
-        def observation_for_action_spec(
+        def observation_for_spec(
             self,
+            obs_spec: benchmark_checkpoints.ObsConfig,
             action_spec: ActionPureConfig,
         ) -> ObsBatch:
-            self.observed_specs.append(action_spec.action_spec)
+            self.observed_specs.append((obs_spec.obs_spec, action_spec.action_spec))
             return ObsBatch(
                 planets=torch.zeros((1, 1, 1)),
                 orbiting_planets=torch.zeros((1, 1), dtype=torch.bool),
@@ -226,6 +229,8 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context(
         assignments,
         model_a=FakeModel(launch_value=True, ship_value=3),
         model_b=FakeModel(launch_value=False, ship_value=7),
+        obs_spec_a=EntityBasedConfig(),
+        obs_spec_b=EntityBasedConfig(),
         action_spec_a=ActionPureConfig(max_per_planet_launches=1),
         action_spec_b=ActionPureConfig(max_per_planet_launches=1),
         config_a=Namespace(dtype="bfloat16"),
@@ -234,7 +239,10 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context(
         deterministic=True,
     )
 
-    assert env.observed_specs == ["pure", "pure"]
+    assert env.observed_specs == [
+        ("entity_based", "pure"),
+        ("entity_based", "pure"),
+    ]
     assert env.decoded_specs == ["pure", "pure"]
     assert seen == [
         ("bfloat16", torch.device("cpu")),
@@ -249,14 +257,15 @@ def test_actions_for_assignments_uses_each_checkpoint_action_spec(
 ) -> None:
     class FakeEnv:
         def __init__(self) -> None:
-            self.observed_specs: list[str] = []
+            self.observed_specs: list[tuple[str, str]] = []
             self.decoded_specs: list[str] = []
 
-        def observation_for_action_spec(
+        def observation_for_spec(
             self,
+            obs_spec: benchmark_checkpoints.ObsConfig,
             action_spec: benchmark_checkpoints.ActionConfig,
         ) -> ObsBatch:
-            self.observed_specs.append(action_spec.action_spec)
+            self.observed_specs.append((obs_spec.obs_spec, action_spec.action_spec))
             if isinstance(action_spec, ActionDiscreteTargetsConfig):
                 action_mask = DiscreteTargetActionMask(
                     can_act=torch.zeros(
@@ -275,13 +284,13 @@ def test_actions_for_assignments_uses_each_checkpoint_action_spec(
                     ),
                 )
             return ObsBatch(
-                planets=torch.zeros((1, 1, 1)),
+                planets=torch.zeros((1, 1, obs_spec.planet_channels)),
                 orbiting_planets=torch.zeros((1, 1), dtype=torch.bool),
-                fleets=torch.zeros((1, 1, 1)),
-                comets=torch.zeros((1, 1, 1)),
-                entity_mask=torch.zeros((1, 1), dtype=torch.bool),
+                fleets=torch.zeros((1, 1, obs_spec.fleet_channels)),
+                comets=torch.zeros((1, 1, obs_spec.comet_channels)),
+                entity_mask=torch.zeros((1, obs_spec.max_entities), dtype=torch.bool),
                 still_playing=torch.ones((1, 4), dtype=torch.bool),
-                global_features=torch.zeros((1, 1)),
+                global_features=torch.zeros((1, obs_spec.global_channels)),
                 action_mask=action_mask,
             )
 
@@ -347,6 +356,8 @@ def test_actions_for_assignments_uses_each_checkpoint_action_spec(
         torch.tensor([[0, 1, 0, 1]]),
         model_a=FakeModel(),
         model_b=FakeModel(),
+        obs_spec_a=EntityBasedConfig(max_entities=128),
+        obs_spec_b=EntityBasedExtV1Config(max_entities=256, ship_count_one_hot_max=5),
         action_spec_a=ActionPureConfig(max_per_planet_launches=1),
         action_spec_b=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
         config_a=Namespace(dtype="float32"),
@@ -355,34 +366,12 @@ def test_actions_for_assignments_uses_each_checkpoint_action_spec(
         deterministic=True,
     )
 
-    assert env.observed_specs == ["pure", "discrete_targets"]
+    assert env.observed_specs == [
+        ("entity_based", "pure"),
+        ("entity_based_ext_v1", "discrete_targets"),
+    ]
     assert env.decoded_specs == ["pure", "discrete_targets"]
     assert actions.ships[0, :, 0].tolist() == [3, 7, 3, 7]
-
-
-def test_validate_compatible_checkpoints_allows_different_action_specs() -> None:
-    obs_spec = object()
-    checkpoint_a = SimpleNamespace(
-        config=SimpleNamespace(
-            env=SimpleNamespace(
-                obs_spec=obs_spec,
-                action_spec=ActionPureConfig(max_per_planet_launches=1),
-            )
-        )
-    )
-    checkpoint_b = SimpleNamespace(
-        config=SimpleNamespace(
-            env=SimpleNamespace(
-                obs_spec=obs_spec,
-                action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
-            )
-        )
-    )
-
-    benchmark_checkpoints._validate_compatible_checkpoints(
-        checkpoint_a,
-        checkpoint_b,
-    )
 
 
 def test_select_decoded_actions_pads_to_larger_action_capacity() -> None:

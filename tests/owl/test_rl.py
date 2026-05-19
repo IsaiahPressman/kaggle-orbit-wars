@@ -629,6 +629,70 @@ def test_vectorized_env_writes_action_masks_for_alternate_specs() -> None:
     assert target_obs.action_mask.can_act.shape == target_mask.can_act.shape
 
 
+def test_vectorized_env_reuses_cached_observation_only_for_same_encoding_spec() -> None:
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionPureConfig(max_per_planet_launches=1, min_fleet_size=6),
+        pin_memory=False,
+    )
+    env.reset()
+
+    same_encoding_obs = env.observation_for_spec(
+        env.obs_spec,
+        ActionDiscreteTargetsConfig(max_per_planet_launches=1, min_fleet_size=6),
+    )
+    different_encoding_obs = env.observation_for_spec(
+        env.obs_spec,
+        ActionDiscreteTargetsConfig(max_per_planet_launches=1, min_fleet_size=7),
+    )
+
+    assert same_encoding_obs.planets is env.observations.planets
+    assert same_encoding_obs.fleets is env.observations.fleets
+    assert different_encoding_obs.planets is not env.observations.planets
+    assert different_encoding_obs.fleets is not env.observations.fleets
+    assert torch.equal(
+        different_encoding_obs.still_playing, env.observations.still_playing
+    )
+
+
+def test_vectorized_env_writes_observations_for_alternate_specs() -> None:
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 1),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+        two_player_weight=1.0,
+        pin_memory=False,
+    )
+    obs = env.reset()
+    obs_spec = EntityBasedExtV1Config(
+        max_entities=MAX_PLANETS + MAX_COMETS + 2,
+        ship_count_one_hot_max=5,
+    )
+    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+
+    alternate_obs = env.observation_for_spec(obs_spec, action_spec)
+
+    assert alternate_obs.planets.shape == (
+        1,
+        MAX_PLANETS,
+        obs_spec.planet_channels,
+    )
+    assert alternate_obs.fleets.shape == (
+        1,
+        obs_spec.max_fleets,
+        obs_spec.fleet_channels,
+    )
+    assert alternate_obs.entity_mask.shape == (1, obs_spec.max_entities)
+    assert alternate_obs.action_mask.can_act.shape == (
+        1,
+        4,
+        ACTION_ENTITY_SLOTS,
+        ACTION_ENTITY_SLOTS,
+    )
+    assert torch.equal(alternate_obs.still_playing, obs.still_playing)
+
+
 def test_step_decoded_actions_validates_shapes() -> None:
     env = VectorizedEnv(
         n_envs=1,

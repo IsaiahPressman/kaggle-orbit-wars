@@ -16,7 +16,7 @@ use super::action_spec::{
     action_entity_slots, decode_discrete_target_actions, decode_discrete_target_bin_actions,
     decode_pure_actions, ActionEntitySlots, RlActionSpec,
 };
-use super::obs_spec::encode_state_with_action_slots;
+use super::obs_spec::{encode_state, encode_state_with_action_slots};
 use super::{
     log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
     DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, MAX_COMETS, MAX_PLANETS,
@@ -34,6 +34,15 @@ type ObsShapes = (
     Vec<usize>,
     (usize, usize, usize),
 );
+
+#[derive(Clone, Copy)]
+struct ObsBufferSpec {
+    max_entities: usize,
+    max_fleets: usize,
+    planet_channels: usize,
+    fleet_channels: usize,
+    ship_count_one_hot_max: Option<i32>,
+}
 
 #[pyclass(name = "RlVecEnv")]
 pub struct PyRlVecEnv {
@@ -563,6 +572,181 @@ impl PyRlVecEnv {
                     min_fleet_size,
                 );
             });
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_observation(
+        &self,
+        obs_spec: &str,
+        action_spec: &str,
+        max_entities: usize,
+        ship_count_one_hot_max: usize,
+        min_fleet_size: i64,
+        n_bins: usize,
+        targeting_mode: &str,
+        planet_obs: PyReadwriteArrayDyn<'_, f32>,
+        orbiting_planet_obs: PyReadwriteArrayDyn<'_, bool>,
+        fleet_obs: PyReadwriteArrayDyn<'_, f32>,
+        comet_obs: PyReadwriteArrayDyn<'_, f32>,
+        entity_mask: PyReadwriteArrayDyn<'_, bool>,
+        still_playing: PyReadwriteArrayDyn<'_, bool>,
+        global_obs: PyReadwriteArrayDyn<'_, f32>,
+        can_act: PyReadwriteArrayDyn<'_, bool>,
+        max_launch: Option<PyReadwriteArrayDyn<'_, i64>>,
+    ) -> PyResult<()> {
+        let obs_buffers =
+            parse_obs_spec_for_buffers(obs_spec, max_entities, ship_count_one_hot_max)?;
+        let action_spec =
+            parse_action_spec_for_buffers(action_spec, n_bins, min_fleet_size, targeting_mode)?;
+        require_observation_shapes(
+            self.n_envs,
+            obs_buffers,
+            action_spec,
+            &planet_obs,
+            &orbiting_planet_obs,
+            &fleet_obs,
+            &comet_obs,
+            &entity_mask,
+            &still_playing,
+            &global_obs,
+            &can_act,
+            max_launch.as_ref(),
+        )?;
+
+        let mut planet_obs = planet_obs;
+        let mut orbiting_planet_obs = orbiting_planet_obs;
+        let mut fleet_obs = fleet_obs;
+        let mut comet_obs = comet_obs;
+        let mut entity_mask = entity_mask;
+        let mut still_playing = still_playing;
+        let mut global_obs = global_obs;
+        let mut can_act = can_act;
+        let mut max_launch = max_launch;
+
+        let planets_per_env = MAX_PLANETS * obs_buffers.planet_channels;
+        let orbiting_planets_per_env = MAX_PLANETS;
+        let fleets_per_env = obs_buffers.max_fleets * obs_buffers.fleet_channels;
+        let comets_per_env = MAX_COMETS * COMET_CHANNELS;
+        let action_masks_per_env = action_spec.can_act_len();
+        let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
+
+        let ignored_fleets: usize = if let Some(max_launch) = max_launch.as_mut() {
+            self.states
+                .par_iter()
+                .zip_eq(self.player_maps.par_iter())
+                .zip_eq(self.player_finished.par_iter())
+                .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
+                .zip_eq(
+                    orbiting_planet_obs
+                        .as_slice_mut()?
+                        .par_chunks_mut(orbiting_planets_per_env),
+                )
+                .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
+                .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
+                .zip_eq(
+                    entity_mask
+                        .as_slice_mut()?
+                        .par_chunks_mut(obs_buffers.max_entities),
+                )
+                .zip_eq(
+                    still_playing
+                        .as_slice_mut()?
+                        .par_chunks_mut(OUTER_PLAYER_SLOTS),
+                )
+                .zip_eq(global_obs.as_slice_mut()?.par_chunks_mut(GLOBAL_CHANNELS))
+                .zip_eq(can_act.as_slice_mut()?.par_chunks_mut(action_masks_per_env))
+                .zip_eq(
+                    max_launch
+                        .as_slice_mut()?
+                        .par_chunks_mut(max_launch_per_env),
+                )
+                .map(|item| {
+                    let (item, max_launch) = item;
+                    let (item, can_act) = item;
+                    let (item, global_obs) = item;
+                    let (item, still_playing) = item;
+                    let (item, entity_mask) = item;
+                    let (item, comet_obs) = item;
+                    let (item, fleet_obs) = item;
+                    let (item, orbiting_planet_obs) = item;
+                    let (item, planet_obs) = item;
+                    let ((state, player_map), player_finished) = item;
+                    write_one_current_obs(
+                        state,
+                        player_map,
+                        player_finished,
+                        action_spec,
+                        obs_buffers,
+                        min_fleet_size,
+                        planet_obs,
+                        orbiting_planet_obs,
+                        fleet_obs,
+                        comet_obs,
+                        entity_mask,
+                        still_playing,
+                        global_obs,
+                        can_act,
+                        Some(max_launch),
+                    )
+                })
+                .sum()
+        } else {
+            self.states
+                .par_iter()
+                .zip_eq(self.player_maps.par_iter())
+                .zip_eq(self.player_finished.par_iter())
+                .zip_eq(planet_obs.as_slice_mut()?.par_chunks_mut(planets_per_env))
+                .zip_eq(
+                    orbiting_planet_obs
+                        .as_slice_mut()?
+                        .par_chunks_mut(orbiting_planets_per_env),
+                )
+                .zip_eq(fleet_obs.as_slice_mut()?.par_chunks_mut(fleets_per_env))
+                .zip_eq(comet_obs.as_slice_mut()?.par_chunks_mut(comets_per_env))
+                .zip_eq(
+                    entity_mask
+                        .as_slice_mut()?
+                        .par_chunks_mut(obs_buffers.max_entities),
+                )
+                .zip_eq(
+                    still_playing
+                        .as_slice_mut()?
+                        .par_chunks_mut(OUTER_PLAYER_SLOTS),
+                )
+                .zip_eq(global_obs.as_slice_mut()?.par_chunks_mut(GLOBAL_CHANNELS))
+                .zip_eq(can_act.as_slice_mut()?.par_chunks_mut(action_masks_per_env))
+                .map(|item| {
+                    let (item, can_act) = item;
+                    let (item, global_obs) = item;
+                    let (item, still_playing) = item;
+                    let (item, entity_mask) = item;
+                    let (item, comet_obs) = item;
+                    let (item, fleet_obs) = item;
+                    let (item, orbiting_planet_obs) = item;
+                    let (item, planet_obs) = item;
+                    let ((state, player_map), player_finished) = item;
+                    write_one_current_obs(
+                        state,
+                        player_map,
+                        player_finished,
+                        action_spec,
+                        obs_buffers,
+                        min_fleet_size,
+                        planet_obs,
+                        orbiting_planet_obs,
+                        fleet_obs,
+                        comet_obs,
+                        entity_mask,
+                        still_playing,
+                        global_obs,
+                        can_act,
+                        None,
+                    )
+                })
+                .sum()
+        };
+        log_ignored_fleets(ignored_fleets);
         Ok(())
     }
 
@@ -1959,6 +2143,118 @@ fn require_min_fleet_size(min_fleet_size: i64) -> PyResult<()> {
     }
 }
 
+fn parse_obs_spec_for_buffers(
+    obs_spec: &str,
+    max_entities: usize,
+    ship_count_one_hot_max: usize,
+) -> PyResult<ObsBufferSpec> {
+    if obs_spec != "entity_based" && obs_spec != "entity_based_ext_v1" {
+        return Err(PyValueError::new_err(format!(
+            "unsupported obs_spec {obs_spec:?}; expected \"entity_based\" or \"entity_based_ext_v1\""
+        )));
+    }
+    if obs_spec == "entity_based" && ship_count_one_hot_max != 0 {
+        return Err(PyValueError::new_err(
+            "entity_based requires ship_count_one_hot_max=0",
+        ));
+    }
+    if obs_spec == "entity_based_ext_v1" && ship_count_one_hot_max == 0 {
+        return Err(PyValueError::new_err(
+            "entity_based_ext_v1 requires ship_count_one_hot_max > 0",
+        ));
+    }
+    if max_entities <= MAX_PLANETS + MAX_COMETS {
+        return Err(PyValueError::new_err(format!(
+            "max_entities must be greater than MAX_PLANETS + MAX_COMETS ({})",
+            MAX_PLANETS + MAX_COMETS
+        )));
+    }
+    let ship_count_one_hot_max = if ship_count_one_hot_max == 0 {
+        None
+    } else {
+        Some(
+            i32::try_from(ship_count_one_hot_max)
+                .map_err(|_| PyValueError::new_err("ship_count_one_hot_max must fit in i32"))?,
+        )
+    };
+    let planet_extra_ship_count_channels = ship_count_one_hot_max.map_or(0, |max| max as usize + 1);
+    let fleet_extra_ship_count_channels = ship_count_one_hot_max.map_or(0, |max| max as usize);
+    Ok(ObsBufferSpec {
+        max_entities,
+        max_fleets: max_entities - (MAX_PLANETS + MAX_COMETS),
+        planet_channels: PLANET_CHANNELS + planet_extra_ship_count_channels,
+        fleet_channels: FLEET_CHANNELS + fleet_extra_ship_count_channels,
+        ship_count_one_hot_max,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn require_observation_shapes(
+    n_envs: usize,
+    obs_spec: ObsBufferSpec,
+    action_spec: RlActionSpec,
+    planet_obs: &PyReadwriteArrayDyn<'_, f32>,
+    orbiting_planet_obs: &PyReadwriteArrayDyn<'_, bool>,
+    fleet_obs: &PyReadwriteArrayDyn<'_, f32>,
+    comet_obs: &PyReadwriteArrayDyn<'_, f32>,
+    entity_mask: &PyReadwriteArrayDyn<'_, bool>,
+    still_playing: &PyReadwriteArrayDyn<'_, bool>,
+    global_obs: &PyReadwriteArrayDyn<'_, f32>,
+    can_act: &PyReadwriteArrayDyn<'_, bool>,
+    max_launch: Option<&PyReadwriteArrayDyn<'_, i64>>,
+) -> PyResult<()> {
+    require_shape(
+        "planet_obs",
+        planet_obs.shape(),
+        &[n_envs, MAX_PLANETS, obs_spec.planet_channels],
+    )?;
+    require_shape(
+        "orbiting_planet_obs",
+        orbiting_planet_obs.shape(),
+        &[n_envs, MAX_PLANETS],
+    )?;
+    require_shape(
+        "fleet_obs",
+        fleet_obs.shape(),
+        &[n_envs, obs_spec.max_fleets, obs_spec.fleet_channels],
+    )?;
+    require_shape(
+        "comet_obs",
+        comet_obs.shape(),
+        &[n_envs, MAX_COMETS, COMET_CHANNELS],
+    )?;
+    require_shape(
+        "entity_mask",
+        entity_mask.shape(),
+        &[n_envs, obs_spec.max_entities],
+    )?;
+    require_shape(
+        "still_playing",
+        still_playing.shape(),
+        &[n_envs, OUTER_PLAYER_SLOTS],
+    )?;
+    require_shape("global_obs", global_obs.shape(), &[n_envs, GLOBAL_CHANNELS])?;
+    require_can_act_shape("can_act", can_act.shape(), n_envs, action_spec)?;
+    if matches!(action_spec, RlActionSpec::DiscreteTargetBins { .. }) {
+        if max_launch.is_some() {
+            return Err(PyValueError::new_err(
+                "max_launch must be omitted for discrete_target_bins observations",
+            ));
+        }
+        return Ok(());
+    }
+    let Some(max_launch) = max_launch else {
+        return Err(PyValueError::new_err(
+            "max_launch is required for pure and discrete_targets observations",
+        ));
+    };
+    require_shape(
+        "max_launch",
+        max_launch.shape(),
+        &[n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS],
+    )
+}
+
 fn require_can_act_shape(
     name: &str,
     actual: &[usize],
@@ -2957,6 +3253,49 @@ fn write_one_obs(
         can_act,
         max_launch,
         action_slots,
+        min_fleet_size,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_one_current_obs(
+    state: &State,
+    player_map: &PlayerMap,
+    player_finished: &[bool],
+    action_spec: RlActionSpec,
+    obs_spec: ObsBufferSpec,
+    min_fleet_size: i64,
+    planet_obs: &mut [f32],
+    orbiting_planet_obs: &mut [bool],
+    fleet_obs: &mut [f32],
+    comet_obs: &mut [f32],
+    entity_mask: &mut [bool],
+    still_playing: &mut [bool],
+    global_obs: &mut [f32],
+    can_act: &mut [bool],
+    max_launch: Option<&mut [i64]>,
+) -> usize {
+    write_still_playing(state, player_map, player_finished, still_playing);
+    let (planet_mask, tail_mask) = entity_mask.split_at_mut(MAX_PLANETS);
+    let (comet_mask, fleet_mask) = tail_mask.split_at_mut(MAX_COMETS);
+    encode_state(
+        action_spec,
+        state,
+        player_map,
+        obs_spec.max_fleets,
+        obs_spec.planet_channels,
+        obs_spec.fleet_channels,
+        obs_spec.ship_count_one_hot_max,
+        planet_obs,
+        orbiting_planet_obs,
+        fleet_obs,
+        comet_obs,
+        planet_mask,
+        fleet_mask,
+        comet_mask,
+        global_obs,
+        can_act,
+        max_launch,
         min_fleet_size,
     )
 }

@@ -527,13 +527,21 @@ as `discrete_targets`.
 ## Decoded Launch Actions
 
 `VectorizedEnv` can expose action masks for action specs other than the env's
-construction spec, decode model actions from those specs, and step the simulator
-with a common launch representation. This is intended for evaluation code that
-benchmarks checkpoints trained with different action specs against each other.
+construction spec, expose observations for observation specs other than the
+env's construction spec, decode model actions from those specs, and step the
+simulator with a common launch representation. This is intended for evaluation
+code that benchmarks checkpoints trained with different observation or action
+specs against each other.
 
 ```python
-obs_a = env.observation_for_action_spec(checkpoint_a.config.env.action_spec)
-obs_b = env.observation_for_action_spec(checkpoint_b.config.env.action_spec)
+obs_a = env.observation_for_spec(
+    checkpoint_a.config.env.obs_spec,
+    checkpoint_a.config.env.action_spec,
+)
+obs_b = env.observation_for_spec(
+    checkpoint_b.config.env.obs_spec,
+    checkpoint_b.config.env.action_spec,
+)
 decoded_a = env.decode_actions(output_a.actions, action_spec=checkpoint_a.config.env.action_spec)
 decoded_b = env.decode_actions(output_b.actions, action_spec=checkpoint_b.config.env.action_spec)
 obs, rewards, dones, episode_metrics = env.step_decoded_actions(selected_decoded)

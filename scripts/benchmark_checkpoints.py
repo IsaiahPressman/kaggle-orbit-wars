@@ -20,6 +20,7 @@ from owl.rl import (
     DiscreteTargetBinActionMask,
     DiscreteTargetBinActions,
     ObsBatch,
+    ObsConfig,
     PureActionMask,
     PureActions,
     VectorizedEnv,
@@ -87,7 +88,6 @@ def main() -> None:
     device = torch.device(args.device)
     checkpoint_a = _load_checkpoint(args.checkpoint_a, device=device)
     checkpoint_b = _load_checkpoint(args.checkpoint_b, device=device)
-    _validate_compatible_checkpoints(checkpoint_a, checkpoint_b)
 
     per_player_count_games = args.n_games // len(PLAYER_COUNTS)
     results = [
@@ -194,6 +194,8 @@ def run_benchmark(
                 assignments,
                 model_a=checkpoint_a.model,
                 model_b=checkpoint_b.model,
+                obs_spec_a=checkpoint_a.config.env.obs_spec,
+                obs_spec_b=checkpoint_b.config.env.obs_spec,
                 action_spec_a=checkpoint_a.config.env.action_spec,
                 action_spec_b=checkpoint_b.config.env.action_spec,
                 config_a=checkpoint_a.config.rl,
@@ -292,16 +294,6 @@ def _checkpoint_config_path(checkpoint_path: Path) -> Path:
     return config_path
 
 
-def _validate_compatible_checkpoints(
-    checkpoint_a: LoadedCheckpoint,
-    checkpoint_b: LoadedCheckpoint,
-) -> None:
-    env_a = checkpoint_a.config.env
-    env_b = checkpoint_b.config.env
-    if env_a.obs_spec != env_b.obs_spec:
-        raise ValueError("checkpoint observation specs must match")
-
-
 @torch.inference_mode()
 def _actions_for_assignments(
     env: VectorizedEnv,
@@ -309,6 +301,8 @@ def _actions_for_assignments(
     *,
     model_a: StatelessTransformerV1,
     model_b: StatelessTransformerV1,
+    obs_spec_a: ObsConfig,
+    obs_spec_b: ObsConfig,
     action_spec_a: ActionConfig,
     action_spec_b: ActionConfig,
     config_a: DTypeConfig,
@@ -316,8 +310,8 @@ def _actions_for_assignments(
     device: torch.device,
     deterministic: bool,
 ) -> DecodedLaunchActions:
-    obs_a = env.observation_for_action_spec(action_spec_a)
-    obs_b = env.observation_for_action_spec(action_spec_b)
+    obs_a = env.observation_for_spec(obs_spec_a, action_spec_a)
+    obs_b = env.observation_for_spec(obs_spec_b, action_spec_b)
     device_obs_a = _obs_to_device(obs_a, device)
     device_obs_b = _obs_to_device(obs_b, device)
     with autocast_context(config_a, device):

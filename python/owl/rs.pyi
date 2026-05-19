@@ -126,6 +126,25 @@ class RlVecEnv:
         targeting_mode: str,
         can_act: np.ndarray,
     ) -> None: ...
+    def write_observation(
+        self,
+        obs_spec: str,
+        action_spec: str,
+        max_entities: int,
+        ship_count_one_hot_max: int,
+        min_fleet_size: int,
+        n_bins: int,
+        targeting_mode: str,
+        planet_obs: np.ndarray,
+        orbiting_planet_obs: np.ndarray,
+        fleet_obs: np.ndarray,
+        comet_obs: np.ndarray,
+        entity_mask: np.ndarray,
+        still_playing: np.ndarray,
+        global_obs: np.ndarray,
+        can_act: np.ndarray,
+        max_launch: np.ndarray | None,
+    ) -> None: ...
     def decode_pure_actions(
         self,
         launch: np.ndarray,
