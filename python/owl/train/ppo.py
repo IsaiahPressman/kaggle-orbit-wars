@@ -88,6 +88,7 @@ class PPOConfig(BaseConfig):
     checkpoint_freq: int | None = Field(default=None, ge=1_000)
     ppo_epochs: int = Field(default=1, ge=1)
     segments_per_minibatch: int = Field(default=1, ge=1)
+    gradient_accumulation_steps: int = Field(default=1, ge=1)
     gamma: float = Field(default=1.0, ge=0.0, le=1.0)
     gae_lambda: float = Field(default=0.95, ge=0.0, le=1.0)
     clip_coef: float = Field(default=0.2, ge=0.0)
@@ -383,6 +384,7 @@ class PPOTrainer:
             world_size=1,
             initialized=False,
         )
+        _validate_minibatch_divisibility(env.n_envs, config)
         self.n_envs = env.n_envs
         self.optimizer_steps = 0
         self.player_step_total = 0
@@ -640,7 +642,10 @@ class PPOTrainer:
         n_minibatches = len(update_samples)
         sampled_segments = 0
         target_kl_exceeded = False
-        for sample_indices in update_samples:
+        accumulation_steps = self.config.gradient_accumulation_steps
+        for sample_index, sample_indices in enumerate(update_samples):
+            if sample_index % accumulation_steps == 0:
+                self.optimizer.zero_grad(set_to_none=True)
             sampled_segments += int(sample_indices.numel())
             update = self._update_minibatch(
                 segments,
@@ -650,12 +655,15 @@ class PPOTrainer:
                 value_mask,
                 sample_indices,
                 value_clip_anchor=current_values,
+                loss_scale=1.0 / accumulation_steps,
+                step_optimizer=False,
             )
             loss_metrics.append(update.metrics)
-            grad_norms.append(update.grad_norm.detach())
             current_values[update.indices] = update.new_values
-            target_kl_exceeded = update.target_kl_exceeded
-            if target_kl_exceeded:
+            target_kl_exceeded = target_kl_exceeded or update.target_kl_exceeded
+            if (sample_index + 1) % accumulation_steps == 0:
+                grad_norms.append(self._step_optimizer().detach())
+            if target_kl_exceeded and (sample_index + 1) % accumulation_steps == 0:
                 break
 
         if not loss_metrics:
@@ -692,6 +700,8 @@ class PPOTrainer:
         indices: torch.Tensor,
         *,
         value_clip_anchor: torch.Tensor,
+        loss_scale: float = 1.0,
+        step_optimizer: bool = True,
     ) -> _PPOUpdateResult:
         idx = indices
         batch_segment_actions = _actions_index(segments.actions, idx)
@@ -757,15 +767,13 @@ class PPOTrainer:
                 for name, component in entropy_components.items()
             },
         )
-        self.optimizer.zero_grad(set_to_none=True)
-        backward_loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(), self.config.max_grad_norm
-        )
-        self.optimizer.step()
-        self.optimizer_steps += 1
-        if self.lr_scheduler is not None:
-            self.lr_scheduler.step()
+        if step_optimizer:
+            self.optimizer.zero_grad(set_to_none=True)
+        (backward_loss * loss_scale).backward()
+        if step_optimizer:
+            grad_norm = self._step_optimizer()
+        else:
+            grad_norm = backward_loss.detach().new_zeros(())
         target_kl_exceeded = (
             self.config.target_kl is not None
             and metrics.approx_kl.item() > self.config.target_kl
@@ -778,6 +786,16 @@ class PPOTrainer:
             grad_norm=grad_norm.detach(),
             target_kl_exceeded=target_kl_exceeded,
         )
+
+    def _step_optimizer(self) -> torch.Tensor:
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            self.model.parameters(), self.config.max_grad_norm
+        )
+        self.optimizer.step()
+        self.optimizer_steps += 1
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
+        return grad_norm
 
     def _mean_policy_metric(
         self,
@@ -1642,11 +1660,21 @@ def _minibatch_indices(
     n_segments: int,
     device: torch.device,
 ) -> list[torch.Tensor]:
+    _validate_minibatch_divisibility(n_segments, config)
     samples: list[torch.Tensor] = []
     for _epoch in range(config.ppo_epochs):
         permutation = torch.randperm(n_segments, device=device)
         samples.extend(permutation.split(config.segments_per_minibatch))
     return samples
+
+
+def _validate_minibatch_divisibility(n_envs: int, config: PPOConfig) -> None:
+    divisor = config.segments_per_minibatch * config.gradient_accumulation_steps
+    if n_envs % divisor != 0:
+        raise ValueError(
+            "n_envs must be divisible by segments_per_minibatch * "
+            "gradient_accumulation_steps"
+        )
 
 
 def _masked_max_or_zero(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:

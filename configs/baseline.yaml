@@ -31,6 +31,7 @@ rl:
   checkpoint_freq: 20_000_000
   ppo_epochs: 1
   segments_per_minibatch: 16
+  gradient_accumulation_steps: 1
   # gamma=1.0 keeps the critic softmax well-defined
   gamma: 1.0
   gae_lambda: 0.9

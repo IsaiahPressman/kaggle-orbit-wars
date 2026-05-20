@@ -14,6 +14,7 @@ def test_ppo_config_validates_with_pydantic() -> None:
         {
             "horizon": 4,
             "segments_per_minibatch": 2,
+            "gradient_accumulation_steps": 2,
             "ppo_epochs": 3,
             "gamma": 0.9,
         }
@@ -21,6 +22,7 @@ def test_ppo_config_validates_with_pydantic() -> None:
 
     assert config.horizon == 4
     assert config.segments_per_minibatch == 2
+    assert config.gradient_accumulation_steps == 2
     assert config.ppo_epochs == 3
     assert config.gamma == pytest.approx(0.9)
     assert config.checkpoint_freq is None
@@ -34,6 +36,8 @@ def test_ppo_config_validates_with_pydantic() -> None:
         PPOConfig(eval_replay_games=1)
     with pytest.raises(ValueError, match="greater than or equal to 1"):
         PPOConfig(ppo_epochs=0)
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        PPOConfig(gradient_accumulation_steps=0)
 
     assert PPOConfig(dtype="bfloat16").dtype == "bfloat16"
 
@@ -354,6 +358,38 @@ def test_full_config_rejects_rl_env_count() -> None:
                 "rl": {
                     "horizon": 4,
                     "n_envs": 3,
+                },
+            }
+        )
+
+
+def test_full_config_rejects_minibatch_accumulation_that_does_not_divide_envs() -> None:
+    with pytest.raises(
+        ValueError,
+        match=(
+            "env.n_envs must be divisible by rl.segments_per_minibatch "
+            r"\* rl.gradient_accumulation_steps"
+        ),
+    ):
+        FullConfig.model_validate(
+            {
+                "env": {
+                    "n_envs": 4,
+                },
+                "model": {
+                    "model_arch": "stateless_transformer_v1",
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                },
+                "optimizer": {
+                    "optimizer": "adamw",
+                    "learning_rate": 0.001,
+                },
+                "rl": {
+                    "horizon": 4,
+                    "segments_per_minibatch": 2,
+                    "gradient_accumulation_steps": 3,
                 },
             }
         )

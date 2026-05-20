@@ -87,10 +87,13 @@ the model first.
 Training `EnvConfig.n_envs` must be even so periodic checkpoint evaluation can
 split evaluation games across 2-player and 4-player batches. PPO updates run
 `rl.ppo_epochs` full-shuffle passes over rollout segments, grouped by
-`rl.segments_per_minibatch`. In distributed PPO launches, `EnvConfig.n_envs`,
-rollout horizon, and minibatch segment width are per GPU. Checkpoint cadence,
-`--max-env-steps`, W&B step values, and `train/env_steps` are counted across all
-ranks.
+`rl.segments_per_minibatch`; set `rl.gradient_accumulation_steps` above `1` to
+accumulate multiple minibatches before each optimizer step. `EnvConfig.n_envs`
+must be divisible by
+`rl.segments_per_minibatch * rl.gradient_accumulation_steps`. In distributed PPO
+launches, `EnvConfig.n_envs`, rollout horizon, minibatch segment width, and
+gradient accumulation are per GPU. Checkpoint cadence, `--max-env-steps`, W&B
+step values, and `train/env_steps` are counted across all ranks.
 PPO supports `pure`, `discrete_targets`, and `discrete_target_bins` action specs
 when the `StatelessTransformerV1` actor discriminator matches the environment
 action spec. The current discrete-target actor requires

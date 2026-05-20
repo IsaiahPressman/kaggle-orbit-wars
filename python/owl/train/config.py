@@ -22,7 +22,7 @@ class FullConfig(BaseConfig):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 
     @model_validator(mode="after")
-    def _validate_model_env_action_spec(self) -> Self:
+    def _validate_cross_config_constraints(self) -> Self:
         if self.model.actor.action_spec != self.env.action_spec.action_spec:
             raise ValueError("model actor action_spec must match env action_spec")
         if (
@@ -31,6 +31,12 @@ class FullConfig(BaseConfig):
             and self.model.actor.n_bins != self.env.action_spec.n_bins
         ):
             raise ValueError("model actor n_bins must match env action_spec n_bins")
+        divisor = self.rl.segments_per_minibatch * self.rl.gradient_accumulation_steps
+        if self.env.n_envs % divisor != 0:
+            raise ValueError(
+                "env.n_envs must be divisible by rl.segments_per_minibatch * "
+                "rl.gradient_accumulation_steps"
+            )
         return self
 
     @classmethod

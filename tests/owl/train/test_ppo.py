@@ -990,6 +990,53 @@ def test_trainer_total_games_played_is_cumulative() -> None:
     assert trainer.total_games_played == 8
 
 
+def test_trainer_accumulates_gradients_before_optimizer_step() -> None:
+    torch.manual_seed(0)
+    env = TinyOrbitEnv(n_envs=4, episode_length=3)
+    model = TinyOrbitModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segments_per_minibatch=1,
+            gradient_accumulation_steps=2,
+        ),
+        device=torch.device("cpu"),
+    )
+
+    metrics = trainer.train_iteration()
+
+    assert metrics["optimizer/minibatches_per_update"] == pytest.approx(4.0)
+    assert metrics["optimizer/steps"] == pytest.approx(2.0)
+    assert trainer.optimizer_steps == 2
+
+
+def test_trainer_rejects_accumulation_group_that_does_not_divide_envs() -> None:
+    env = TinyOrbitEnv(n_envs=4)
+    model = TinyOrbitModel()
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "n_envs must be divisible by segments_per_minibatch "
+            r"\* gradient_accumulation_steps"
+        ),
+    ):
+        ppo.PPOTrainer(
+            env=env,
+            model=model,
+            optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+            config=ppo.PPOConfig(
+                horizon=2,
+                segments_per_minibatch=2,
+                gradient_accumulation_steps=3,
+            ),
+            device=torch.device("cpu"),
+        )
+
+
 def test_rollout_and_update_model_calls_run_under_autocast() -> None:
     torch.manual_seed(0)
     env = TinyOrbitEnv(n_envs=2, episode_length=3)
@@ -1212,7 +1259,7 @@ def test_ppo_epoch_one_uses_shuffled_single_pass_minibatches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     torch.manual_seed(7)
-    env = TinyOrbitEnv(n_envs=5)
+    env = TinyOrbitEnv(n_envs=6)
     model = TinyOrbitModel()
     trainer = ppo.PPOTrainer(
         env=env,
@@ -1241,6 +1288,8 @@ def test_ppo_epoch_one_uses_shuffled_single_pass_minibatches(
         indices: torch.Tensor,
         *,
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
+        loss_scale: float = 1.0,  # noqa: ARG001
+        step_optimizer: bool = True,  # noqa: ARG001
     ) -> ppo._PPOUpdateResult:
         seen.append(indices.detach().clone())
         zero = segments.logp.new_zeros(())
@@ -1261,14 +1310,14 @@ def test_ppo_epoch_one_uses_shuffled_single_pass_minibatches(
         value_mask,
     )
 
-    assert [indices.shape for indices in seen] == [(2,), (2,), (1,)]
+    assert [indices.shape for indices in seen] == [(2,), (2,), (2,)]
     all_indices = torch.cat(seen)
-    assert torch.equal(all_indices.sort().values, torch.arange(5))
+    assert torch.equal(all_indices.sort().values, torch.arange(6))
     assert metrics["optimizer/minibatches_per_update"] == pytest.approx(3.0)
     assert "optimizer/num_minibatches" not in metrics
     assert "optimizer/num_total_minibatches" not in metrics
     assert "sampling/minibatch_exposure" not in metrics
-    assert sampled_segments == 5
+    assert sampled_segments == 6
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(0.0)
 
 
@@ -1306,6 +1355,8 @@ def test_update_reports_target_kl_guard_when_exceeded(
         indices: torch.Tensor,
         *,
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
+        loss_scale: float = 1.0,  # noqa: ARG001
+        step_optimizer: bool = True,  # noqa: ARG001
     ) -> ppo._PPOUpdateResult:
         nonlocal update_calls
         update_calls += 1
@@ -1363,6 +1414,8 @@ def test_train_iteration_update_sps_uses_actual_segments_when_target_kl_stops_up
         indices: torch.Tensor,
         *,
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
+        loss_scale: float = 1.0,  # noqa: ARG001
+        step_optimizer: bool = True,  # noqa: ARG001
     ) -> ppo._PPOUpdateResult:
         zero = segments.logp.new_zeros(())
         metrics = replace(_zero_loss_metrics(zero), approx_kl=zero + 0.02)
