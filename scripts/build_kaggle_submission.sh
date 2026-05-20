@@ -14,6 +14,9 @@ Arguments:
 
 Options:
   -o, --output PATH  Tarball path to write.
+  --quantization FORMAT
+                     Optional slim-checkpoint quantization format:
+                     fp8_e4m3fn or fp4_e2m1fn_x2_scaled_block16.
   -h, --help         Show this help.
 EOF
 }
@@ -21,6 +24,7 @@ EOF
 checkpoint_path=""
 output_path="submission.tar.gz"
 output_path_set=0
+quantization=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,6 +39,14 @@ while [[ $# -gt 0 ]]; do
       fi
       output_path="$2"
       output_path_set=1
+      shift 2
+      ;;
+    --quantization)
+      if [[ $# -lt 2 ]]; then
+        echo "$1 requires a format argument" >&2
+        exit 2
+      fi
+      quantization="$2"
       shift 2
       ;;
     -*)
@@ -141,7 +153,11 @@ find "$stage_dir/submission" -type d -name "__pycache__" -prune -exec rm -rf {} 
 find "$stage_dir/submission" -type f -name "*.pyc" -delete
 
 slim_checkpoint_path="$stage_dir/$(basename "$checkpoint_path")"
-"${uv_run[@]}" python scripts/extract_model_weights.py "$checkpoint_path" "$slim_checkpoint_path"
+extract_args=(scripts/extract_model_weights.py "$checkpoint_path" "$slim_checkpoint_path")
+if [[ -n "$quantization" ]]; then
+  extract_args+=(--quantization "$quantization")
+fi
+"${uv_run[@]}" python "${extract_args[@]}"
 cp "$slim_checkpoint_path" "$stage_dir/submission/$(basename "$checkpoint_path")"
 cp "$model_config_path" "$stage_dir/submission/config.yaml"
 cp "$entrypoint_path" "$stage_dir/submission/main.py"
