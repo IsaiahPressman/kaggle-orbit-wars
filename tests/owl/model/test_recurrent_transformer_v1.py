@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import pytest
 import torch
 from owl.model import (
@@ -11,6 +13,7 @@ from owl.model import (
 from owl.model.recurrent_transformer_v1 import MinGRU
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
+    MAX_PLANETS,
     OUTER_PLAYER_SLOTS,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
@@ -180,6 +183,18 @@ def test_recurrent_model_config_has_discriminator_tag() -> None:
 
     assert isinstance(config, RecurrentTransformerV1Config)
     assert config.actor.launch_mode == "binary"
+    assert config.recurrence_mode == "global_only"
+
+    include_planets_config = TypeAdapter(ModelConfig).validate_python(
+        {
+            "model_arch": "recurrent_transformer_v1",
+            "embed_dim": 32,
+            "n_heads": 4,
+            "recurrence_mode": "include_planets",
+        }
+    )
+    assert isinstance(include_planets_config, RecurrentTransformerV1Config)
+    assert include_planets_config.recurrence_mode == "include_planets"
 
 
 def test_recurrent_model_rejects_non_binary_launch_mode() -> None:
@@ -257,12 +272,89 @@ def test_recurrent_hidden_reset_uses_env_and_player_dones() -> None:
             assert reset.hidden[0, 0, token].eq(1.0).all()
 
 
-def test_recurrent_forward_supports_compacted_runtime_entity_counts() -> None:
+def test_recurrent_include_planets_adds_env_level_state() -> None:
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
+    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+    model = RecurrentTransformerV1(
+        RecurrentTransformerV1Config(
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+            n_scratch_tokens=3,
+            recurrence_mode="include_planets",
+        ),
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    layout = model._recurrent_layout
+    state = model.initial_hidden_state(2, device=torch.device("cpu"))
+    state.hidden.fill_(1.0)
+
+    assert layout.token_indices[:MAX_PLANETS].tolist() == list(range(MAX_PLANETS))
+    assert layout.shared_count == MAX_PLANETS + 1 + 3
+    assert (
+        layout.token_indices[MAX_PLANETS : layout.shared_count]
+        .ge(obs_spec.max_entities)
+        .all()
+    )
+    assert layout.player_index[: layout.shared_count].eq(-1).all()
+    assert state.hidden.shape[2] == MAX_PLANETS + 1 + 3 + 3 * OUTER_PLAYER_SLOTS
+
+    dones = torch.tensor(
+        [
+            [True, False, False, False],
+            [True, True, True, True],
+        ]
+    )
+    reset = model.reset_hidden_state(state, dones)
+    assert reset is not None
+
+    assert reset.hidden[0, 0, :MAX_PLANETS].eq(1.0).all()
+    assert reset.hidden[0, 1, :MAX_PLANETS].eq(0.0).all()
+    for token, player in enumerate(layout.player_index.tolist()):
+        if player == 0:
+            assert reset.hidden[0, 0, token].eq(0.0).all()
+
+
+def test_recurrent_include_planets_zeros_inactive_planet_state() -> None:
+    torch.manual_seed(0)
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
+    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+    model = RecurrentTransformerV1(
+        RecurrentTransformerV1Config(
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+            recurrence_mode="include_planets",
+        ),
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    model.reset_parameters()
+    obs = _obs_batch(batch_size=1, obs_spec=obs_spec, action_spec=action_spec)
+    state = model.initial_hidden_state(1, device=torch.device("cpu"))
+    state.hidden.fill_(1.0)
+
+    output = model(obs, deterministic=True, hidden_state=state)
+
+    assert output.next_hidden_state is not None
+    assert output.next_hidden_state.hidden[0, 0, 2:MAX_PLANETS].eq(0.0).all()
+
+
+@pytest.mark.parametrize("recurrence_mode", ["global_only", "include_planets"])
+def test_recurrent_forward_supports_compacted_runtime_entity_counts(
+    recurrence_mode: Literal["global_only", "include_planets"],
+) -> None:
     torch.manual_seed(0)
     obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 3)
     action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
     model = RecurrentTransformerV1(
-        RecurrentTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        RecurrentTransformerV1Config(
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+            recurrence_mode=recurrence_mode,
+        ),
         obs_spec=obs_spec,
         action_spec=action_spec,
     )
@@ -288,14 +380,22 @@ def test_recurrent_forward_supports_compacted_runtime_entity_counts() -> None:
     )
 
 
-def test_recurrent_sequence_evaluation_matches_stepwise_evaluation() -> None:
+@pytest.mark.parametrize("recurrence_mode", ["global_only", "include_planets"])
+def test_recurrent_sequence_evaluation_matches_stepwise_evaluation(
+    recurrence_mode: Literal["global_only", "include_planets"],
+) -> None:
     torch.manual_seed(1)
     batch_size = 2
     time_steps = 4
     obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
     action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
     model = RecurrentTransformerV1(
-        RecurrentTransformerV1Config(embed_dim=16, depth=2, n_heads=4),
+        RecurrentTransformerV1Config(
+            embed_dim=16,
+            depth=2,
+            n_heads=4,
+            recurrence_mode=recurrence_mode,
+        ),
         obs_spec=obs_spec,
         action_spec=action_spec,
     )
@@ -307,6 +407,7 @@ def test_recurrent_sequence_evaluation_matches_stepwise_evaluation() -> None:
     actions = _actions(batch_size, time_steps)
     dones = torch.zeros((batch_size, time_steps, OUTER_PLAYER_SLOTS), dtype=torch.bool)
     dones[0, 1, 0] = True
+    dones[1, 2, :] = True
     initial_state = model.initial_hidden_state(batch_size, device=torch.device("cpu"))
 
     sequence = model.evaluate_actions(

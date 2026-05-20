@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from owl.model import RecurrentTransformerV1Config
 from owl.train import FullConfig, PPOConfig
 from owl.train.utils import autocast_context
 
@@ -98,6 +99,7 @@ def test_full_config_accepts_recurrent_transformer_discrete_targets() -> None:
                 "embed_dim": 32,
                 "depth": 1,
                 "n_heads": 4,
+                "recurrence_mode": "include_planets",
                 "actor": {"action_spec": "discrete_targets"},
             },
             "optimizer": {
@@ -111,6 +113,8 @@ def test_full_config_accepts_recurrent_transformer_discrete_targets() -> None:
     )
 
     assert config.model.model_arch == "recurrent_transformer_v1"
+    assert isinstance(config.model, RecurrentTransformerV1Config)
+    assert config.model.recurrence_mode == "include_planets"
     assert config.model.actor.launch_mode == "binary"
 
 
