@@ -29,17 +29,24 @@ from owl.rl import (
     DiscreteTargetBinActions,
     EntityBasedConfig,
     ObsBatch,
+    PureActionMask,
     PureActions,
     VectorizedEnv,
 )
 from owl.train import ppo
 from torch import nn
 
-_OBS_COPY_FIELDS = (
-    *(field for field in ObsBatch.model_fields if field != "action_mask"),
-    "can_act",
-    "max_launch",
+_OBS_COPY_FIELDS = tuple(
+    field for field in ObsBatch.model_fields if field != "action_mask"
 )
+
+
+def _obs_buffer_ptrs(obs: ObsBatch) -> dict[str, int]:
+    ptrs = {field: getattr(obs, field).data_ptr() for field in _OBS_COPY_FIELDS}
+    ptrs["action_mask.can_act"] = obs.action_mask.can_act.data_ptr()
+    if isinstance(obs.action_mask, PureActionMask | DiscreteTargetActionMask):
+        ptrs["action_mask.max_launch"] = obs.action_mask.max_launch.data_ptr()
+    return ptrs
 
 
 def _obs_batch(*, n_envs: int, obs_spec: EntityBasedConfig) -> ObsBatch:
@@ -66,8 +73,10 @@ def _obs_batch(*, n_envs: int, obs_spec: EntityBasedConfig) -> ObsBatch:
             (n_envs, obs_spec.global_channels),
             dtype=torch.float32,
         ),
-        can_act=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
-        max_launch=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+        action_mask=PureActionMask(
+            can_act=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
+            max_launch=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+        ),
     )
 
 
@@ -153,8 +162,8 @@ class TinyOrbitEnv:
         )
         obs.still_playing = self._still_playing()
         obs.entity_mask[:, :2] = True
-        obs.can_act[:, :, 0] = obs.still_playing
-        obs.max_launch[:, :, 0] = obs.still_playing.to(torch.int64)
+        obs.action_mask.can_act[:, :, 0] = obs.still_playing
+        obs.action_mask.max_launch[:, :, 0] = obs.still_playing.to(torch.int64)
         return obs
 
     def _still_playing(self) -> torch.Tensor:
@@ -206,8 +215,8 @@ class TinyDiscreteTargetEnv:
         obs = _discrete_obs_batch(n_envs=self.n_envs, obs_spec=self.obs_spec)
         obs.still_playing.fill_(True)
         obs.entity_mask[:, :2] = True
-        obs.can_act[:, :, 0, 1] = True
-        obs.max_launch[:, :, 0] = 3
+        obs.action_mask.can_act[:, :, 0, 1] = True
+        obs.action_mask.max_launch[:, :, 0] = 3
         return obs
 
 
@@ -224,14 +233,14 @@ class ReusingObservationEnv(TinyOrbitEnv):
         obs.entity_mask.zero_()
         obs.still_playing.zero_()
         obs.global_features.zero_()
-        obs.can_act.zero_()
-        obs.max_launch.zero_()
+        obs.action_mask.can_act.zero_()
+        obs.action_mask.max_launch.zero_()
         obs.global_features[:, 0] = self._targets
         obs.global_features[:, 1] = self._steps.to(torch.float32)
         obs.still_playing.copy_(self._still_playing())
         obs.entity_mask[:, :2] = True
-        obs.can_act[:, :, 0] = obs.still_playing
-        obs.max_launch[:, :, 0] = obs.still_playing.to(torch.int64)
+        obs.action_mask.can_act[:, :, 0] = obs.still_playing
+        obs.action_mask.max_launch[:, :, 0] = obs.still_playing.to(torch.int64)
         return obs
 
 
@@ -574,8 +583,8 @@ def test_obs_to_device_clones_cpu_observation_buffers() -> None:
     obs.global_features.fill_(2.0)
 
     assert torch.equal(copied.global_features, torch.ones_like(copied.global_features))
-    for field in _OBS_COPY_FIELDS:
-        assert getattr(copied, field).data_ptr() != getattr(obs, field).data_ptr()
+    for field, copied_ptr in _obs_buffer_ptrs(copied).items():
+        assert copied_ptr != _obs_buffer_ptrs(obs)[field]
 
 
 def test_env_metrics_are_logged_under_train_prefix() -> None:
@@ -779,7 +788,7 @@ def test_obs_to_device_uses_explicit_non_blocking_policy(
 
     ppo._obs_to_device(obs, torch.device("cuda"), non_blocking=True)
 
-    assert non_blocking_args == [True] * len(_OBS_COPY_FIELDS)
+    assert non_blocking_args == [True] * len(_obs_buffer_ptrs(obs))
 
 
 def test_obs_to_device_defaults_to_blocking_transfer(
@@ -801,7 +810,7 @@ def test_obs_to_device_defaults_to_blocking_transfer(
 
     ppo._obs_to_device(obs, torch.device("cuda"))
 
-    assert non_blocking_args == [False] * len(_OBS_COPY_FIELDS)
+    assert non_blocking_args == [False] * len(_obs_buffer_ptrs(obs))
 
 
 def test_actions_to_cpu_transfer_policy_is_explicit(
@@ -877,16 +886,12 @@ def test_collect_rollout_keeps_pre_step_obs_with_reused_cpu_buffers() -> None:
         ),
         device=torch.device("cpu"),
     )
-    obs_ptrs = {
-        field: getattr(trainer._obs, field).data_ptr() for field in _OBS_COPY_FIELDS
-    }
+    obs_ptrs = _obs_buffer_ptrs(trainer._obs)
 
     trainer._collect_rollout()
     segments = trainer.rollout.segment_major()
 
-    assert obs_ptrs == {
-        field: getattr(trainer._obs, field).data_ptr() for field in _OBS_COPY_FIELDS
-    }
+    assert obs_ptrs == _obs_buffer_ptrs(trainer._obs)
     expected_steps = torch.tensor([0.0, 1.0, 2.0])
     assert torch.equal(
         segments.obs.global_features[:, :, 1], expected_steps.expand(2, -1)
@@ -1525,8 +1530,8 @@ def test_discrete_target_rollout_buffer_and_policy_mask() -> None:
     obs = _discrete_obs_batch(n_envs=3, obs_spec=obs_spec)
     obs.still_playing[:, :2] = True
     obs.still_playing[:, 2:] = False
-    obs.can_act[:, 0, 0, 1] = True
-    obs.max_launch[:, 0, 0] = 3
+    obs.action_mask.can_act[:, 0, 0, 1] = True
+    obs.action_mask.max_launch[:, 0, 0] = 3
     actions = _actions(3, max_launches=1, kind="discrete_targets")
     actions.launch[:, 0, 0, 0] = True
     assert actions.target is not None
@@ -1544,7 +1549,7 @@ def test_discrete_target_rollout_buffer_and_policy_mask() -> None:
     )
     segments = buffer.segment_major()
 
-    assert segments.obs.can_act.shape == (
+    assert segments.obs.action_mask.can_act.shape == (
         3,
         2,
         4,
@@ -1576,7 +1581,7 @@ def test_discrete_target_bin_rollout_buffer_and_policy_mask() -> None:
             dtype=torch.bool,
         )
     )
-    obs.can_act[:, 0, 0, 1, [0, 6]] = True
+    obs.action_mask.can_act[:, 0, 0, 1, [0, 6]] = True
     actions = _actions(3, kind="discrete_target_bins")
     assert actions.fleet_bin is not None
     actions.target[:, 0, 0] = 1
@@ -1593,8 +1598,8 @@ def test_discrete_target_bin_rollout_buffer_and_policy_mask() -> None:
     )
     segments = buffer.segment_major()
 
-    assert segments.obs.max_launch is None
-    assert segments.obs.can_act.shape == (
+    assert isinstance(segments.obs.action_mask, DiscreteTargetBinActionMask)
+    assert segments.obs.action_mask.can_act.shape == (
         3,
         2,
         4,

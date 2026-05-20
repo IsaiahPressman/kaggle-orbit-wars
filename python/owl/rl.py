@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal, SupportsFloat, TypeAlias, cast
 
 import numpy as np
 import torch
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 from owl.config import BaseConfig
 from owl.rs import RlVecEnv as _RustRlVecEnv
@@ -228,49 +228,6 @@ class ObsBatch(BaseModel):
     global_features: torch.Tensor
     action_mask: ActionMask
 
-    @model_validator(mode="before")
-    @classmethod
-    def _coerce_legacy_action_mask(cls, data: object) -> object:
-        if not isinstance(data, dict):
-            return data
-        if "action_mask" in data:
-            return data
-        if "can_act" not in data:
-            return data
-        data = dict(data)
-        can_act = data.pop("can_act")
-        max_launch = data.pop("max_launch", None)
-        if max_launch is None:
-            data["action_mask"] = DiscreteTargetBinActionMask(can_act=can_act)
-        elif getattr(can_act, "ndim", 0) == getattr(max_launch, "ndim", -1) + 1:
-            data["action_mask"] = DiscreteTargetActionMask(
-                can_act=can_act,
-                max_launch=max_launch,
-            )
-        elif getattr(can_act, "ndim", 0) == getattr(max_launch, "ndim", -1):
-            data["action_mask"] = PureActionMask(
-                can_act=can_act,
-                max_launch=max_launch,
-            )
-        else:
-            raise ValueError(
-                "legacy can_act/max_launch shapes do not identify an action mask"
-            )
-        return data
-
-    @property
-    def can_act(self) -> torch.Tensor:
-        return self.action_mask.can_act
-
-    @property
-    def max_launch(self) -> torch.Tensor | None:
-        if isinstance(
-            self.action_mask,
-            PureActionMask | DiscreteTargetActionMask,
-        ):
-            return self.action_mask.max_launch
-        return None
-
 
 class VectorizedEnv:
     def __init__(
@@ -291,10 +248,10 @@ class VectorizedEnv:
             self.action_spec.action_spec,
             self.obs_spec.max_entities,
             self.obs_spec.ship_count_one_hot_encoder_max,
-            getattr(self.action_spec, "max_per_planet_launches", 1),
+            _max_per_planet_launches(self.action_spec),
             self.action_spec.min_fleet_size,
-            getattr(self.action_spec, "n_bins", 0),
-            getattr(self.action_spec, "targeting_mode", "full_mask"),
+            _n_action_bins(self.action_spec),
+            _targeting_mode(self.action_spec),
         )
         if pin_memory and not torch.cuda.is_available():
             warnings.warn(
@@ -321,11 +278,12 @@ class VectorizedEnv:
         self._entity_mask_np = self.observations.entity_mask.numpy()
         self._still_playing_np = self.observations.still_playing.numpy()
         self._global_obs_np = self.observations.global_features.numpy()
-        self._can_act_np = self.observations.can_act.numpy()
+        action_mask = self.observations.action_mask
+        self._can_act_np = action_mask.can_act.numpy()
         self._max_launch_np = (
             None
-            if self.observations.max_launch is None
-            else self.observations.max_launch.numpy()
+            if isinstance(action_mask, DiscreteTargetBinActionMask)
+            else action_mask.max_launch.numpy()
         )
         self._rewards_np = self.rewards.numpy()
         self._dones_np = self.dones.numpy()
@@ -390,7 +348,7 @@ class VectorizedEnv:
             action_spec.action_spec,
             action_spec.min_fleet_size,
             0,
-            getattr(action_spec, "targeting_mode", "full_mask"),
+            _targeting_mode(action_spec),
             can_act.numpy(),
             max_launch.numpy(),
         )
@@ -423,14 +381,15 @@ class VectorizedEnv:
             obs_spec=obs_spec,
             action_spec=action_spec,
         )
+        action_mask = obs.action_mask
         self._rust.write_observation(
             obs_spec.obs_spec,
             action_spec.action_spec,
             obs_spec.max_entities,
             obs_spec.ship_count_one_hot_encoder_max,
             action_spec.min_fleet_size,
-            getattr(action_spec, "n_bins", 0),
-            getattr(action_spec, "targeting_mode", "full_mask"),
+            _n_action_bins(action_spec),
+            _targeting_mode(action_spec),
             obs.planets.numpy(),
             obs.orbiting_planets.numpy(),
             obs.fleets.numpy(),
@@ -438,8 +397,10 @@ class VectorizedEnv:
             obs.entity_mask.numpy(),
             obs.still_playing.numpy(),
             obs.global_features.numpy(),
-            obs.can_act.numpy(),
-            None if obs.max_launch is None else obs.max_launch.numpy(),
+            action_mask.can_act.numpy(),
+            None
+            if isinstance(action_mask, DiscreteTargetBinActionMask)
+            else action_mask.max_launch.numpy(),
         )
         return obs
 
@@ -1218,6 +1179,24 @@ def _can_act_shape(
         ACTION_ENTITY_SLOTS,
         action_spec.n_bins,
     )
+
+
+def _max_per_planet_launches(action_spec: ActionConfig) -> int:
+    if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
+        return 1
+    return action_spec.max_per_planet_launches
+
+
+def _n_action_bins(action_spec: ActionConfig) -> int:
+    if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
+        return action_spec.n_bins
+    return 0
+
+
+def _targeting_mode(action_spec: ActionConfig) -> TargetingMode:
+    if isinstance(action_spec, ActionPureConfig):
+        return "full_mask"
+    return action_spec.targeting_mode
 
 
 def _max_decoded_actions(action_spec: ActionConfig) -> int:

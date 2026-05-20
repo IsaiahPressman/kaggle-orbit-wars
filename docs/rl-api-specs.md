@@ -80,9 +80,8 @@ fixed outer-slot policies in evaluation and benchmarking code, so callers do not
 need to rotate policy-to-slot assignments themselves. After a terminal
 auto-reset, `still_playing` describes the returned reset observation, while
 `dones` still describes the transition that just finished.
-`ObsBatch.can_act` and `ObsBatch.max_launch` remain read-only compatibility
-properties. For target-bin observations, `ObsBatch.max_launch` is `None`;
-`DiscreteTargetBinActionMask` itself has no `max_launch` member.
+For target-bin observations, `DiscreteTargetBinActionMask` has no `max_launch`
+member.
 
 ## EntityBasedExtV1
 

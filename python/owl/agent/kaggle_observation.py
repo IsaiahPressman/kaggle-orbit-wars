@@ -1,6 +1,6 @@
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 KAGGLE_EPISODE_STEPS = 500
 
@@ -22,8 +22,6 @@ class Comet(BaseModel):
 
 
 class KaggleObservation(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     remaining_overage_time: float = Field(alias="remainingOverageTime")
     step: int = Field(ge=0, lt=KAGGLE_EPISODE_STEPS)
     planets: list[Planet]

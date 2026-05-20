@@ -1057,8 +1057,8 @@ def _eval_actions_for_assignments_and_hidden(
     use_current = assignments.to(device=device).eq(MODEL_CURRENT)
     return (
         _select_actions(current_output.actions, last_best_output.actions, use_current),
-        getattr(current_output, "next_hidden_state", None),
-        getattr(last_best_output, "next_hidden_state", None),
+        current_output.next_hidden_state,
+        last_best_output.next_hidden_state,
     )
 
 

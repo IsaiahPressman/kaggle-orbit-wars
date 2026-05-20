@@ -34,6 +34,7 @@ from owl.rl import (
     EntityBasedConfig,
     EnvConfig,
     ObsBatch,
+    PureActionMask,
     PureActions,
 )
 from owl.train.config import FullConfig
@@ -232,8 +233,10 @@ def _obs_batch(*, max_fleets: int) -> ObsBatch:
         ),
         still_playing=torch.zeros((1, 4), dtype=torch.bool),
         global_features=torch.zeros((1, GLOBAL_CHANNELS), dtype=torch.float32),
-        can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
-        max_launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+        action_mask=PureActionMask(
+            can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
+            max_launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+        ),
     )
 
 
@@ -264,6 +267,9 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
     )
     agent.config = AgentConfig(deterministic=False)
     agent.device = torch.device("cpu")
+    agent.hidden_state = None
+    agent._peak_total_ms = 0
+    agent._peak_entities = 0
     action_shape = (1, 4, ACTION_ENTITY_SLOTS, action_spec.max_per_planet_launches)
     launch = torch.zeros(action_shape, dtype=torch.bool)
     angle = torch.zeros(action_shape, dtype=torch.float32)
@@ -273,12 +279,21 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
     ships[0, 0, 0, 0] = action_spec.min_fleet_size
 
     class FakeModel:
+        def initial_hidden_state(
+            self,
+            _batch_size: int,
+            *,
+            device: torch.device,  # noqa: ARG002
+        ) -> None:
+            return None
+
         def __call__(self, obs: object, *, deterministic: bool) -> object:
             assert not deterministic
             assert obs.still_playing.tolist() == [[True, False, False, False]]
             return SimpleNamespace(
                 actions=PureActions(launch=launch, angle=angle, ships=ships),
                 values=torch.tensor([[0.25, -0.5, 0.0, 0.75]]),
+                next_hidden_state=None,
             )
 
     agent.model = FakeModel()
@@ -301,6 +316,9 @@ def test_agent_act_moves_action_bundle_to_cpu_before_kaggle_conversion(
     )
     agent.config = AgentConfig(deterministic=False)
     agent.device = torch.device("cpu")
+    agent.hidden_state = None
+    agent._peak_total_ms = 0
+    agent._peak_entities = 0
     converted: list[str] = []
 
     class FakeActionTensor:
@@ -312,6 +330,14 @@ def test_agent_act_moves_action_bundle_to_cpu_before_kaggle_conversion(
             return f"cpu:{self.name}"
 
     class FakeModel:
+        def initial_hidden_state(
+            self,
+            _batch_size: int,
+            *,
+            device: torch.device,  # noqa: ARG002
+        ) -> None:
+            return None
+
         def __call__(self, _obs: object, *, deterministic: bool) -> object:
             assert not deterministic
             return SimpleNamespace(
@@ -321,6 +347,7 @@ def test_agent_act_moves_action_bundle_to_cpu_before_kaggle_conversion(
                     ships=FakeActionTensor("ships"),  # type: ignore[arg-type]
                 ),
                 values=torch.tensor([[0.25, -0.5, 0.0, 0.75]]),
+                next_hidden_state=None,
             )
 
     def fake_actions_to_kaggle(
@@ -353,6 +380,7 @@ def test_agent_log_prints_one_line_with_metrics(capsys) -> None:
     agent.log(
         step=7,
         total_ms=10,
+        peak_total_ms=20,
         encode_ms=2,
         inference_ms=7,
         conversion_ms=1,
@@ -360,10 +388,22 @@ def test_agent_log_prints_one_line_with_metrics(capsys) -> None:
         advantage=-0.5,
         player_values=[0.25, -0.5, 0.0, 0.75],
         entity_count=3,
+        peak_entities=5,
         remaining_overage_time=59.5,
     )
 
     assert "\n" not in capsys.readouterr().out.rstrip()
+
+
+def test_agent_peak_metrics_exclude_first_step_total_time() -> None:
+    agent = Agent.__new__(Agent)
+    agent._peak_total_ms = 0
+    agent._peak_entities = 0
+
+    assert agent._update_peak_metrics(step=0, total_ms=100, entity_count=3) == (0, 3)
+    assert agent._update_peak_metrics(step=1, total_ms=10, entity_count=5) == (10, 5)
+    assert agent._update_peak_metrics(step=2, total_ms=7, entity_count=4) == (10, 5)
+    assert agent._update_peak_metrics(step=3, total_ms=11, entity_count=2) == (11, 5)
 
 
 def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
@@ -377,9 +417,20 @@ def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
     )
     agent.config = AgentConfig(deterministic=False)
     agent.device = torch.device("cpu")
+    agent.hidden_state = None
+    agent._peak_total_ms = 0
+    agent._peak_entities = 0
     action_shape = (1, 4, ACTION_ENTITY_SLOTS, action_spec.max_per_planet_launches)
 
     class FakeModel:
+        def initial_hidden_state(
+            self,
+            _batch_size: int,
+            *,
+            device: torch.device,  # noqa: ARG002
+        ) -> None:
+            return None
+
         def __call__(self, obs: object, *, deterministic: bool) -> object:
             assert not deterministic
             assert obs.entity_mask.sum().item() == 1
@@ -392,6 +443,7 @@ def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
                     ships=torch.zeros(action_shape, dtype=torch.int64),
                 ),
                 values=torch.tensor([[0.25, -0.5, 0.0, 0.75]]),
+                next_hidden_state=None,
             )
 
     agent.model = FakeModel()
@@ -400,10 +452,12 @@ def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
 
     log_line = capsys.readouterr().out
     assert re.fullmatch(
-        r"step=0 - total_ms=\d+ - encode_ms=\d+ - inference_ms=\d+ - "
+        r"step=0 - total_ms=\d+ - peak_total_ms=0 - "
+        r"encode_ms=\d+ - inference_ms=\d+ - "
         r"conversion_ms=\d+ - value_self=0\.250 - advantage=0\.250 - "
         r"values=\[0\.250,-0\.500,0\.000,0\.750\] - "
-        rf"entities={ACTION_ENTITY_SLOTS} - remaining_overage_s=60\.0\n",
+        rf"entities={ACTION_ENTITY_SLOTS} - "
+        rf"peak_entities={ACTION_ENTITY_SLOTS} - remaining_overage_s=60\.0\n",
         log_line,
     )
 
@@ -420,6 +474,9 @@ def test_agent_act_logs_step_and_value_advantage(capsys) -> None:
     agent.config = AgentConfig(deterministic=False)
     agent.device = torch.device("cpu")
     agent._last_turn_value = float("nan")
+    agent.hidden_state = None
+    agent._peak_total_ms = 0
+    agent._peak_entities = 0
     action_shape = (1, 4, ACTION_ENTITY_SLOTS, action_spec.max_per_planet_launches)
     values = iter(
         [
@@ -429,6 +486,14 @@ def test_agent_act_logs_step_and_value_advantage(capsys) -> None:
     )
 
     class FakeModel:
+        def initial_hidden_state(
+            self,
+            _batch_size: int,
+            *,
+            device: torch.device,  # noqa: ARG002
+        ) -> None:
+            return None
+
         def __call__(self, _obs: object, *, deterministic: bool) -> object:
             assert not deterministic
             return SimpleNamespace(
@@ -438,6 +503,7 @@ def test_agent_act_logs_step_and_value_advantage(capsys) -> None:
                     ships=torch.zeros(action_shape, dtype=torch.int64),
                 ),
                 values=next(values),
+                next_hidden_state=None,
             )
 
     agent.model = FakeModel()

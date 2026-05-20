@@ -71,6 +71,8 @@ class Agent:
             self.config.targeting_mode_override,
         )
         self._last_turn_value = float("nan")
+        self._peak_total_ms = 0
+        self._peak_entities = 0
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = create_model(
             self.checkpoint_config.model,
@@ -112,24 +114,19 @@ class Agent:
         encode_ms = _elapsed_ms(encode_start)
 
         inference_start = perf_counter()
-        hidden_state = getattr(self, "hidden_state", None)
-        initial_hidden_state = getattr(self.model, "initial_hidden_state", None)
-        if callable(initial_hidden_state):
-            if observation.step == 0 or hidden_state is None:
-                hidden_state = initial_hidden_state(1, device=self.device)
-            output = (
-                self.model(device_obs, deterministic=self.config.deterministic)
-                if hidden_state is None
-                else self.model(
-                    device_obs,
-                    deterministic=self.config.deterministic,
-                    hidden_state=hidden_state,
-                )
+        hidden_state = self.hidden_state
+        if observation.step == 0 or hidden_state is None:
+            hidden_state = self.model.initial_hidden_state(1, device=self.device)
+        output = (
+            self.model(device_obs, deterministic=self.config.deterministic)
+            if hidden_state is None
+            else self.model(
+                device_obs,
+                deterministic=self.config.deterministic,
+                hidden_state=hidden_state,
             )
-            self.hidden_state = getattr(output, "next_hidden_state", None)
-        else:
-            output = self.model(device_obs, deterministic=self.config.deterministic)
-            self.hidden_state = None
+        )
+        self.hidden_state = output.next_hidden_state
         self._synchronize_device()
         values = output.values.detach().cpu()[0]
         self_value = float(values[observation.player].item())
@@ -149,17 +146,25 @@ class Agent:
         )
         conversion_ms = _elapsed_ms(conversion_start)
         total_ms = _elapsed_ms(total_start)
+        entity_count = obs.entity_mask.shape[1]
+        peak_total_ms, peak_entities = self._update_peak_metrics(
+            step=observation.step,
+            total_ms=total_ms,
+            entity_count=entity_count,
+        )
 
         self.log(
             step=observation.step,
             total_ms=total_ms,
+            peak_total_ms=peak_total_ms,
             encode_ms=encode_ms,
             inference_ms=inference_ms,
             conversion_ms=conversion_ms,
             self_value=self_value,
             advantage=advantage,
             player_values=[float(value) for value in values.tolist()],
-            entity_count=obs.entity_mask.shape[1],
+            entity_count=entity_count,
+            peak_entities=peak_entities,
             remaining_overage_time=observation.remaining_overage_time,
         )
         self._last_turn_value = self_value
@@ -184,6 +189,7 @@ class Agent:
         *,
         step: int,
         total_ms: int,
+        peak_total_ms: int,
         encode_ms: int,
         inference_ms: int,
         conversion_ms: int,
@@ -191,12 +197,14 @@ class Agent:
         advantage: float,
         player_values: list[float],
         entity_count: int,
+        peak_entities: int,
         remaining_overage_time: float,
     ) -> None:
         values = ",".join(f"{value:.3f}" for value in player_values)
         print(
             f"step={step} - "
             f"total_ms={total_ms} - "
+            f"peak_total_ms={peak_total_ms} - "
             f"encode_ms={encode_ms} - "
             f"inference_ms={inference_ms} - "
             f"conversion_ms={conversion_ms} - "
@@ -204,9 +212,26 @@ class Agent:
             f"advantage={advantage:.3f} - "
             f"values=[{values}] - "
             f"entities={entity_count} - "
+            f"peak_entities={peak_entities} - "
             f"remaining_overage_s={remaining_overage_time:.1f}",
             flush=True,
         )
+
+    def _update_peak_metrics(
+        self,
+        *,
+        step: int,
+        total_ms: int,
+        entity_count: int,
+    ) -> tuple[int, int]:
+        peak_total_ms = self._peak_total_ms
+        if step != 0:
+            peak_total_ms = max(peak_total_ms, total_ms)
+        self._peak_total_ms = peak_total_ms
+
+        peak_entities = max(self._peak_entities, entity_count)
+        self._peak_entities = peak_entities
+        return peak_total_ms, peak_entities
 
 
 def _elapsed_ms(start: float) -> int:

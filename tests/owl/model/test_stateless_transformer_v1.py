@@ -50,10 +50,13 @@ from owl.rl import (
     ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
+    DiscreteTargetActionMask,
     DiscreteTargetActions,
+    DiscreteTargetBinActionMask,
     DiscreteTargetBinActions,
     EntityBasedConfig,
     ObsBatch,
+    PureActionMask,
     PureActions,
     encode_python_observation,
 )
@@ -158,6 +161,21 @@ def _obs_batch(
         max_launch[:, 1, 1] = 3
         max_launch[:, 2, MAX_PLANETS] = 2
 
+    if isinstance(action_spec, ActionPureConfig):
+        assert max_launch is not None
+        action_mask = PureActionMask(
+            can_act=can_act,
+            max_launch=max_launch,
+        )
+    elif isinstance(action_spec, ActionDiscreteTargetsConfig):
+        assert max_launch is not None
+        action_mask = DiscreteTargetActionMask(
+            can_act=can_act,
+            max_launch=max_launch,
+        )
+    else:
+        action_mask = DiscreteTargetBinActionMask(can_act=can_act)
+
     return ObsBatch(
         planets=planets,
         orbiting_planets=orbiting_planets,
@@ -166,8 +184,7 @@ def _obs_batch(
         entity_mask=entity_mask,
         still_playing=still_playing,
         global_features=global_features,
-        can_act=can_act,
-        max_launch=max_launch,
+        action_mask=action_mask,
     )
 
 
@@ -421,8 +438,7 @@ def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
         entity_mask=padded_entity_mask,
         still_playing=compact.still_playing,
         global_features=compact.global_features,
-        can_act=compact.can_act,
-        max_launch=compact.max_launch,
+        action_mask=compact.action_mask,
     )
     padded_zeroed = ObsBatch(
         planets=compact.planets,
@@ -441,8 +457,7 @@ def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
         entity_mask=padded_entity_mask,
         still_playing=compact.still_playing,
         global_features=compact.global_features,
-        can_act=compact.can_act,
-        max_launch=compact.max_launch,
+        action_mask=compact.action_mask,
     )
 
     with torch.inference_mode():
@@ -1362,7 +1377,7 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert torch.allclose(output.winner_probabilities.sum(dim=1), torch.ones(2))
     assert torch.all(output.winner_probabilities[~obs.still_playing] == 0)
     assert torch.all(output.actions.ships[~output.actions.launch] == 0)
-    assert torch.all(output.actions.ships.sum(dim=-1) <= obs.max_launch)
+    assert torch.all(output.actions.ships.sum(dim=-1) <= obs.action_mask.max_launch)
 
     evaluation = model.evaluate_actions(obs, output.actions)
     assert torch.allclose(evaluation.log_probs.launch, output.log_probs.launch)
@@ -1436,9 +1451,9 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
         raising=False,
     )
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
-    obs.max_launch[:, 0, 0] = 8
-    obs.max_launch[:, 1, 1] = 4
-    obs.max_launch[:, 2, MAX_PLANETS] = 3
+    obs.action_mask.max_launch[:, 0, 0] = 8
+    obs.action_mask.max_launch[:, 1, 1] = 4
+    obs.action_mask.max_launch[:, 2, MAX_PLANETS] = 3
 
     output = model(obs)
 
@@ -1481,11 +1496,13 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
         ACTION_ENTITY_SLOTS,
     )
     launched_target = output.actions.target[..., 0].clamp(0, ACTION_ENTITY_SLOTS - 1)
-    target_valid = obs.can_act.gather(-1, launched_target.unsqueeze(-1)).squeeze(-1)
+    target_valid = obs.action_mask.can_act.gather(
+        -1, launched_target.unsqueeze(-1)
+    ).squeeze(-1)
     assert torch.all(target_valid[output.actions.launch[..., 0]])
     launched_ships = output.actions.ships[output.actions.launch]
     assert torch.all(launched_ships >= action_spec.min_fleet_size)
-    assert torch.all(output.actions.ships.sum(dim=-1) <= obs.max_launch)
+    assert torch.all(output.actions.ships.sum(dim=-1) <= obs.action_mask.max_launch)
 
     evaluation = model.evaluate_actions(obs, output.actions)
     assert torch.allclose(evaluation.log_probs.launch, output.log_probs.launch)
@@ -1546,11 +1563,11 @@ def test_discrete_target_bins_actor_outputs_bins_and_replays_log_probs() -> None
     assert isinstance(output.actions, DiscreteTargetBinActions)
     assert output.actions.target.shape == expected_action_shape
     assert output.actions.fleet_bin.shape == expected_action_shape
-    source_active = obs.can_act.flatten(start_dim=-2).any(dim=-1)
+    source_active = obs.action_mask.can_act.flatten(start_dim=-2).any(dim=-1)
     batch_index = torch.arange(2)[:, None, None]
     player_index = torch.arange(4)[None, :, None]
     source_index = torch.arange(ACTION_ENTITY_SLOTS)[None, None, :]
-    selected = obs.can_act[
+    selected = obs.action_mask.can_act[
         batch_index,
         player_index,
         source_index,
@@ -1576,7 +1593,7 @@ def test_discrete_target_bins_actor_outputs_bins_and_replays_log_probs() -> None
         fleet_bin=output.actions.fleet_bin.clone(),
     )
     invalid.fleet_bin[0, 0, 0] = 1
-    obs.can_act[0, 0, 0, :, 1] = False
+    obs.action_mask.can_act[0, 0, 0, :, 1] = False
     with pytest.raises(ValueError, match="valid target-bin pair"):
         model.evaluate_actions(obs, invalid)
 
@@ -2350,7 +2367,7 @@ def test_discrete_targets_actor_rejects_invalid_replay_target() -> None:
     )
     model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     obs = _obs_batch(batch_size=1, obs_spec=obs_spec, action_spec=action_spec)
-    obs.max_launch[0, 0, 0] = action_spec.min_fleet_size
+    obs.action_mask.max_launch[0, 0, 0] = action_spec.min_fleet_size
     output = model(obs, deterministic=True)
     output.actions.launch.zero_()
     output.actions.ships.zero_()
@@ -3089,8 +3106,8 @@ def test_evaluate_actions_rejects_nonfinite_launched_angles(angle: float) -> Non
     output.actions.launch[0, 0, 0, 0] = True
     output.actions.angle[0, 0, 0, 0] = angle
     output.actions.ships[0, 0, 0, 0] = action_spec.min_fleet_size
-    assert obs.max_launch is not None
-    obs.max_launch[0, 0, 0] = action_spec.min_fleet_size
+    assert obs.action_mask.max_launch is not None
+    obs.action_mask.max_launch[0, 0, 0] = action_spec.min_fleet_size
 
     with pytest.raises(ValueError, match=r"actions\.angle must be finite"):
         model.evaluate_actions(obs, output.actions)

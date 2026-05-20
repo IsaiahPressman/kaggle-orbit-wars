@@ -19,7 +19,7 @@ from owl.model import (
     ModelHiddenState,
     ModelOutput,
 )
-from owl.rl import ActionConfig, ObsBatch
+from owl.rl import ObsBatch
 
 T = TypeVar("T")
 
@@ -218,6 +218,7 @@ class DistributedModelAdapter(BaseModelAPI):
             raise ValueError("DistributedModelAdapter requires an initialized context")
         if context.device.type != "cuda":
             raise RuntimeError("distributed model wrapping requires a CUDA device")
+        self.action_spec = model.action_spec
         self._ddp = DistributedDataParallel(
             _DistributedModelDispatch(model),
             device_ids=[context.local_rank],
@@ -227,10 +228,6 @@ class DistributedModelAdapter(BaseModelAPI):
     @property
     def wrapped_model(self) -> BaseModelAPI:
         return self._ddp.module.model
-
-    @property
-    def action_spec(self) -> ActionConfig:
-        return cast(ActionConfig, self.wrapped_model.action_spec)
 
     def forward(
         self,

@@ -61,7 +61,10 @@ impl TargetingMode {
 impl RlActionSpec {
     pub(super) fn parse(value: &str, n_bins: usize, targeting_mode: &str) -> Result<Self, String> {
         match value {
-            "pure" => Ok(Self::Pure),
+            "pure" => {
+                TargetingMode::parse(targeting_mode)?;
+                Ok(Self::Pure)
+            }
             "discrete_targets" => Ok(Self::DiscreteTargets {
                 targeting_mode: TargetingMode::parse(targeting_mode)?,
             }),
@@ -2522,12 +2525,10 @@ mod tests {
     };
 
     #[test]
-    fn parse_ignores_targeting_mode_for_pure_action_spec() {
-        assert_eq!(
-            RlActionSpec::parse("pure", 0, "not_a_targeting_mode")
-                .expect("pure should ignore targeting_mode"),
-            RlActionSpec::Pure,
-        );
+    fn parse_rejects_invalid_targeting_mode_for_pure_action_spec() {
+        let err = RlActionSpec::parse("pure", 0, "not_a_targeting_mode")
+            .expect_err("pure should validate targeting_mode");
+        assert!(err.contains("unsupported targeting_mode"));
     }
 
     #[test]

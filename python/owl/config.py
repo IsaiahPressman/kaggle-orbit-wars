@@ -104,9 +104,6 @@ class BaseConfig(BaseModel):
 
     @classmethod
     def _iter_base_config_types(cls, annotation: Any) -> list[type["BaseConfig"]]:
-        if hasattr(annotation, "__value__"):
-            return cls._iter_base_config_types(annotation.__value__)
-
         origin = get_origin(annotation)
         if origin is Annotated:
             return cls._iter_base_config_types(get_args(annotation)[0])
