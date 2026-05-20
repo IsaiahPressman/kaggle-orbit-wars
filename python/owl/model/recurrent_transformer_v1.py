@@ -36,6 +36,7 @@ from owl.model.stateless_transformer_v1 import (
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
+    MAX_PLANETS,
     OUTER_PLAYER_SLOTS,
     ActionConfig,
     ActionDiscreteTargetsConfig,
@@ -60,6 +61,7 @@ class RecurrentTransformerV1Config(BaseConfig):
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
     force_flash_attn: bool = False
     use_learned_pairwise_bias: bool = False
+    recurrence_mode: Literal["global_only", "include_planets"] = "global_only"
     actor: ActorDiscreteTargetsConfig = Field(
         default_factory=ActorDiscreteTargetsConfig
     )
@@ -116,6 +118,7 @@ class RecurrentTransformerV1(StatelessTransformerV1):
         if config.actor.launch_mode != "binary":
             raise ValueError("recurrent_transformer_v1 requires binary launch mode")
         super().__init__(cast(Any, config), obs_spec=obs_spec, action_spec=action_spec)
+        self._recurrence_mode = config.recurrence_mode
         self.blocks = nn.ModuleList(
             RecurrentTransformerBlock(config) for _ in range(config.depth)
         )
@@ -151,6 +154,7 @@ class RecurrentTransformerV1(StatelessTransformerV1):
             layout = _build_recurrent_token_layout(
                 entity_count=entity_count,
                 n_scratch_tokens=self.config.n_scratch_tokens,
+                include_planets=self._recurrence_mode == "include_planets",
             )
             self._recurrent_layout_cache[entity_count] = layout
         return layout
@@ -594,14 +598,17 @@ def _build_recurrent_token_layout(
     *,
     entity_count: int,
     n_scratch_tokens: int,
+    include_planets: bool,
 ) -> _RecurrentTokenLayout:
     player_start = entity_count
     global_start = player_start + OUTER_PLAYER_SLOTS
     board_start = global_start + 1
     actor_plan_start = board_start + n_scratch_tokens
     critic_value_start = actor_plan_start + OUTER_PLAYER_SLOTS
-    token_indices = [global_start, *range(board_start, actor_plan_start)]
+    token_indices = list(range(MAX_PLANETS)) if include_planets else []
+    token_indices.extend([global_start, *range(board_start, actor_plan_start)])
     player_index = [-1 for _ in token_indices]
+    shared_count = len(token_indices)
     for start in (player_start, actor_plan_start, critic_value_start):
         for player in range(OUTER_PLAYER_SLOTS):
             token_indices.append(start + player)
@@ -609,7 +616,7 @@ def _build_recurrent_token_layout(
     return _RecurrentTokenLayout(
         token_indices=torch.tensor(token_indices, dtype=torch.long),
         player_index=torch.tensor(player_index, dtype=torch.long),
-        shared_count=1 + n_scratch_tokens,
+        shared_count=shared_count,
     )
 
 

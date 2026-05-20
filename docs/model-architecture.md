@@ -70,7 +70,9 @@ against the supplied environment action spec.
 `"discrete_targets"` actor with `launch_mode="binary"`. The policy first samples
 whether to launch, then samples the target, then samples fleet size. Pure,
 target-bin, `binary_after`, and `target_token` actor modes are rejected for this
-architecture.
+architecture. Its recurrent-token scope is controlled by
+`recurrence_mode`, which defaults to `"global_only"` and can be set to
+`"include_planets"`.
 
 Observation and action specs are owned by `EnvConfig`. `StatelessTransformerV1`
 receives `env.obs_spec` and `env.action_spec` when it is instantiated, so model
@@ -159,19 +161,23 @@ behavior. Its trunk replaces each stateless transformer block with:
 
 ```text
 transformer block over all current observation tokens
-minGRU block over recurrent non-entity tokens only
+minGRU block over the configured recurrent token set
 ```
 
-The recurrent token set is:
+`recurrence_mode` controls the recurrent token set:
 
-- shared tokens: global-feature token and board scratch tokens
-- per-player tokens: player tokens, actor-plan tokens, and critic-value tokens
+- `global_only` (default): global-feature token, board scratch tokens,
+  player tokens, actor-plan tokens, and critic-value tokens
+- `include_planets`: all `global_only` tokens plus non-comet planet tokens
+  `0..MAX_PLANETS-1`
 
-Planet, comet, and fleet tokens are not recurrent. This keeps entity ordering
-and ownership changes out of the first recurrent state contract.
+Comet and fleet tokens are not recurrent. Planet recurrence is keyed by the
+existing non-comet planet row order, which the RL API defines as ascending
+planet ID order. Planet token state is env-level state, so ownership changes do
+not reset it.
 The recurrent token layout is memoized per runtime entity count, so inference
-paths that compact inactive fleet rows can shift non-entity token positions
-without changing the hidden-state contract.
+paths that compact inactive fleet rows can shift later token positions without
+changing the hidden-state contract.
 
 The recurrent hidden state has shape:
 
@@ -180,16 +186,17 @@ The recurrent hidden state has shape:
 ```
 
 Shared token state resets when the whole environment episode resets. Per-player
-token state resets when that player slot is done. During PPO updates,
-minGRU uses an affine parallel scan over the segment time dimension, with
-`dones[:, t]` applied as the reset boundary before processing observation
-`t + 1`.
+token state resets when that player slot is done. In `include_planets` mode,
+planet token state also resets only when the whole environment episode resets.
+During PPO updates, minGRU uses an affine parallel scan over the segment time
+dimension, with `dones[:, t]` applied as the reset boundary before processing
+observation `t + 1`.
 
 For packed flash-attention execution, the recurrent block builds an inverse map
 from padded token coordinates to packed rows, gathers only recurrent token rows,
 runs the dense recurrent scan as `(batch, time, recurrent_tokens, dim)`, and
 scatters the updated recurrent rows back into the packed tensor. Missing masked
-player tokens do not scatter back and their recurrent state is zeroed.
+recurrent tokens do not scatter back and their recurrent state is zeroed.
 
 ## Initialization
 
