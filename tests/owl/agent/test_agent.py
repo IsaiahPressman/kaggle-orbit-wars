@@ -15,7 +15,11 @@ from owl.agent.agent import (
     apply_targeting_mode_override,
     compact_entities,
 )
-from owl.model import StatelessTransformerV1Config
+from owl.agent.checkpoint_quantization import (
+    FP4_E2M1FN_X2_SCALED_BLOCK16,
+    quantize_model_state_dict,
+)
+from owl.model import StatelessTransformerV1Config, create_model
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     COMET_CHANNELS,
@@ -60,6 +64,60 @@ def test_agent_config_path_valid() -> None:
 
 def test_agent_checkpoint_config_fields_exist_on_full_config() -> None:
     assert set(AgentCheckpointConfig.model_fields) <= set(FullConfig.model_fields)
+
+
+def test_agent_init_loads_quantized_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_config_path = tmp_path / "agent_config.yaml"
+    agent_config_path.write_text(
+        "\n".join(
+            (
+                "deterministic: true",
+                "max_entities_override: null",
+                "targeting_mode_override: null",
+                "min_overage_time: 0.0",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("owl.agent.agent.AGENT_CONFIG_PATH", agent_config_path)
+
+    model_config = StatelessTransformerV1Config(embed_dim=8, depth=1, n_heads=1)
+    env_config = EnvConfig(
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(),
+    )
+    checkpoint_config_path = tmp_path / "config.yaml"
+    AgentCheckpointConfig(env=env_config, model=model_config).to_file(
+        checkpoint_config_path
+    )
+
+    model = create_model(
+        model_config,
+        obs_spec=env_config.obs_spec,
+        action_spec=env_config.action_spec,
+    )
+    model.reset_parameters()
+    checkpoint_path = tmp_path / "checkpoint_last_best.pt"
+    torch.save(
+        {
+            "model": quantize_model_state_dict(
+                model.state_dict(),
+                FP4_E2M1FN_X2_SCALED_BLOCK16,
+            )
+        },
+        checkpoint_path,
+    )
+
+    agent = Agent(
+        checkpoint_config_path=checkpoint_config_path,
+        checkpoint_path=checkpoint_path,
+    )
+
+    assert set(agent.model.state_dict()) == set(model.state_dict())
+    assert all(parameter.isfinite().all() for parameter in agent.model.parameters())
 
 
 def test_agent_config_max_entities_override_updates_checkpoint_obs_spec() -> None:
@@ -345,7 +403,7 @@ def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
         r"step=0 - total_ms=\d+ - encode_ms=\d+ - inference_ms=\d+ - "
         r"conversion_ms=\d+ - value_self=0\.250 - advantage=0\.250 - "
         r"values=\[0\.250,-0\.500,0\.000,0\.750\] - "
-        r"entities=1 - remaining_overage_s=60\.0\n",
+        rf"entities={ACTION_ENTITY_SLOTS} - remaining_overage_s=60\.0\n",
         log_line,
     )
 

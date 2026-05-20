@@ -81,6 +81,13 @@ write `artifacts/<name>.tar.gz`, for example:
 just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt my-run
 ```
 
+Pass a quantization format as the third argument to quantize the packaged model
+weights inside the submission image:
+
+```sh
+just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt my-run fp4
+```
+
 The `kaggle-submission` recipe depends on `just prepare`, then rebuilds
 `orbit-wars:kaggle` from the current checkout before running the package script
 in that image. The Kaggle image build uses the Buildx docker exporter with zstd
@@ -91,8 +98,10 @@ from a previous image build.
 The package script expects `python/main.py` or `main.py` to exist and copies it
 to `main.py` at the archive root. It also extracts `checkpoint["model"]` from
 the requested checkpoint into a temporary file, copies that file to the archive
-root using the original checkpoint filename, and copies `config.yaml` from the
-same directory. The image build validates Kaggle-targeted Rust compilation
+root using the original checkpoint filename, optionally quantizes those weights
+when the recipe quantization argument is not `fp32`, and copies `config.yaml`
+from the same directory. Unique quantization prefixes such as `fp4` are
+accepted. The image build validates Kaggle-targeted Rust compilation
 directly before artifact generation runs with the mounted checkpoint directory.
 Use `just kaggle-image` only when you want to rebuild or validate the Kaggle
 image without creating a submission tarball.

@@ -159,7 +159,7 @@ class Agent:
             self_value=self_value,
             advantage=advantage,
             player_values=[float(value) for value in values.tolist()],
-            entity_count=int(obs.entity_mask.sum().item()),
+            entity_count=obs.entity_mask.shape[1],
             remaining_overage_time=observation.remaining_overage_time,
         )
         self._last_turn_value = self_value

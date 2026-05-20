@@ -15,6 +15,7 @@ from owl.agent.checkpoint_quantization import (
     dequantize_model_state_dict,
     quantize_model_state_dict,
 )
+from owl.utils import ResolvedFormat, parse_format_prefix_arg
 
 TARGET_DTYPES = {
     "fp16": torch.float16,
@@ -42,12 +43,6 @@ class ModelRoundTripResult:
     model_state: MutableMapping[str, Any]
     stats: RoundTripStats
     post_quantization_model_size_bytes: int
-
-
-@dataclass(frozen=True)
-class ResolvedTargetFormat:
-    value: str
-    inferred_from: str | None = None
 
 
 def roundtrip_checkpoint_model_dtype(
@@ -229,22 +224,12 @@ def _target_format(target_format: str) -> str:
     raise ValueError(f"target format must be one of: {allowed}")
 
 
-def _parse_target_format_arg(target_format: str) -> ResolvedTargetFormat:
-    if target_format in TARGET_FORMATS:
-        return ResolvedTargetFormat(value=target_format)
-
-    matches = tuple(fmt for fmt in TARGET_FORMATS if fmt.startswith(target_format))
-    if len(matches) == 1:
-        return ResolvedTargetFormat(value=matches[0], inferred_from=target_format)
-
-    allowed = ", ".join(TARGET_FORMATS)
-    if len(matches) > 1:
-        match_list = ", ".join(matches)
-        raise argparse.ArgumentTypeError(
-            f"target format prefix {target_format!r} is ambiguous; "
-            f"matches: {match_list}"
-        )
-    raise argparse.ArgumentTypeError(f"target format must be one of: {allowed}")
+def _parse_target_format_arg(target_format: str) -> ResolvedFormat:
+    return parse_format_prefix_arg(
+        target_format,
+        allowed_formats=TARGET_FORMATS,
+        label="target format",
+    )
 
 
 def _quantization_format(target_format: str) -> QuantizationFormat:
