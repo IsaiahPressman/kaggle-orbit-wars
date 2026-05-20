@@ -9,6 +9,7 @@ from owl.model import (
 )
 from owl.rl import ObsBatch
 from owl.train import (
+    AdamConfig,
     AdamWConfig,
     LRScheduleConfig,
     MuonConfig,
@@ -60,21 +61,38 @@ class OptimizerTestModel(BaseModelAPI):
         return (self.output,)
 
 
-def test_create_optimizer_supports_adamw_and_muon() -> None:
+def test_create_optimizer_supports_adam_adamw_and_muon() -> None:
+    adam_model = OptimizerTestModel()
     adamw_model = OptimizerTestModel()
     muon_model = OptimizerTestModel()
 
+    adam = create_optimizer(
+        adam_model,
+        AdamConfig(
+            learning_rate=3e-4,
+            betas=(0.85, 0.95),
+            eps=1e-6,
+            weight_decay=0.01,
+        ),
+    )
     adamw = create_optimizer(
         adamw_model,
-        AdamWConfig(learning_rate=3e-4, weight_decay=0.01),
+        AdamWConfig(learning_rate=3e-4, betas=(0.8, 0.9), weight_decay=0.01),
     )
     muon = create_optimizer(
         muon_model,
         MuonConfig(adamw_lr=3e-4, muon_lr=0.02),
     )
 
+    assert isinstance(adam, torch.optim.Adam)
+    assert adam.defaults["lr"] == pytest.approx(3e-4)
+    assert adam.defaults["betas"] == pytest.approx((0.85, 0.95))
+    assert adam.defaults["eps"] == pytest.approx(1e-6)
+    assert adam.defaults["weight_decay"] == pytest.approx(0.01)
+    assert adam.defaults["fused"] is True
     assert isinstance(adamw, torch.optim.AdamW)
     assert adamw.defaults["lr"] == pytest.approx(3e-4)
+    assert adamw.defaults["betas"] == pytest.approx((0.8, 0.9))
     assert adamw.defaults["weight_decay"] == pytest.approx(0.01)
     assert isinstance(muon, CompositeOptimizer)
     assert any(isinstance(inner, torch.optim.Muon) for inner in muon.optimizers)

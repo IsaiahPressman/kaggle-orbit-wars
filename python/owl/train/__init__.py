@@ -1,5 +1,6 @@
 from .config import FullConfig, RuntimeConfig
 from .optimizer import (
+    AdamConfig,
     AdamWConfig,
     LRScheduleConfig,
     MuonConfig,
@@ -11,6 +12,7 @@ from .ppo import PPOConfig, PPOTrainer
 from .utils import configure_torch
 
 __all__ = [
+    "AdamConfig",
     "AdamWConfig",
     "FullConfig",
     "LRScheduleConfig",

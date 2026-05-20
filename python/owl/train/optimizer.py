@@ -13,6 +13,7 @@ from owl.model import BaseModelAPI, InputLayer
 
 LRScheduleName = Literal["linear_warmup_cosine_decay"]
 StateDict: TypeAlias = dict[str, Any]
+AdamBeta: TypeAlias = Annotated[float, Field(ge=0.0, lt=1.0)]
 
 
 class LRScheduleConfig(BaseConfig):
@@ -42,9 +43,19 @@ class LRScheduler(Protocol):
     def load_state_dict(self, state_dict: StateDict) -> None: ...
 
 
+class AdamConfig(BaseConfig):
+    optimizer: Literal["adam"] = "adam"
+    learning_rate: float = Field(default=3e-4, gt=0.0)
+    betas: tuple[AdamBeta, AdamBeta] = (0.9, 0.999)
+    eps: float = Field(default=1e-5, gt=0.0)
+    weight_decay: float = Field(default=0.0, ge=0.0)
+    lr_schedule: LRScheduleConfig | None = None
+
+
 class AdamWConfig(BaseConfig):
     optimizer: Literal["adamw"] = "adamw"
     learning_rate: float = Field(default=3e-4, gt=0.0)
+    betas: tuple[AdamBeta, AdamBeta] = (0.9, 0.999)
     adamw_eps: float = Field(default=1e-5, gt=0.0)
     weight_decay: float = Field(default=0.0, ge=0.0)
     lr_schedule: LRScheduleConfig | None = None
@@ -62,7 +73,7 @@ class MuonConfig(BaseConfig):
 
 
 OptimizerConfig: TypeAlias = Annotated[
-    AdamWConfig | MuonConfig, Field(discriminator="optimizer")
+    AdamConfig | AdamWConfig | MuonConfig, Field(discriminator="optimizer")
 ]
 
 
@@ -180,10 +191,20 @@ def lr_multiplier(config: LRScheduleConfig, step: int) -> float:
 
 
 def create_optimizer(model: BaseModelAPI, config: OptimizerConfig) -> Optimizer:
+    if config.optimizer == "adam":
+        return torch.optim.Adam(
+            model.parameters(),
+            lr=config.learning_rate,
+            betas=config.betas,
+            eps=config.eps,
+            weight_decay=config.weight_decay,
+            fused=True,
+        )
     if config.optimizer == "adamw":
         return torch.optim.AdamW(
             model.parameters(),
             lr=config.learning_rate,
+            betas=config.betas,
             eps=config.adamw_eps,
             weight_decay=config.weight_decay,
         )

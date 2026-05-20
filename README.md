@@ -74,6 +74,11 @@ Training presets live in `configs/`:
   larger rollout/minibatch sizing, Muon/AdamW optimizer rates, periodic
   checkpoints every 20M environment steps, `torch.compile` default mode, and
   bfloat16 autocast.
+- `baseline_adam.yaml`: Adam optimizer variant with explicit optimizer
+  settings, including `1e-4` learning rate, `(0.9, 0.999)` betas, `1e-5`
+  epsilon, no weight decay, and the same warmup/cosine scheduler shape.
+- `baseline_adamw.yaml`: AdamW optimizer variant matching `baseline_adam.yaml`
+  except for decoupled `0.01` weight decay.
 - `model/stateless_transformer_20m_swiglu.yaml`: larger stateless transformer
   model config used by `baseline.yaml`, with an inline discrete-target actor
   override using eight action mixtures.

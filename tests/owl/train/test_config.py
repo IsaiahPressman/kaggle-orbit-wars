@@ -88,6 +88,44 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
     assert config.runtime.n_runtime_gpus == 1
 
 
+def test_full_config_accepts_adam_optimizer_config() -> None:
+    config = FullConfig.model_validate(
+        {
+            "env": {
+                "n_envs": 2,
+            },
+            "model": {
+                "model_arch": "stateless_transformer_v1",
+                "embed_dim": 32,
+                "depth": 1,
+                "n_heads": 4,
+            },
+            "optimizer": {
+                "optimizer": "adam",
+                "learning_rate": 0.0001,
+                "betas": [0.9, 0.999],
+                "eps": 1.0e-5,
+                "weight_decay": 0.0,
+                "lr_schedule": {
+                    "schedule": "linear_warmup_cosine_decay",
+                    "warmup_steps": 2,
+                    "decay_steps": 10,
+                    "lr_min_ratio": 0.02,
+                },
+            },
+            "rl": {
+                "horizon": 4,
+            },
+        }
+    )
+
+    assert config.optimizer.optimizer == "adam"
+    assert config.optimizer.learning_rate == pytest.approx(0.0001)
+    assert config.optimizer.betas == pytest.approx((0.9, 0.999))
+    assert config.optimizer.lr_schedule is not None
+    assert config.optimizer.lr_schedule.lr_min_ratio == pytest.approx(0.02)
+
+
 def test_full_config_accepts_recurrent_transformer_discrete_targets() -> None:
     config = FullConfig.model_validate(
         {
