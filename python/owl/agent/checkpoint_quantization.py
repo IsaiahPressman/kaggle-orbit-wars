@@ -5,13 +5,16 @@ from typing import Literal, TypeAlias, TypeGuard
 
 import torch
 
-QuantizationFormat: TypeAlias = Literal["fp8_e4m3fn", "fp4_e2m1fn_x2"]
+QuantizationFormat: TypeAlias = Literal[
+    "fp8_e4m3fn",
+    "fp4_e2m1fn_x2_scaled_block16",
+]
 
 FP8_E4M3FN: QuantizationFormat = "fp8_e4m3fn"
-FP4_E2M1FN_X2: QuantizationFormat = "fp4_e2m1fn_x2"
+FP4_E2M1FN_X2_SCALED_BLOCK16: QuantizationFormat = "fp4_e2m1fn_x2_scaled_block16"
 SUPPORTED_QUANTIZATION_FORMATS: tuple[QuantizationFormat, ...] = (
     FP8_E4M3FN,
-    FP4_E2M1FN_X2,
+    FP4_E2M1FN_X2_SCALED_BLOCK16,
 )
 
 _QUANTIZED_STATE_MARKER = "__owl_quantized_model_state_dict__"
@@ -20,7 +23,10 @@ _TENSOR_QUANTIZED_KEY = "quantized"
 _TENSOR_FORMAT_KEY = "format"
 _TENSOR_SHAPE_KEY = "shape"
 _TENSOR_DATA_KEY = "data"
+_TENSOR_SCALE_KEY = "scale"
 _TENSOR_SOURCE_DTYPE_KEY = "source_dtype"
+
+_FP4_BLOCK_SIZE = 16
 
 _FP4_E2M1FN_VALUES = torch.tensor(
     (
@@ -103,19 +109,24 @@ def _quantize_state_tensor(
         }
 
     if quantization == FP8_E4M3FN:
-        data = _quantize_fp8_e4m3fn(tensor)
-    elif quantization == FP4_E2M1FN_X2:
-        data = _pack_fp4_e2m1fn(_quantize_fp4_e2m1fn_codes(tensor))
-    else:
-        raise ValueError(f"unsupported quantization format: {quantization}")
-
-    return {
-        _TENSOR_QUANTIZED_KEY: True,
-        _TENSOR_FORMAT_KEY: quantization,
-        _TENSOR_SHAPE_KEY: tuple(tensor.shape),
-        _TENSOR_SOURCE_DTYPE_KEY: str(tensor.dtype),
-        _TENSOR_DATA_KEY: data,
-    }
+        return {
+            _TENSOR_QUANTIZED_KEY: True,
+            _TENSOR_FORMAT_KEY: quantization,
+            _TENSOR_SHAPE_KEY: tuple(tensor.shape),
+            _TENSOR_SOURCE_DTYPE_KEY: str(tensor.dtype),
+            _TENSOR_DATA_KEY: _quantize_fp8_e4m3fn(tensor),
+        }
+    if quantization == FP4_E2M1FN_X2_SCALED_BLOCK16:
+        data, scale = _quantize_fp4_e2m1fn_scaled_block16(tensor)
+        return {
+            _TENSOR_QUANTIZED_KEY: True,
+            _TENSOR_FORMAT_KEY: quantization,
+            _TENSOR_SHAPE_KEY: tuple(tensor.shape),
+            _TENSOR_SOURCE_DTYPE_KEY: str(tensor.dtype),
+            _TENSOR_DATA_KEY: data,
+            _TENSOR_SCALE_KEY: scale,
+        }
+    raise ValueError(f"unsupported quantization format: {quantization}")
 
 
 def _dequantize_state_tensor(name: object, payload: object) -> torch.Tensor:
@@ -139,8 +150,13 @@ def _dequantize_state_tensor(name: object, payload: object) -> torch.Tensor:
     quantization = payload.get(_TENSOR_FORMAT_KEY)
     if quantization == FP8_E4M3FN:
         return _dequantize_fp8_e4m3fn(data, shape)
-    if quantization == FP4_E2M1FN_X2:
-        return _dequantize_fp4_e2m1fn(data, shape)
+    if quantization == FP4_E2M1FN_X2_SCALED_BLOCK16:
+        scale = payload.get(_TENSOR_SCALE_KEY)
+        if not isinstance(scale, torch.Tensor):
+            raise ValueError(
+                f"quantized model state '{state_key}' scale must be a tensor"
+            )
+        return _dequantize_fp4_e2m1fn_scaled_block16(data, scale, shape)
     raise ValueError(
         f"quantized model state '{state_key}' has unsupported format: {quantization}"
     )
@@ -161,7 +177,9 @@ def _dequantize_fp8_e4m3fn(data: torch.Tensor, shape: tuple[int, ...]) -> torch.
 def _quantize_fp4_e2m1fn_codes(tensor: torch.Tensor) -> torch.Tensor:
     tensor = tensor.to(torch.float32)
     if not torch.isfinite(tensor).all().item():
-        raise ValueError("fp4_e2m1fn_x2 quantization requires finite tensors")
+        raise ValueError(
+            "fp4_e2m1fn_x2_scaled_block16 quantization requires finite tensors"
+        )
 
     abs_tensor = tensor.abs()
     tie_values = _FP4_E2M1FN_ROUNDING_THRESHOLDS.to(device=tensor.device)
@@ -174,6 +192,30 @@ def _quantize_fp4_e2m1fn_codes(tensor: torch.Tensor) -> torch.Tensor:
 
     sign = torch.signbit(tensor).to(torch.uint8) << 3
     return codes | sign
+
+
+def _quantize_fp4_e2m1fn_scaled_block16(
+    tensor: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    tensor = tensor.to(torch.float32)
+    flat = tensor.reshape(-1)
+    numel = flat.numel()
+    if numel == 0:
+        return torch.empty(0, dtype=torch.uint8), torch.empty(0, dtype=torch.float16)
+
+    block_count = (numel + _FP4_BLOCK_SIZE - 1) // _FP4_BLOCK_SIZE
+    padded = torch.zeros(
+        block_count * _FP4_BLOCK_SIZE,
+        dtype=torch.float32,
+        device=flat.device,
+    )
+    padded[:numel] = flat
+    blocks = padded.reshape(block_count, _FP4_BLOCK_SIZE)
+    max_abs = blocks.abs().amax(dim=1, keepdim=True)
+    scale = max_abs / 6.0
+    safe_scale = torch.where(max_abs == 0, torch.ones_like(scale), scale)
+    codes = _quantize_fp4_e2m1fn_codes(blocks / safe_scale).reshape(-1)[:numel]
+    return _pack_fp4_e2m1fn(codes), scale.reshape(-1).to(torch.float16)
 
 
 def _pack_fp4_e2m1fn(codes: torch.Tensor) -> torch.Tensor:
@@ -189,8 +231,9 @@ def _pack_fp4_e2m1fn(codes: torch.Tensor) -> torch.Tensor:
     return packed
 
 
-def _dequantize_fp4_e2m1fn(
+def _dequantize_fp4_e2m1fn_scaled_block16(
     data: torch.Tensor,
+    scale: torch.Tensor,
     shape: tuple[int, ...],
 ) -> torch.Tensor:
     packed = data.contiguous().view(torch.uint8).reshape(-1)
@@ -202,8 +245,18 @@ def _dequantize_fp4_e2m1fn(
         raise ValueError(
             f"fp4 payload has {codes.numel()} unpacked values, expected {numel}"
         )
+    expected_blocks = (numel + _FP4_BLOCK_SIZE - 1) // _FP4_BLOCK_SIZE
+    flat_scale = scale.contiguous().to(torch.float32).reshape(-1)
+    if flat_scale.numel() != expected_blocks:
+        raise ValueError(
+            f"fp4 payload has {flat_scale.numel()} scale values, "
+            f"expected {expected_blocks}"
+        )
     values = _FP4_E2M1FN_VALUES.to(device=packed.device)
-    return values[codes[:numel].long()].reshape(shape)
+    block_scale = flat_scale.to(device=packed.device).repeat_interleave(
+        _FP4_BLOCK_SIZE
+    )[:numel]
+    return (values[codes[:numel].long()] * block_scale).reshape(shape)
 
 
 def _is_quantized_model_state_dict(

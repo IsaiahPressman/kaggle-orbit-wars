@@ -53,8 +53,8 @@ aligned with the current checkout. The packaged checkpoint keeps the original
 filename but contains only the model weights needed by the Kaggle agent. To
 store the packaged model below fp16/bf16 precision, call
 `scripts/build_kaggle_submission.sh --quantization fp8_e4m3fn ...` or
-`--quantization fp4_e2m1fn_x2`; the Kaggle agent dequantizes those slim
-checkpoints back to fp32 before loading the model.
+`--quantization fp4_e2m1fn_x2_scaled_block16`; the Kaggle agent dequantizes
+those slim checkpoints back to fp32 before loading the model.
 
 ## Orbit Wars reference
 
