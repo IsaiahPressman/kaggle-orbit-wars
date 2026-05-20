@@ -188,7 +188,7 @@ To use a different host-edited config without rebuilding the image, set
 `ORBIT_WARS_CONFIG` to another host YAML file:
 
 ```sh
-ORBIT_WARS_CONFIG=/sw/isaiah/orbit-wars/configs/experiment.yaml \
+ORBIT_WARS_CONFIG=/path/to/experiment.yaml \
   sbatch scripts/slurm/launch-train.sbatch
 ```
 
@@ -196,7 +196,7 @@ The launch script mounts the config file's parent directory read-only at
 `/config` and runs training with `/config/experiment.yaml`. If the config uses
 subconfig references such as `model: stateless_transformer_5m_gelu`, keep the
 referenced subconfig directories next to the mounted file, for example
-`/sw/isaiah/orbit-wars/configs/model/stateless_transformer_5m_gelu.yaml`.
+`/path/to/model/stateless_transformer_5m_gelu.yaml`.
 
 Override Slurm resources either by editing `scripts/slurm/launch-train.sbatch` or
 by passing normal `sbatch` flags, for example:
@@ -259,7 +259,7 @@ Use the interactive helper to request a Slurm allocation and open a shell inside
 the container:
 
 ```sh
-ORBIT_WARS_OUTPUT_DIR=/sw/isaiah/orbit-wars/debug \
+ORBIT_WARS_OUTPUT_DIR=/path/to/debug-runs \
 ORBIT_WARS_PARTITION=gpu \
 ORBIT_WARS_GPUS=1 \
 ORBIT_WARS_TIME=01:00:00 \
@@ -293,7 +293,7 @@ mounts `ORBIT_WARS_CONFIG_DIR`, defaulting to `./configs`, read-only at
 `/config` and exports `ORBIT_WARS_CONFIG_DIR=/config` inside the shell:
 
 ```sh
-ORBIT_WARS_CONFIG_DIR=/sw/isaiah/orbit-wars/configs \
+ORBIT_WARS_CONFIG_DIR=/path/to/configs \
   scripts/slurm/launch-interactive.sh
 
 uv run python scripts/run_ppo.py "$ORBIT_WARS_CONFIG_DIR/experiment.yaml" /runs \
