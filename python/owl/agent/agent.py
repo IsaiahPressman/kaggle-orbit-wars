@@ -24,6 +24,7 @@ from owl.rl import (
     encode_python_observation,
 )
 
+from .checkpoint_quantization import dequantize_model_state_dict
 from .kaggle_observation import KaggleObservation
 
 AGENT_CONFIG_PATH = Path(__file__).with_name("agent_config.yaml")
@@ -87,7 +88,7 @@ class Agent:
                 f"checkpoint must be a dictionary with key 'model': {checkpoint_path}"
             )
 
-        self.model.load_state_dict(checkpoint["model"])
+        self.model.load_state_dict(dequantize_model_state_dict(checkpoint["model"]))
         self.model.eval()
         print(f"init_s={perf_counter() - init_start:.2f} - ", end="", flush=True)
 
