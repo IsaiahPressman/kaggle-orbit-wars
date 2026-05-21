@@ -18,6 +18,7 @@ from owl.model.base import (
     ModelEvaluation,
     ModelHiddenState,
     ModelOutput,
+    ModelServingOutput,
 )
 from owl.model.stateless_transformer_v1 import (
     _ACTOR_HEAD_INIT_GAIN,
@@ -238,6 +239,33 @@ class RecurrentTransformerV1(StatelessTransformerV1):
             actions=actions,
             log_probs=log_probs,
             entropies=entropies,
+            values=values,
+            winner_probabilities=winner_probabilities,
+            next_hidden_state=next_state,
+        )
+
+    def serve(
+        self,
+        obs: ObsBatch,
+        *,
+        deterministic: bool = False,
+        hidden_state: ModelHiddenState | None = None,
+    ) -> ModelServingOutput:
+        state = self._initial_or_validate_hidden_state(obs, hidden_state)
+        encoded, next_state = self._encode_sequence(
+            obs,
+            hidden_state=state,
+            dones=None,
+        )
+        values, winner_probabilities = self._value_from_encoded(encoded, obs)
+        actions = self._actor_actions(
+            encoded,
+            obs,
+            obs.action_mask,
+            deterministic=deterministic,
+        )
+        return ModelServingOutput(
+            actions=actions,
             values=values,
             winner_probabilities=winner_probabilities,
             next_hidden_state=next_state,
