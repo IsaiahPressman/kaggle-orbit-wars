@@ -6,10 +6,9 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import torch
-from owl.model import BaseModelAPI, ModelHiddenState, create_model
+from owl.model import BaseModelAPI, ModelHiddenState, ModelOutput, create_model
 from owl.replay import ReplayRecorder
 from owl.rl import (
     ActionBundle,
@@ -382,8 +381,8 @@ def _actions_for_assignments_and_hidden(
     )
     return (
         _select_decoded_actions(decoded_a, decoded_b, assignments.eq(MODEL_A)),
-        getattr(output_a, "next_hidden_state", None),
-        getattr(output_b, "next_hidden_state", None),
+        output_a.next_hidden_state,
+        output_b.next_hidden_state,
     )
 
 
@@ -393,7 +392,7 @@ def _model_output_for_assignment(
     *,
     deterministic: bool,
     hidden_state: ModelHiddenState | None,
-) -> Any:
+) -> ModelOutput:
     if hidden_state is None:
         return model(obs, deterministic=deterministic)
     return model(obs, deterministic=deterministic, hidden_state=hidden_state)

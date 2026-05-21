@@ -71,7 +71,8 @@ replays:
 - geometry helpers
 - RL discrete-target launch-angle selection for static target cones, dynamic
   target-hit windows, sun avoidance, static and dynamic blocker arc
-  subtraction, static arc caching, and no-op fallback accounting
+  subtraction, strict static arc caching, full-mask masking for fully blocked
+  static targets, and no-op fallback accounting
 - fleet speed curve
 - launch validation and side effects
 - production order

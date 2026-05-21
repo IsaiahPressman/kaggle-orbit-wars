@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+import owl.model.actor.discrete_targets as discrete_targets_impl
 import pytest
 import torch
 from owl.model import (
@@ -339,6 +340,51 @@ def test_recurrent_include_planets_zeros_inactive_planet_state() -> None:
 
     assert output.next_hidden_state is not None
     assert output.next_hidden_state.hidden[0, 0, 2:MAX_PLANETS].eq(0.0).all()
+
+
+def test_recurrent_serving_path_accepts_hidden_state_and_skips_log_probs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(8)
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
+    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+    model = RecurrentTransformerV1(
+        RecurrentTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    hidden_state = model.initial_hidden_state(2, device=torch.device("cpu"))
+
+    expected = model(obs, deterministic=True, hidden_state=hidden_state)
+    assert expected.next_hidden_state is not None
+
+    def fail_log_prob(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("serving should not compute action log probs")
+
+    def fail_entropy(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("serving should not compute action entropies")
+
+    monkeypatch.setattr(
+        discrete_targets_impl,
+        "discrete_action_log_probs",
+        fail_log_prob,
+    )
+    monkeypatch.setattr(model.actor, "_policy_params_for_entropy", fail_entropy)
+
+    output = model.serve(obs, deterministic=True, hidden_state=hidden_state)
+
+    assert isinstance(output.actions, DiscreteTargetActions)
+    assert torch.equal(output.actions.launch, expected.actions.launch)
+    assert torch.equal(output.actions.target, expected.actions.target)
+    assert torch.equal(output.actions.ships, expected.actions.ships)
+    assert torch.allclose(output.values, expected.values)
+    assert torch.allclose(output.winner_probabilities, expected.winner_probabilities)
+    assert output.next_hidden_state is not None
+    assert torch.allclose(
+        output.next_hidden_state.hidden,
+        expected.next_hidden_state.hidden,
+    )
 
 
 @pytest.mark.parametrize("recurrence_mode", ["global_only", "include_planets"])

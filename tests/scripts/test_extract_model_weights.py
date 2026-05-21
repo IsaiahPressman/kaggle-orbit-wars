@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 from owl.agent.checkpoint_quantization import (
+    FP4_E2M1FN_X2_SCALED_BLOCK16,
     FP8_E4M3FN,
     dequantize_model_state_dict,
 )
@@ -71,6 +72,109 @@ def test_extract_model_weights_can_quantize_model_state(tmp_path: Path) -> None:
         dequantized["linear.weight"].view(torch.int32),
         expected.view(torch.int32),
     )
+
+
+def test_extract_model_weights_accepts_explicit_fp32_output(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "checkpoint_last_best.pt"
+    output_path = tmp_path / "slim.pt"
+    model_state = {"linear.weight": torch.tensor([[0.375, 1.125]])}
+    torch.save(
+        {
+            "model": model_state,
+            "optimizer": {"state": {"large": torch.zeros((100, 100))}},
+        },
+        checkpoint_path,
+    )
+
+    extract_model_weights.extract_model_weights(
+        checkpoint_path,
+        output_path,
+        quantization=extract_model_weights.FP32,
+    )
+
+    slim_checkpoint = torch.load(output_path, map_location="cpu", weights_only=True)
+    assert slim_checkpoint.keys() == {"model"}
+    assert torch.equal(
+        slim_checkpoint["model"]["linear.weight"], model_state["linear.weight"]
+    )
+
+
+def test_extract_model_weights_can_quantize_model_state_to_fp4(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "checkpoint_last_best.pt"
+    output_path = tmp_path / "slim.pt"
+    model_state = {"linear.weight": torch.tensor([[0.375, 1.125, 2.5]])}
+    torch.save({"model": model_state}, checkpoint_path)
+
+    extract_model_weights.extract_model_weights(
+        checkpoint_path,
+        output_path,
+        quantization=FP4_E2M1FN_X2_SCALED_BLOCK16,
+    )
+
+    slim_checkpoint = torch.load(output_path, map_location="cpu", weights_only=True)
+    assert slim_checkpoint.keys() == {"model"}
+    assert slim_checkpoint["model"]["format"] == FP4_E2M1FN_X2_SCALED_BLOCK16
+    dequantized = dequantize_model_state_dict(slim_checkpoint["model"])
+    assert dequantized["linear.weight"].shape == model_state["linear.weight"].shape
+
+
+def test_main_infers_quantization_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    checkpoint_path = tmp_path / "checkpoint_last_best.pt"
+    output_path = tmp_path / "slim.pt"
+    model_state = {"linear.weight": torch.tensor([[0.375, 1.125, 2.5]])}
+    torch.save({"model": model_state}, checkpoint_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "extract_model_weights.py",
+            str(checkpoint_path),
+            str(output_path),
+            "--quantization",
+            "fp4",
+        ],
+    )
+
+    extract_model_weights.main()
+
+    captured = capsys.readouterr()
+    assert (
+        "Inferred quantization format 'fp4_e2m1fn_x2_scaled_block16' from prefix 'fp4'"
+    ) in captured.out
+    slim_checkpoint = torch.load(output_path, map_location="cpu", weights_only=True)
+    assert slim_checkpoint["model"]["format"] == FP4_E2M1FN_X2_SCALED_BLOCK16
+
+
+def test_main_rejects_ambiguous_quantization_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    checkpoint_path = tmp_path / "checkpoint_last_best.pt"
+    output_path = tmp_path / "slim.pt"
+    torch.save({"model": {"linear.weight": torch.ones(1)}}, checkpoint_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "extract_model_weights.py",
+            str(checkpoint_path),
+            str(output_path),
+            "--quantization",
+            "fp",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        extract_model_weights.main()
+
+    captured = capsys.readouterr()
+    assert "quantization format prefix 'fp' is ambiguous" in captured.err
+    assert "fp4_e2m1fn_x2_scaled_block16" in captured.err
 
 
 def test_extract_model_weights_rejects_overwriting_input(tmp_path: Path) -> None:

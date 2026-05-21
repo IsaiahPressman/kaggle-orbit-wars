@@ -59,10 +59,11 @@ kaggle-image: prepare
 	  --output type=docker,name=orbit-wars:kaggle,compression=zstd,compression-level=1 \
 	  .
 [group: 'build']
-kaggle-submission model submission="submission": prepare kaggle-image
+kaggle-submission model submission="submission" quantization="fp32": prepare kaggle-image
 	#!/usr/bin/env bash
 	set -euo pipefail
 	submission="{{submission}}"
+	quantization="{{quantization}}"
 	if [[ -z "$submission" || "$submission" == *"/"* || "$submission" == "." || "$submission" == ".." ]]; then
 	  echo "Submission name must be a non-empty file name, not a path: $submission" >&2
 	  exit 2
@@ -74,10 +75,14 @@ kaggle-submission model submission="submission": prepare kaggle-image
 	  output="artifacts/${submission}.tar.gz"
 	fi
 	output_abs="$(mkdir -p "$(dirname "$output")" && cd "$(dirname "$output")" && pwd)/$(basename "$output")"
+	submission_args=()
+	if [[ "$quantization" != "fp32" ]]; then
+	  submission_args+=(--quantization "$quantization")
+	fi
 	docker run --rm \
 	  -v "$(dirname "$model_abs"):/model:ro" \
 	  -v "$(dirname "$output_abs"):/artifacts" \
-	  orbit-wars:kaggle "/model/$(basename "$model_abs")" "/artifacts/$(basename "$output_abs")"
+	  orbit-wars:kaggle "${submission_args[@]}" "/model/$(basename "$model_abs")" "/artifacts/$(basename "$output_abs")"
 
 _prepare_base: build rs-format py-format rs-lint py-lint docs-lint py-static rs-test py-test-full
 [group: 'ci']

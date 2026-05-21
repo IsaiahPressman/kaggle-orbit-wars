@@ -5,6 +5,7 @@ import argparse
 import importlib
 import json
 import random
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol, cast
@@ -98,14 +99,14 @@ def load_reference() -> OrbitWarsModule:
 def run_with_recording_random(
     module: OrbitWarsModule,
     seed: int,
-    function_name: str,
+    function: Callable[..., Any],
     *args: Any,
 ) -> tuple[Any, list[dict[str, int | float | str]]]:
     recorder = RecordingRandom(seed)
     original_random = module.random
     module.random = recorder
     try:
-        return getattr(module, function_name)(*args), recorder.calls
+        return function(*args), recorder.calls
     finally:
         module.random = original_random
 
@@ -163,7 +164,7 @@ def comet_path_case(
     comet_paths, comet_calls = run_with_recording_random(
         module,
         case["seed"],
-        "generate_comet_paths",
+        module.generate_comet_paths,
         planets,
         0.04,
         case["spawn_step"],
@@ -262,12 +263,12 @@ def main() -> None:
     planets, planet_calls = run_with_recording_random(
         module,
         args.planet_seed,
-        "generate_planets",
+        module.generate_planets,
     )
     comet_paths, comet_calls = run_with_recording_random(
         module,
         args.comet_seed,
-        "generate_comet_paths",
+        module.generate_comet_paths,
         planets,
         0.04,
         50,

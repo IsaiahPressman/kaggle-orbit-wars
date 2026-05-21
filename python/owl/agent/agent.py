@@ -1,15 +1,27 @@
+from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 import torch
 from pydantic import ConfigDict, Field
 
 from owl.config import BaseConfig
-from owl.model import ModelConfig, ModelHiddenState, create_model
+from owl.model import (
+    ModelConfig,
+    ModelHiddenState,
+    RecurrentTransformerV1Config,
+    create_model,
+)
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
+    MAX_PLANETS,
     ActionBundle,
+    ActionConfig,
+    ActionDiscreteTargetBinsConfig,
+    ActionDiscreteTargetsConfig,
     ActionMask,
+    ActionPureConfig,
     DiscreteTargetActionMask,
     DiscreteTargetActions,
     DiscreteTargetBinActionMask,
@@ -28,6 +40,12 @@ from .checkpoint_quantization import dequantize_model_state_dict
 from .kaggle_observation import KaggleObservation
 
 AGENT_CONFIG_PATH = Path(__file__).with_name("agent_config.yaml")
+
+
+@dataclass(frozen=True)
+class CompactedObservation:
+    obs: ObsBatch
+    action_entity_indices: torch.Tensor
 
 
 class AgentConfig(BaseConfig):
@@ -71,6 +89,8 @@ class Agent:
             self.config.targeting_mode_override,
         )
         self._last_turn_value = float("nan")
+        self._peak_total_ms = 0
+        self._peak_entities = 0
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = create_model(
             self.checkpoint_config.model,
@@ -93,43 +113,38 @@ class Agent:
         print(f"init_s={perf_counter() - init_start:.2f} - ", end="", flush=True)
 
     @torch.inference_mode()
-    def act(self, observation: KaggleObservation) -> list[list[float]]:
+    def act(self, observation: Any) -> list[list[float]]:
+        total_start = perf_counter()
+        encode_start = total_start
+        observation = KaggleObservation.model_validate(observation)
         if observation.remaining_overage_time < self.config.min_overage_time:
             return []
 
-        total_start = perf_counter()
-
-        encode_start = perf_counter()
         obs_dict = observation.to_rl_observation()
         obs = encode_python_observation(
             obs_dict,
             obs_spec=self.checkpoint_config.env.obs_spec,
             action_spec=self.checkpoint_config.env.action_spec,
         )
-        obs = compact_entities(obs)
+        compacted = compact_entities(
+            obs,
+            compact_planets=_should_compact_planets(self.checkpoint_config.model),
+        )
+        obs = compacted.obs
         device_obs = self._obs_to_device(obs)
         self._synchronize_device()
         encode_ms = _elapsed_ms(encode_start)
 
         inference_start = perf_counter()
-        hidden_state = getattr(self, "hidden_state", None)
-        initial_hidden_state = getattr(self.model, "initial_hidden_state", None)
-        if callable(initial_hidden_state):
-            if observation.step == 0 or hidden_state is None:
-                hidden_state = initial_hidden_state(1, device=self.device)
-            output = (
-                self.model(device_obs, deterministic=self.config.deterministic)
-                if hidden_state is None
-                else self.model(
-                    device_obs,
-                    deterministic=self.config.deterministic,
-                    hidden_state=hidden_state,
-                )
-            )
-            self.hidden_state = getattr(output, "next_hidden_state", None)
-        else:
-            output = self.model(device_obs, deterministic=self.config.deterministic)
-            self.hidden_state = None
+        hidden_state = self.hidden_state
+        if observation.step == 0 or hidden_state is None:
+            hidden_state = self.model.initial_hidden_state(1, device=self.device)
+        output = self.model.serve(
+            device_obs,
+            deterministic=self.config.deterministic,
+            hidden_state=hidden_state,
+        )
+        self.hidden_state = output.next_hidden_state
         self._synchronize_device()
         values = output.values.detach().cpu()[0]
         self_value = float(values[observation.player].item())
@@ -141,25 +156,38 @@ class Agent:
         inference_ms = _elapsed_ms(inference_start)
 
         conversion_start = perf_counter()
+        actions_cpu = expand_actions_to_full_action_slots(
+            _model_actions_to_cpu(output.actions),
+            compacted.action_entity_indices,
+            action_spec=self.checkpoint_config.env.action_spec,
+        )
         actions = actions_to_kaggle(
             obs_dict,
             observation.player,
-            _model_actions_to_cpu(output.actions),
+            actions_cpu,
             action_spec=self.checkpoint_config.env.action_spec,
         )
         conversion_ms = _elapsed_ms(conversion_start)
         total_ms = _elapsed_ms(total_start)
+        entity_count = obs.entity_mask.shape[1]
+        peak_total_ms, peak_entities = self._update_peak_metrics(
+            step=observation.step,
+            total_ms=total_ms,
+            entity_count=entity_count,
+        )
 
         self.log(
             step=observation.step,
             total_ms=total_ms,
+            peak_total_ms=peak_total_ms,
             encode_ms=encode_ms,
             inference_ms=inference_ms,
             conversion_ms=conversion_ms,
             self_value=self_value,
             advantage=advantage,
             player_values=[float(value) for value in values.tolist()],
-            entity_count=int(obs.entity_mask.sum().item()),
+            entity_count=entity_count,
+            peak_entities=peak_entities,
             remaining_overage_time=observation.remaining_overage_time,
         )
         self._last_turn_value = self_value
@@ -184,6 +212,7 @@ class Agent:
         *,
         step: int,
         total_ms: int,
+        peak_total_ms: int,
         encode_ms: int,
         inference_ms: int,
         conversion_ms: int,
@@ -191,12 +220,14 @@ class Agent:
         advantage: float,
         player_values: list[float],
         entity_count: int,
+        peak_entities: int,
         remaining_overage_time: float,
     ) -> None:
         values = ",".join(f"{value:.3f}" for value in player_values)
         print(
             f"step={step} - "
             f"total_ms={total_ms} - "
+            f"peak_total_ms={peak_total_ms} - "
             f"encode_ms={encode_ms} - "
             f"inference_ms={inference_ms} - "
             f"conversion_ms={conversion_ms} - "
@@ -204,9 +235,26 @@ class Agent:
             f"advantage={advantage:.3f} - "
             f"values=[{values}] - "
             f"entities={entity_count} - "
+            f"peak_entities={peak_entities} - "
             f"remaining_overage_s={remaining_overage_time:.1f}",
             flush=True,
         )
+
+    def _update_peak_metrics(
+        self,
+        *,
+        step: int,
+        total_ms: int,
+        entity_count: int,
+    ) -> tuple[int, int]:
+        peak_total_ms = self._peak_total_ms
+        if step != 0:
+            peak_total_ms = max(peak_total_ms, total_ms)
+        self._peak_total_ms = peak_total_ms
+
+        peak_entities = max(self._peak_entities, entity_count)
+        self._peak_entities = peak_entities
+        return peak_total_ms, peak_entities
 
 
 def _elapsed_ms(start: float) -> int:
@@ -260,35 +308,157 @@ def _action_mask_to_device(action_mask: ActionMask, device: torch.device) -> Act
     return DiscreteTargetBinActionMask(can_act=action_mask.can_act.to(device=device))
 
 
-def compact_entities(obs: ObsBatch) -> ObsBatch:
-    """Drop inactive fleet rows from a single-row observation batch."""
+def compact_entities(
+    obs: ObsBatch, *, compact_planets: bool = True
+) -> CompactedObservation:
+    """Drop inactive entity rows from a single-row observation batch."""
     batch_size = obs.entity_mask.shape[0]
     if batch_size != 1:
         raise ValueError(
             f"runtime entity compaction requires batch size 1, got {batch_size}"
         )
 
+    planet_mask = obs.entity_mask[0, :MAX_PLANETS]
+    comet_mask = obs.entity_mask[0, MAX_PLANETS:ACTION_ENTITY_SLOTS]
     fleet_mask = obs.entity_mask[0, ACTION_ENTITY_SLOTS:]
+    active_planet_indexes = (
+        torch.nonzero(planet_mask, as_tuple=True)[0]
+        if compact_planets
+        else torch.arange(MAX_PLANETS, device=obs.entity_mask.device)
+    )
+    active_comet_indexes = torch.nonzero(comet_mask, as_tuple=True)[0]
     active_fleet_indexes = torch.nonzero(fleet_mask, as_tuple=True)[0]
-    if active_fleet_indexes.numel() == obs.fleets.shape[1]:
-        return obs
+    action_entity_indices = torch.cat(
+        (
+            active_planet_indexes,
+            active_comet_indexes + MAX_PLANETS,
+        )
+    )
+    if action_entity_indices.numel() == 0:
+        raise ValueError(
+            "runtime entity compaction requires at least one action entity"
+        )
 
-    return ObsBatch(
-        planets=obs.planets,
-        orbiting_planets=obs.orbiting_planets,
+    compacted = ObsBatch(
+        planets=obs.planets[:, active_planet_indexes, :],
+        orbiting_planets=obs.orbiting_planets[:, active_planet_indexes],
         fleets=obs.fleets[:, active_fleet_indexes, :],
-        comets=obs.comets,
+        comets=obs.comets[:, active_comet_indexes, :],
         entity_mask=torch.cat(
             (
-                obs.entity_mask[:, :ACTION_ENTITY_SLOTS],
+                obs.entity_mask[:, :MAX_PLANETS][:, active_planet_indexes],
+                obs.entity_mask[:, MAX_PLANETS:ACTION_ENTITY_SLOTS][
+                    :, active_comet_indexes
+                ],
                 obs.entity_mask[:, ACTION_ENTITY_SLOTS:][:, active_fleet_indexes],
             ),
             dim=1,
         ),
         still_playing=obs.still_playing,
         global_features=obs.global_features,
-        action_mask=obs.action_mask,
+        action_mask=_compact_action_mask(obs.action_mask, action_entity_indices),
     )
+    return CompactedObservation(
+        obs=compacted,
+        action_entity_indices=action_entity_indices,
+    )
+
+
+def _should_compact_planets(model_config: ModelConfig) -> bool:
+    # Recurrent include-planets checkpoints index the fixed planet token prefix
+    # directly, so compacting inactive planet rows changes the recurrent layout.
+    return not (
+        isinstance(model_config, RecurrentTransformerV1Config)
+        and model_config.recurrence_mode == "include_planets"
+    )
+
+
+def _compact_action_mask(
+    action_mask: ActionMask,
+    action_entity_indices: torch.Tensor,
+) -> ActionMask:
+    if isinstance(action_mask, PureActionMask):
+        return PureActionMask(
+            can_act=action_mask.can_act.index_select(2, action_entity_indices),
+            max_launch=action_mask.max_launch.index_select(2, action_entity_indices),
+        )
+    if isinstance(action_mask, DiscreteTargetActionMask):
+        can_act = action_mask.can_act.index_select(2, action_entity_indices)
+        can_act = can_act.index_select(3, action_entity_indices)
+        return DiscreteTargetActionMask(
+            can_act=can_act,
+            max_launch=action_mask.max_launch.index_select(2, action_entity_indices),
+        )
+    can_act = action_mask.can_act.index_select(2, action_entity_indices)
+    can_act = can_act.index_select(3, action_entity_indices)
+    return DiscreteTargetBinActionMask(can_act=can_act)
+
+
+def expand_actions_to_full_action_slots(
+    actions: ActionBundle,
+    action_entity_indices: torch.Tensor,
+    *,
+    action_spec: ActionConfig,
+) -> ActionBundle:
+    if action_entity_indices.numel() == ACTION_ENTITY_SLOTS and torch.equal(
+        action_entity_indices,
+        torch.arange(ACTION_ENTITY_SLOTS, device=action_entity_indices.device),
+    ):
+        return actions
+
+    if isinstance(actions, PureActions):
+        if not isinstance(action_spec, ActionPureConfig):
+            raise TypeError("pure actions require pure action_spec")
+        return PureActions(
+            launch=_expand_action_tensor(actions.launch, action_entity_indices),
+            angle=_expand_action_tensor(actions.angle, action_entity_indices),
+            ships=_expand_action_tensor(actions.ships, action_entity_indices),
+        )
+    if isinstance(actions, DiscreteTargetActions):
+        if not isinstance(action_spec, ActionDiscreteTargetsConfig):
+            raise TypeError(
+                "discrete-target actions require discrete-target action_spec"
+            )
+        return DiscreteTargetActions(
+            launch=_expand_action_tensor(actions.launch, action_entity_indices),
+            target=_expand_action_tensor(
+                _remap_compact_targets(actions.target, action_entity_indices),
+                action_entity_indices,
+            ),
+            ships=_expand_action_tensor(actions.ships, action_entity_indices),
+        )
+    if not isinstance(action_spec, ActionDiscreteTargetBinsConfig):
+        raise TypeError("target-bin actions require target-bin action_spec")
+    return DiscreteTargetBinActions(
+        target=_expand_action_tensor(
+            _remap_compact_targets(actions.target, action_entity_indices),
+            action_entity_indices,
+        ),
+        fleet_bin=_expand_action_tensor(actions.fleet_bin, action_entity_indices),
+    )
+
+
+def _expand_action_tensor(
+    tensor: torch.Tensor,
+    action_entity_indices: torch.Tensor,
+) -> torch.Tensor:
+    full_shape = (*tensor.shape[:2], ACTION_ENTITY_SLOTS, *tensor.shape[3:])
+    expanded = tensor.new_zeros(full_shape)
+    return expanded.index_copy(
+        2,
+        action_entity_indices.to(device=tensor.device),
+        tensor,
+    )
+
+
+def _remap_compact_targets(
+    target: torch.Tensor,
+    action_entity_indices: torch.Tensor,
+) -> torch.Tensor:
+    target_in_range = target.ge(0) & target.lt(action_entity_indices.numel())
+    if not target_in_range.all().item():
+        raise ValueError("compact target indices must reference compact action slots")
+    return action_entity_indices.to(device=target.device)[target]
 
 
 def apply_max_entities_override(

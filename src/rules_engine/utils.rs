@@ -116,8 +116,7 @@ where
     if let Some(relative_angle) = choose_center_first(&feasible) {
         return Some(normalize_angle(base_angle + relative_angle));
     }
-    choose_center_first(&static_target_sun_safe_angle_spans(source, target))
-        .map(|relative_angle| normalize_angle(base_angle + relative_angle))
+    None
 }
 
 pub fn static_target_arcs<'a, I>(

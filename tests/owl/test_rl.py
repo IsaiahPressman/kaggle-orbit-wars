@@ -17,6 +17,7 @@ from owl.rl import (
     ActionPureConfig,
     DecodedLaunchActions,
     DiscreteTargetActions,
+    DiscreteTargetBinActionMask,
     DiscreteTargetBinActions,
     EntityBasedConfig,
     EntityBasedExtV1Config,
@@ -69,6 +70,7 @@ def _encoded_python_observation(
         obs_spec=obs_spec,
         action_spec=action_spec,
     )
+    action_mask = encoded.action_mask
     return (
         encoded.planets[0].numpy(),
         encoded.orbiting_planets[0].numpy(),
@@ -76,8 +78,10 @@ def _encoded_python_observation(
         encoded.comets[0].numpy(),
         encoded.entity_mask[0].numpy(),
         encoded.global_features[0].numpy(),
-        encoded.can_act[0].numpy(),
-        None if encoded.max_launch is None else encoded.max_launch[0].numpy(),
+        action_mask.can_act[0].numpy(),
+        None
+        if isinstance(action_mask, DiscreteTargetBinActionMask)
+        else action_mask.max_launch[0].numpy(),
     )
 
 
@@ -94,8 +98,8 @@ def test_vectorized_env_writes_into_preallocated_torch_buffers() -> None:
     env.observations.planets.fill_(-7)
     env.observations.comets.fill_(-3)
     env.observations.entity_mask.fill_(True)
-    env.observations.can_act.fill_(True)
-    env.observations.max_launch.fill_(123)
+    env.observations.action_mask.can_act.fill_(True)
+    env.observations.action_mask.max_launch.fill_(123)
     obs = env.reset()
 
     assert obs.planets.data_ptr() == planet_ptr
@@ -110,8 +114,8 @@ def test_vectorized_env_writes_into_preallocated_torch_buffers() -> None:
     assert torch.all(obs.comets == 0)
     assert torch.all(~obs.entity_mask[:, MAX_PLANETS:ACTION_ENTITY_SLOTS])
     assert torch.all(~obs.entity_mask[:, ACTION_ENTITY_SLOTS:])
-    assert torch.any(obs.can_act)
-    assert torch.all(obs.max_launch[~obs.can_act] == 0)
+    assert torch.any(obs.action_mask.can_act)
+    assert torch.all(obs.action_mask.max_launch[~obs.action_mask.can_act] == 0)
 
 
 def test_vectorized_env_warns_and_disables_pin_memory_without_cuda(
@@ -164,8 +168,8 @@ def test_step_writes_observations_rewards_and_dones_in_place() -> None:
     assert obs.comets.shape == (2, MAX_COMETS, COMET_CHANNELS)
     assert obs.global_features.shape == (2, GLOBAL_CHANNELS)
     assert obs.still_playing.shape == (2, 4)
-    assert obs.can_act.shape == (2, 4, ACTION_ENTITY_SLOTS)
-    assert obs.max_launch.shape == (2, 4, ACTION_ENTITY_SLOTS)
+    assert obs.action_mask.can_act.shape == (2, 4, ACTION_ENTITY_SLOTS)
+    assert obs.action_mask.max_launch.shape == (2, 4, ACTION_ENTITY_SLOTS)
     assert rewards.shape == (2, 4)
     assert dones.shape == (2, 4)
     assert episode_metrics == {}
@@ -302,7 +306,9 @@ def test_step_rejects_invalid_launched_action_values(
         pin_memory=False,
     )
     obs = env.reset()
-    env_index, player, entity = torch.nonzero(obs.can_act, as_tuple=False)[0].tolist()
+    env_index, player, entity = torch.nonzero(obs.action_mask.can_act, as_tuple=False)[
+        0
+    ].tolist()
     shape = (1, 4, ACTION_ENTITY_SLOTS, env.action_spec.max_per_planet_launches)
     launch = np.zeros(shape, dtype=np.bool_)
     angle = np.zeros(shape, dtype=np.float32)
@@ -498,9 +504,14 @@ def test_discrete_targets_config_and_env_shapes() -> None:
     )
     obs = env.reset()
 
-    assert obs.can_act.shape == (1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS)
-    assert obs.max_launch.shape == (1, 4, ACTION_ENTITY_SLOTS)
-    assert obs.max_launch[~obs.can_act.any(dim=-1)].eq(0).all()
+    assert obs.action_mask.can_act.shape == (
+        1,
+        4,
+        ACTION_ENTITY_SLOTS,
+        ACTION_ENTITY_SLOTS,
+    )
+    assert obs.action_mask.max_launch.shape == (1, 4, ACTION_ENTITY_SLOTS)
+    assert obs.action_mask.max_launch[~obs.action_mask.can_act.any(dim=-1)].eq(0).all()
 
 
 def test_discrete_targets_step_uses_int_target_tensor() -> None:
@@ -520,7 +531,12 @@ def test_discrete_targets_step_uses_int_target_tensor() -> None:
         DiscreteTargetActions(launch=launch, target=target, ships=ships)
     )
 
-    assert obs.can_act.shape == (1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS)
+    assert obs.action_mask.can_act.shape == (
+        1,
+        4,
+        ACTION_ENTITY_SLOTS,
+        ACTION_ENTITY_SLOTS,
+    )
     assert rewards.shape == (1, 4)
     assert dones.shape == (1, 4)
     assert episode_metrics == {}
@@ -561,8 +577,14 @@ def test_discrete_target_bins_config_and_env_shapes() -> None:
     )
     obs = env.reset()
 
-    assert obs.can_act.shape == (2, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS, 11)
-    assert obs.max_launch is None
+    assert obs.action_mask.can_act.shape == (
+        2,
+        4,
+        ACTION_ENTITY_SLOTS,
+        ACTION_ENTITY_SLOTS,
+        11,
+    )
+    assert isinstance(obs.action_mask, DiscreteTargetBinActionMask)
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         ActionDiscreteTargetBinsConfig(n_bins=11, max_per_planet_launches=1)  # type: ignore[call-arg]
@@ -585,8 +607,14 @@ def test_discrete_target_bins_step_uses_target_and_fleet_bin_bundle() -> None:
 
     obs, rewards, dones, episode_metrics = env.step(actions)
 
-    assert obs.can_act.shape == (2, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS, 8)
-    assert obs.max_launch is None
+    assert obs.action_mask.can_act.shape == (
+        2,
+        4,
+        ACTION_ENTITY_SLOTS,
+        ACTION_ENTITY_SLOTS,
+        8,
+    )
+    assert isinstance(obs.action_mask, DiscreteTargetBinActionMask)
     assert rewards.shape == (2, 4)
     assert dones.shape == (2, 4)
     assert episode_metrics == {}
@@ -614,7 +642,7 @@ def test_vectorized_env_writes_action_masks_for_alternate_specs() -> None:
     target_bin_mask = env.action_mask_for_spec(target_bin_spec)
     target_obs = env.observation_for_action_spec(target_spec)
 
-    assert obs.can_act.shape == (1, 4, ACTION_ENTITY_SLOTS)
+    assert obs.action_mask.can_act.shape == (1, 4, ACTION_ENTITY_SLOTS)
     assert target_mask.can_act.shape == (
         1,
         4,
@@ -734,7 +762,9 @@ def test_step_decoded_actions_accepts_mixed_source_action_specs() -> None:
     pure_launch = torch.zeros(pure_shape, dtype=torch.bool)
     pure_angle = torch.zeros(pure_shape, dtype=torch.float32)
     pure_ships = torch.zeros(pure_shape, dtype=torch.int64)
-    pure_source = int(torch.nonzero(obs.can_act[0, pure_player], as_tuple=False)[0])
+    pure_source = int(
+        torch.nonzero(obs.action_mask.can_act[0, pure_player], as_tuple=False)[0]
+    )
     pure_launch[0, pure_player, pure_source, 0] = True
     pure_ships[0, pure_player, pure_source, 0] = pure_spec.min_fleet_size
     pure_decoded = env.decode_actions(
@@ -778,7 +808,7 @@ def test_step_decoded_actions_accepts_mixed_source_action_specs() -> None:
 
     obs, rewards, dones, episode_metrics = env.step_decoded_actions(mixed)
 
-    assert obs.can_act.shape == (1, 4, ACTION_ENTITY_SLOTS)
+    assert obs.action_mask.can_act.shape == (1, 4, ACTION_ENTITY_SLOTS)
     assert rewards.shape == (1, 4)
     assert dones.shape == (1, 4)
     assert episode_metrics == {}
@@ -928,7 +958,9 @@ def test_min_fleet_size_controls_action_mask_and_validation() -> None:
         pin_memory=False,
     )
     obs = env.reset()
-    env_index, player, entity = torch.nonzero(obs.can_act, as_tuple=False)[0].tolist()
+    env_index, player, entity = torch.nonzero(obs.action_mask.can_act, as_tuple=False)[
+        0
+    ].tolist()
     shape = (1, 4, ACTION_ENTITY_SLOTS, action_spec.max_per_planet_launches)
     launch = np.zeros(shape, dtype=np.bool_)
     angle = np.zeros(shape, dtype=np.float32)

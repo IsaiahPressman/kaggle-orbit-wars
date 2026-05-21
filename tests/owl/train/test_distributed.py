@@ -14,6 +14,7 @@ from owl.rl import (
     ActionBundle,
     ActionPureConfig,
     ObsBatch,
+    PureActionMask,
     PureActions,
 )
 from owl.train import distributed as distributed_module
@@ -119,8 +120,10 @@ def _obs(n_envs: int) -> ObsBatch:
         entity_mask=torch.ones((n_envs, 1), dtype=torch.bool),
         still_playing=torch.ones((n_envs, 4), dtype=torch.bool),
         global_features=torch.zeros((n_envs, 1)),
-        can_act=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
-        max_launch=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+        action_mask=PureActionMask(
+            can_act=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
+            max_launch=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+        ),
     )
 
 
@@ -141,6 +144,7 @@ def _entropies(per_player: torch.Tensor) -> ModelActionEntropies:
         launch=torch.zeros(action_shape),
         event=torch.zeros(action_shape),
         per_player_entity=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS)),
+        components={"launch": per_player},
     )
 
 

@@ -50,6 +50,7 @@ from owl.model.base import (
     ModelEvaluation,
     ModelHiddenState,
     ModelOutput,
+    ModelServingOutput,
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
@@ -322,7 +323,12 @@ class StatelessTransformerV1(BaseModelAPI):
             *self.actor.get_output_layers(),
         )
 
-    def encode_observations(self, obs: ObsBatch) -> EncodedObservations:
+    def encode_observations(
+        self,
+        obs: ObsBatch,
+        *,
+        action_entity_slots: int = ACTION_ENTITY_SLOTS,
+    ) -> EncodedObservations:
         global_x = self.global_proj(obs.global_features)
         global_token = global_x.unsqueeze(1)
         orbiting = obs.orbiting_planets.unsqueeze(-1)
@@ -414,7 +420,7 @@ class StatelessTransformerV1(BaseModelAPI):
         return EncodedObservations(
             hidden=x,
             token_mask=token_mask,
-            action_entity_hidden=x[:, :ACTION_ENTITY_SLOTS, :],
+            action_entity_hidden=x[:, :action_entity_slots, :],
             player_hidden=x[:, player_start:global_start, :],
             global_feature_hidden=x[:, global_start : global_start + 1, :],
             board_hidden=x[:, board_start:actor_plan_start, :],
@@ -435,7 +441,10 @@ class StatelessTransformerV1(BaseModelAPI):
     ) -> ModelOutput:
         if hidden_state is not None:
             raise ValueError("StatelessTransformerV1 does not accept hidden_state")
-        encoded = self.encode_observations(obs)
+        encoded = self.encode_observations(
+            obs,
+            action_entity_slots=_action_entity_slots_from_mask(obs.action_mask),
+        )
         values, winner_probabilities = self._value_from_encoded(encoded, obs)
         actions, log_probs, entropies = self._actor(
             encoded,
@@ -447,6 +456,32 @@ class StatelessTransformerV1(BaseModelAPI):
             actions=actions,
             log_probs=log_probs,
             entropies=entropies,
+            values=values,
+            winner_probabilities=winner_probabilities,
+        )
+
+    def serve(
+        self,
+        obs: ObsBatch,
+        *,
+        deterministic: bool = False,
+        hidden_state: ModelHiddenState | None = None,
+    ) -> ModelServingOutput:
+        if hidden_state is not None:
+            raise ValueError("StatelessTransformerV1 does not accept hidden_state")
+        encoded = self.encode_observations(
+            obs,
+            action_entity_slots=_action_entity_slots_from_mask(obs.action_mask),
+        )
+        values, winner_probabilities = self._value_from_encoded(encoded, obs)
+        actions = self._actor_actions(
+            encoded,
+            obs,
+            obs.action_mask,
+            deterministic=deterministic,
+        )
+        return ModelServingOutput(
+            actions=actions,
             values=values,
             winner_probabilities=winner_probabilities,
         )
@@ -463,7 +498,10 @@ class StatelessTransformerV1(BaseModelAPI):
             raise ValueError("StatelessTransformerV1 does not accept hidden_state")
         if dones is not None:
             raise ValueError("StatelessTransformerV1 does not accept dones")
-        encoded = self.encode_observations(obs)
+        encoded = self.encode_observations(
+            obs,
+            action_entity_slots=_action_entity_slots_from_mask(obs.action_mask),
+        )
         values, winner_probabilities = self._value_from_encoded(encoded, obs)
         log_probs, entropies = self._actor_log_prob(
             encoded,
@@ -486,7 +524,10 @@ class StatelessTransformerV1(BaseModelAPI):
     ) -> torch.Tensor:
         if hidden_state is not None:
             raise ValueError("StatelessTransformerV1 does not accept hidden_state")
-        encoded = self.encode_observations(obs)
+        encoded = self.encode_observations(
+            obs,
+            action_entity_slots=_action_entity_slots_from_mask(obs.action_mask),
+        )
         values, _winner_probabilities = self._value_from_encoded(encoded, obs)
         return values
 
@@ -522,6 +563,7 @@ class StatelessTransformerV1(BaseModelAPI):
         encoded: EncodedObservations,
     ) -> PureActorInputs:
         action_entity_hidden = encoded.action_entity_hidden
+        action_entity_slots = action_entity_hidden.shape[1]
         entity_features = action_entity_hidden[:, None, :, :].expand(
             -1,
             OUTER_PLAYER_SLOTS,
@@ -531,13 +573,13 @@ class StatelessTransformerV1(BaseModelAPI):
         player_features = encoded.player_hidden[:, :, None, :].expand(
             -1,
             -1,
-            ACTION_ENTITY_SLOTS,
+            action_entity_slots,
             -1,
         )
         plan_features = encoded.actor_plan_hidden[:, :, None, :].expand(
             -1,
             -1,
-            ACTION_ENTITY_SLOTS,
+            action_entity_slots,
             -1,
         )
         if self.source_actor_input_proj is None or self.target_actor_input_proj is None:
@@ -551,7 +593,7 @@ class StatelessTransformerV1(BaseModelAPI):
         return PureActorInputs(
             source=source,
             target=target,
-            target_mask=encoded.token_mask[:, :ACTION_ENTITY_SLOTS],
+            target_mask=encoded.token_mask[:, :action_entity_slots],
         )
 
     def _discrete_actor_inputs(
@@ -560,6 +602,7 @@ class StatelessTransformerV1(BaseModelAPI):
         obs: ObsBatch,
     ) -> DiscreteActorInputs:
         action_entity_hidden = encoded.action_entity_hidden
+        action_entity_slots = action_entity_hidden.shape[1]
         entity_features = action_entity_hidden[:, None, :, :].expand(
             -1,
             OUTER_PLAYER_SLOTS,
@@ -569,13 +612,13 @@ class StatelessTransformerV1(BaseModelAPI):
         player_features = encoded.player_hidden[:, :, None, :].expand(
             -1,
             -1,
-            ACTION_ENTITY_SLOTS,
+            action_entity_slots,
             -1,
         )
         plan_features = encoded.actor_plan_hidden[:, :, None, :].expand(
             -1,
             -1,
-            ACTION_ENTITY_SLOTS,
+            action_entity_slots,
             -1,
         )
         if self.source_actor_input_proj is None or self.target_actor_input_proj is None:
@@ -640,6 +683,35 @@ class StatelessTransformerV1(BaseModelAPI):
             min_fleet_size=self.action_spec.min_fleet_size,
             deterministic=deterministic,
         )
+
+    def _actor_actions(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+        action_mask: ActionMask,
+        *,
+        deterministic: bool,
+    ) -> ActionBundle:
+        if isinstance(self.actor, DiscreteTargetsActor):
+            if not isinstance(action_mask, DiscreteTargetActionMask):
+                raise RuntimeError(
+                    "discrete_targets actor requires a discrete-target action mask"
+                )
+            return self.actor.sample_actions(
+                self._discrete_actor_inputs(encoded, obs),
+                action_mask.can_act,
+                action_mask.max_launch,
+                min_fleet_size=self.action_spec.min_fleet_size,
+                deterministic=deterministic,
+            )
+
+        actions, _log_probs, _entropies = self._actor(
+            encoded,
+            obs,
+            action_mask,
+            deterministic=deterministic,
+        )
+        return actions
 
     def _actor_log_prob(
         self,
@@ -815,6 +887,10 @@ def build_pairwise_action_features(obs: ObsBatch) -> torch.Tensor:
         ),
         dim=-1,
     )
+
+
+def _action_entity_slots_from_mask(action_mask: ActionMask) -> int:
+    return action_mask.can_act.shape[2]
 
 
 def _expand_tokens(

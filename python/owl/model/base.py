@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TypeAlias
 
 import torch
 from torch import nn
 
-from owl.rl import ActionBundle, ObsBatch
+from owl.rl import ActionBundle, ActionConfig, ObsBatch
 
 InputLayer = nn.Module | nn.Parameter
 ModelActions: TypeAlias = ActionBundle
@@ -27,8 +27,8 @@ class ModelActionEntropies:
     launch: torch.Tensor
     event: torch.Tensor
     per_player_entity: torch.Tensor
+    components: dict[str, torch.Tensor]
     target: torch.Tensor | None = None
-    components: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
 @dataclass
@@ -50,7 +50,23 @@ class ModelEvaluation:
     next_hidden_state: ModelHiddenState | None = None
 
 
+@dataclass
+class ModelServingOutput:
+    actions: ModelActions
+    values: torch.Tensor
+    winner_probabilities: torch.Tensor
+    next_hidden_state: ModelHiddenState | None = None
+
+
 class BaseModelAPI(nn.Module, ABC):
+    @property
+    def action_spec(self) -> ActionConfig:
+        return self._action_spec
+
+    @action_spec.setter
+    def action_spec(self, value: ActionConfig) -> None:
+        self._action_spec = value
+
     @abstractmethod
     def forward(
         self,
@@ -77,6 +93,25 @@ class BaseModelAPI(nn.Module, ABC):
         *,
         hidden_state: ModelHiddenState | None = None,
     ) -> torch.Tensor: ...
+
+    def serve(
+        self,
+        obs: ObsBatch,
+        *,
+        deterministic: bool = False,
+        hidden_state: ModelHiddenState | None = None,
+    ) -> ModelServingOutput:
+        output = self.forward(
+            obs,
+            deterministic=deterministic,
+            hidden_state=hidden_state,
+        )
+        return ModelServingOutput(
+            actions=output.actions,
+            values=output.values,
+            winner_probabilities=output.winner_probabilities,
+            next_hidden_state=output.next_hidden_state,
+        )
 
     @abstractmethod
     def reset_parameters(self) -> None: ...

@@ -81,6 +81,13 @@ write `artifacts/<name>.tar.gz`, for example:
 just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt my-run
 ```
 
+Pass a quantization format as the third argument to quantize the packaged model
+weights inside the submission image:
+
+```sh
+just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt my-run fp4
+```
+
 The `kaggle-submission` recipe depends on `just prepare`, then rebuilds
 `orbit-wars:kaggle` from the current checkout before running the package script
 in that image. The Kaggle image build uses the Buildx docker exporter with zstd
@@ -91,8 +98,10 @@ from a previous image build.
 The package script expects `python/main.py` or `main.py` to exist and copies it
 to `main.py` at the archive root. It also extracts `checkpoint["model"]` from
 the requested checkpoint into a temporary file, copies that file to the archive
-root using the original checkpoint filename, and copies `config.yaml` from the
-same directory. The image build validates Kaggle-targeted Rust compilation
+root using the original checkpoint filename, optionally quantizes those weights
+when the recipe quantization argument is not `fp32`, and copies `config.yaml`
+from the same directory. Unique quantization prefixes such as `fp4` are
+accepted. The image build validates Kaggle-targeted Rust compilation
 directly before artifact generation runs with the mounted checkpoint directory.
 Use `just kaggle-image` only when you want to rebuild or validate the Kaggle
 image without creating a submission tarball.
@@ -188,7 +197,7 @@ To use a different host-edited config without rebuilding the image, set
 `ORBIT_WARS_CONFIG` to another host YAML file:
 
 ```sh
-ORBIT_WARS_CONFIG=/sw/isaiah/orbit-wars/configs/experiment.yaml \
+ORBIT_WARS_CONFIG=/path/to/experiment.yaml \
   sbatch scripts/slurm/launch-train.sbatch
 ```
 
@@ -196,7 +205,7 @@ The launch script mounts the config file's parent directory read-only at
 `/config` and runs training with `/config/experiment.yaml`. If the config uses
 subconfig references such as `model: stateless_transformer_5m_gelu`, keep the
 referenced subconfig directories next to the mounted file, for example
-`/sw/isaiah/orbit-wars/configs/model/stateless_transformer_5m_gelu.yaml`.
+`/path/to/model/stateless_transformer_5m_gelu.yaml`.
 
 Override Slurm resources either by editing `scripts/slurm/launch-train.sbatch` or
 by passing normal `sbatch` flags, for example:
@@ -259,7 +268,7 @@ Use the interactive helper to request a Slurm allocation and open a shell inside
 the container:
 
 ```sh
-ORBIT_WARS_OUTPUT_DIR=/sw/isaiah/orbit-wars/debug \
+ORBIT_WARS_OUTPUT_DIR=/path/to/debug-runs \
 ORBIT_WARS_PARTITION=gpu \
 ORBIT_WARS_GPUS=1 \
 ORBIT_WARS_TIME=01:00:00 \
@@ -293,7 +302,7 @@ mounts `ORBIT_WARS_CONFIG_DIR`, defaulting to `./configs`, read-only at
 `/config` and exports `ORBIT_WARS_CONFIG_DIR=/config` inside the shell:
 
 ```sh
-ORBIT_WARS_CONFIG_DIR=/sw/isaiah/orbit-wars/configs \
+ORBIT_WARS_CONFIG_DIR=/path/to/configs \
   scripts/slurm/launch-interactive.sh
 
 uv run python scripts/run_ppo.py "$ORBIT_WARS_CONFIG_DIR/experiment.yaml" /runs \

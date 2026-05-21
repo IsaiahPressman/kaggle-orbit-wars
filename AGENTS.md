@@ -41,3 +41,13 @@
 - Fail fast with explicit, informative errors instead of silent fallbacks.
 - When user input is invalid, raise clear exceptions.
 - For persisted data schemas owned by this repo, prefer strict key access and explicit validation over backward-compatibility fallbacks.
+
+## Attribute Access
+
+- Avoid `getattr`, `setattr`, and `__dict__` in first-class code paths. They
+  undermine the repo's mypy-forward pseudo-typed style; prefer direct attribute
+  access and explicit union narrowing with `isinstance`.
+- Use dynamic attribute access only for narrow, deliberate cases such as
+  iterating over known schema/dataclass fields (`ObsBatch.model_fields`,
+  `_OBS_TENSOR_FIELDS`) or test monkeypatching. If backwards compatibility
+  seems to require dynamic access, ask before preserving it.

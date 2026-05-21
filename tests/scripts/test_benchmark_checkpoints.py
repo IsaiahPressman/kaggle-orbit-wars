@@ -155,7 +155,7 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context(
                 angle=torch.zeros(shape, dtype=torch.float32),
             )
             assert deterministic
-            return SimpleNamespace(actions=actions)
+            return SimpleNamespace(actions=actions, next_hidden_state=None)
 
     class FakeEnv:
         def __init__(self) -> None:
@@ -335,7 +335,7 @@ def test_actions_for_assignments_uses_each_checkpoint_action_spec(
                     angle=torch.zeros(shape, dtype=torch.float32),
                     ships=torch.full(shape, 3, dtype=torch.int64),
                 )
-            return SimpleNamespace(actions=actions)
+            return SimpleNamespace(actions=actions, next_hidden_state=None)
 
     @contextmanager
     def fake_autocast_context(

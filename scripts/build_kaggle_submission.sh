@@ -16,7 +16,9 @@ Options:
   -o, --output PATH  Tarball path to write.
   --quantization FORMAT
                      Optional slim-checkpoint quantization format:
-                     fp8_e4m3fn or fp4_e2m1fn_x2_scaled_block16.
+                     fp32, fp8_e4m3fn, or
+                     fp4_e2m1fn_x2_scaled_block16. Unique prefixes such as
+                     fp4 are accepted.
   -h, --help         Show this help.
 EOF
 }

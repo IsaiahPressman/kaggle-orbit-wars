@@ -368,8 +368,7 @@ class PPOTrainer:
     ) -> None:
         self.env = env
         self.model = model
-        model_action_spec = getattr(model, "action_spec", None)
-        if model_action_spec != env.action_spec:
+        if model.action_spec != env.action_spec:
             raise ValueError("model and env action_spec must match")
         self._compute_gae = compile_compute_gae(config.compile_mode)
         self._ppo_loss = _compile_ppo_loss(config.compile_mode)
@@ -390,8 +389,8 @@ class PPOTrainer:
         self.player_step_total = 0
         self.total_games_played = 0
         self.target_kl_exceeded_total = 0
-        self._non_blocking_env_to_device = device.type == "cuda" and getattr(
-            env, "pin_memory_enabled", False
+        self._non_blocking_env_to_device = (
+            device.type == "cuda" and env.pin_memory_enabled
         )
         self._obs = _obs_to_device(
             env.reset(),
@@ -1619,22 +1618,10 @@ def _output_entropy_components(
     output: ModelOutput | ModelEvaluation,
     like: torch.Tensor,
 ) -> dict[str, torch.Tensor]:
-    components = output.entropies.components
-    if components:
-        return {
-            name: _sum_entropy_component(component, like)
-            for name, component in components.items()
-        }
-    fallback = {
-        "launch": _sum_entropy_component(output.entropies.launch, like),
-        "event": _sum_entropy_component(
-            output.entropies.event,
-            like,
-        ),
+    return {
+        name: _sum_entropy_component(component, like)
+        for name, component in output.entropies.components.items()
     }
-    if output.entropies.target is not None:
-        fallback["target"] = _sum_entropy_component(output.entropies.target, like)
-    return fallback
 
 
 def _sum_entropy_component(tensor: torch.Tensor, like: torch.Tensor) -> torch.Tensor:

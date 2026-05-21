@@ -16,6 +16,7 @@ from owl.rl import (
     ActionPureConfig,
     EntityBasedConfig,
     ObsBatch,
+    PureActionMask,
 )
 from owl.train import FullConfig, PPOTrainer
 from owl.train.distributed import DistributedContext
@@ -489,7 +490,7 @@ def test_eval_actions_for_assignments_uses_stochastic_model_outputs() -> None:
                 ships=torch.full(shape, self.ship_value, dtype=torch.int64),
                 angle=torch.zeros(shape, dtype=torch.float32),
             )
-            return SimpleNamespace(actions=actions)
+            return SimpleNamespace(actions=actions, next_hidden_state=None)
 
     obs = ObsBatch(
         planets=torch.zeros((1, 1, 1)),
@@ -499,8 +500,10 @@ def test_eval_actions_for_assignments_uses_stochastic_model_outputs() -> None:
         entity_mask=torch.zeros((1, 1), dtype=torch.bool),
         still_playing=torch.ones((1, 4), dtype=torch.bool),
         global_features=torch.zeros((1, 1)),
-        can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
-        max_launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+        action_mask=PureActionMask(
+            can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
+            max_launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+        ),
     )
 
     actions = run_ppo._eval_actions_for_assignments(
@@ -531,8 +534,12 @@ def test_evaluate_player_count_carries_recurrent_hidden_state(
                 dtype=torch.bool,
             ),
             global_features=torch.zeros((n_envs, 1)),
-            can_act=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
-            max_launch=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+            action_mask=PureActionMask(
+                can_act=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
+                max_launch=torch.zeros(
+                    (n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64
+                ),
+            ),
         )
 
     class FakeEnv:

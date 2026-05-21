@@ -44,6 +44,13 @@ Pass a submission name to write `artifacts/<name>.tar.gz` instead:
 just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt my-run
 ```
 
+Pass a quantization format as the third argument to quantize the packaged
+model weights during submission generation:
+
+```sh
+just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt my-run fp4
+```
+
 The submission recipe runs `just prepare`, rebuilds the `orbit-wars:kaggle`
 image with Buildx zstd layer compression, compiles the Rust extension inside
 Kaggle's Python image, and packages `python/owl`, `python/main.py` or `main.py`,
@@ -51,10 +58,11 @@ the requested model, and the model's adjacent `config.yaml` at the archive root.
 Rebuilding the image during submission generation keeps the packaged Python code
 aligned with the current checkout. The packaged checkpoint keeps the original
 filename but contains only the model weights needed by the Kaggle agent. To
-store the packaged model below fp16/bf16 precision, call
-`scripts/build_kaggle_submission.sh --quantization fp8_e4m3fn ...` or
-`--quantization fp4_e2m1fn_x2_scaled_block16`; the Kaggle agent dequantizes
-those slim checkpoints back to fp32 before loading the model.
+store the packaged model below fp32 precision, pass a quantization format such
+as `fp8_e4m3fn` or `fp4_e2m1fn_x2_scaled_block16`; unique prefixes such as
+`fp4` are accepted. The default `fp32` leaves checkpoint weights unchanged. The
+Kaggle agent dequantizes quantized slim checkpoints back to fp32 before loading
+the model.
 
 ## Orbit Wars reference
 
