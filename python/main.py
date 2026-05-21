@@ -4,7 +4,7 @@ from typing import Any
 
 THREADS = 2
 os.environ.setdefault("OMP_NUM_THREADS", f"{THREADS}")
-os.environ.setdefault("MKL_NUM_THREADS", "{THREADS}")
+os.environ.setdefault("MKL_NUM_THREADS", f"{THREADS}")
 
 import torch
 

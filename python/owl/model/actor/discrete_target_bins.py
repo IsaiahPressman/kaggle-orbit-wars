@@ -21,7 +21,7 @@ from owl.model.base import (
     ModelActionEntropies,
     ModelActionLogProbs,
 )
-from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS, DiscreteTargetBinActions
+from owl.rl import OUTER_PLAYER_SLOTS, DiscreteTargetBinActions
 
 
 @dataclass(frozen=True)
@@ -142,7 +142,7 @@ class DiscreteTargetBinsActor(nn.Module):
             (
                 actor_inputs.source.shape[0],
                 OUTER_PLAYER_SLOTS,
-                ACTION_ENTITY_SLOTS,
+                actor_inputs.source.shape[2],
             ),
         )
         selection = self._selection_params(actor_inputs, can_act)
@@ -157,7 +157,7 @@ class DiscreteTargetBinsActor(nn.Module):
             selection,
             actor_inputs.source,
             can_act,
-            actions.target.clamp(0, ACTION_ENTITY_SLOTS - 1),
+            actions.target.clamp(0, selection.target_values.shape[2] - 1),
         )
         target_log_prob, fleet_bin_log_prob = discrete_target_bin_log_probs(
             params,
@@ -201,10 +201,11 @@ class DiscreteTargetBinsActor(nn.Module):
     ) -> DiscreteTargetSelectionParams:
         source_input = actor_inputs.source
         target_input = actor_inputs.target
+        action_entity_slots = source_input.shape[2]
         expected_input_shape = (
             source_input.shape[0],
             OUTER_PLAYER_SLOTS,
-            ACTION_ENTITY_SLOTS,
+            action_entity_slots,
             self.head_dim,
         )
         if source_input.shape != expected_input_shape:
@@ -220,8 +221,8 @@ class DiscreteTargetBinsActor(nn.Module):
         expected_can_act_shape = (
             source_input.shape[0],
             OUTER_PLAYER_SLOTS,
-            ACTION_ENTITY_SLOTS,
-            ACTION_ENTITY_SLOTS,
+            action_entity_slots,
+            action_entity_slots,
             self.config.n_bins,
         )
         if can_act.shape != expected_can_act_shape:
@@ -364,7 +365,7 @@ def discrete_target_bin_log_probs(
     fleet_bin: torch.Tensor,
     source_active: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    safe_target = target.clamp(0, ACTION_ENTITY_SLOTS - 1)
+    safe_target = target.clamp(0, params.target_logits.shape[-1] - 1)
     safe_fleet_bin = fleet_bin.clamp(0, params.fleet_bin_logits.shape[-1] - 1)
     target_log_all = F.log_softmax(params.target_logits.float(), dim=-1)
     target_log_prob = target_log_all.gather(-1, safe_target.unsqueeze(-1)).squeeze(-1)
@@ -413,9 +414,10 @@ def _require_valid_discrete_target_bin_action(
     can_act: torch.Tensor,
     source_active: torch.Tensor,
 ) -> None:
-    target_in_range = target.ge(0) & target.lt(ACTION_ENTITY_SLOTS)
+    target_slots = can_act.shape[-2]
+    target_in_range = target.ge(0) & target.lt(target_slots)
     fleet_bin_in_range = fleet_bin.ge(0) & fleet_bin.lt(can_act.shape[-1])
-    safe_target = target.clamp(0, ACTION_ENTITY_SLOTS - 1)
+    safe_target = target.clamp(0, target_slots - 1)
     safe_fleet_bin = fleet_bin.clamp(0, can_act.shape[-1] - 1)
     target_index = safe_target[..., None, None].expand(
         *safe_target.shape,

@@ -188,6 +188,44 @@ def _obs_batch(
     )
 
 
+def _compacted_obs_batch(
+    *,
+    batch_size: int,
+    obs_spec: EntityBasedConfig,
+    action_spec: ActionConfig,
+) -> ObsBatch:
+    obs = _obs_batch(batch_size=batch_size, obs_spec=obs_spec, action_spec=action_spec)
+    action_indices = torch.tensor([0, 1, MAX_PLANETS])
+    entity_mask = torch.ones((batch_size, action_indices.numel()), dtype=torch.bool)
+    action_mask: PureActionMask | DiscreteTargetActionMask | DiscreteTargetBinActionMask
+    if isinstance(obs.action_mask, PureActionMask):
+        action_mask = PureActionMask(
+            can_act=obs.action_mask.can_act.index_select(2, action_indices),
+            max_launch=obs.action_mask.max_launch.index_select(2, action_indices),
+        )
+    elif isinstance(obs.action_mask, DiscreteTargetActionMask):
+        can_act = obs.action_mask.can_act.index_select(2, action_indices)
+        can_act = can_act.index_select(3, action_indices)
+        action_mask = DiscreteTargetActionMask(
+            can_act=can_act,
+            max_launch=obs.action_mask.max_launch.index_select(2, action_indices),
+        )
+    else:
+        can_act = obs.action_mask.can_act.index_select(2, action_indices)
+        can_act = can_act.index_select(3, action_indices)
+        action_mask = DiscreteTargetBinActionMask(can_act=can_act)
+    return ObsBatch(
+        planets=obs.planets[:, :2, :],
+        orbiting_planets=obs.orbiting_planets[:, :2],
+        fleets=obs.fleets[:, :0, :],
+        comets=obs.comets[:, :1, :],
+        entity_mask=entity_mask,
+        still_playing=obs.still_playing,
+        global_features=obs.global_features,
+        action_mask=action_mask,
+    )
+
+
 def _model(
     config: StatelessTransformerV1Config,
     *,
@@ -224,7 +262,7 @@ def _pure_actor_inputs(
         source=source,
         target=source if target is None else target,
         target_mask=(
-            torch.ones(source.shape[0], ACTION_ENTITY_SLOTS, dtype=torch.bool)
+            torch.ones(source.shape[0], source.shape[2], dtype=torch.bool)
             if target_mask is None
             else target_mask
         ),
@@ -1310,6 +1348,107 @@ def test_observation_encoder_returns_structured_token_fields() -> None:
     assert not torch.allclose(
         model.player_tokens[0],
         model.player_tokens[1],
+    )
+
+
+@pytest.mark.parametrize(
+    ("config", "action_spec"),
+    [
+        (
+            StatelessTransformerV1Config(
+                embed_dim=32,
+                depth=1,
+                n_heads=4,
+                actor=ActorPureConfig(n_angle_mixtures=2, n_fleet_size_mixtures=2),
+            ),
+            ActionPureConfig(min_fleet_size=1),
+        ),
+        (
+            StatelessTransformerV1Config(
+                embed_dim=32,
+                depth=1,
+                n_heads=4,
+                actor=ActorDiscreteTargetsConfig(n_action_mixtures=2),
+            ),
+            ActionDiscreteTargetsConfig(min_fleet_size=1),
+        ),
+        (
+            StatelessTransformerV1Config(
+                embed_dim=32,
+                depth=1,
+                n_heads=4,
+                actor=ActorDiscreteTargetsConfig(
+                    launch_mode="target_token",
+                    n_action_mixtures=2,
+                ),
+            ),
+            ActionDiscreteTargetsConfig(min_fleet_size=1),
+        ),
+        (
+            StatelessTransformerV1Config(
+                embed_dim=32,
+                depth=1,
+                n_heads=4,
+                use_learned_pairwise_bias=True,
+                actor=ActorDiscreteTargetsConfig(n_action_mixtures=2),
+            ),
+            ActionDiscreteTargetsConfig(min_fleet_size=1),
+        ),
+        (
+            StatelessTransformerV1Config(
+                embed_dim=32,
+                depth=1,
+                n_heads=4,
+                actor=ActorDiscreteTargetBinsConfig(n_bins=3),
+            ),
+            ActionDiscreteTargetBinsConfig(min_fleet_size=1, n_bins=3),
+        ),
+    ],
+)
+def test_model_accepts_compacted_action_entity_slots(
+    config: StatelessTransformerV1Config,
+    action_spec: ActionConfig,
+) -> None:
+    torch.manual_seed(17)
+    action_entity_slots = 3
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _compacted_obs_batch(
+        batch_size=2,
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+
+    encoded = model.encode_observations(
+        obs,
+        action_entity_slots=action_entity_slots,
+    )
+    output = model(obs, deterministic=True)
+    serving = model.serve(obs, deterministic=True)
+    evaluation = model.evaluate_actions(obs, output.actions)
+
+    assert encoded.action_entity_hidden.shape == (2, action_entity_slots, 32)
+    if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
+        expected_action_shape = (2, OUTER_PLAYER_SLOTS, action_entity_slots)
+        assert isinstance(output.actions, DiscreteTargetBinActions)
+        assert isinstance(serving.actions, DiscreteTargetBinActions)
+        assert output.actions.target.shape == expected_action_shape
+        assert serving.actions.target.shape == expected_action_shape
+    else:
+        expected_action_shape = (2, OUTER_PLAYER_SLOTS, action_entity_slots, 1)
+        assert isinstance(output.actions, (PureActions, DiscreteTargetActions))
+        assert isinstance(serving.actions, (PureActions, DiscreteTargetActions))
+        assert output.actions.launch.shape == expected_action_shape
+        assert serving.actions.launch.shape == expected_action_shape
+    assert evaluation.log_probs.per_player_entity.shape == (
+        2,
+        OUTER_PLAYER_SLOTS,
+        action_entity_slots,
+    )
+    assert evaluation.entropies.per_player_entity.shape == (
+        2,
+        OUTER_PLAYER_SLOTS,
+        action_entity_slots,
     )
 
 

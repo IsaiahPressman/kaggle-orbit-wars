@@ -30,7 +30,7 @@ from owl.model.base import (
     ModelActionEntropies,
     ModelActionLogProbs,
 )
-from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS, DiscreteTargetActions
+from owl.rl import OUTER_PLAYER_SLOTS, DiscreteTargetActions
 
 __all__ = [
     "DiscreteActorInputs",
@@ -256,7 +256,7 @@ class DiscreteTargetsActor(nn.Module):
             (
                 actor_inputs.source.shape[0],
                 OUTER_PLAYER_SLOTS,
-                ACTION_ENTITY_SLOTS,
+                actor_inputs.source.shape[2],
                 1,
             ),
         )
@@ -287,7 +287,7 @@ class DiscreteTargetsActor(nn.Module):
             selection,
             actor_inputs.source,
             max_launch,
-            target.clamp(0, ACTION_ENTITY_SLOTS - 1),
+            target.clamp(0, selection.target_values.shape[2] - 1),
             min_fleet_size=min_fleet_size,
         )
         entropy_params = self._policy_params_for_entropy(
@@ -352,10 +352,11 @@ class DiscreteTargetsActor(nn.Module):
     ) -> DiscreteTargetSelectionParams:
         source_input = actor_inputs.source
         target_input = actor_inputs.target
+        action_entity_slots = source_input.shape[2]
         expected_input_shape = (
             source_input.shape[0],
             OUTER_PLAYER_SLOTS,
-            ACTION_ENTITY_SLOTS,
+            action_entity_slots,
             self.head_dim,
         )
         if source_input.shape != expected_input_shape:
@@ -371,14 +372,14 @@ class DiscreteTargetsActor(nn.Module):
         if can_act.shape != (
             source_input.shape[0],
             OUTER_PLAYER_SLOTS,
-            ACTION_ENTITY_SLOTS,
-            ACTION_ENTITY_SLOTS,
+            action_entity_slots,
+            action_entity_slots,
         ):
             expected_shape = (
                 source_input.shape[0],
                 OUTER_PLAYER_SLOTS,
-                ACTION_ENTITY_SLOTS,
-                ACTION_ENTITY_SLOTS,
+                action_entity_slots,
+                action_entity_slots,
             )
             raise ValueError(
                 "discrete target can_act must have shape "
@@ -409,7 +410,7 @@ class DiscreteTargetsActor(nn.Module):
         if actor_inputs.pairwise_bias is not None:
             pairwise_bias = actor_inputs.pairwise_bias
             expected_bias_shape = (
-                (*target_logits.shape[:-1], ACTION_ENTITY_SLOTS)
+                (*target_logits.shape[:-1], action_entity_slots)
                 if self.config.launch_mode == "target_token"
                 else target_logits.shape
             )
@@ -674,7 +675,7 @@ def discrete_action_log_probs(
         no_launch_target = params.target_logits.shape[-1] - 1
         selected_target = torch.where(
             launch,
-            target.clamp(0, ACTION_ENTITY_SLOTS - 1),
+            target.clamp(0, no_launch_target - 1),
             torch.full_like(target, no_launch_target),
         )
     else:
@@ -689,7 +690,7 @@ def discrete_action_log_probs(
             launch_log_prob,
             torch.zeros_like(launch_log_prob),
         )
-        selected_target = target.clamp(0, ACTION_ENTITY_SLOTS - 1)
+        selected_target = target.clamp(0, params.target_logits.shape[-1] - 1)
     target_log_all = F.log_softmax(params.target_logits.float(), dim=-1)
     target_log_prob = target_log_all.gather(
         -1,
@@ -839,8 +840,9 @@ def _require_valid_discrete_action_slot(
         raise ValueError(
             f"actions.ships must be in {min_fleet_size}..remaining for launched slots"
         )
-    target_in_range = target.ge(0) & target.lt(ACTION_ENTITY_SLOTS)
-    safe_target = target.clamp(0, ACTION_ENTITY_SLOTS - 1)
+    target_slots = can_act.shape[-1]
+    target_in_range = target.ge(0) & target.lt(target_slots)
+    safe_target = target.clamp(0, target_slots - 1)
     target_valid = can_act.gather(-1, safe_target.unsqueeze(-1)).squeeze(-1)
     if (launch & (~target_in_range | ~target_valid)).any().item():
         raise ValueError("actions.target must select a valid target for launched slots")
@@ -851,8 +853,9 @@ def _require_valid_discrete_action_target(
     active: torch.Tensor,
     can_act: torch.Tensor,
 ) -> None:
-    target_in_range = target.ge(0) & target.lt(ACTION_ENTITY_SLOTS)
-    safe_target = target.clamp(0, ACTION_ENTITY_SLOTS - 1)
+    target_slots = can_act.shape[-1]
+    target_in_range = target.ge(0) & target.lt(target_slots)
+    safe_target = target.clamp(0, target_slots - 1)
     target_valid = can_act.gather(-1, safe_target.unsqueeze(-1)).squeeze(-1)
     if (active & (~target_in_range | ~target_valid)).any().item():
         raise ValueError("actions.target must select a valid target for active slots")

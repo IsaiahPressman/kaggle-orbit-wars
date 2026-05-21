@@ -26,6 +26,7 @@ from owl.model.stateless_transformer_v1 import (
     PackedSequence,
     StatelessTransformerV1,
     TransformerBlock,
+    _action_entity_slots_from_mask,
     _init_input_layer,
     _init_linear,
     _init_module,
@@ -333,6 +334,7 @@ class RecurrentTransformerV1(StatelessTransformerV1):
                 "hidden_state.hidden must have shape "
                 f"{expected_hidden_shape}, got {tuple(hidden_state.hidden.shape)}"
             )
+        action_entity_slots = _action_entity_slots_from_mask(obs.action_mask)
         encoded_inputs = self._build_flat_tokens(obs)
         x = encoded_inputs.x
         token_mask = encoded_inputs.token_mask
@@ -394,7 +396,12 @@ class RecurrentTransformerV1(StatelessTransformerV1):
         if packed is not None:
             x = unpack_sequence(x, packed)
         x = x.masked_fill(~token_mask.unsqueeze(-1), 0.0)
-        encoded = self._encoded_from_flat_hidden(x, token_mask, obs)
+        encoded = self._encoded_from_flat_hidden(
+            x,
+            token_mask,
+            obs,
+            action_entity_slots=action_entity_slots,
+        )
         return encoded, RecurrentTransformerV1HiddenState(
             hidden=torch.stack(next_hidden_layers, dim=0)
         )
@@ -466,6 +473,8 @@ class RecurrentTransformerV1(StatelessTransformerV1):
         x: torch.Tensor,
         token_mask: torch.Tensor,
         obs: ObsBatch,
+        *,
+        action_entity_slots: int = ACTION_ENTITY_SLOTS,
     ) -> EncodedObservations:
         entity_count = obs.entity_mask.shape[1]
         player_start = entity_count
@@ -476,7 +485,7 @@ class RecurrentTransformerV1(StatelessTransformerV1):
         return EncodedObservations(
             hidden=x,
             token_mask=token_mask,
-            action_entity_hidden=x[:, :ACTION_ENTITY_SLOTS, :],
+            action_entity_hidden=x[:, :action_entity_slots, :],
             player_hidden=x[:, player_start:global_start, :],
             global_feature_hidden=x[:, global_start : global_start + 1, :],
             board_hidden=x[:, board_start:actor_plan_start, :],

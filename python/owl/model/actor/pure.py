@@ -27,7 +27,7 @@ from owl.model.base import (
     ModelActionEntropies,
     ModelActionLogProbs,
 )
-from owl.rl import ACTION_ENTITY_SLOTS, OUTER_PLAYER_SLOTS, PureActions
+from owl.rl import OUTER_PLAYER_SLOTS, PureActions
 
 
 @dataclass(frozen=True)
@@ -271,7 +271,7 @@ class PureActor(nn.Module):
             (
                 actor_inputs.source.shape[0],
                 OUTER_PLAYER_SLOTS,
-                ACTION_ENTITY_SLOTS,
+                actor_inputs.source.shape[2],
                 self.max_per_planet_launches,
             ),
         )
@@ -372,10 +372,11 @@ class PureActor(nn.Module):
     ) -> AnglePolicyParams:
         source_input = actor_inputs.source
         target_input = actor_inputs.target
+        action_entity_slots = source_input.shape[2]
         expected_input_shape = (
             source_input.shape[0],
             OUTER_PLAYER_SLOTS,
-            ACTION_ENTITY_SLOTS,
+            action_entity_slots,
             self.head_dim,
         )
         if source_input.shape != expected_input_shape:
@@ -390,9 +391,9 @@ class PureActor(nn.Module):
             )
         if actor_inputs.target_mask.shape != (
             source_input.shape[0],
-            ACTION_ENTITY_SLOTS,
+            action_entity_slots,
         ):
-            expected_shape = (source_input.shape[0], ACTION_ENTITY_SLOTS)
+            expected_shape = (source_input.shape[0], action_entity_slots)
             raise ValueError(
                 "pure actor target_mask must have shape "
                 f"{expected_shape}, got {tuple(actor_inputs.target_mask.shape)}"
@@ -470,7 +471,8 @@ class PureActor(nn.Module):
         target_mask = actor_inputs.target_mask[:, None, None, :].expand_as(
             target_logits
         )
-        source_indices = torch.arange(ACTION_ENTITY_SLOTS, device=target_logits.device)
+        action_entity_slots = target_logits.shape[2]
+        source_indices = torch.arange(action_entity_slots, device=target_logits.device)
         target_mask = target_mask.clone()
         target_mask[:, :, source_indices, source_indices] = False
         target_logits = target_logits.masked_fill(

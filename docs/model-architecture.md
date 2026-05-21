@@ -126,6 +126,16 @@ excluded from attention keys and are zeroed in the returned hidden states.
 Downstream code must consume the named `EncodedObservations` fields rather than
 assuming output meaning from positional slices.
 
+Kaggle serving may compact inactive planet, comet, and fleet rows before model
+inference. Recurrent checkpoints with `recurrence_mode="include_planets"` keep
+the fixed planet prefix and compact only comets/fleets, because their recurrent
+layout indexes the planet tokens directly. In the compacted path the
+actor-visible action slot count is the runtime
+`ObsBatch.action_mask.can_act.shape[2]` instead of the fixed
+`ACTION_ENTITY_SLOTS` API width. The compacted action slots still appear first
+in planet-then-comet order, and `Agent` expands sampled actions back to the full
+44-slot Rust/Kaggle contract before conversion.
+
 ## Transformer Trunk
 
 The shared trunk is a stack of pre-norm transformer blocks configured by:
@@ -246,6 +256,10 @@ The actor uses hidden states for the action entity slots:
 40..43 -> comet tokens
 ```
 
+For regular training and vector-env evaluation this is the fixed 44-slot API
+layout. For compacted Kaggle serving, the same actor heads operate on a smaller
+runtime slot count while preserving the compact planet-then-comet order.
+
 Both actor heads start from the same shared transformer trunk. For each
 `(batch, player, action_entity)` position, the actor combines:
 
@@ -260,7 +274,7 @@ heads live under `python/owl/model/actor/`: `PureActor` for raw angles and
 When `use_learned_pairwise_bias=True`, the discrete-target and discrete
 target-bin actors receive an auxiliary learned bias after the shared
 self-attention trunk. The model builds six raw source-target features over the
-44 action entity slots, applies a two-layer MLP
+runtime action entity slots, applies a two-layer MLP
 `6 -> embed_dim -> 1`, and adds the result to the target-selection attention
 score before action masking:
 
@@ -321,19 +335,22 @@ sizes use the same discretized logistic mixture parameterization as
 
 The model returns a typed action bundle owned by the active action spec. Pure
 and discrete-target actions keep the final launch-slot dimension expected by
-their Rust API paths:
+their Rust API paths. For regular env/training batches the action-slot width is
+44; for compacted Kaggle serving the width is the runtime compact slot count
+until `Agent` expands the actions back to 44:
 
-- `launch`: bool, `(batch, 4, 44, max_per_planet_launches)`
-- `ships`: int64, `(batch, 4, 44, max_per_planet_launches)`
+- `launch`: bool, `(batch, 4, action_slots, max_per_planet_launches)`
+- `ships`: int64, `(batch, 4, action_slots, max_per_planet_launches)`
 - `angle`: float32, same shape, pure actor only
 - `target`: int64, same shape, discrete-target actor only
-- `target`: int64, `(batch, 4, 44)`, discrete target-bin actor only
-- `fleet_bin`: int64, `(batch, 4, 44)`, discrete target-bin actor only
+- `target`: int64, `(batch, 4, action_slots)`, discrete target-bin actor only
+- `fleet_bin`: int64, `(batch, 4, action_slots)`, discrete target-bin actor only
 
 It also returns decomposed log-prob and entropy tensors for launch gates and
 target or angle/size events, plus per-player action-entity totals with shape
-`(batch, 4, 44)`. PPO stores and submits the typed action bundle directly, so
-action-spec-specific payloads such as `fleet_bin` cannot be silently dropped.
+`(batch, 4, action_slots)`. PPO stores and submits the typed action bundle
+directly, so action-spec-specific payloads such as `fleet_bin` cannot be
+silently dropped.
 Observation masks are likewise held in typed `ObsBatch.action_mask` bundles:
 pure and discrete-target masks carry `can_act` plus `max_launch`, while
 discrete target-bin masks carry only `can_act`.
@@ -394,11 +411,11 @@ source-only continue gate is not coupled to the pair-conditioned size head.
 With the default `launch_mode="binary"`, each source emits:
 
 - Bernoulli launch/stop logits
-- masked categorical target logits over the 44 action entity slots
+- masked categorical target logits over the runtime action entity slots
 - mixture parameters for a truncated discretized logistic fleet-size policy
 
 With `launch_mode="binary_after"`, the target categorical remains over the
-44 action entity slots and no no-launch target is added. The actor samples or
+runtime action entity slots and no no-launch target is added. The actor samples or
 replays the selected target first, gathers that target's value, applies the
 same residual feedforward and size-pair projection used by the fleet-size
 heads, then projects Bernoulli launch/stop logits from that target-conditioned
@@ -410,11 +427,11 @@ selected target approximation, matching the fleet-size entropy approximation.
 
 With `launch_mode="target_token"`, the actor appends one learned
 no-launch token to the target/key/value stream only; the source/query stream
-remains the 44 actionable entity slots. Selecting that extra target maps back
-to `launch=False` in the external `DiscreteTargetActions` bundle; selecting any
-real target maps to `launch=True`. Pairwise source-target bias is still defined
-only over the 44 real target slots, and the actor appends a zero-bias column for
-the no-launch target before masking. In this mode the binary continue
+remains the real runtime action entity slots. Selecting that extra target maps
+back to `launch=False` in the external `DiscreteTargetActions` bundle; selecting
+any real target maps to `launch=True`. Pairwise source-target bias is still
+defined only over the real target slots, and the actor appends a zero-bias
+column for the no-launch target before masking. In this mode the binary continue
 projection/head is not allocated, and the launch log-probability and launch
 entropy tensors are zero while target log-probability and target entropy include
 the no-launch candidate. The default binary mode does not allocate the extra
@@ -450,7 +467,7 @@ non-negative discrete entropy.
 The discrete target-bin actor supports `ActionDiscreteTargetBinsConfig`. It uses
 the same source/target stream construction and target-selection logits as the
 discrete-target actor, but the environment supplies a 5-D mask
-`(batch, 4, 44, 44, n_bins)` and no `max_launch` tensor.
+`(batch, 4, action_slots, action_slots, n_bins)` and no `max_launch` tensor.
 
 For each active source, the actor samples target first from target slots with at
 least one valid bin, then samples `fleet_bin` from categorical logits
