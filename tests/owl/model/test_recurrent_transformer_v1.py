@@ -353,6 +353,7 @@ def test_recurrent_serving_path_accepts_hidden_state_and_skips_log_probs(
         obs_spec=obs_spec,
         action_spec=action_spec,
     )
+    model.reset_parameters()
     obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
     hidden_state = model.initial_hidden_state(2, device=torch.device("cpu"))
 
