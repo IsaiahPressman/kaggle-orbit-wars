@@ -62,7 +62,7 @@ def test_actor_config_files_load(config_path: Path) -> None:
         ("stateless_transformer_20m_gelu.yaml", 20_093_402),
         ("stateless_transformer_20m_swiglu.yaml", 20_914_202),
         ("stateless_transformer_28m.yaml", 27_785_738),
-        ("stateless_transformer_170m.yaml", 170_575_130),
+        ("stateless_transformer_152m.yaml", 151_666_970),
         ("recurrent_transformer_5m_gelu.yaml", 5_270_286),
     ],
 )

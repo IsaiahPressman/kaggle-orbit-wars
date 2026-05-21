@@ -50,6 +50,7 @@ from owl.model.base import (
     ModelEvaluation,
     ModelHiddenState,
     ModelOutput,
+    ModelServingOutput,
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
@@ -451,6 +452,29 @@ class StatelessTransformerV1(BaseModelAPI):
             winner_probabilities=winner_probabilities,
         )
 
+    def serve(
+        self,
+        obs: ObsBatch,
+        *,
+        deterministic: bool = False,
+        hidden_state: ModelHiddenState | None = None,
+    ) -> ModelServingOutput:
+        if hidden_state is not None:
+            raise ValueError("StatelessTransformerV1 does not accept hidden_state")
+        encoded = self.encode_observations(obs)
+        values, winner_probabilities = self._value_from_encoded(encoded, obs)
+        actions = self._actor_actions(
+            encoded,
+            obs,
+            obs.action_mask,
+            deterministic=deterministic,
+        )
+        return ModelServingOutput(
+            actions=actions,
+            values=values,
+            winner_probabilities=winner_probabilities,
+        )
+
     def evaluate_actions(
         self,
         obs: ObsBatch,
@@ -640,6 +664,35 @@ class StatelessTransformerV1(BaseModelAPI):
             min_fleet_size=self.action_spec.min_fleet_size,
             deterministic=deterministic,
         )
+
+    def _actor_actions(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+        action_mask: ActionMask,
+        *,
+        deterministic: bool,
+    ) -> ActionBundle:
+        if isinstance(self.actor, DiscreteTargetsActor):
+            if not isinstance(action_mask, DiscreteTargetActionMask):
+                raise RuntimeError(
+                    "discrete_targets actor requires a discrete-target action mask"
+                )
+            return self.actor.sample_actions(
+                self._discrete_actor_inputs(encoded, obs),
+                action_mask.can_act,
+                action_mask.max_launch,
+                min_fleet_size=self.action_spec.min_fleet_size,
+                deterministic=deterministic,
+            )
+
+        actions, _log_probs, _entropies = self._actor(
+            encoded,
+            obs,
+            action_mask,
+            deterministic=deterministic,
+        )
+        return actions
 
     def _actor_log_prob(
         self,

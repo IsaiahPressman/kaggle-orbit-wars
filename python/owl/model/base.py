@@ -50,6 +50,14 @@ class ModelEvaluation:
     next_hidden_state: ModelHiddenState | None = None
 
 
+@dataclass
+class ModelServingOutput:
+    actions: ModelActions
+    values: torch.Tensor
+    winner_probabilities: torch.Tensor
+    next_hidden_state: ModelHiddenState | None = None
+
+
 class BaseModelAPI(nn.Module, ABC):
     @property
     def action_spec(self) -> ActionConfig:
@@ -85,6 +93,25 @@ class BaseModelAPI(nn.Module, ABC):
         *,
         hidden_state: ModelHiddenState | None = None,
     ) -> torch.Tensor: ...
+
+    def serve(
+        self,
+        obs: ObsBatch,
+        *,
+        deterministic: bool = False,
+        hidden_state: ModelHiddenState | None = None,
+    ) -> ModelServingOutput:
+        output = self.forward(
+            obs,
+            deterministic=deterministic,
+            hidden_state=hidden_state,
+        )
+        return ModelServingOutput(
+            actions=output.actions,
+            values=output.values,
+            winner_probabilities=output.winner_probabilities,
+            next_hidden_state=output.next_hidden_state,
+        )
 
     @abstractmethod
     def reset_parameters(self) -> None: ...

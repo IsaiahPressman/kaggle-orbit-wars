@@ -2,16 +2,17 @@
 import os
 from typing import Any
 
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
+THREADS = 2
+os.environ.setdefault("OMP_NUM_THREADS", f"{THREADS}")
+os.environ.setdefault("MKL_NUM_THREADS", "{THREADS}")
 
 import torch
 
-torch.set_num_threads(1)
+torch.set_num_threads(THREADS)
 torch.set_num_interop_threads(1)
 
 from owl import OWL_ROOT
-from owl.agent import Agent, KaggleObservation, find_checkpoint_path
+from owl.agent import Agent, find_checkpoint_path
 from owl.rs import assert_release_build
 
 assert_release_build()
@@ -24,4 +25,4 @@ AGENT = Agent(
 
 
 def agent_fn(observation: Any) -> list[list[float]]:
-    return AGENT.act(KaggleObservation.model_validate(observation))
+    return AGENT.act(observation)

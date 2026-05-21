@@ -1544,6 +1544,55 @@ def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     )
 
 
+def test_discrete_targets_serving_path_skips_log_probs_and_entropies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(13)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionDiscreteTargetsConfig(
+        max_per_planet_launches=1,
+        min_fleet_size=2,
+    )
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(
+            n_action_mixtures=3,
+            entropy_ship_quantiles=8,
+        ),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    assert isinstance(model.actor, DiscreteTargetsActor)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    obs.action_mask.max_launch[:, 0, 0] = 8
+    obs.action_mask.max_launch[:, 1, 1] = 4
+
+    expected = model(obs, deterministic=True)
+
+    def fail_log_prob(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("serving should not compute action log probs")
+
+    def fail_entropy(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("serving should not compute action entropies")
+
+    monkeypatch.setattr(
+        discrete_targets_impl,
+        "discrete_action_log_probs",
+        fail_log_prob,
+    )
+    monkeypatch.setattr(model.actor, "_policy_params_for_entropy", fail_entropy)
+
+    output = model.serve(obs, deterministic=True)
+
+    assert isinstance(output.actions, DiscreteTargetActions)
+    assert torch.equal(output.actions.launch, expected.actions.launch)
+    assert torch.equal(output.actions.target, expected.actions.target)
+    assert torch.equal(output.actions.ships, expected.actions.ships)
+    assert torch.allclose(output.values, expected.values)
+    assert torch.allclose(output.winner_probabilities, expected.winner_probabilities)
+
+
 def test_discrete_target_bins_actor_outputs_bins_and_replays_log_probs() -> None:
     torch.manual_seed(17)
     obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)

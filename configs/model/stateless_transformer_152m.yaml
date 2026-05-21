@@ -1,6 +1,6 @@
 model_arch: stateless_transformer_v1
 embed_dim: 768
-depth: 32
+depth: 28
 n_heads: 16
 mlp_ratio: 2.0
 n_scratch_tokens: 4

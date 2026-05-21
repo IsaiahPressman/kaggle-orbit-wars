@@ -287,8 +287,15 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
         ) -> None:
             return None
 
-        def __call__(self, obs: object, *, deterministic: bool) -> object:
+        def serve(
+            self,
+            obs: object,
+            *,
+            deterministic: bool,
+            hidden_state: object | None,
+        ) -> object:
             assert not deterministic
+            assert hidden_state is None
             assert obs.still_playing.tolist() == [[True, False, False, False]]
             return SimpleNamespace(
                 actions=PureActions(launch=launch, angle=angle, ships=ships),
@@ -338,8 +345,15 @@ def test_agent_act_moves_action_bundle_to_cpu_before_kaggle_conversion(
         ) -> None:
             return None
 
-        def __call__(self, _obs: object, *, deterministic: bool) -> object:
+        def serve(
+            self,
+            _obs: object,
+            *,
+            deterministic: bool,
+            hidden_state: object | None,
+        ) -> object:
             assert not deterministic
+            assert hidden_state is None
             return SimpleNamespace(
                 actions=PureActions(
                     launch=FakeActionTensor("launch"),  # type: ignore[arg-type]
@@ -431,8 +445,15 @@ def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
         ) -> None:
             return None
 
-        def __call__(self, obs: object, *, deterministic: bool) -> object:
+        def serve(
+            self,
+            obs: object,
+            *,
+            deterministic: bool,
+            hidden_state: object | None,
+        ) -> object:
             assert not deterministic
+            assert hidden_state is None
             assert obs.entity_mask.sum().item() == 1
             assert obs.entity_mask.shape == (1, ACTION_ENTITY_SLOTS)
             assert obs.fleets.shape[1] == 0
@@ -494,8 +515,15 @@ def test_agent_act_logs_step_and_value_advantage(capsys) -> None:
         ) -> None:
             return None
 
-        def __call__(self, _obs: object, *, deterministic: bool) -> object:
+        def serve(
+            self,
+            _obs: object,
+            *,
+            deterministic: bool,
+            hidden_state: object | None,
+        ) -> object:
             assert not deterministic
+            assert hidden_state is None
             return SimpleNamespace(
                 actions=PureActions(
                     launch=torch.zeros(action_shape, dtype=torch.bool),

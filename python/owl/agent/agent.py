@@ -1,5 +1,6 @@
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 import torch
 from pydantic import ConfigDict, Field
@@ -95,13 +96,13 @@ class Agent:
         print(f"init_s={perf_counter() - init_start:.2f} - ", end="", flush=True)
 
     @torch.inference_mode()
-    def act(self, observation: KaggleObservation) -> list[list[float]]:
+    def act(self, observation: Any) -> list[list[float]]:
+        total_start = perf_counter()
+        encode_start = total_start
+        observation = KaggleObservation.model_validate(observation)
         if observation.remaining_overage_time < self.config.min_overage_time:
             return []
 
-        total_start = perf_counter()
-
-        encode_start = perf_counter()
         obs_dict = observation.to_rl_observation()
         obs = encode_python_observation(
             obs_dict,
@@ -117,14 +118,10 @@ class Agent:
         hidden_state = self.hidden_state
         if observation.step == 0 or hidden_state is None:
             hidden_state = self.model.initial_hidden_state(1, device=self.device)
-        output = (
-            self.model(device_obs, deterministic=self.config.deterministic)
-            if hidden_state is None
-            else self.model(
-                device_obs,
-                deterministic=self.config.deterministic,
-                hidden_state=hidden_state,
-            )
+        output = self.model.serve(
+            device_obs,
+            deterministic=self.config.deterministic,
+            hidden_state=hidden_state,
         )
         self.hidden_state = output.next_hidden_state
         self._synchronize_device()
