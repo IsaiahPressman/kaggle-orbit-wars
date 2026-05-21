@@ -836,17 +836,6 @@ fn target_angle(
         ));
     }
 
-    if matches!(targeting_mode, TargetingMode::FullMask)
-        && !is_dynamic_planet_cached(state, source)
-        && !state.static_target_cache.is_empty()
-        && state
-            .static_target_cache
-            .get(source.id, target.id)
-            .is_none()
-    {
-        return Ok(None);
-    }
-
     Ok(static_target_angle(
         state,
         source,
@@ -2599,6 +2588,119 @@ mod tests {
         }
     }
 
+    fn replay_77263963_static_target_state(source_ships: i32) -> State {
+        let planets = vec![
+            planet(
+                2,
+                -1,
+                84.12388824387287,
+                2.965933424497905,
+                2.09861228866811,
+                82,
+            ),
+            planet(
+                7,
+                -1,
+                30.247979474405184,
+                5.056628318443259,
+                1.6931471805599454,
+                24,
+            ),
+            planet(
+                10,
+                -1,
+                68.39179262370835,
+                5.052350137026821,
+                2.09861228866811,
+                57,
+            ),
+            planet(
+                15,
+                1,
+                19.862568169475338,
+                7.366978768343088,
+                1.0,
+                source_ships,
+            ),
+        ];
+        let mut config = ResetConfig::new(4);
+        config.step = Some(25);
+        config.angular_velocity = Some(0.043356178890437275);
+        config.planets = Some(planets.clone());
+        config.initial_planets = Some(planets);
+        reset(config)
+    }
+
+    fn entity_index_for_planet(entities: &ActionEntitySlots, planet_id: u32) -> usize {
+        entities
+            .iter()
+            .position(|slot| slot.is_some_and(|slot| slot.planet_id == planet_id))
+            .unwrap_or_else(|| panic!("planet {planet_id} should be in action entity slots"))
+    }
+
+    fn decode_single_discrete_target(
+        state: &State,
+        source_id: u32,
+        target_id: u32,
+        ship_count: i32,
+    ) -> DecodedDiscreteTargetActions {
+        let entities = action_entity_slots(state);
+        let source_index = entity_index_for_planet(&entities, source_id);
+        let target_index = entity_index_for_planet(&entities, target_id);
+        let mut launch = vec![false; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut targets = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut ships = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let action_index = ACTION_ENTITY_SLOTS + source_index;
+        launch[action_index] = true;
+        targets[action_index] = target_index as i64;
+        ships[action_index] = i64::from(ship_count);
+
+        decode_discrete_target_actions(
+            state,
+            &PlayerMap::identity(),
+            &entities,
+            &launch,
+            &targets,
+            &ships,
+            1,
+            1,
+            TargetingMode::FullMask,
+        )
+        .expect("valid replay discrete target should decode")
+    }
+
+    fn discrete_target_can_act(
+        state: &State,
+        source_id: u32,
+        target_id: u32,
+        min_fleet_size: i64,
+    ) -> bool {
+        let entities = action_entity_slots(state);
+        let source_index = entity_index_for_planet(&entities, source_id);
+        let target_index = entity_index_for_planet(&entities, target_id);
+        let spec = RlActionSpec::DiscreteTargets {
+            targeting_mode: TargetingMode::FullMask,
+        };
+        let mut can_act = vec![false; spec.can_act_len()];
+        let mut max_launch = vec![0; spec.max_launch_len()];
+
+        encode_action_spec(
+            spec,
+            state,
+            &PlayerMap::identity(),
+            &entities,
+            &mut can_act,
+            Some(&mut max_launch),
+            min_fleet_size,
+        );
+
+        let player = state.planets.get(source_id).expect("source").owner as usize;
+        let base = (PlayerMap::identity().internal_to_outer(player) * ACTION_ENTITY_SLOTS
+            + source_index)
+            * ACTION_ENTITY_SLOTS;
+        can_act[base + target_index]
+    }
+
     fn run_until_planet_changes(state: &mut State, planet_id: u32, initial_ships: i32) -> bool {
         let empty_actions = vec![Vec::new(); state.config.player_count];
         for _ in 0..80 {
@@ -3960,7 +4062,7 @@ mod tests {
     }
 
     #[test]
-    fn static_source_static_target_cache_gates_full_mask_decode() {
+    fn static_source_static_target_cache_gates_full_mask_mask() {
         let mut state = state_from_planets(vec![
             planet(0, 0, 5.0, 80.0, 2.0, 10),
             planet(1, -1, 95.0, 80.0, 2.0, 10),
@@ -3968,46 +4070,11 @@ mod tests {
         state.static_target_cache =
             StaticTargetCache::new(crate::rules_engine::state::MAX_PLANET_ID as usize);
         state.static_target_cache.set(0, 1, 0.25);
-        let entities = action_entity_slots(&state);
-        let mut launch = vec![false; 4 * ACTION_ENTITY_SLOTS];
-        let mut targets = vec![0; 4 * ACTION_ENTITY_SLOTS];
-        let mut ships = vec![0; 4 * ACTION_ENTITY_SLOTS];
-        launch[0] = true;
-        targets[0] = 1;
-        ships[0] = 6;
-
-        let decoded = decode_discrete_target_actions(
-            &state,
-            &PlayerMap::identity(),
-            &entities,
-            &launch,
-            &targets,
-            &ships,
-            1,
-            1,
-            TargetingMode::FullMask,
-        )
-        .expect("cached static target should decode");
-
-        assert_eq!(decoded.actions[0][0].angle, 0.0);
+        assert!(discrete_target_can_act(&state, 0, 1, 1));
 
         state.static_target_cache =
             StaticTargetCache::new(crate::rules_engine::state::MAX_PLANET_ID as usize);
-        let decoded = decode_discrete_target_actions(
-            &state,
-            &PlayerMap::identity(),
-            &entities,
-            &launch,
-            &targets,
-            &ships,
-            1,
-            1,
-            TargetingMode::FullMask,
-        )
-        .expect("masked static target should decode as no-op");
-
-        assert_eq!(decoded.launch_failures, 1);
-        assert!(decoded.actions.iter().all(Vec::is_empty));
+        assert!(!discrete_target_can_act(&state, 0, 1, 1));
     }
 
     #[test]
@@ -4411,6 +4478,70 @@ mod tests {
 
         assert!(run_until_planet_changes(&mut state, 2, 100));
         assert_eq!(state.planets.get(1).expect("blocker").ships, 100);
+    }
+
+    #[test]
+    fn replay_static_target_to_57_ship_planet_arrives_for_slow_fleets() {
+        for ship_count in [1, 2, 6, 11] {
+            let state = replay_77263963_static_target_state(ship_count);
+            assert!(discrete_target_can_act(
+                &state,
+                15,
+                10,
+                i64::from(ship_count)
+            ));
+            let decoded = decode_single_discrete_target(&state, 15, 10, ship_count);
+
+            assert_eq!(decoded.launch_failures, 0);
+            assert_eq!(decoded.actions[1].len(), 1);
+            let action = &decoded.actions[1][0];
+            let source = state.planets.get(15).expect("source");
+            let target = state.planets.get(10).expect("target");
+
+            assert!(
+                matches!(
+                    launch_outcome(&state, source, target, action.angle, ship_count),
+                    LaunchOutcome::Arrived(_)
+                ),
+                "{ship_count}-ship replay launch should arrive at the 57-ship planet"
+            );
+            assert_eq!(
+                state.planets.get(7).expect("blocker").ships,
+                24,
+                "regression setup should keep the 24-ship blocker unchanged before launch"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_far_static_target_blocked_by_57_ship_planet_is_masked_for_slow_fleets() {
+        for ship_count in [1, 2, 6] {
+            let state = replay_77263963_static_target_state(ship_count);
+            assert!(!discrete_target_can_act(
+                &state,
+                15,
+                2,
+                i64::from(ship_count)
+            ));
+
+            let decoded = decode_single_discrete_target(&state, 15, 2, ship_count);
+            assert_eq!(decoded.launch_failures, 0);
+            assert_eq!(decoded.actions[1].len(), 1);
+
+            let source = state.planets.get(15).expect("source");
+            let target = state.planets.get(2).expect("target");
+            let outcome = launch_outcome(
+                &state,
+                source,
+                target,
+                decoded.actions[1][0].angle,
+                ship_count,
+            );
+            assert!(
+                matches!(outcome, LaunchOutcome::HitObstacle { planet_id: 7, .. }),
+                "selected masked launch should hit blocker, got {outcome:?}"
+            );
+        }
     }
 
     #[test]

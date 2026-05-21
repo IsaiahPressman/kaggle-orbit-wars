@@ -390,12 +390,13 @@ train against this action spec when the model actor config also uses
 
 | Mode | Target mask | Bad selected target launch |
 | --- | --- | --- |
-| `"full_mask"` | Existing targets except self, plus the simulator's full static-target eligibility filter. | Selected targets are replaced with no-op when no allowed or fallback ray exists. |
+| `"full_mask"` | Existing targets except self, plus the simulator's full static-target eligibility filter. | Selected sun-blocked static targets are replaced with no-op. Selected planet-blocked static targets can still fall back to a sun-safe ray. Selected dynamic targets are replaced with no-op when no allowed or fallback ray exists. |
 | `"stop_bad_launch"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Falls back through the target cone for a sun-avoiding ray and is replaced with no-op only when no sun-avoiding target ray exists. |
 | `"anything_goes"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Submitted even when the computed ray crosses the sun. Dynamic targets with no target-hit window still become no-ops because no launch angle is defined. |
 
 In `"full_mask"`, static-source to static-target pairs use the reset-time
-cached static target-cone result for masking. Selected static-source to
+cached blocker-safe static target-cone result for masking. Fully
+blocker-covered static targets are masked out. Selected static-source to
 static-target launches also reuse the cached static-safe target arcs, then only
 check dynamic blockers at launch time. Dynamic-source to static-target pairs
 recompute the same static target-cone sun/static-blocker check for the current
@@ -439,10 +440,13 @@ shot horizon. Other static-target selected launches recompute sun/static arcs
 live, with cached static blocker geometry reused per decode. Dynamic blockers
 use their cached orbit paths or comet path segments up to the selected shot's
 impact horizon. If the sun removes the whole eligible arc, decoding skips
-blocker search and falls back immediately. If blockers cover the whole target
-cone, decoding falls back to the closest sun-avoiding angle. If no sun-avoiding
-angle exists, `"full_mask"` and `"stop_bad_launch"` decode the launch as a
-no-op, while `"anything_goes"` uses the centerline.
+blocker search and falls back immediately. If blockers cover the whole static
+target cone, selected launches fall back to the closest sun-avoiding angle.
+This selected-launch fallback is separate from the `full_mask` target mask:
+fully planet-blocked static targets are masked out as legal targets, but if one
+is selected anyway it may still fire. If no sun-avoiding angle exists,
+`"full_mask"` and `"stop_bad_launch"` decode the launch as a no-op, while
+`"anything_goes"` uses the centerline.
 
 For orbiting non-comet planets, reset caches future tick positions across the
 episode horizon, and decoding solves target-hit time windows against the cached
