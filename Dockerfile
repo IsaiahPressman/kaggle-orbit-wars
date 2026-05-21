@@ -67,4 +67,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/workspace/orbit-wars/target \
     just prepare-container
 
+ENV UV_COMPILE_BYTECODE=0
+
 CMD ["bash"]
