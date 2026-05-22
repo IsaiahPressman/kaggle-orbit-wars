@@ -1558,6 +1558,8 @@ def test_discrete_target_rollout_buffer_and_policy_mask() -> None:
     )
     assert segments.actions.target is not None
     assert segments.actions.target.shape == (3, 2, 4, ACTION_ENTITY_SLOTS, 1)
+    assert segments.entity_logp is not None
+    assert segments.entity_logp.shape == (3, 2, 4, ACTION_ENTITY_SLOTS)
     policy_mask = ppo._policy_mask(segments.obs)
     assert policy_mask.shape == (3, 2, 4)
     assert policy_mask[:, 0, 0].all()

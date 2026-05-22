@@ -111,6 +111,10 @@ must be divisible by
 launches, `EnvConfig.n_envs`, rollout horizon, minibatch segment width, and
 gradient accumulation are per GPU. Checkpoint cadence, `--max-env-steps`, W&B
 step values, and `train/env_steps` are counted across all ranks.
+`rl.ppo_clip_mode` defaults to `per_player`, which clips the summed per-player
+joint action log-probability. Set it to `per_entity` to clip each controllable
+action entity independently before summing those clipped policy-loss terms back
+to the player-step.
 PPO supports `pure`, `discrete_targets`, and `discrete_target_bins` action specs
 when the `StatelessTransformerV1` actor discriminator matches the environment
 action spec. The current discrete-target actor requires

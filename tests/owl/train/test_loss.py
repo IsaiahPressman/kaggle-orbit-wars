@@ -60,6 +60,43 @@ def test_ppo_loss_matches_clipped_objectives() -> None:
     assert torch.allclose(metrics.clipfrac, torch.tensor(1.0))
 
 
+def test_ppo_loss_can_clip_per_entity_before_summing() -> None:
+    new_logp = torch.log(torch.tensor([[[1.3, 1.01]]]))
+    old_logp = torch.zeros((1, 1, 2))
+    old_values = torch.zeros((1, 1))
+    new_values = torch.zeros((1, 1))
+    returns = torch.zeros((1, 1))
+    advantages = torch.tensor([[2.0]])
+    entropy = torch.tensor([[[0.2, 0.4]]])
+    entity_policy_weight = torch.ones_like(new_logp)
+
+    metrics, _backward_loss = _ppo_loss(
+        new_logp=new_logp,
+        entropy=entropy,
+        new_values=new_values,
+        old_logp=old_logp,
+        old_values=old_values,
+        returns=returns,
+        advantages=advantages,
+        policy_weight=torch.ones_like(advantages),
+        value_weight=torch.ones_like(advantages),
+        config=PPOConfig(
+            clip_coef=0.2,
+            vf_coef=0.0,
+            ent_coef=0.0,
+            ppo_clip_mode="per_entity",
+        ),
+        entity_policy_weight=entity_policy_weight,
+    )
+
+    expected_policy = torch.tensor(-2.0 * 1.2 - 2.0 * 1.01)
+    expected_kl = ((new_logp.exp() - 1.0) - new_logp).sum()
+    assert torch.allclose(metrics.policy_loss, expected_policy)
+    assert torch.allclose(metrics.entropy, torch.tensor(0.6))
+    assert torch.allclose(metrics.approx_kl, expected_kl)
+    assert torch.allclose(metrics.clipfrac, torch.tensor(0.5))
+
+
 def test_ppo_loss_uses_policy_and_value_weights_separately() -> None:
     new_logp = torch.log(torch.tensor([[1.1, 10.0]]))
     old_logp = torch.zeros((1, 2))

@@ -27,6 +27,7 @@ def test_ppo_config_validates_with_pydantic() -> None:
     assert config.gamma == pytest.approx(0.9)
     assert config.checkpoint_freq is None
     assert config.eval_replay_games == 0
+    assert config.ppo_clip_mode == "per_player"
 
     with pytest.raises(ValueError, match="greater than or equal to 0"):
         PPOConfig(gamma=-0.1)
@@ -40,9 +41,15 @@ def test_ppo_config_validates_with_pydantic() -> None:
         PPOConfig(gradient_accumulation_steps=0)
 
     assert PPOConfig(dtype="bfloat16").dtype == "bfloat16"
+    assert PPOConfig(ppo_clip_mode="per_entity").ppo_clip_mode == "per_entity"
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         PPOConfig(removed_field=True)
+    with pytest.raises(
+        ValueError,
+        match="Input should be 'per_player' or 'per_entity'",
+    ):
+        PPOConfig(ppo_clip_mode="per_source")
 
 
 def test_full_config_accepts_nested_discriminated_configs() -> None:

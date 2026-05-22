@@ -76,6 +76,7 @@ CompileMode = Literal[
     "max-autotune",
     "max-autotune-no-cudagraphs",
 ]
+PPOClipMode = Literal["per_player", "per_entity"]
 
 
 _OBS_TENSOR_FIELDS = tuple(
@@ -97,6 +98,7 @@ class PPOConfig(BaseConfig):
     ent_coef: float = Field(default=0.01, ge=0.0)
     max_grad_norm: float = Field(default=0.5, gt=0.0)
     target_kl: float | None = Field(default=0.03, gt=0.0)
+    ppo_clip_mode: PPOClipMode = "per_player"
     normalize_advantages: bool = False
     eval_replay_games: int = Field(default=0, ge=0)
     compile_mode: CompileMode | None = None
@@ -145,6 +147,7 @@ class _PPORolloutSegments:
     values: torch.Tensor
     rewards: torch.Tensor
     dones: torch.Tensor
+    entity_logp: torch.Tensor | None = None
     initial_hidden_state: ModelHiddenState | None = None
 
 
@@ -304,6 +307,11 @@ class _PPORolloutBuffer:
             dtype=torch.float32,
             device=device,
         )
+        self.entity_logp = torch.zeros(
+            (horizon, n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS),
+            dtype=torch.float32,
+            device=device,
+        )
         self.values = torch.zeros(
             (horizon, n_envs, OUTER_PLAYER_SLOTS),
             dtype=torch.float32,
@@ -328,6 +336,7 @@ class _PPORolloutBuffer:
         obs: ObsBatch,
         actions: ModelActions,
         logp: torch.Tensor,
+        entity_logp: torch.Tensor | None = None,
         values: torch.Tensor,
         rewards: torch.Tensor,
         dones: torch.Tensor,
@@ -337,6 +346,10 @@ class _PPORolloutBuffer:
         _copy_obs_time_step(self.obs, step, obs)
         _copy_actions_time_step(self.actions, step, actions)
         self.logp[step].copy_(logp)
+        if entity_logp is None:
+            self.entity_logp[step].zero_()
+        else:
+            self.entity_logp[step].copy_(entity_logp)
         self.values[step].copy_(values)
         self.rewards[step].copy_(rewards)
         self.dones[step].copy_(dones)
@@ -347,6 +360,7 @@ class _PPORolloutBuffer:
             obs=_obs_segment_major(self.obs),
             actions=_actions_segment_major(self.actions),
             logp=self.logp.transpose(0, 1).contiguous(),
+            entity_logp=self.entity_logp.transpose(0, 1).contiguous(),
             values=self.values.transpose(0, 1).contiguous(),
             rewards=self.rewards.transpose(0, 1).contiguous(),
             dones=self.dones.transpose(0, 1).contiguous(),
@@ -600,6 +614,7 @@ class PPOTrainer:
                     obs=self._obs,
                     actions=actions,
                     logp=_output_logp(output),
+                    entity_logp=_output_entity_logp(output),
                     values=_output_values(output),
                     rewards=rewards,
                     dones=dones,
@@ -715,11 +730,20 @@ class PPOTrainer:
         else:
             batch_actions = batch_segment_actions
             batch_obs = batch_segment_obs
-        batch_old_logp = segments.logp[idx]
+        batch_old_logp = _old_policy_logp_for_clip_mode(
+            segments,
+            idx,
+            self.config.ppo_clip_mode,
+        )
         batch_old_values = value_clip_anchor[idx]
         batch_returns = returns[idx]
         batch_policy_mask = policy_mask[idx]
         batch_value_mask = value_mask[idx]
+        batch_entity_policy_mask = (
+            _policy_entity_mask(batch_segment_obs)
+            if self.config.ppo_clip_mode == "per_entity"
+            else None
+        )
         batch_advantages = advantages[idx]
         if self.config.normalize_advantages:
             batch_advantages = _normalize_masked_advantages(
@@ -728,6 +752,11 @@ class PPOTrainer:
             )
         batch_policy_weight = batch_policy_mask.to(dtype=batch_advantages.dtype)
         batch_value_weight = batch_value_mask.to(dtype=batch_advantages.dtype)
+        batch_entity_policy_weight = (
+            None
+            if batch_entity_policy_mask is None
+            else batch_entity_policy_mask.to(dtype=batch_advantages.dtype)
+        )
 
         with _autocast_context(self.config, self.device):
             output = _model_evaluate_actions(
@@ -737,28 +766,38 @@ class PPOTrainer:
                 hidden_state=batch_hidden_state,
                 dones=segments.dones[idx],
             )
-        new_logp = _output_logp(output).view_as(batch_old_logp)
-        entropy = _output_entropy(output, batch_old_logp)
-        entropy_components = _output_entropy_components(output, batch_old_logp)
+        new_logp = _output_logp_for_clip_mode(
+            output,
+            self.config.ppo_clip_mode,
+        ).view_as(batch_old_logp)
+        entropy = _output_entropy_for_clip_mode(
+            output,
+            batch_old_logp,
+            self.config.ppo_clip_mode,
+        )
+        entropy_components = _output_entropy_components(output, segments.logp[idx])
         new_values = _output_values(output).view_as(batch_old_values)
 
-        metrics, backward_loss = self._ppo_loss(
-            new_logp=new_logp,
-            entropy=entropy,
-            new_values=new_values,
-            old_logp=batch_old_logp,
-            old_values=batch_old_values,
-            returns=batch_returns,
-            advantages=batch_advantages,
-            policy_weight=batch_policy_weight,
-            value_weight=batch_value_weight,
-            config=self.config,
-            context=(
+        loss_kwargs = {
+            "new_logp": new_logp,
+            "entropy": entropy,
+            "new_values": new_values,
+            "old_logp": batch_old_logp,
+            "old_values": batch_old_values,
+            "returns": batch_returns,
+            "advantages": batch_advantages,
+            "policy_weight": batch_policy_weight,
+            "value_weight": batch_value_weight,
+            "config": self.config,
+            "context": (
                 self.distributed_context
                 if self.distributed_context.initialized
                 else None
             ),
-        )
+        }
+        if batch_entity_policy_weight is not None:
+            loss_kwargs["entity_policy_weight"] = batch_entity_policy_weight
+        metrics, backward_loss = self._ppo_loss(**loss_kwargs)
         metrics = replace(
             metrics,
             entropy_components={
@@ -891,6 +930,7 @@ def _compile_ppo_loss(
         value_weight: torch.Tensor,
         config: PPOConfig,
         context: DistributedContext | None = None,
+        entity_policy_weight: torch.Tensor | None = None,
     ) -> tuple[_PPOLossMetrics, torch.Tensor]:
         return _ppo_loss(
             new_logp=new_logp,
@@ -905,6 +945,7 @@ def _compile_ppo_loss(
             config=config,
             context=context,
             loss_components=compiled_loss_components,
+            entity_policy_weight=entity_policy_weight,
         )
 
     return compiled_ppo_loss
@@ -924,6 +965,7 @@ def _ppo_loss(
     config: PPOConfig,
     context: DistributedContext | None = None,
     loss_components: Callable[..., tuple[torch.Tensor, ...]] | None = None,
+    entity_policy_weight: torch.Tensor | None = None,
 ) -> tuple[_PPOLossMetrics, torch.Tensor]:
     if loss_components is None:
         loss_components = _ppo_loss_components
@@ -938,6 +980,8 @@ def _ppo_loss(
             advantages,
             config.clip_coef,
             config.vf_clip_coef,
+            config.ppo_clip_mode,
+            entity_policy_weight,
         ),
         policy_weight=policy_weight,
         value_weight=value_weight,
@@ -1136,12 +1180,40 @@ def _ppo_loss_components(
     advantages: torch.Tensor,
     clip_coef: float,
     vf_clip_coef: float | None,
+    ppo_clip_mode: PPOClipMode,
+    entity_policy_weight: torch.Tensor | None,
 ) -> tuple[torch.Tensor, ...]:
-    logratio = new_logp - old_logp
-    ratio = logratio.exp()
-    pg_loss1 = -advantages * ratio
-    pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef)
-    policy_loss_values = torch.max(pg_loss1, pg_loss2)
+    if ppo_clip_mode == "per_entity":
+        if entity_policy_weight is None:
+            raise ValueError(
+                "entity_policy_weight is required for per_entity PPO clipping"
+            )
+        entity_weight = entity_policy_weight
+        policy_components = _per_entity_policy_loss_components(
+            new_logp,
+            old_logp,
+            advantages,
+            clip_coef,
+            entity_weight,
+        )
+    else:
+        entity_weight = None
+        policy_components = _per_player_policy_loss_components(
+            new_logp,
+            old_logp,
+            advantages,
+            clip_coef,
+        )
+    (
+        policy_loss_values,
+        approx_kl_values,
+        clipfrac_values,
+        ratio,
+        logratio,
+    ) = policy_components
+
+    if entity_weight is not None:
+        entropy = _sum_masked_entities(entropy, entity_weight)
 
     if vf_clip_coef:
         value_clipped = old_values + torch.clamp(
@@ -1159,10 +1231,60 @@ def _ppo_loss_components(
         policy_loss_values,
         value_loss_values,
         entropy,
+        approx_kl_values,
+        clipfrac_values,
+        ratio,
+        logratio,
+    )
+
+
+def _per_player_policy_loss_components(
+    new_logp: torch.Tensor,
+    old_logp: torch.Tensor,
+    advantages: torch.Tensor,
+    clip_coef: float,
+) -> tuple[torch.Tensor, ...]:
+    logratio = new_logp - old_logp
+    ratio = logratio.exp()
+    pg_loss1 = -advantages * ratio
+    pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef)
+    policy_loss_values = torch.max(pg_loss1, pg_loss2)
+
+    return (
+        policy_loss_values,
         (ratio - 1.0) - logratio,
         ((ratio - 1.0).abs() > clip_coef).float(),
         ratio,
         logratio,
+    )
+
+
+def _per_entity_policy_loss_components(
+    new_logp: torch.Tensor,
+    old_logp: torch.Tensor,
+    advantages: torch.Tensor,
+    clip_coef: float,
+    entity_policy_weight: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    entity_advantages = advantages.unsqueeze(-1)
+    logratio = new_logp - old_logp
+    ratio = logratio.exp()
+    pg_loss1 = -entity_advantages * ratio
+    pg_loss2 = -entity_advantages * torch.clamp(
+        ratio,
+        1.0 - clip_coef,
+        1.0 + clip_coef,
+    )
+    entity_policy_loss = torch.max(pg_loss1, pg_loss2)
+    entity_approx_kl = (ratio - 1.0) - logratio
+    entity_clipfrac = ((ratio - 1.0).abs() > clip_coef).float()
+
+    return (
+        _sum_masked_entities(entity_policy_loss, entity_policy_weight),
+        _sum_masked_entities(entity_approx_kl, entity_policy_weight),
+        _mean_masked_entities(entity_clipfrac, entity_policy_weight),
+        _mean_masked_entities(ratio, entity_policy_weight),
+        _mean_masked_entities(logratio, entity_policy_weight),
     )
 
 
@@ -1608,10 +1730,51 @@ def _output_logp(output: ModelOutput | ModelEvaluation) -> torch.Tensor:
     return output.log_probs.per_player_entity.sum(dim=-1)
 
 
+def _output_entity_logp(output: ModelOutput | ModelEvaluation) -> torch.Tensor:
+    return output.log_probs.per_player_entity
+
+
+def _old_policy_logp_for_clip_mode(
+    segments: _PPORolloutSegments,
+    idx: torch.Tensor,
+    ppo_clip_mode: PPOClipMode,
+) -> torch.Tensor:
+    if ppo_clip_mode == "per_entity":
+        if segments.entity_logp is None:
+            raise RuntimeError(
+                "per_entity PPO clipping requires stored entity log-probs"
+            )
+        return segments.entity_logp[idx]
+    return segments.logp[idx]
+
+
+def _output_logp_for_clip_mode(
+    output: ModelOutput | ModelEvaluation,
+    ppo_clip_mode: PPOClipMode,
+) -> torch.Tensor:
+    if ppo_clip_mode == "per_entity":
+        return _output_entity_logp(output)
+    return _output_logp(output)
+
+
 def _output_entropy(
     output: ModelOutput | ModelEvaluation, like: torch.Tensor
 ) -> torch.Tensor:
     return output.entropies.per_player_entity.sum(dim=-1).view_as(like)
+
+
+def _output_entity_entropy(output: ModelOutput | ModelEvaluation) -> torch.Tensor:
+    return output.entropies.per_player_entity
+
+
+def _output_entropy_for_clip_mode(
+    output: ModelOutput | ModelEvaluation,
+    like: torch.Tensor,
+    ppo_clip_mode: PPOClipMode,
+) -> torch.Tensor:
+    if ppo_clip_mode == "per_entity":
+        return _output_entity_entropy(output).view_as(like)
+    return _output_entropy(output, like)
 
 
 def _output_entropy_components(
@@ -1639,6 +1802,15 @@ def _output_values(output: ModelOutput | ModelEvaluation) -> torch.Tensor:
 def _policy_mask(obs: ObsBatch) -> torch.Tensor:
     can_act = obs.action_mask.can_act.flatten(start_dim=3).any(dim=-1)
     return obs.still_playing & can_act
+
+
+def _policy_entity_mask(obs: ObsBatch) -> torch.Tensor:
+    can_act = obs.action_mask.can_act
+    if can_act.ndim == obs.still_playing.ndim + 1:
+        source_can_act = can_act
+    else:
+        source_can_act = can_act.flatten(start_dim=4).any(dim=-1)
+    return obs.still_playing.unsqueeze(-1) & source_can_act
 
 
 def _minibatch_indices(
@@ -1671,6 +1843,15 @@ def _masked_max_or_zero(values: torch.Tensor, mask: torch.Tensor) -> torch.Tenso
         masked.max(),
         torch.zeros((), dtype=values.dtype, device=values.device),
     )
+
+
+def _sum_masked_entities(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    return (values * weights).sum(dim=-1)
+
+
+def _mean_masked_entities(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    weighted_sum = (values * weights).sum(dim=-1)
+    return weighted_sum / weights.sum(dim=-1).clamp_min(1e-8)
 
 
 def _distributed_weighted_mean(
