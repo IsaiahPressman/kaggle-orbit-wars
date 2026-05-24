@@ -11,16 +11,27 @@ from torch import nn
 from owl.config import BaseConfig
 from owl.model import BaseModelAPI, InputLayer
 
-LRScheduleName = Literal["linear_warmup_cosine_decay"]
 StateDict: TypeAlias = dict[str, Any]
 AdamBeta: TypeAlias = Annotated[float, Field(ge=0.0, lt=1.0)]
 
 
-class LRScheduleConfig(BaseConfig):
-    schedule: LRScheduleName = "linear_warmup_cosine_decay"
+class LinearWarmupCosineDecayLRScheduleConfig(BaseConfig):
+    schedule: Literal["linear_warmup_cosine_decay"] = "linear_warmup_cosine_decay"
     warmup_steps: int = Field(default=0, ge=0)
     decay_steps: int = Field(default=1, ge=1)
     lr_min_ratio: float = Field(default=1e-3, ge=1e-3, le=0.1)
+
+
+class CosineLRScheduleConfig(BaseConfig):
+    schedule: Literal["cosine"] = "cosine"
+    phase_steps: int = Field(default=1, ge=1)
+    lr_min_ratio: float = Field(default=1e-3, ge=0.0, lt=1.0)
+
+
+LRScheduleConfig: TypeAlias = Annotated[
+    LinearWarmupCosineDecayLRScheduleConfig | CosineLRScheduleConfig,
+    Field(discriminator="schedule"),
+]
 
 
 class Optimizer(Protocol):
@@ -185,6 +196,10 @@ def lr_multiplier(config: LRScheduleConfig, step: int) -> float:
             )
             progress = decay_step / config.decay_steps
             cosine = 0.5 * (1.0 + cos(pi * progress))
+            return config.lr_min_ratio + (1.0 - config.lr_min_ratio) * cosine
+        case "cosine":
+            phase_progress = (step % (2 * config.phase_steps)) / config.phase_steps
+            cosine = 0.5 * (1.0 + cos(pi * phase_progress))
             return config.lr_min_ratio + (1.0 - config.lr_min_ratio) * cosine
         case _:
             assert_never(config.schedule)

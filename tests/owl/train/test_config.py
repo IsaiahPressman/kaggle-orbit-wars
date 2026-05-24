@@ -73,6 +73,7 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
                 "optimizer": "adamw",
                 "learning_rate": 0.001,
                 "lr_schedule": {
+                    "schedule": "linear_warmup_cosine_decay",
                     "warmup_steps": 2,
                     "decay_steps": 10,
                     "lr_min_ratio": 0.1,

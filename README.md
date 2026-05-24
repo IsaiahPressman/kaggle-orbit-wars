@@ -101,6 +101,12 @@ cuDNN benchmarking before constructing the environment, model, and optimizer.
 Fresh launches explicitly reset model parameters before optimizer construction;
 resume launches load checkpoint weights and optimizer state without resetting
 the model first.
+Optimizer configs may set `lr_schedule.schedule` to
+`linear_warmup_cosine_decay` for warmup followed by cosine decay, or `cosine`
+for a repeating LambdaLR multiplier that moves from `1.0` to `lr_min_ratio`
+over `phase_steps` optimizer steps and back to `1.0` over the next phase. The
+schedule name selects the accepted scheduler fields; unrelated scheduler fields
+are rejected.
 Training `EnvConfig.n_envs` must be even. PPO updates run
 `rl.ppo_epochs` full-shuffle passes over rollout segments, grouped by
 `rl.segments_per_minibatch`; set `rl.gradient_accumulation_steps` above `1` to

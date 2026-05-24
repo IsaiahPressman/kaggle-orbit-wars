@@ -47,6 +47,7 @@ def _full_config(*, checkpoint_freq: int | None = None) -> FullConfig:
                 "optimizer": "adamw",
                 "learning_rate": 0.001,
                 "lr_schedule": {
+                    "schedule": "linear_warmup_cosine_decay",
                     "warmup_steps": 1,
                     "decay_steps": 4,
                     "lr_min_ratio": 0.1,

@@ -11,12 +11,15 @@ from owl.rl import ObsBatch
 from owl.train import (
     AdamConfig,
     AdamWConfig,
+    CosineLRScheduleConfig,
+    LinearWarmupCosineDecayLRScheduleConfig,
     LRScheduleConfig,
     MuonConfig,
     create_lr_scheduler,
     create_optimizer,
 )
 from owl.train.optimizer import CompositeOptimizer, lr_multiplier
+from pydantic import TypeAdapter
 from torch import nn
 
 
@@ -142,7 +145,11 @@ def test_create_optimizer_rejects_unknown_optimizer_contract() -> None:
 
 
 def test_lr_multiplier_linear_warmup_then_cosine_decay() -> None:
-    config = LRScheduleConfig(warmup_steps=2, decay_steps=4, lr_min_ratio=0.1)
+    config = LinearWarmupCosineDecayLRScheduleConfig(
+        warmup_steps=2,
+        decay_steps=4,
+        lr_min_ratio=0.1,
+    )
 
     assert lr_multiplier(config, 0) == pytest.approx(0.0)
     assert lr_multiplier(config, 1) == pytest.approx(0.5)
@@ -151,12 +158,63 @@ def test_lr_multiplier_linear_warmup_then_cosine_decay() -> None:
     assert lr_multiplier(config, 20) == pytest.approx(0.1)
 
 
+def test_lr_multiplier_cosine_oscillates_between_bounds() -> None:
+    config = CosineLRScheduleConfig(phase_steps=2, lr_min_ratio=0.2)
+
+    assert lr_multiplier(config, 0) == pytest.approx(1.0)
+    assert lr_multiplier(config, 1) == pytest.approx(0.6)
+    assert lr_multiplier(config, 2) == pytest.approx(0.2)
+    assert lr_multiplier(config, 3) == pytest.approx(0.6)
+    assert lr_multiplier(config, 4) == pytest.approx(1.0)
+    assert lr_multiplier(config, 6) == pytest.approx(0.2)
+
+
+def test_lr_multiplier_cosine_config_validation() -> None:
+    config = CosineLRScheduleConfig(phase_steps=1, lr_min_ratio=0.0)
+    assert lr_multiplier(config, 1) == pytest.approx(0.0)
+
+    with pytest.raises(ValueError, match="less than 1"):
+        CosineLRScheduleConfig(lr_min_ratio=1.0)
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        CosineLRScheduleConfig(phase_steps=0)
+
+
+def test_lr_schedule_config_discriminates_allowed_fields() -> None:
+    adapter = TypeAdapter(LRScheduleConfig)
+
+    cosine_config = adapter.validate_python(
+        {"schedule": "cosine", "phase_steps": 3, "lr_min_ratio": 0.0}
+    )
+    assert isinstance(cosine_config, CosineLRScheduleConfig)
+
+    linear_config = adapter.validate_python(
+        {
+            "schedule": "linear_warmup_cosine_decay",
+            "warmup_steps": 2,
+            "decay_steps": 4,
+            "lr_min_ratio": 0.1,
+        }
+    )
+    assert isinstance(linear_config, LinearWarmupCosineDecayLRScheduleConfig)
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        adapter.validate_python({"schedule": "cosine", "warmup_steps": 2})
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        adapter.validate_python(
+            {"schedule": "linear_warmup_cosine_decay", "phase_steps": 2}
+        )
+
+
 def test_lr_scheduler_scales_optimizer_param_groups() -> None:
     model = OptimizerTestModel()
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
     scheduler = create_lr_scheduler(
         optimizer,
-        LRScheduleConfig(warmup_steps=2, decay_steps=2, lr_min_ratio=0.025),
+        LinearWarmupCosineDecayLRScheduleConfig(
+            warmup_steps=2,
+            decay_steps=2,
+            lr_min_ratio=0.025,
+        ),
     )
     assert scheduler is not None
     assert isinstance(scheduler, torch.optim.lr_scheduler.LambdaLR)
@@ -186,12 +244,15 @@ def test_composite_lr_scheduler_round_trips_nested_state_dict() -> None:
         MuonConfig(
             adamw_lr=0.01,
             muon_lr=0.02,
-            lr_schedule=LRScheduleConfig(warmup_steps=1, decay_steps=2),
+            lr_schedule=LinearWarmupCosineDecayLRScheduleConfig(
+                warmup_steps=1,
+                decay_steps=2,
+            ),
         ),
     )
     scheduler = create_lr_scheduler(
         optimizer,
-        LRScheduleConfig(warmup_steps=1, decay_steps=2),
+        LinearWarmupCosineDecayLRScheduleConfig(warmup_steps=1, decay_steps=2),
     )
     assert scheduler is not None
 
@@ -200,7 +261,7 @@ def test_composite_lr_scheduler_round_trips_nested_state_dict() -> None:
     state = scheduler.state_dict()
     replacement = create_lr_scheduler(
         optimizer,
-        LRScheduleConfig(warmup_steps=1, decay_steps=2),
+        LinearWarmupCosineDecayLRScheduleConfig(warmup_steps=1, decay_steps=2),
     )
     assert replacement is not None
     replacement.load_state_dict(state)

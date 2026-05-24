@@ -2,6 +2,8 @@ from .config import FullConfig, RuntimeConfig
 from .optimizer import (
     AdamConfig,
     AdamWConfig,
+    CosineLRScheduleConfig,
+    LinearWarmupCosineDecayLRScheduleConfig,
     LRScheduleConfig,
     MuonConfig,
     OptimizerConfig,
@@ -14,8 +16,10 @@ from .utils import configure_torch
 __all__ = [
     "AdamConfig",
     "AdamWConfig",
+    "CosineLRScheduleConfig",
     "FullConfig",
     "LRScheduleConfig",
+    "LinearWarmupCosineDecayLRScheduleConfig",
     "MuonConfig",
     "OptimizerConfig",
     "PPOConfig",
