@@ -26,7 +26,7 @@ class ReplayRecorder:
         *,
         output_path: Path,
         source: str,
-        player_count: int,
+        player_count: int | None,
         total_games: int,
         sample_games: int,
         metadata: dict[str, Any],
@@ -139,7 +139,11 @@ class ReplayRecorder:
         row = {
             "schema_version": 1,
             "source": self.source,
-            "player_count": self.player_count,
+            "player_count": (
+                sum(replay.start_mask)
+                if self.player_count is None
+                else self.player_count
+            ),
             "game_ordinal": replay.game_ordinal,
             "env_index": replay.env_index,
             "model_assignments": replay.model_assignments,

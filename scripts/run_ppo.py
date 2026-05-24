@@ -741,30 +741,26 @@ def _evaluate_against_last_best(
     env_metrics: dict[str, list[float]] = {}
     try:
         with torch.no_grad():
-            per_player_count_games = cfg.env.n_envs // len(PLAYER_COUNTS)
-            eval_n_envs = cfg.env.n_envs // 2
             if cfg.rl.eval_replay_games > cfg.env.n_envs:
                 raise ValueError("rl.eval_replay_games must be <= env.n_envs")
-            for player_count in PLAYER_COUNTS:
-                player_stats, player_env_metrics, player_steps = _evaluate_player_count(
+            player_stats, player_stats_by_count, player_env_metrics, player_steps = (
+                _evaluate_games(
                     current_model=current_model,
                     last_best_model=last_best_model,
                     cfg=cfg,
-                    player_count=player_count,
-                    n_games=per_player_count_games,
-                    n_envs=eval_n_envs,
+                    n_games=cfg.env.n_envs,
+                    n_envs=cfg.env.n_envs,
                     device=device,
-                    replay_games=cfg.rl.eval_replay_games // len(PLAYER_COUNTS),
+                    replay_games=cfg.rl.eval_replay_games,
                     replay_output_path=(
-                        replay_dir / f"eval_{player_count}p.jsonl"
-                        if replay_dir is not None
-                        else None
+                        replay_dir / "eval.jsonl" if replay_dir is not None else None
                     ),
                 )
-                stats_by_player_count[player_count] = player_stats
-                stats.merge(player_stats)
-                _extend_env_metrics(env_metrics, player_env_metrics)
-                eval_steps += player_steps
+            )
+            stats_by_player_count.update(player_stats_by_count)
+            stats.merge(player_stats)
+            _extend_env_metrics(env_metrics, player_env_metrics)
+            eval_steps += player_steps
     finally:
         current_model.train(current_was_training)
         last_best_model.train(last_best_was_training)
@@ -773,6 +769,8 @@ def _evaluate_against_last_best(
     metrics = _eval_env_metrics(env_metrics)
     metrics["eval/win_rate_against_last_best"] = stats.win_rate(MODEL_CURRENT)
     for player_count, player_stats in stats_by_player_count.items():
+        if player_stats.model_games[MODEL_CURRENT] == 0:
+            continue
         metrics[f"eval/win_rate_against_last_best_{player_count}p"] = (
             player_stats.win_rate(MODEL_CURRENT)
         )
@@ -781,23 +779,22 @@ def _evaluate_against_last_best(
     return metrics
 
 
-def _evaluate_player_count(
+def _evaluate_games(
     *,
     current_model: BaseModelAPI,
     last_best_model: BaseModelAPI,
     cfg: FullConfig,
-    player_count: int,
     n_games: int,
     n_envs: int,
     device: torch.device,
     replay_games: int = 0,
     replay_output_path: Path | None = None,
-) -> tuple[_EvalStats, dict[str, list[float]], int]:
+) -> tuple[_EvalStats, dict[int, _EvalStats], dict[str, list[float]], int]:
     env = VectorizedEnv(
         n_envs=n_envs,
         obs_spec=cfg.env.obs_spec,
         action_spec=cfg.env.action_spec,
-        two_player_weight=1.0 if player_count == 2 else 0.0,
+        two_player_weight=cfg.env.two_player_weight,
         pin_memory=device.type == "cuda",
     )
     obs = env.reset()
@@ -808,7 +805,7 @@ def _evaluate_player_count(
         ReplayRecorder(
             output_path=replay_output_path,
             source="run_ppo_eval",
-            player_count=player_count,
+            player_count=None,
             total_games=n_games,
             sample_games=replay_games,
             metadata={
@@ -827,7 +824,7 @@ def _evaluate_player_count(
             assignments,
             env_index,
             active_slots=start_masks[env_index],
-            player_count=player_count,
+            player_count=_player_count_for_eval(start_masks[env_index], env_index),
         )
         if started_games < n_games:
             current_game_ordinals[env_index] = started_games
@@ -844,6 +841,9 @@ def _evaluate_player_count(
     games = 0
     steps = 0
     stats = _EvalStats.empty()
+    stats_by_player_count = {
+        player_count: _EvalStats.empty() for player_count in PLAYER_COUNTS
+    }
     env_metrics: dict[str, list[float]] = {}
     hidden_current = current_model.initial_hidden_state(n_envs, device=device)
     hidden_last_best = last_best_model.initial_hidden_state(n_envs, device=device)
@@ -879,12 +879,19 @@ def _evaluate_player_count(
                 break
             env_index = int(env_index_tensor.item())
             if current_game_ordinals[env_index] is not None:
+                player_count = _player_count_for_eval(start_masks[env_index], env_index)
                 terminal_metrics = env.terminal_metrics(env_index)
                 if terminal_metrics is None:
                     raise RuntimeError(f"missing terminal metrics for env {env_index}")
                 _extend_single_env_metrics(env_metrics, terminal_metrics)
                 _record_eval_terminal_result(
                     stats,
+                    assignments[env_index],
+                    start_masks[env_index],
+                    returns[env_index],
+                )
+                _record_eval_terminal_result(
+                    stats_by_player_count[player_count],
                     assignments[env_index],
                     start_masks[env_index],
                     returns[env_index],
@@ -897,7 +904,7 @@ def _evaluate_player_count(
                 assignments,
                 env_index,
                 active_slots=start_masks[env_index],
-                player_count=player_count,
+                player_count=_player_count_for_eval(start_masks[env_index], env_index),
             )
             if started_games < n_games:
                 current_game_ordinals[env_index] = started_games
@@ -912,7 +919,16 @@ def _evaluate_player_count(
                 started_games += 1
             else:
                 current_game_ordinals[env_index] = None
-    return stats, env_metrics, steps
+    return stats, stats_by_player_count, env_metrics, steps
+
+
+def _player_count_for_eval(active_slots: torch.Tensor, env_index: int) -> int:
+    player_count = int(active_slots.sum().item())
+    if player_count not in PLAYER_COUNTS:
+        raise ValueError(
+            f"expected 2 or 4 active players, got {player_count} for env {env_index}"
+        )
+    return player_count
 
 
 def _extend_single_env_metrics(

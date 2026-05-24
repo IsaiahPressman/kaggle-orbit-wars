@@ -98,3 +98,49 @@ def test_replay_recorder_can_write_one_file_per_sampled_game(tmp_path: Path) -> 
     assert not aggregate_path.exists()
     assert not stale_path.exists()
     assert [json.loads(path.read_text())["game_ordinal"] for path in paths] == [0, 1]
+
+
+def test_replay_recorder_can_infer_player_count_per_game(tmp_path: Path) -> None:
+    recorder = ReplayRecorder(
+        output_path=tmp_path / "sample.jsonl",
+        source="test",
+        player_count=None,
+        total_games=2,
+        sample_games=2,
+        metadata={},
+        rng=random.Random(1),
+    )
+    env = _FakeEnv()
+
+    recorder.start_episode(
+        env,
+        0,
+        game_ordinal=0,
+        assignments=torch.tensor([0, 1, -1, -1]),
+        start_mask=torch.tensor([True, True, False, False]),
+    )
+    recorder.record_step(
+        env,
+        terminal_envs={0},
+        rewards=torch.tensor([[1.0, -1.0, 0.0, 0.0]]),
+        dones=torch.tensor([[True, True, True, True]]),
+    )
+    recorder.start_episode(
+        env,
+        0,
+        game_ordinal=1,
+        assignments=torch.tensor([0, 1, 1, 0]),
+        start_mask=torch.tensor([True, True, True, True]),
+    )
+    recorder.record_step(
+        env,
+        terminal_envs={0},
+        rewards=torch.tensor([[1.0, -1.0, -1.0, 1.0]]),
+        dones=torch.tensor([[True, True, True, True]]),
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "sample.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["player_count"] for row in rows] == [2, 4]

@@ -316,25 +316,32 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
     last_best_model = torch.nn.Linear(1, 1)
     current_model.train()
     last_best_model.eval()
-    seen_eval_sizes: list[tuple[int, int]] = []
+    seen_eval_sizes: list[tuple[int, int, int]] = []
     perf_times = iter([10.0, 14.0])
 
-    def fake_evaluate_player_count(
+    def fake_evaluate_games(
         **kwargs: object,
-    ) -> tuple[object, dict[str, list[float]], int]:
+    ) -> tuple[object, dict[int, object], dict[str, list[float]], int]:
         assert kwargs["current_model"] is current_model
         assert kwargs["last_best_model"] is last_best_model
         assert not current_model.training
         assert not last_best_model.training
         assert not torch.is_grad_enabled()
-        seen_eval_sizes.append((kwargs["n_games"], kwargs["n_envs"]))
+        seen_eval_sizes.append(
+            (kwargs["n_games"], kwargs["n_envs"], kwargs["replay_games"])
+        )
         stats = run_ppo._EvalStats.empty()
-        if kwargs["player_count"] == 2:
-            stats.add_game_result(run_ppo.MODEL_CURRENT)
-        else:
-            stats.add_game_result(run_ppo.MODEL_LAST_BEST)
+        stats.add_game_result(run_ppo.MODEL_CURRENT)
+        stats.add_game_result(run_ppo.MODEL_LAST_BEST)
+        stats_by_count = {
+            2: run_ppo._EvalStats.empty(),
+            4: run_ppo._EvalStats.empty(),
+        }
+        stats_by_count[2].add_game_result(run_ppo.MODEL_CURRENT)
+        stats_by_count[4].add_game_result(run_ppo.MODEL_LAST_BEST)
         return (
             stats,
+            stats_by_count,
             {
                 "game_length_mean": [12.0],
                 "_neutral_planets_captured_per_game": [1.0],
@@ -347,8 +354,8 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
 
     monkeypatch.setattr(
         run_ppo,
-        "_evaluate_player_count",
-        fake_evaluate_player_count,
+        "_evaluate_games",
+        fake_evaluate_games,
     )
     monkeypatch.setattr(run_ppo.time, "perf_counter", lambda: next(perf_times))
 
@@ -367,13 +374,13 @@ def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
     assert metrics["eval/neutral_comet_undershot_rate"] == pytest.approx(2.0 / 3.0)
     assert "eval/_neutral_planets_captured_per_game" not in metrics
     assert metrics["time/eval_seconds"] == pytest.approx(4.0)
-    assert metrics["perf/eval_sps"] == pytest.approx(3.0)
-    assert seen_eval_sizes == [(2, 2), (2, 2)]
+    assert metrics["perf/eval_sps"] == pytest.approx(1.5)
+    assert seen_eval_sizes == [(4, 4, 0)]
     assert current_model.training
     assert not last_best_model.training
 
 
-def test_evaluate_against_last_best_splits_eval_replay_outputs(
+def test_evaluate_against_last_best_records_weighted_eval_replay_outputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -383,9 +390,9 @@ def test_evaluate_against_last_best_splits_eval_replay_outputs(
     )
     seen_replays: list[tuple[int, Path | None]] = []
 
-    def fake_evaluate_player_count(
+    def fake_evaluate_games(
         **kwargs: object,
-    ) -> tuple[object, dict[str, list[float]], int]:
+    ) -> tuple[object, dict[int, object], dict[str, list[float]], int]:
         seen_replays.append(
             (
                 kwargs["replay_games"],
@@ -394,12 +401,13 @@ def test_evaluate_against_last_best_splits_eval_replay_outputs(
         )
         stats = run_ppo._EvalStats.empty()
         stats.add_game_result(run_ppo.MODEL_CURRENT)
-        return stats, {}, 1
+        stats_by_count = {2: stats, 4: run_ppo._EvalStats.empty()}
+        return stats, stats_by_count, {}, 1
 
     monkeypatch.setattr(
         run_ppo,
-        "_evaluate_player_count",
-        fake_evaluate_player_count,
+        "_evaluate_games",
+        fake_evaluate_games,
     )
 
     run_ppo._evaluate_against_last_best(
@@ -410,10 +418,35 @@ def test_evaluate_against_last_best_splits_eval_replay_outputs(
         replay_dir=tmp_path,
     )
 
-    assert seen_replays == [
-        (1, tmp_path / "eval_2p.jsonl"),
-        (1, tmp_path / "eval_4p.jsonl"),
-    ]
+    assert seen_replays == [(2, tmp_path / "eval.jsonl")]
+
+
+def test_evaluate_against_last_best_omits_empty_player_count_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_evaluate_games(
+        **_kwargs: object,
+    ) -> tuple[object, dict[int, object], dict[str, list[float]], int]:
+        stats = run_ppo._EvalStats.empty()
+        stats.add_game_result(run_ppo.MODEL_CURRENT)
+        stats_by_count = {
+            2: run_ppo._EvalStats.empty(),
+            4: run_ppo._EvalStats.empty(),
+        }
+        stats_by_count[2].add_game_result(run_ppo.MODEL_CURRENT)
+        return stats, stats_by_count, {}, 1
+
+    monkeypatch.setattr(run_ppo, "_evaluate_games", fake_evaluate_games)
+
+    metrics = run_ppo._evaluate_against_last_best(
+        current_model=torch.nn.Linear(1, 1),
+        last_best_model=torch.nn.Linear(1, 1),
+        cfg=_config_with_envs(2),
+        device=torch.device("cpu"),
+    )
+
+    assert metrics["eval/win_rate_against_last_best_2p"] == pytest.approx(1.0)
+    assert "eval/win_rate_against_last_best_4p" not in metrics
 
 
 def test_record_eval_terminal_result_counts_team_ties_as_half_win() -> None:
@@ -519,7 +552,7 @@ def test_eval_actions_for_assignments_uses_stochastic_model_outputs() -> None:
     assert actions.ships[0, :, 0, 0].tolist() == [3, 7, 3, 7]
 
 
-def test_evaluate_player_count_carries_recurrent_hidden_state(
+def test_evaluate_games_carries_recurrent_hidden_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def obs_batch(n_envs: int) -> ObsBatch:
@@ -543,7 +576,14 @@ def test_evaluate_player_count_carries_recurrent_hidden_state(
         )
 
     class FakeEnv:
-        def __init__(self, *, n_envs: int, **_kwargs: object) -> None:
+        def __init__(
+            self,
+            *,
+            n_envs: int,
+            two_player_weight: float,
+            **_kwargs: object,
+        ) -> None:
+            assert two_player_weight == pytest.approx(0.25)
             self.n_envs = n_envs
             self.steps = 0
 
@@ -614,12 +654,17 @@ def test_evaluate_player_count_carries_recurrent_hidden_state(
     monkeypatch.setattr(run_ppo, "VectorizedEnv", FakeEnv)
     current_model = RecordingRecurrentModel(initial=0.0, launch_value=True)
     last_best_model = RecordingRecurrentModel(initial=10.0, launch_value=False)
+    base_cfg = _config_with_envs(2)
+    cfg = base_cfg.model_copy(
+        update={
+            "env": base_cfg.env.model_copy(update={"two_player_weight": 0.25}),
+        }
+    )
 
-    stats, env_metrics, steps = run_ppo._evaluate_player_count(
+    stats, stats_by_player_count, env_metrics, steps = run_ppo._evaluate_games(
         current_model=current_model,
         last_best_model=last_best_model,
-        cfg=_config_with_envs(2),
-        player_count=2,
+        cfg=cfg,
         n_games=2,
         n_envs=2,
         device=torch.device("cpu"),
@@ -628,6 +673,8 @@ def test_evaluate_player_count_carries_recurrent_hidden_state(
     assert steps == 4
     assert env_metrics == {"game_length_mean": [2.0, 2.0]}
     assert stats.model_games == [2, 2]
+    assert stats_by_player_count[2].model_games == [2, 2]
+    assert stats_by_player_count[4].model_games == [0, 0]
     assert [hidden.tolist() for hidden in current_model.seen_hidden] == [
         [0.0, 0.0],
         [1.0, 1.0],

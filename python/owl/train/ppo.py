@@ -8,7 +8,7 @@ from time import perf_counter
 from typing import Literal, cast
 
 import torch
-from pydantic import Field, field_validator
+from pydantic import Field
 
 from owl.config import BaseConfig
 from owl.model import (
@@ -103,13 +103,6 @@ class PPOConfig(BaseConfig):
     eval_replay_games: int = Field(default=0, ge=0)
     compile_mode: CompileMode | None = None
     dtype: _TrainingDType = "float32"
-
-    @field_validator("eval_replay_games")
-    @classmethod
-    def _validate_even_eval_replay_games(cls, value: int) -> int:
-        if value % 2 != 0:
-            raise ValueError("eval_replay_games must be even")
-        return value
 
 
 @dataclass(frozen=True)

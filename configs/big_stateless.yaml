@@ -41,6 +41,7 @@ rl:
   ent_coef: 1e-5
   max_grad_norm: 5.0
   target_kl: null
+  ppo_clip_mode: per_player
   normalize_advantages: true
   eval_replay_games: 8
   compile_mode: default

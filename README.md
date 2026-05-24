@@ -101,8 +101,7 @@ cuDNN benchmarking before constructing the environment, model, and optimizer.
 Fresh launches explicitly reset model parameters before optimizer construction;
 resume launches load checkpoint weights and optimizer state without resetting
 the model first.
-Training `EnvConfig.n_envs` must be even so periodic checkpoint evaluation can
-split evaluation games across 2-player and 4-player batches. PPO updates run
+Training `EnvConfig.n_envs` must be even. PPO updates run
 `rl.ppo_epochs` full-shuffle passes over rollout segments, grouped by
 `rl.segments_per_minibatch`; set `rl.gradient_accumulation_steps` above `1` to
 accumulate multiple minibatches before each optimizer step. `EnvConfig.n_envs`
@@ -155,13 +154,14 @@ simulator snapshots. Periodic checkpoint names use grouped zero-padded
 environment-step labels such as `checkpoint_00_022_000_000.pt`. At each
 periodic checkpoint, the
 current model is evaluated against the last-best model snapshot using
-sampled policy actions, with current and last-best seats randomly shuffled
+sampled policy actions across `env.n_envs` games using the configured
+`env.two_player_weight`, with current and last-best seats randomly shuffled
 across active player slots for each eval game, and logs
 `eval/win_rate_against_last_best` plus terminal environment metrics under
 `eval/`. When the current model reaches at least 70% eval win rate, the
 last-best snapshot is replaced and also saved as `checkpoint_last_best.pt`.
-Set `rl.eval_replay_games` to an even positive count to save random eval replay
-samples, split evenly between 2-player and 4-player games, under
+Set `rl.eval_replay_games` to a positive count to save random eval replay
+samples from the weighted eval game set under
 `eval_replays/<checkpoint-name>/` in the run directory. The sampled game
 ordinals are selected up front rather than taking the first games to finish.
 Each sampled eval game is written as its own JSONL file.

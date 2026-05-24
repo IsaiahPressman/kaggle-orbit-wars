@@ -33,14 +33,13 @@ def test_ppo_config_validates_with_pydantic() -> None:
         PPOConfig(gamma=-0.1)
     with pytest.raises(ValueError, match="greater than or equal to 1000"):
         PPOConfig(checkpoint_freq=999)
-    with pytest.raises(ValueError, match="eval_replay_games must be even"):
-        PPOConfig(eval_replay_games=1)
     with pytest.raises(ValueError, match="greater than or equal to 1"):
         PPOConfig(ppo_epochs=0)
     with pytest.raises(ValueError, match="greater than or equal to 1"):
         PPOConfig(gradient_accumulation_steps=0)
 
     assert PPOConfig(dtype="bfloat16").dtype == "bfloat16"
+    assert PPOConfig(eval_replay_games=1).eval_replay_games == 1
     assert PPOConfig(ppo_clip_mode="per_entity").ppo_clip_mode == "per_entity"
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
