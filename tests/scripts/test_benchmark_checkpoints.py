@@ -57,29 +57,47 @@ def test_assignment_pattern_assigns_two_models_per_four_player_game() -> None:
     assert pattern.count(1) == 2
 
 
-def test_validate_args_requires_even_game_count() -> None:
+def test_player_count_counts_uses_two_player_weight() -> None:
+    assert benchmark_checkpoints._player_count_counts(9, 0.25) == {2: 2, 4: 7}
+    assert benchmark_checkpoints._player_count_counts(9, 0.75) == {2: 7, 4: 2}
+
+
+def test_validate_args_allows_weighted_odd_game_count() -> None:
     benchmark_checkpoints._validate_args(
-        Namespace(n_games=10, n_envs=5, save_replay_games=0)
+        Namespace(
+            n_games=9,
+            n_envs=5,
+            save_replay_games=0,
+            two_player_weight=0.25,
+        )
     )
 
-    with pytest.raises(ValueError, match="must be even"):
+    benchmark_checkpoints._validate_args(
+        Namespace(
+            n_games=9,
+            n_envs=5,
+            save_replay_games=1,
+            two_player_weight=0.25,
+        )
+    )
+
+
+def test_validate_args_requires_two_player_weight_in_range() -> None:
+    with pytest.raises(ValueError, match="--two-player-weight must be in"):
         benchmark_checkpoints._validate_args(
-            Namespace(n_games=9, n_envs=1, save_replay_games=0)
+            Namespace(
+                n_games=10,
+                n_envs=5,
+                save_replay_games=0,
+                two_player_weight=1.1,
+            )
         )
 
 
-def test_validate_args_requires_games_per_player_count_divisible_by_envs() -> None:
-    with pytest.raises(ValueError, match="must be divisible by --n-envs"):
-        benchmark_checkpoints._validate_args(
-            Namespace(n_games=10, n_envs=3, save_replay_games=0)
-        )
-
-
-def test_validate_args_requires_even_replay_count() -> None:
-    with pytest.raises(ValueError, match="--save-replay-games must be even"):
-        benchmark_checkpoints._validate_args(
-            Namespace(n_games=10, n_envs=5, save_replay_games=1)
-        )
+def test_validate_args_allows_games_per_player_count_not_divisible_by_envs() -> None:
+    benchmark_checkpoints._validate_args(
+        Namespace(n_games=10, n_envs=3, save_replay_games=0, two_player_weight=0.5)
+    )
 
 
 def test_record_terminal_result_counts_model_winner_by_game() -> None:

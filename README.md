@@ -212,9 +212,9 @@ Policy logs include total entropy plus policy-specific component means such as
 ## Replay capture
 
 `scripts/benchmark_checkpoints.py` can save replay JSONL samples with
-`--save-replay-games N`, where `N` must be even and is split evenly across
-2-player and 4-player benchmark games. Files are written under
-`--replay-dir`, defaulting to `replays/benchmark_checkpoints`.
+`--save-replay-games N`, split across 2-player and 4-player benchmark games
+according to `--two-player-weight`. Files are written under `--replay-dir`,
+defaulting to `replays/benchmark_checkpoints`.
 Each sampled benchmark game is written as its own JSONL file.
 Open `tools/orbit_wars_replay_viewer.html` in a browser and choose
 a saved `.jsonl` file or Kaggle episode replay `.json` file to play back a

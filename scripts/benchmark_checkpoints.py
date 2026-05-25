@@ -77,6 +77,8 @@ class BenchmarkResult:
 
     @property
     def steps_per_second(self) -> float:
+        if self.elapsed_seconds == 0.0:
+            return 0.0
         return self.steps / self.elapsed_seconds
 
 
@@ -89,18 +91,19 @@ def main() -> None:
     checkpoint_a = _load_checkpoint(args.checkpoint_a, device=device)
     checkpoint_b = _load_checkpoint(args.checkpoint_b, device=device)
 
-    per_player_count_games = args.n_games // len(PLAYER_COUNTS)
+    game_counts = _player_count_counts(args.n_games, args.two_player_weight)
+    replay_counts = _player_count_counts(args.save_replay_games, args.two_player_weight)
     results = [
         run_benchmark(
             checkpoint_a=checkpoint_a,
             checkpoint_b=checkpoint_b,
             player_count=player_count,
-            n_games=per_player_count_games,
+            n_games=game_counts[player_count],
             n_envs=args.n_envs,
             device=device,
             deterministic=args.deterministic,
             no_progress=args.no_progress,
-            replay_games=args.save_replay_games // len(PLAYER_COUNTS),
+            replay_games=replay_counts[player_count],
             replay_output_path=_benchmark_replay_path(args, player_count),
             replay_rng=random.Random(),
         )
@@ -183,9 +186,9 @@ def run_benchmark(
     hidden_a = checkpoint_a.model.initial_hidden_state(n_envs, device=device)
     hidden_b = checkpoint_b.model.initial_hidden_state(n_envs, device=device)
     progress = tqdm(
-        total=n_games,
-        desc=f"{player_count}p games",
-        unit="game",
+        total=None,
+        desc=f"{player_count}p steps",
+        unit="step",
         disable=no_progress,
     )
     started_at = time.perf_counter()
@@ -211,6 +214,7 @@ def run_benchmark(
             hidden_a = checkpoint_a.model.reset_hidden_state(hidden_a, dones)
             hidden_b = checkpoint_b.model.reset_hidden_state(hidden_b, dones)
             steps += n_envs
+            progress.update(n_envs)
             terminal_envs = torch.nonzero(dones.all(dim=1), as_tuple=False).flatten()
             terminal_env_set = {int(env_index.item()) for env_index in terminal_envs}
             if recorder is not None:
@@ -233,7 +237,6 @@ def run_benchmark(
                         returns[env_index],
                     )
                     games += 1
-                    progress.update(1)
 
                 returns[env_index].zero_()
                 start_masks[env_index].copy_(obs.still_playing[env_index])
@@ -617,11 +620,19 @@ def _matrix_cell(stats: MatchupStats, model_index: int) -> str:
     return f"{wins:g}-{losses:g} ({winrate:.1%})"
 
 
+def _player_count_counts(total: int, two_player_weight: float) -> dict[int, int]:
+    two_player_games = int(total * two_player_weight + 0.5)
+    return {
+        2: two_player_games,
+        4: total - two_player_games,
+    }
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Benchmark two Orbit Wars model checkpoints against each other in "
-            "balanced 2-player and 4-player games using the Rust vectorized env."
+            "2-player and 4-player games using the Rust vectorized env."
         )
     )
     parser.add_argument("checkpoint_a", type=Path, help="First checkpoint .pt file")
@@ -630,7 +641,17 @@ def _parse_args() -> argparse.Namespace:
         "--n-games",
         type=int,
         default=512,
-        help="Total completed games to count, split evenly between 2p and 4p.",
+        help=(
+            "Total completed games to count, split between 2p and 4p according "
+            "to --two-player-weight."
+        ),
+    )
+    parser.add_argument(
+        "-pw",
+        "--two-player-weight",
+        type=float,
+        default=0.5,
+        help="Fraction of games to run as 2-player games.",
     )
     parser.add_argument(
         "--n-envs",
@@ -658,8 +679,8 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help=(
-            "Random completed games to save as replay JSONL, split evenly "
-            "across 2p and 4p."
+            "Random completed games to save as replay JSONL, split across 2p "
+            "and 4p according to --two-player-weight."
         ),
     )
     parser.add_argument(
@@ -676,25 +697,26 @@ def _parse_args() -> argparse.Namespace:
 def _validate_args(args: argparse.Namespace) -> None:
     if args.n_games <= 0:
         raise ValueError("--n-games must be positive")
-    if args.n_games % len(PLAYER_COUNTS) != 0:
-        raise ValueError("--n-games must be even so 2p and 4p games are balanced")
+    if not 0.0 <= args.two_player_weight <= 1.0:
+        raise ValueError("--two-player-weight must be in [0, 1]")
     if args.n_envs <= 0:
         raise ValueError("--n-envs must be positive")
     if args.save_replay_games < 0:
         raise ValueError("--save-replay-games must be non-negative")
-    if args.save_replay_games % len(PLAYER_COUNTS) != 0:
-        raise ValueError(
-            "--save-replay-games must be even so 2p and 4p replays are balanced"
-        )
     if args.save_replay_games > args.n_games:
         raise ValueError("--save-replay-games must be <= --n-games")
-    per_player_count_games = args.n_games // len(PLAYER_COUNTS)
-    if args.save_replay_games // len(PLAYER_COUNTS) > per_player_count_games:
+    game_counts = _player_count_counts(args.n_games, args.two_player_weight)
+    replay_counts = _player_count_counts(
+        args.save_replay_games,
+        args.two_player_weight,
+    )
+    if any(
+        replay_counts[player_count] > game_counts[player_count]
+        for player_count in PLAYER_COUNTS
+    ):
         raise ValueError(
             "--save-replay-games requests more games than one player count runs"
         )
-    if per_player_count_games % args.n_envs != 0:
-        raise ValueError("(--n-games / 2) must be divisible by --n-envs")
 
 
 if __name__ == "__main__":
