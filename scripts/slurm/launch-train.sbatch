@@ -16,8 +16,12 @@ OUTPUT_DIR="${ORBIT_WARS_OUTPUT_DIR:-/sw/isaiah/orbit-wars/runs}"
 CONFIG="${ORBIT_WARS_CONFIG:-configs/baseline.yaml}"
 LOG_MODE="${ORBIT_WARS_LOG_MODE:-wandb}"
 MAX_RUNTIME_HOURS="${ORBIT_WARS_MAX_RUNTIME_HOURS:-23.5}"
+LOAD_MODEL_WEIGHTS="${ORBIT_WARS_LOAD_MODEL_WEIGHTS:-}"
 CONFIG_MOUNT_TARGET="/config"
 CONFIG_MOUNT_DIR=""
+MODEL_WEIGHTS_MOUNT_TARGET="/model-weights"
+MODEL_WEIGHTS_MOUNT_DIR=""
+MAPPED_MODEL_WEIGHTS_PATH=""
 RUN_ARGS=("$@")
 USE_DEFAULT_FRESH_LAUNCH=0
 
@@ -84,6 +88,75 @@ if [[ "$USE_DEFAULT_FRESH_LAUNCH" -eq 0 ]]; then
     RUN_ARGS[0]="$(map_output_path "${RUN_ARGS[0]}")"
 fi
 
+has_load_model_weights_arg() {
+    local arg
+    for arg in "${RUN_ARGS[@]}"; do
+        if [[ "$arg" == "--load-model-weights" || "$arg" == --load-model-weights=* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+map_model_weights_path() {
+    local path="$1"
+    local mapped_path
+    local host_dir
+
+    mapped_path="$(map_output_path "$path")"
+    if [[ "$mapped_path" != "$path" || "$mapped_path" == "/runs" || "$mapped_path" == /runs/* ]]; then
+        MAPPED_MODEL_WEIGHTS_PATH="$mapped_path"
+        return
+    fi
+
+    if [[ ! -f "$path" ]]; then
+        echo "Missing model-weights checkpoint: $path" >&2
+        exit 1
+    fi
+
+    host_dir="$(cd "$(dirname "$path")" && pwd)"
+    MODEL_WEIGHTS_MOUNT_DIR="$host_dir"
+    MAPPED_MODEL_WEIGHTS_PATH="$MODEL_WEIGHTS_MOUNT_TARGET/$(basename "$path")"
+}
+
+map_load_model_weights_args() {
+    local index=0
+    local arg
+    while [[ "$index" -lt "${#RUN_ARGS[@]}" ]]; do
+        arg="${RUN_ARGS[$index]}"
+        if [[ "$arg" == "--load-model-weights" ]]; then
+            if [[ "$((index + 1))" -ge "${#RUN_ARGS[@]}" ]]; then
+                echo "--load-model-weights requires a checkpoint path" >&2
+                exit 1
+            fi
+            map_model_weights_path "${RUN_ARGS[$((index + 1))]}"
+            RUN_ARGS[$((index + 1))]="$MAPPED_MODEL_WEIGHTS_PATH"
+            index=$((index + 2))
+        elif [[ "$arg" == --load-model-weights=* ]]; then
+            map_model_weights_path "${arg#--load-model-weights=}"
+            RUN_ARGS[$index]="--load-model-weights=$MAPPED_MODEL_WEIGHTS_PATH"
+            index=$((index + 1))
+        else
+            index=$((index + 1))
+        fi
+    done
+}
+
+if [[ -n "$LOAD_MODEL_WEIGHTS" && "$USE_DEFAULT_FRESH_LAUNCH" -eq 0 ]]; then
+    echo "ORBIT_WARS_LOAD_MODEL_WEIGHTS is only supported for default fresh launches." >&2
+    echo "Pass --load-model-weights explicitly when providing run_ppo.py positional arguments." >&2
+    exit 1
+fi
+if [[ -n "$LOAD_MODEL_WEIGHTS" ]] && has_load_model_weights_arg; then
+    echo "Use either ORBIT_WARS_LOAD_MODEL_WEIGHTS or --load-model-weights, not both." >&2
+    exit 1
+fi
+if [[ -n "$LOAD_MODEL_WEIGHTS" ]]; then
+    map_model_weights_path "$LOAD_MODEL_WEIGHTS"
+    LOAD_MODEL_WEIGHTS="$MAPPED_MODEL_WEIGHTS_PATH"
+fi
+map_load_model_weights_args
+
 set -a
 # shellcheck disable=SC1090
 source "$WANDB_ENV_FILE"
@@ -110,6 +183,9 @@ train_cmd=(
 
 if [[ "$USE_DEFAULT_FRESH_LAUNCH" -eq 1 ]]; then
     train_cmd+=("$CONFIG" /runs)
+    if [[ -n "$LOAD_MODEL_WEIGHTS" ]]; then
+        train_cmd+=(--load-model-weights "$LOAD_MODEL_WEIGHTS")
+    fi
 fi
 
 if [[ -n "$MAX_RUNTIME_HOURS" ]]; then
@@ -123,6 +199,9 @@ fi
 CONTAINER_MOUNTS="$OUTPUT_DIR:/runs"
 if [[ -n "$CONFIG_MOUNT_DIR" ]]; then
     CONTAINER_MOUNTS+=",$CONFIG_MOUNT_DIR:$CONFIG_MOUNT_TARGET:ro"
+fi
+if [[ -n "$MODEL_WEIGHTS_MOUNT_DIR" ]]; then
+    CONTAINER_MOUNTS+=",$MODEL_WEIGHTS_MOUNT_DIR:$MODEL_WEIGHTS_MOUNT_TARGET:ro"
 fi
 
 srun \

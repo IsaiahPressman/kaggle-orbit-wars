@@ -144,10 +144,12 @@ class _PPORolloutSegments:
     initial_hidden_state: ModelHiddenState | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class PPOCheckpointMetadata:
     env_steps: int
-    wandb_run_id: str | None
+    player_step_total: int = 0
+    total_games_played: int = 0
+    wandb_run_id: str | None = None
 
 
 class _PPORolloutBuffer:
@@ -528,29 +530,14 @@ class PPOTrainer:
         if not isinstance(checkpoint, dict):
             raise ValueError("checkpoint must be a dictionary")
 
-        env_steps = _checkpoint_nonnegative_int(
-            checkpoint["env_steps"],
-            name="env_steps",
-        )
+        metadata = _checkpoint_metadata(checkpoint)
         optimizer_steps = _checkpoint_nonnegative_int(
             checkpoint["optimizer_steps"],
             name="optimizer_steps",
         )
-        player_step_total = _checkpoint_nonnegative_int(
-            checkpoint["player_step_total"],
-            name="player_step_total",
-        )
-        total_games_played = _checkpoint_nonnegative_int(
-            checkpoint["total_games_played"],
-            name="total_games_played",
-        )
         target_kl_exceeded_total = _checkpoint_nonnegative_int(
             checkpoint["target_kl_exceeded_total"],
             name="target_kl_exceeded_total",
-        )
-        wandb_run_id = _checkpoint_optional_str(
-            checkpoint["wandb_run_id"],
-            name="wandb_run_id",
         )
         unwrap_model(self.model).load_state_dict(checkpoint["model"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
@@ -565,13 +552,21 @@ class PPOTrainer:
                 raise ValueError("checkpoint is missing lr_scheduler state")
             self.lr_scheduler.load_state_dict(scheduler_state)
         self.optimizer_steps = optimizer_steps
-        self.player_step_total = player_step_total
-        self.total_games_played = total_games_played
+        self.player_step_total = metadata.player_step_total
+        self.total_games_played = metadata.total_games_played
         self.target_kl_exceeded_total = target_kl_exceeded_total
-        return PPOCheckpointMetadata(
-            env_steps=env_steps,
-            wandb_run_id=wandb_run_id,
-        )
+        return metadata
+
+    def load_model_weights(self, path: Path) -> PPOCheckpointMetadata:
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        if not isinstance(checkpoint, dict):
+            raise ValueError("checkpoint must be a dictionary")
+
+        metadata = _checkpoint_metadata(checkpoint)
+        unwrap_model(self.model).load_state_dict(checkpoint["model"])
+        self.player_step_total = metadata.player_step_total
+        self.total_games_played = metadata.total_games_played
+        return metadata
 
     def _collect_rollout(self) -> torch.Tensor:
         self.rollout.rewards.zero_()
@@ -1670,6 +1665,27 @@ def _checkpoint_nonnegative_int(value: object, *, name: str) -> int:
     if value < 0:
         raise ValueError(f"checkpoint {name} must be non-negative")
     return value
+
+
+def _checkpoint_metadata(checkpoint: dict[object, object]) -> PPOCheckpointMetadata:
+    return PPOCheckpointMetadata(
+        env_steps=_checkpoint_nonnegative_int(
+            checkpoint["env_steps"],
+            name="env_steps",
+        ),
+        player_step_total=_checkpoint_nonnegative_int(
+            checkpoint["player_step_total"],
+            name="player_step_total",
+        ),
+        total_games_played=_checkpoint_nonnegative_int(
+            checkpoint["total_games_played"],
+            name="total_games_played",
+        ),
+        wandb_run_id=_checkpoint_optional_str(
+            checkpoint["wandb_run_id"],
+            name="wandb_run_id",
+        ),
+    )
 
 
 def _checkpoint_optional_str(value: object, *, name: str) -> str | None:

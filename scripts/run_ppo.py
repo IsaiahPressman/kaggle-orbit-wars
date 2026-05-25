@@ -71,6 +71,7 @@ class FreshLaunch:
     config_path: Path
     output_dir: Path
     overrides: dict[str, Any]
+    load_model_weights_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -178,6 +179,11 @@ def main() -> None:
                 resume_run_id=resume_run_id,
                 checkpoint_path=launch.last_best_checkpoint_path,
             )
+        elif launch.load_model_weights_path is not None:
+            checkpoint_metadata = trainer.load_model_weights(
+                launch.load_model_weights_path
+            )
+            start_env_steps = checkpoint_metadata.env_steps
 
         env_steps_per_iteration = cfg.rl.horizon * env.n_envs * distributed.world_size
         max_runtime_seconds = _max_runtime_seconds(args.max_runtime_hours)
@@ -411,6 +417,16 @@ def _parse_args() -> argparse.Namespace:
         help="Optional overrides in the format field.path=value",
     )
     parser.add_argument(
+        "--load-model-weights",
+        type=Path,
+        default=None,
+        metavar="CHECKPOINT",
+        help=(
+            "For fresh launches, initialize model weights from a checkpoint while "
+            "keeping only env_steps, player_step_total, and total_games_played"
+        ),
+    )
+    parser.add_argument(
         "--max-env-steps",
         type=int,
         default=None,
@@ -434,6 +450,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-runtime-hours must be positive")
     if args.output_dir is None and args.overrides is not None:
         raise ValueError("resume launches cannot use config overrides")
+    if args.output_dir is None and args.load_model_weights is not None:
+        raise ValueError("resume launches cannot use --load-model-weights")
     if args.output_dir is None and args.log_mode == LogMode.DEBUG:
         raise ValueError("resume launches require wandb logging")
 
@@ -442,10 +460,18 @@ def _resolve_launch(args: argparse.Namespace) -> Launch:
     if args.output_dir is not None:
         if not args.target.is_file():
             raise ValueError(f"fresh run config does not exist: {args.target}")
+        if (
+            args.load_model_weights is not None
+            and not args.load_model_weights.is_file()
+        ):
+            raise ValueError(
+                f"model-weights checkpoint does not exist: {args.load_model_weights}"
+            )
         return FreshLaunch(
             config_path=args.target,
             output_dir=args.output_dir,
             overrides=_parse_cli_overrides(args.overrides),
+            load_model_weights_path=args.load_model_weights,
         )
     return _resolve_resume_launch(args.target)
 
@@ -662,6 +688,16 @@ def _checkpoint_metadata(
         env_steps=_checkpoint_nonnegative_int(
             checkpoint["env_steps"],
             name="env_steps",
+            path=path,
+        ),
+        player_step_total=_checkpoint_nonnegative_int(
+            checkpoint["player_step_total"],
+            name="player_step_total",
+            path=path,
+        ),
+        total_games_played=_checkpoint_nonnegative_int(
+            checkpoint["total_games_played"],
+            name="total_games_played",
             path=path,
         ),
         wandb_run_id=_checkpoint_optional_str(

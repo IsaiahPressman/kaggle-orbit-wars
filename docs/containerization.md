@@ -224,6 +224,39 @@ sbatch --exclude=gpu-node-01 scripts/slurm/launch-train.sbatch \
   --overrides env.n_envs=1024 rl.horizon=256
 ```
 
+To initialize a fresh Slurm run from existing model weights without resuming the
+old optimizer, scheduler, config, or W&B run, set
+`ORBIT_WARS_LOAD_MODEL_WEIGHTS` to a host checkpoint path. If the checkpoint is
+outside `ORBIT_WARS_OUTPUT_DIR`, the wrapper mounts its parent directory
+read-only at `/model-weights` inside the container:
+
+```sh
+ORBIT_WARS_LOAD_MODEL_WEIGHTS=/path/to/checkpoints/checkpoint_last_best.pt \
+  sbatch scripts/slurm/launch-train.sbatch
+```
+
+You can also pass `--load-model-weights` after the batch script. Use a container
+path under `/runs`, a host path under `ORBIT_WARS_OUTPUT_DIR`, or another
+existing host checkpoint path:
+
+```sh
+sbatch scripts/slurm/launch-train.sbatch \
+  --load-model-weights /runs/20260505-120000/checkpoint_last_best.pt
+
+ORBIT_WARS_OUTPUT_DIR=/path/to/runs \
+  sbatch scripts/slurm/launch-train.sbatch \
+    --load-model-weights /path/to/runs/20260505-120000/checkpoint_last_best.pt
+
+sbatch scripts/slurm/launch-train.sbatch \
+  --load-model-weights /path/to/checkpoints/checkpoint_last_best.pt
+```
+
+The new run keeps only the checkpoint model weights plus `env_steps`,
+`player_step_total`, and `total_games_played` logging counters. Host checkpoint
+paths under `ORBIT_WARS_OUTPUT_DIR` are mapped into the container's `/runs`
+mount before launch; other host checkpoint directories are mounted read-only at
+`/model-weights`.
+
 When the first batch-script argument is a positional target, the arguments after
 the batch script use the same shape as `scripts/run_ppo.py`, with default
 `--log-mode` and `--max-runtime-hours` supplied by the wrapper:

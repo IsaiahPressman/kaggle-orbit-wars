@@ -14,16 +14,16 @@ model: stateless_transformer_5m_gelu
 
 optimizer:
   optimizer: muon
-  adamw_lr: 5.0e-05
+  adamw_lr: 2.0e-05
   adamw_eps: 1.0e-05
   weight_decay: 0.0
-  muon_lr: 0.001
+  muon_lr: 5.0e-04
   muon_weight_decay: 0.05
   muon_momentum: 0.95
   lr_schedule:
     schedule: cosine
     full_cycle_steps: 100_000
-    lr_min_ratio: 0.02
+    lr_min_ratio: 0.1
 
 rl:
   horizon: 128

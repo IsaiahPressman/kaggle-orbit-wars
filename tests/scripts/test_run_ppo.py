@@ -204,6 +204,7 @@ def test_validate_args_rejects_non_positive_runtime_hours() -> None:
                 max_runtime_hours=0.0,
                 output_dir=Path("runs"),
                 overrides=None,
+                load_model_weights=None,
                 log_mode=LogMode.WANDB,
             )
         )
@@ -217,6 +218,7 @@ def test_validate_args_rejects_debug_resume() -> None:
                 max_runtime_hours=None,
                 output_dir=None,
                 overrides=None,
+                load_model_weights=None,
                 log_mode=LogMode.DEBUG,
             )
         )
@@ -230,6 +232,24 @@ def test_validate_args_rejects_resume_overrides() -> None:
                 max_runtime_hours=None,
                 output_dir=None,
                 overrides=[["rl.horizon=8"]],
+                load_model_weights=None,
+                log_mode=LogMode.WANDB,
+            )
+        )
+
+
+def test_validate_args_rejects_resume_load_model_weights() -> None:
+    with pytest.raises(
+        ValueError,
+        match="resume launches cannot use --load-model-weights",
+    ):
+        run_ppo._validate_args(
+            Namespace(
+                max_env_steps=None,
+                max_runtime_hours=None,
+                output_dir=None,
+                overrides=None,
+                load_model_weights=Path("checkpoint.pt"),
                 log_mode=LogMode.WANDB,
             )
         )
@@ -243,6 +263,30 @@ def test_parse_cli_overrides_flattens_repeated_flags() -> None:
         "env.n_envs": 4,
         "model.depth": 2,
     }
+
+
+def test_resolve_fresh_launch_accepts_load_model_weights(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("env: {}\nmodel: {}\noptimizer: {}\nrl: {}\n")
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.touch()
+    output_dir = tmp_path / "runs"
+
+    launch = run_ppo._resolve_launch(
+        Namespace(
+            target=config_path,
+            output_dir=output_dir,
+            overrides=[["rl.horizon=8"]],
+            load_model_weights=checkpoint_path,
+        )
+    )
+
+    assert launch == run_ppo.FreshLaunch(
+        config_path=config_path,
+        output_dir=output_dir,
+        overrides={"rl.horizon": 8},
+        load_model_weights_path=checkpoint_path,
+    )
 
 
 def test_resolve_resume_launch_prefers_final_checkpoint(tmp_path: Path) -> None:
@@ -307,6 +351,11 @@ def test_resume_wandb_run_id_requires_checkpoint_run_id() -> None:
 
     with pytest.raises(ValueError, match="missing wandb_run_id"):
         run_ppo._resume_wandb_run_id(metadata, LogMode.WANDB)
+
+
+def test_checkpoint_metadata_rejects_positional_fields() -> None:
+    with pytest.raises(TypeError):
+        run_ppo.PPOCheckpointMetadata(1, "run-abc")
 
 
 def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
@@ -1119,6 +1168,8 @@ def test_ppo_trainer_load_checkpoint_restores_training_state(tmp_path: Path) -> 
     metadata = dst_trainer.load_checkpoint(path)
 
     assert metadata.env_steps == 2048
+    assert metadata.player_step_total == 37
+    assert metadata.total_games_played == 41
     assert metadata.wandb_run_id == "run-abc"
     assert dst_trainer.optimizer_steps == 11
     assert dst_trainer.player_step_total == 37
@@ -1132,6 +1183,69 @@ def test_ppo_trainer_load_checkpoint_restores_training_state(tmp_path: Path) -> 
         assert torch.equal(src_param, dst_param)
     assert dst_optimizer.state_dict()["state"]
     assert dst_scheduler.state_dict() == src_scheduler.state_dict()
+
+
+def test_ppo_trainer_load_model_weights_keeps_only_logging_counters(
+    tmp_path: Path,
+) -> None:
+    src_model = torch.nn.Linear(2, 1)
+    dst_model = torch.nn.Linear(2, 1)
+    src_optimizer = torch.optim.AdamW(src_model.parameters(), lr=0.001)
+    dst_optimizer = torch.optim.AdamW(dst_model.parameters(), lr=0.001)
+    src_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        src_optimizer,
+        lr_lambda=lambda step: 0.5**step,
+    )
+    dst_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        dst_optimizer,
+        lr_lambda=lambda step: 0.5**step,
+    )
+    for param in src_model.parameters():
+        param.data.fill_(3.0)
+    src_optimizer.zero_grad()
+    src_model(torch.ones(1, 2)).sum().backward()
+    src_optimizer.step()
+    src_scheduler.step()
+    src_trainer = PPOTrainer.__new__(PPOTrainer)
+    src_trainer.model = src_model
+    src_trainer.optimizer = src_optimizer
+    src_trainer.lr_scheduler = src_scheduler
+    src_trainer.optimizer_steps = 11
+    src_trainer.player_step_total = 37
+    src_trainer.total_games_played = 41
+    src_trainer.target_kl_exceeded_total = 5
+    path = tmp_path / "checkpoint.pt"
+    src_trainer.write_checkpoint(path, env_steps=2048, wandb_run_id="run-abc")
+
+    dst_trainer = PPOTrainer.__new__(PPOTrainer)
+    dst_trainer.model = dst_model
+    dst_trainer.optimizer = dst_optimizer
+    dst_trainer.lr_scheduler = dst_scheduler
+    dst_trainer.optimizer_steps = 0
+    dst_trainer.player_step_total = 0
+    dst_trainer.total_games_played = 0
+    dst_trainer.target_kl_exceeded_total = 0
+    dst_trainer.device = torch.device("cpu")
+    scheduler_state_before = dst_scheduler.state_dict()
+
+    metadata = dst_trainer.load_model_weights(path)
+
+    assert metadata.env_steps == 2048
+    assert metadata.player_step_total == 37
+    assert metadata.total_games_played == 41
+    assert metadata.wandb_run_id == "run-abc"
+    assert dst_trainer.optimizer_steps == 0
+    assert dst_trainer.player_step_total == 37
+    assert dst_trainer.total_games_played == 41
+    assert dst_trainer.target_kl_exceeded_total == 0
+    assert not dst_optimizer.state_dict()["state"]
+    assert dst_scheduler.state_dict() == scheduler_state_before
+    for src_param, dst_param in zip(
+        src_model.parameters(),
+        dst_model.parameters(),
+        strict=True,
+    ):
+        assert torch.equal(src_param, dst_param)
 
 
 def test_ppo_trainer_load_checkpoint_rejects_scheduler_mismatch(
