@@ -70,6 +70,46 @@ def _config_with_envs(n_envs: int) -> FullConfig:
     )
 
 
+def _config_with_resume_shape(
+    *,
+    n_envs: int,
+    segments_per_minibatch: int,
+    gradient_accumulation_steps: int,
+    runtime_gpus: int,
+    eval_replay_games: int = 0,
+) -> FullConfig:
+    cfg = _full_config()
+    return FullConfig.model_validate(
+        {
+            **cfg.model_dump(mode="python"),
+            "env": {
+                **cfg.env.model_dump(mode="python"),
+                "n_envs": n_envs,
+            },
+            "rl": {
+                **cfg.rl.model_dump(mode="python"),
+                "segments_per_minibatch": segments_per_minibatch,
+                "gradient_accumulation_steps": gradient_accumulation_steps,
+                "eval_replay_games": eval_replay_games,
+            },
+            "runtime": {
+                **cfg.runtime.model_dump(mode="python"),
+                "n_runtime_gpus": runtime_gpus,
+            },
+        }
+    )
+
+
+def _distributed_context(world_size: int) -> run_ppo.DistributedContext:
+    return run_ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=world_size,
+        initialized=False,
+    )
+
+
 class _FakeLogger:
     def __init__(self, *, run_id: str | None = "run-123") -> None:
         self.closed = False
@@ -816,18 +856,179 @@ def test_with_runtime_gpus_records_world_size() -> None:
     assert cfg.runtime.n_runtime_gpus == 1
 
 
-def test_validate_runtime_gpus_rejects_resume_mismatch() -> None:
+def test_adapt_resume_config_returns_unchanged_config_when_gpu_count_matches() -> None:
     cfg = run_ppo._with_runtime_gpus(_full_config(), 4)
-    distributed = run_ppo.DistributedContext(
-        device=torch.device("cpu"),
-        rank=0,
-        local_rank=0,
-        world_size=2,
-        initialized=False,
+
+    updated = run_ppo._adapt_resume_config_for_runtime_gpus(
+        cfg,
+        _distributed_context(4),
     )
 
-    with pytest.raises(ValueError, match="resume runtime GPU count mismatch"):
-        run_ppo._validate_runtime_gpus(cfg, distributed)
+    assert updated == cfg
+
+
+def test_adapt_resume_config_halves_envs_and_accumulation_for_more_gpus() -> None:
+    cfg = _config_with_resume_shape(
+        n_envs=64,
+        segments_per_minibatch=8,
+        gradient_accumulation_steps=2,
+        runtime_gpus=2,
+    )
+
+    updated = run_ppo._adapt_resume_config_for_runtime_gpus(
+        cfg,
+        _distributed_context(4),
+    )
+
+    assert updated.env.n_envs == 32
+    assert updated.rl.segments_per_minibatch == 8
+    assert updated.rl.gradient_accumulation_steps == 1
+    assert updated.runtime.n_runtime_gpus == 4
+    assert cfg.env.n_envs == 64
+    assert cfg.rl.gradient_accumulation_steps == 2
+
+
+def test_adapt_resume_config_reduces_minibatch_segments_for_more_gpus() -> None:
+    cfg = _config_with_resume_shape(
+        n_envs=64,
+        segments_per_minibatch=16,
+        gradient_accumulation_steps=1,
+        runtime_gpus=2,
+    )
+
+    updated = run_ppo._adapt_resume_config_for_runtime_gpus(
+        cfg,
+        _distributed_context(4),
+    )
+
+    assert updated.env.n_envs == 32
+    assert updated.rl.segments_per_minibatch == 8
+    assert updated.rl.gradient_accumulation_steps == 1
+    assert updated.runtime.n_runtime_gpus == 4
+
+
+def test_adapt_resume_config_doubles_envs_and_accumulation_for_fewer_gpus() -> None:
+    cfg = _config_with_resume_shape(
+        n_envs=32,
+        segments_per_minibatch=8,
+        gradient_accumulation_steps=1,
+        runtime_gpus=4,
+    )
+
+    updated = run_ppo._adapt_resume_config_for_runtime_gpus(
+        cfg,
+        _distributed_context(2),
+    )
+
+    assert updated.env.n_envs == 64
+    assert updated.rl.segments_per_minibatch == 8
+    assert updated.rl.gradient_accumulation_steps == 2
+    assert updated.runtime.n_runtime_gpus == 2
+
+
+def test_adapt_resume_config_reduces_segments_for_fewer_gpus_when_needed() -> None:
+    cfg = _config_with_resume_shape(
+        n_envs=48,
+        segments_per_minibatch=16,
+        gradient_accumulation_steps=1,
+        runtime_gpus=3,
+    )
+
+    updated = run_ppo._adapt_resume_config_for_runtime_gpus(
+        cfg,
+        _distributed_context(2),
+    )
+
+    assert updated.env.n_envs == 72
+    assert updated.rl.segments_per_minibatch == 12
+    assert updated.rl.gradient_accumulation_steps == 2
+    assert updated.runtime.n_runtime_gpus == 2
+
+
+def test_adapt_resume_config_reduces_segments_when_accumulation_not_exact() -> None:
+    cfg = _config_with_resume_shape(
+        n_envs=12,
+        segments_per_minibatch=3,
+        gradient_accumulation_steps=2,
+        runtime_gpus=2,
+    )
+
+    updated = run_ppo._adapt_resume_config_for_runtime_gpus(
+        cfg,
+        _distributed_context(3),
+    )
+
+    assert updated.env.n_envs == 8
+    assert updated.rl.segments_per_minibatch == 2
+    assert updated.rl.gradient_accumulation_steps == 2
+    assert updated.runtime.n_runtime_gpus == 3
+
+
+def test_adapt_resume_config_rejects_fractional_env_count() -> None:
+    cfg = _config_with_resume_shape(
+        n_envs=8,
+        segments_per_minibatch=2,
+        gradient_accumulation_steps=2,
+        runtime_gpus=2,
+    )
+
+    with pytest.raises(ValueError, match=r"env.n_envs=.*does not scale evenly"):
+        run_ppo._adapt_resume_config_for_runtime_gpus(
+            cfg,
+            _distributed_context(3),
+        )
+
+
+def test_adapt_resume_config_rejects_odd_derived_env_count() -> None:
+    cfg = _config_with_resume_shape(
+        n_envs=6,
+        segments_per_minibatch=2,
+        gradient_accumulation_steps=1,
+        runtime_gpus=2,
+    )
+
+    with pytest.raises(ValueError, match="n_envs must be even"):
+        run_ppo._adapt_resume_config_for_runtime_gpus(
+            cfg,
+            _distributed_context(4),
+        )
+
+
+def test_adapt_resume_config_rejects_fractional_train_batch() -> None:
+    cfg = _config_with_resume_shape(
+        n_envs=12,
+        segments_per_minibatch=4,
+        gradient_accumulation_steps=1,
+        runtime_gpus=2,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"rl.segments_per_minibatch .*does not scale evenly",
+    ):
+        run_ppo._adapt_resume_config_for_runtime_gpus(
+            cfg,
+            _distributed_context(3),
+        )
+
+
+def test_adapt_resume_config_rejects_eval_replay_games_above_derived_envs() -> None:
+    cfg = _config_with_resume_shape(
+        n_envs=8,
+        segments_per_minibatch=4,
+        gradient_accumulation_steps=1,
+        runtime_gpus=2,
+        eval_replay_games=8,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"rl.eval_replay_games must be <= env.n_envs",
+    ):
+        run_ppo._adapt_resume_config_for_runtime_gpus(
+            cfg,
+            _distributed_context(4),
+        )
 
 
 def test_run_training_loop_writes_periodic_checkpoints(

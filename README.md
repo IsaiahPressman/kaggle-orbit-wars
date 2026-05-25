@@ -118,7 +118,14 @@ must be divisible by
 `rl.segments_per_minibatch * rl.gradient_accumulation_steps`. In distributed PPO
 launches, `EnvConfig.n_envs`, rollout horizon, minibatch segment width, and
 gradient accumulation are per GPU. Checkpoint cadence, `--max-env-steps`, W&B
-step values, and `train/env_steps` are counted across all ranks.
+step values, and `train/env_steps` are counted across all ranks. Resume launches
+with a different GPU count derive an equivalent per-rank config by scaling
+`env.n_envs` and
+`rl.segments_per_minibatch * rl.gradient_accumulation_steps` by
+`saved_gpus / current_gpus`. The derived config keeps
+`rl.segments_per_minibatch` at or below the saved value, so the per-minibatch
+training batch does not increase; resume fails if the scaled values are
+fractional or config-invalid.
 `rl.ppo_clip_mode` defaults to `per_player`, which clips the summed per-player
 joint action log-probability. Set it to `per_entity` to clip each controllable
 action entity independently before summing those clipped policy-loss terms back
@@ -153,11 +160,13 @@ target-KL counters, optimizer state, scheduler state, and checkpoint config are
 fresh for the new run.
 
 PPO run directories save `config.yaml` alongside checkpoints. The saved config
-includes `runtime.n_runtime_gpus`, and resume fails if the current launch uses a
-different number of ranks. Checkpoints save model, optimizer, scheduler,
-environment-step metadata, optimizer-step metadata, player-step metadata, plus
-the W&B run ID used for resume. Resume training by passing either a run
-directory or a checkpoint file as the only positional path:
+includes `runtime.n_runtime_gpus`; resume uses it to keep the effective rollout
+and optimizer-step batch shape equivalent when the current launch uses a
+different number of ranks, and fails when no exact derived config exists.
+Checkpoints save model, optimizer, scheduler, environment-step metadata,
+optimizer-step metadata, player-step metadata, plus the W&B run ID used for
+resume. Resume training by passing either a run directory or a checkpoint file
+as the only positional path:
 
 ```sh
 uv run python scripts/run_ppo.py runs/20260505-120000

@@ -293,7 +293,10 @@ world_size * env.n_envs * rl.horizon
 Checkpoint frequency, `--max-env-steps`, W&B step values, and logged
 `train/env_steps` are global across ranks. Rank 0 owns W&B, checkpoints,
 last-best evaluation replay files, and the saved `config.yaml`. The saved config
-records `runtime.n_runtime_gpus`; resume launches must use the same GPU count.
+records `runtime.n_runtime_gpus`; resume launches with a different GPU count
+derive an equivalent per-rank `env.n_envs` and minibatch/accumulation shape when
+those values scale exactly, and fail otherwise. The derived resume config never
+increases `rl.segments_per_minibatch`.
 
 ## Interactive debugging
 

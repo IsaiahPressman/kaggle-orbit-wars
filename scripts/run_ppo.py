@@ -129,7 +129,7 @@ def main() -> None:
                 cfg.to_file(run_dir / "config.yaml")
             run_dir = broadcast_object(run_dir, distributed)
         else:
-            _validate_runtime_gpus(cfg, distributed)
+            cfg = _adapt_resume_config_for_runtime_gpus(cfg, distributed)
             run_dir = launch.run_dir
 
         device = distributed.device
@@ -606,18 +606,91 @@ def _with_runtime_gpus(cfg: FullConfig, world_size: int) -> FullConfig:
     )
 
 
-def _validate_runtime_gpus(
+def _adapt_resume_config_for_runtime_gpus(
     cfg: FullConfig,
     distributed: DistributedContext,
-) -> None:
-    expected = cfg.runtime.n_runtime_gpus
-    actual = distributed.world_size
-    if expected != actual:
-        raise ValueError(
-            "resume runtime GPU count mismatch: "
-            f"config has runtime.n_runtime_gpus={expected}, "
-            f"current launch has {actual}"
+) -> FullConfig:
+    saved_gpus = cfg.runtime.n_runtime_gpus
+    current_gpus = distributed.world_size
+    if saved_gpus == current_gpus:
+        return cfg
+
+    n_envs = _scale_resume_value_for_runtime_gpus(
+        cfg.env.n_envs,
+        saved_gpus=saved_gpus,
+        current_gpus=current_gpus,
+        name="env.n_envs",
+    )
+    train_segments = _scale_resume_value_for_runtime_gpus(
+        cfg.rl.segments_per_minibatch * cfg.rl.gradient_accumulation_steps,
+        saved_gpus=saved_gpus,
+        current_gpus=current_gpus,
+        name=("rl.segments_per_minibatch * rl.gradient_accumulation_steps"),
+    )
+    segments_per_minibatch, gradient_accumulation_steps = (
+        _derive_resume_minibatch_shape(
+            train_segments=train_segments,
+            segments_per_minibatch=cfg.rl.segments_per_minibatch,
         )
+    )
+
+    updated = cfg.model_copy(
+        update={
+            "env": cfg.env.model_copy(update={"n_envs": n_envs}),
+            "rl": cfg.rl.model_copy(
+                update={
+                    "segments_per_minibatch": segments_per_minibatch,
+                    "gradient_accumulation_steps": gradient_accumulation_steps,
+                },
+            ),
+            "runtime": cfg.runtime.model_copy(
+                update={"n_runtime_gpus": current_gpus},
+            ),
+        },
+    )
+    adapted = FullConfig.model_validate(updated.model_dump(mode="python"))
+    if adapted.rl.eval_replay_games > adapted.env.n_envs:
+        raise ValueError(
+            "cannot derive resume config for runtime GPU count change: "
+            "rl.eval_replay_games must be <= env.n_envs"
+        )
+    return adapted
+
+
+def _scale_resume_value_for_runtime_gpus(
+    value: int,
+    *,
+    saved_gpus: int,
+    current_gpus: int,
+    name: str,
+) -> int:
+    numerator = value * saved_gpus
+    if numerator % current_gpus != 0:
+        raise ValueError(
+            "cannot derive resume config for runtime GPU count change: "
+            f"{name}={value} from runtime.n_runtime_gpus={saved_gpus} "
+            f"does not scale evenly to {current_gpus} GPUs"
+        )
+    return numerator // current_gpus
+
+
+def _derive_resume_minibatch_shape(
+    *,
+    train_segments: int,
+    segments_per_minibatch: int,
+) -> tuple[int, int]:
+    if train_segments % segments_per_minibatch == 0:
+        return segments_per_minibatch, train_segments // segments_per_minibatch
+
+    for candidate_segments in range(
+        min(train_segments, segments_per_minibatch),
+        0,
+        -1,
+    ):
+        if train_segments % candidate_segments == 0:
+            return candidate_segments, train_segments // candidate_segments
+
+    raise RuntimeError("positive integers should always have a divisor")
 
 
 def _trainable_parameter_count(model: torch.nn.Module) -> int:
