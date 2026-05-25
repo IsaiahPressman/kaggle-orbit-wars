@@ -104,7 +104,8 @@ the model first.
 Optimizer configs may set `lr_schedule.schedule` to
 `linear_warmup_cosine_decay` for warmup followed by cosine decay, or `cosine`
 for a repeating LambdaLR multiplier that moves from `1.0` to `lr_min_ratio`
-over `phase_steps` optimizer steps and back to `1.0` over the next phase. The
+halfway through `full_cycle_steps` optimizer steps, then back to `1.0` at the
+end of the cycle. The
 schedule name selects the accepted scheduler fields; unrelated scheduler fields
 are rejected.
 Training `EnvConfig.n_envs` must be even. PPO updates run

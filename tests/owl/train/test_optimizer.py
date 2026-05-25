@@ -159,7 +159,7 @@ def test_lr_multiplier_linear_warmup_then_cosine_decay() -> None:
 
 
 def test_lr_multiplier_cosine_oscillates_between_bounds() -> None:
-    config = CosineLRScheduleConfig(phase_steps=2, lr_min_ratio=0.2)
+    config = CosineLRScheduleConfig(full_cycle_steps=4, lr_min_ratio=0.2)
 
     assert lr_multiplier(config, 0) == pytest.approx(1.0)
     assert lr_multiplier(config, 1) == pytest.approx(0.6)
@@ -170,20 +170,20 @@ def test_lr_multiplier_cosine_oscillates_between_bounds() -> None:
 
 
 def test_lr_multiplier_cosine_config_validation() -> None:
-    config = CosineLRScheduleConfig(phase_steps=1, lr_min_ratio=0.0)
+    config = CosineLRScheduleConfig(full_cycle_steps=2, lr_min_ratio=0.0)
     assert lr_multiplier(config, 1) == pytest.approx(0.0)
 
     with pytest.raises(ValueError, match="less than 1"):
         CosineLRScheduleConfig(lr_min_ratio=1.0)
-    with pytest.raises(ValueError, match="greater than or equal to 1"):
-        CosineLRScheduleConfig(phase_steps=0)
+    with pytest.raises(ValueError, match="greater than or equal to 2"):
+        CosineLRScheduleConfig(full_cycle_steps=1)
 
 
 def test_lr_schedule_config_discriminates_allowed_fields() -> None:
     adapter = TypeAdapter(LRScheduleConfig)
 
     cosine_config = adapter.validate_python(
-        {"schedule": "cosine", "phase_steps": 3, "lr_min_ratio": 0.0}
+        {"schedule": "cosine", "full_cycle_steps": 4, "lr_min_ratio": 0.0}
     )
     assert isinstance(cosine_config, CosineLRScheduleConfig)
 
@@ -201,7 +201,7 @@ def test_lr_schedule_config_discriminates_allowed_fields() -> None:
         adapter.validate_python({"schedule": "cosine", "warmup_steps": 2})
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         adapter.validate_python(
-            {"schedule": "linear_warmup_cosine_decay", "phase_steps": 2}
+            {"schedule": "linear_warmup_cosine_decay", "full_cycle_steps": 4}
         )
 
 

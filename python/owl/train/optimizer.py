@@ -24,7 +24,7 @@ class LinearWarmupCosineDecayLRScheduleConfig(BaseConfig):
 
 class CosineLRScheduleConfig(BaseConfig):
     schedule: Literal["cosine"] = "cosine"
-    phase_steps: int = Field(default=1, ge=1)
+    full_cycle_steps: int = Field(default=2, ge=2)
     lr_min_ratio: float = Field(default=1e-3, ge=0.0, lt=1.0)
 
 
@@ -198,8 +198,8 @@ def lr_multiplier(config: LRScheduleConfig, step: int) -> float:
             cosine = 0.5 * (1.0 + cos(pi * progress))
             return config.lr_min_ratio + (1.0 - config.lr_min_ratio) * cosine
         case "cosine":
-            phase_progress = (step % (2 * config.phase_steps)) / config.phase_steps
-            cosine = 0.5 * (1.0 + cos(pi * phase_progress))
+            cycle_progress = (step % config.full_cycle_steps) / config.full_cycle_steps
+            cosine = 0.5 * (1.0 + cos(2.0 * pi * cycle_progress))
             return config.lr_min_ratio + (1.0 - config.lr_min_ratio) * cosine
         case _:
             assert_never(config.schedule)
