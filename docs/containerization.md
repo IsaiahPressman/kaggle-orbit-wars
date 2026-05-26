@@ -88,6 +88,14 @@ weights inside the submission image:
 just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt my-run fp4
 ```
 
+Pass an optional fallback checkpoint after the existing arguments to package a
+second, faster model:
+
+```sh
+just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt my-run fp4 \
+  --fallback-checkpoint runs/20260501-090000/checkpoint_last_best.pt
+```
+
 The `kaggle-submission` recipe depends on `just prepare`, then rebuilds
 `orbit-wars:kaggle` from the current checkout before running the package script
 in that image. The Kaggle image build uses the Buildx docker exporter with zstd
@@ -97,12 +105,18 @@ from a previous image build.
 
 The package script expects `python/main.py` or `main.py` to exist and copies it
 to `main.py` at the archive root. It also extracts `checkpoint["model"]` from
-the requested checkpoint into a temporary file, copies that file to the archive
-root using the original checkpoint filename, optionally quantizes those weights
-when the recipe quantization argument is not `fp32`, and copies `config.yaml`
-from the same directory. Unique quantization prefixes such as `fp4` are
-accepted. The image build validates Kaggle-targeted Rust compilation
-directly before artifact generation runs with the mounted checkpoint directory.
+the requested checkpoint into a temporary file, copies that file to
+`models/primary/checkpoint.pt`, optionally quantizes those weights when the
+recipe quantization argument is not `fp32`, and copies `config.yaml` from the
+same directory to `models/primary/config.yaml`. If `--fallback-checkpoint` is
+provided, the fallback checkpoint and adjacent config are packaged under
+`models/fallback/` using the same fixed filenames. Unique quantization prefixes
+such as `fp4` are accepted. Set `fallback_min_overage_time` in
+`python/owl/agent/agent_config.yaml` to switch to the fallback model when
+remaining overage time drops below that threshold; `null` disables fallback
+routing even when the fallback model is packaged. The image build validates
+Kaggle-targeted Rust compilation directly before artifact generation runs with
+the mounted checkpoint directory.
 Use `just kaggle-image` only when you want to rebuild or validate the Kaggle
 image without creating a submission tarball.
 

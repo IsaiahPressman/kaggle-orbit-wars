@@ -88,6 +88,7 @@ def test_agent_init_loads_quantized_checkpoint(
                 "max_entities_override: null",
                 "targeting_mode_override: null",
                 "min_overage_time: 0.0",
+                "fallback_min_overage_time: 5.0",
             )
         ),
         encoding="utf-8",
@@ -120,14 +121,86 @@ def test_agent_init_loads_quantized_checkpoint(
         },
         checkpoint_path,
     )
+    fallback_checkpoint_config_path = tmp_path / "fallback_config.yaml"
+    AgentCheckpointConfig(env=env_config, model=model_config).to_file(
+        fallback_checkpoint_config_path
+    )
+    fallback_checkpoint_path = tmp_path / "fallback_checkpoint.pt"
+    torch.save({"model": model.state_dict()}, fallback_checkpoint_path)
 
     agent = Agent(
         checkpoint_config_path=checkpoint_config_path,
         checkpoint_path=checkpoint_path,
+        fallback_checkpoint_config_path=fallback_checkpoint_config_path,
+        fallback_checkpoint_path=fallback_checkpoint_path,
     )
 
     assert set(agent.model.state_dict()) == set(model.state_dict())
     assert all(parameter.isfinite().all() for parameter in agent.model.parameters())
+    assert agent.fallback_model is not None
+    assert set(agent.fallback_model.state_dict()) == set(model.state_dict())
+
+
+def test_agent_init_rejects_recurrent_fallback_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_config_path = tmp_path / "agent_config.yaml"
+    agent_config_path.write_text(
+        "\n".join(
+            (
+                "deterministic: true",
+                "max_entities_override: null",
+                "targeting_mode_override: null",
+                "min_overage_time: 0.0",
+                "fallback_min_overage_time: 5.0",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("owl.agent.agent.AGENT_CONFIG_PATH", agent_config_path)
+
+    env_config = EnvConfig(
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionDiscreteTargetsConfig(),
+    )
+    primary_model_config = StatelessTransformerV1Config(
+        embed_dim=8,
+        depth=1,
+        n_heads=1,
+        actor={"action_spec": "discrete_targets"},
+    )
+    primary_config_path = tmp_path / "primary_config.yaml"
+    AgentCheckpointConfig(env=env_config, model=primary_model_config).to_file(
+        primary_config_path
+    )
+    primary_model = create_model(
+        primary_model_config,
+        obs_spec=env_config.obs_spec,
+        action_spec=env_config.action_spec,
+    )
+    primary_checkpoint_path = tmp_path / "primary_checkpoint.pt"
+    torch.save({"model": primary_model.state_dict()}, primary_checkpoint_path)
+
+    fallback_model_config = RecurrentTransformerV1Config(
+        embed_dim=8,
+        depth=1,
+        n_heads=1,
+    )
+    fallback_config_path = tmp_path / "fallback_config.yaml"
+    AgentCheckpointConfig(env=env_config, model=fallback_model_config).to_file(
+        fallback_config_path
+    )
+    fallback_checkpoint_path = tmp_path / "fallback_checkpoint.pt"
+    torch.save({"model": {}}, fallback_checkpoint_path)
+
+    with pytest.raises(ValueError, match="fallback model cannot be recurrent"):
+        Agent(
+            checkpoint_config_path=primary_config_path,
+            checkpoint_path=primary_checkpoint_path,
+            fallback_checkpoint_config_path=fallback_config_path,
+            fallback_checkpoint_path=fallback_checkpoint_path,
+        )
 
 
 def test_agent_config_max_entities_override_updates_checkpoint_obs_spec() -> None:
@@ -420,10 +493,10 @@ def _obs_batch(*, max_fleets: int) -> ObsBatch:
     )
 
 
-def _raw_observation() -> dict[str, object]:
+def _raw_observation(*, remaining_overage_time: float = 60.0) -> dict[str, object]:
     planet = [0, 0, 25.0, 50.0, 2.0, 10, 3]
     return {
-        "remainingOverageTime": 60.0,
+        "remainingOverageTime": remaining_overage_time,
         "step": 0,
         "planets": [planet],
         "initial_planets": [planet],
@@ -449,6 +522,8 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
     agent.config = AgentConfig(deterministic=False)
     agent.device = torch.device("cpu")
     agent.hidden_state = None
+    agent.fallback_model = None
+    agent.fallback_checkpoint_config = None
     agent._peak_total_ms = 0
     agent._peak_entities = 0
     action_shape = (1, 4, 1, action_spec.max_per_planet_launches)
@@ -514,6 +589,8 @@ def test_agent_act_preserves_planet_slots_for_recurrent_include_planets(
     agent.config = AgentConfig(deterministic=True)
     agent.device = torch.device("cpu")
     agent.hidden_state = None
+    agent.fallback_model = None
+    agent.fallback_checkpoint_config = None
     agent._peak_total_ms = 0
     agent._peak_entities = 0
 
@@ -596,6 +673,8 @@ def test_agent_act_moves_action_bundle_to_cpu_before_kaggle_conversion(
     agent.config = AgentConfig(deterministic=False)
     agent.device = torch.device("cpu")
     agent.hidden_state = None
+    agent.fallback_model = None
+    agent.fallback_checkpoint_config = None
     agent._peak_total_ms = 0
     agent._peak_entities = 0
 
@@ -657,6 +736,92 @@ def test_agent_act_moves_action_bundle_to_cpu_before_kaggle_conversion(
     assert actions == []
 
 
+def test_agent_act_uses_fallback_model_below_configured_overage() -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    agent = Agent.__new__(Agent)
+    checkpoint_config = SimpleNamespace(
+        env=SimpleNamespace(
+            obs_spec=EntityBasedConfig(),
+            action_spec=action_spec,
+        ),
+        model=StatelessTransformerV1Config(),
+    )
+    agent.checkpoint_config = checkpoint_config
+    agent.fallback_checkpoint_config = checkpoint_config
+    agent.config = AgentConfig(
+        deterministic=True,
+        min_overage_time=1.0,
+        fallback_min_overage_time=10.0,
+    )
+    agent.device = torch.device("cpu")
+    agent.hidden_state = "primary-hidden"
+    agent._last_turn_value = float("nan")
+    agent._peak_total_ms = 0
+    agent._peak_entities = 0
+
+    class PrimaryModel:
+        def initial_hidden_state(
+            self,
+            _batch_size: int,
+            *,
+            device: torch.device,  # noqa: ARG002
+        ) -> None:
+            raise AssertionError("primary model should not be used")
+
+        def serve(
+            self,
+            obs: object,  # noqa: ARG002
+            *,
+            deterministic: bool,  # noqa: ARG002
+            hidden_state: object | None,  # noqa: ARG002
+        ) -> object:
+            raise AssertionError("primary model should not be used")
+
+    class FallbackModel:
+        def initial_hidden_state(
+            self,
+            _batch_size: int,
+            *,
+            device: torch.device,  # noqa: ARG002
+        ) -> str:
+            return "fallback-hidden"
+
+        def serve(
+            self,
+            obs: object,
+            *,
+            deterministic: bool,
+            hidden_state: object | None,
+        ) -> object:
+            assert deterministic
+            assert hidden_state is None
+            action_shape = (
+                1,
+                4,
+                obs.action_mask.can_act.shape[2],
+                action_spec.max_per_planet_launches,
+            )
+            return SimpleNamespace(
+                actions=PureActions(
+                    launch=torch.zeros(action_shape, dtype=torch.bool),
+                    angle=torch.zeros(action_shape, dtype=torch.float32),
+                    ships=torch.zeros(action_shape, dtype=torch.int64),
+                ),
+                values=torch.tensor([[0.25, -0.5, 0.0, 0.75]]),
+                next_hidden_state=None,
+            )
+
+    agent.model = PrimaryModel()
+    agent.fallback_model = FallbackModel()
+
+    actions = agent.act(
+        KaggleObservation.model_validate(_raw_observation(remaining_overage_time=5.0))
+    )
+
+    assert actions == []
+    assert agent.hidden_state == "primary-hidden"
+
+
 def test_agent_log_prints_one_line_with_metrics(capsys) -> None:
     agent = Agent.__new__(Agent)
 
@@ -676,6 +841,28 @@ def test_agent_log_prints_one_line_with_metrics(capsys) -> None:
     )
 
     assert "\n" not in capsys.readouterr().out.rstrip()
+
+
+def test_agent_log_prefixes_fallback_trigger(capsys) -> None:
+    agent = Agent.__new__(Agent)
+
+    agent.log(
+        step=7,
+        total_ms=10,
+        peak_total_ms=20,
+        encode_ms=2,
+        inference_ms=7,
+        conversion_ms=1,
+        self_value=0.25,
+        advantage=-0.5,
+        player_values=[0.25, -0.5, 0.0, 0.75],
+        entity_count=3,
+        peak_entities=5,
+        remaining_overage_time=4.5,
+        fallback_triggered=True,
+    )
+
+    assert capsys.readouterr().out.startswith("fallback triggered - step=7 - ")
 
 
 def test_agent_peak_metrics_exclude_first_step_total_time() -> None:
@@ -702,6 +889,8 @@ def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
     agent.config = AgentConfig(deterministic=False)
     agent.device = torch.device("cpu")
     agent.hidden_state = None
+    agent.fallback_model = None
+    agent.fallback_checkpoint_config = None
     agent._peak_total_ms = 0
     agent._peak_entities = 0
     action_shape = (1, 4, 1, action_spec.max_per_planet_launches)
@@ -767,6 +956,8 @@ def test_agent_act_logs_step_and_value_advantage(capsys) -> None:
     agent.device = torch.device("cpu")
     agent._last_turn_value = float("nan")
     agent.hidden_state = None
+    agent.fallback_model = None
+    agent.fallback_checkpoint_config = None
     agent._peak_total_ms = 0
     agent._peak_entities = 0
     values = iter(

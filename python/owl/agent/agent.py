@@ -8,6 +8,7 @@ from pydantic import ConfigDict, Field
 
 from owl.config import BaseConfig
 from owl.model import (
+    BaseModelAPI,
     ModelConfig,
     ModelHiddenState,
     RecurrentTransformerV1Config,
@@ -55,6 +56,7 @@ class AgentConfig(BaseConfig):
     max_entities_override: int | None = None
     targeting_mode_override: TargetingMode | None = None
     min_overage_time: float = Field(default=0.0, ge=0.0, le=60.0)
+    fallback_min_overage_time: float | None = Field(default=None, ge=0.0, le=60.0)
 
 
 class AgentCheckpointConfig(BaseConfig):
@@ -70,34 +72,78 @@ class Agent:
         *,
         checkpoint_config_path: Path,
         checkpoint_path: Path,
+        fallback_checkpoint_config_path: Path | None = None,
+        fallback_checkpoint_path: Path | None = None,
     ) -> None:
         init_start = perf_counter()
+        if (fallback_checkpoint_config_path is None) != (
+            fallback_checkpoint_path is None
+        ):
+            raise ValueError(
+                "fallback checkpoint config and checkpoint path must be provided "
+                "together"
+            )
+
+        self.config = AgentConfig.from_file(AGENT_CONFIG_PATH)
+        self._last_turn_value = float("nan")
+        self._peak_total_ms = 0
+        self._peak_entities = 0
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.checkpoint_config, self.model = self._load_model(
+            checkpoint_config_path=checkpoint_config_path,
+            checkpoint_path=checkpoint_path,
+        )
+        self.hidden_state: ModelHiddenState | None = None
+
+        self.fallback_checkpoint_config: AgentCheckpointConfig | None = None
+        self.fallback_model: BaseModelAPI | None = None
+        if fallback_checkpoint_config_path is not None:
+            assert fallback_checkpoint_path is not None
+            self.fallback_checkpoint_config, self.fallback_model = self._load_model(
+                checkpoint_config_path=fallback_checkpoint_config_path,
+                checkpoint_path=fallback_checkpoint_path,
+                allow_recurrent=False,
+            )
+            if self.config.fallback_min_overage_time is None:
+                print(
+                    "warning: fallback model is packaged but "
+                    "fallback_min_overage_time is null",
+                    flush=True,
+                )
+        print(f"init_s={perf_counter() - init_start:.2f} - ", end="", flush=True)
+
+    def _load_model(
+        self,
+        *,
+        checkpoint_config_path: Path,
+        checkpoint_path: Path,
+        allow_recurrent: bool = True,
+    ) -> tuple[AgentCheckpointConfig, BaseModelAPI]:
         if not checkpoint_config_path.is_file():
             raise ValueError(f"expected Kaggle config at {checkpoint_config_path}")
 
         if not checkpoint_path.is_file():
             raise ValueError(f"expected Kaggle checkpoint at {checkpoint_path}")
 
-        self.config = AgentConfig.from_file(AGENT_CONFIG_PATH)
-        self.checkpoint_config = AgentCheckpointConfig.from_file(checkpoint_config_path)
-        self.checkpoint_config = apply_max_entities_override(
-            self.checkpoint_config,
+        checkpoint_config = AgentCheckpointConfig.from_file(checkpoint_config_path)
+        checkpoint_config = apply_max_entities_override(
+            checkpoint_config,
             self.config.max_entities_override,
         )
-        self.checkpoint_config = apply_targeting_mode_override(
-            self.checkpoint_config,
+        checkpoint_config = apply_targeting_mode_override(
+            checkpoint_config,
             self.config.targeting_mode_override,
         )
-        self._last_turn_value = float("nan")
-        self._peak_total_ms = 0
-        self._peak_entities = 0
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = create_model(
-            self.checkpoint_config.model,
-            obs_spec=self.checkpoint_config.env.obs_spec,
-            action_spec=self.checkpoint_config.env.action_spec,
+        if not allow_recurrent and isinstance(
+            checkpoint_config.model, RecurrentTransformerV1Config
+        ):
+            raise ValueError("fallback model cannot be recurrent")
+
+        model = create_model(
+            checkpoint_config.model,
+            obs_spec=checkpoint_config.env.obs_spec,
+            action_spec=checkpoint_config.env.action_spec,
         ).to(self.device)
-        self.hidden_state: ModelHiddenState | None = None
         checkpoint = torch.load(
             checkpoint_path,
             map_location=self.device,
@@ -108,9 +154,9 @@ class Agent:
                 f"checkpoint must be a dictionary with key 'model': {checkpoint_path}"
             )
 
-        self.model.load_state_dict(dequantize_model_state_dict(checkpoint["model"]))
-        self.model.eval()
-        print(f"init_s={perf_counter() - init_start:.2f} - ", end="", flush=True)
+        model.load_state_dict(dequantize_model_state_dict(checkpoint["model"]))
+        model.eval()
+        return checkpoint_config, model
 
     @torch.inference_mode()
     def act(self, observation: Any) -> list[list[float]]:
@@ -120,15 +166,26 @@ class Agent:
         if observation.remaining_overage_time < self.config.min_overage_time:
             return []
 
+        model = self.model
+        checkpoint_config = self.checkpoint_config
+        hidden_state = self.hidden_state
+        use_fallback = self._should_use_fallback(observation.remaining_overage_time)
+        if use_fallback:
+            assert self.fallback_model is not None
+            assert self.fallback_checkpoint_config is not None
+            model = self.fallback_model
+            checkpoint_config = self.fallback_checkpoint_config
+            hidden_state = None
+
         obs_dict = observation.to_rl_observation()
         obs = encode_python_observation(
             obs_dict,
-            obs_spec=self.checkpoint_config.env.obs_spec,
-            action_spec=self.checkpoint_config.env.action_spec,
+            obs_spec=checkpoint_config.env.obs_spec,
+            action_spec=checkpoint_config.env.action_spec,
         )
         compacted = compact_entities(
             obs,
-            compact_planets=_should_compact_planets(self.checkpoint_config.model),
+            compact_planets=_should_compact_planets(checkpoint_config.model),
         )
         obs = compacted.obs
         device_obs = self._obs_to_device(obs)
@@ -136,15 +193,15 @@ class Agent:
         encode_ms = _elapsed_ms(encode_start)
 
         inference_start = perf_counter()
-        hidden_state = self.hidden_state
-        if observation.step == 0 or hidden_state is None:
-            hidden_state = self.model.initial_hidden_state(1, device=self.device)
-        output = self.model.serve(
+        if not use_fallback and (observation.step == 0 or hidden_state is None):
+            hidden_state = model.initial_hidden_state(1, device=self.device)
+        output = model.serve(
             device_obs,
             deterministic=self.config.deterministic,
             hidden_state=hidden_state,
         )
-        self.hidden_state = output.next_hidden_state
+        if not use_fallback:
+            self.hidden_state = output.next_hidden_state
         self._synchronize_device()
         values = output.values.detach().cpu()[0]
         self_value = float(values[observation.player].item())
@@ -159,13 +216,13 @@ class Agent:
         actions_cpu = expand_actions_to_full_action_slots(
             _model_actions_to_cpu(output.actions),
             compacted.action_entity_indices,
-            action_spec=self.checkpoint_config.env.action_spec,
+            action_spec=checkpoint_config.env.action_spec,
         )
         actions = actions_to_kaggle(
             obs_dict,
             observation.player,
             actions_cpu,
-            action_spec=self.checkpoint_config.env.action_spec,
+            action_spec=checkpoint_config.env.action_spec,
         )
         conversion_ms = _elapsed_ms(conversion_start)
         total_ms = _elapsed_ms(total_start)
@@ -189,9 +246,17 @@ class Agent:
             entity_count=entity_count,
             peak_entities=peak_entities,
             remaining_overage_time=observation.remaining_overage_time,
+            fallback_triggered=use_fallback,
         )
         self._last_turn_value = self_value
         return actions
+
+    def _should_use_fallback(self, remaining_overage_time: float) -> bool:
+        return (
+            self.fallback_model is not None
+            and self.config.fallback_min_overage_time is not None
+            and remaining_overage_time < self.config.fallback_min_overage_time
+        )
 
     def _obs_to_device(self, obs: ObsBatch) -> ObsBatch:
         return ObsBatch(
@@ -222,9 +287,12 @@ class Agent:
         entity_count: int,
         peak_entities: int,
         remaining_overage_time: float,
+        fallback_triggered: bool = False,
     ) -> None:
         values = ",".join(f"{value:.3f}" for value in player_values)
+        prefix = "fallback triggered - " if fallback_triggered else ""
         print(
+            f"{prefix}"
             f"step={step} - "
             f"total_ms={total_ms} - "
             f"peak_total_ms={peak_total_ms} - "

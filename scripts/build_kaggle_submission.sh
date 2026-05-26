@@ -8,12 +8,16 @@ Usage: scripts/build_kaggle_submission.sh CHECKPOINT_PATH [OUTPUT_PATH]
 Build the release Rust extension and write a Kaggle submission tarball.
 
 Arguments:
-  CHECKPOINT_PATH  Checkpoint/model file to include at submission archive root.
+  CHECKPOINT_PATH  Primary checkpoint/model file to include in the submission.
                    The script also requires config.yaml from the same directory.
   OUTPUT_PATH      Tarball path to write. Defaults to submission.tar.gz.
 
 Options:
   -o, --output PATH  Tarball path to write.
+  --fallback-checkpoint PATH
+                     Optional fallback checkpoint/model file to include in the
+                     submission. The script also requires config.yaml from the
+                     same directory.
   --quantization FORMAT
                      Optional slim-checkpoint quantization format:
                      fp32, fp8_e4m3fn, or
@@ -24,6 +28,7 @@ EOF
 }
 
 checkpoint_path=""
+fallback_checkpoint_path=""
 output_path="submission.tar.gz"
 output_path_set=0
 quantization=""
@@ -41,6 +46,14 @@ while [[ $# -gt 0 ]]; do
       fi
       output_path="$2"
       output_path_set=1
+      shift 2
+      ;;
+    --fallback-checkpoint)
+      if [[ $# -lt 2 ]]; then
+        echo "$1 requires a path argument" >&2
+        exit 2
+      fi
+      fallback_checkpoint_path="$2"
       shift 2
       ;;
     --quantization)
@@ -90,6 +103,11 @@ fi
 
 checkpoint_path="$(cd "$(dirname "$checkpoint_path")" && pwd)/$(basename "$checkpoint_path")"
 model_config_path="$(dirname "$checkpoint_path")/config.yaml"
+fallback_model_config_path=""
+if [[ -n "$fallback_checkpoint_path" ]]; then
+  fallback_checkpoint_path="$(cd "$(dirname "$fallback_checkpoint_path")" && pwd)/$(basename "$fallback_checkpoint_path")"
+  fallback_model_config_path="$(dirname "$fallback_checkpoint_path")/config.yaml"
+fi
 
 if [[ ! -f "$checkpoint_path" ]]; then
   echo "Checkpoint path does not exist: $checkpoint_path" >&2
@@ -98,6 +116,14 @@ fi
 
 if [[ ! -f "$model_config_path" ]]; then
   echo "Adjacent model config does not exist: $model_config_path" >&2
+  exit 1
+fi
+if [[ -n "$fallback_checkpoint_path" && ! -f "$fallback_checkpoint_path" ]]; then
+  echo "Fallback checkpoint path does not exist: $fallback_checkpoint_path" >&2
+  exit 1
+fi
+if [[ -n "$fallback_model_config_path" && ! -f "$fallback_model_config_path" ]]; then
+  echo "Adjacent fallback model config does not exist: $fallback_model_config_path" >&2
   exit 1
 fi
 
@@ -154,14 +180,28 @@ cp -R python/owl "$stage_dir/submission/owl"
 find "$stage_dir/submission" -type d -name "__pycache__" -prune -exec rm -rf {} +
 find "$stage_dir/submission" -type f -name "*.pyc" -delete
 
-slim_checkpoint_path="$stage_dir/$(basename "$checkpoint_path")"
-extract_args=(scripts/extract_model_weights.py "$checkpoint_path" "$slim_checkpoint_path")
-if [[ -n "$quantization" ]]; then
-  extract_args+=(--quantization "$quantization")
+copy_model_bundle() {
+  local source_checkpoint_path="$1"
+  local source_config_path="$2"
+  local bundle_name="$3"
+  local bundle_dir="$stage_dir/submission/models/$bundle_name"
+  local slim_checkpoint_path="$stage_dir/${bundle_name}_checkpoint.pt"
+  local extract_args
+
+  mkdir -p "$bundle_dir"
+  extract_args=(scripts/extract_model_weights.py "$source_checkpoint_path" "$slim_checkpoint_path")
+  if [[ -n "$quantization" ]]; then
+    extract_args+=(--quantization "$quantization")
+  fi
+  "${uv_run[@]}" python "${extract_args[@]}"
+  cp "$slim_checkpoint_path" "$bundle_dir/checkpoint.pt"
+  cp "$source_config_path" "$bundle_dir/config.yaml"
+}
+
+copy_model_bundle "$checkpoint_path" "$model_config_path" primary
+if [[ -n "$fallback_checkpoint_path" ]]; then
+  copy_model_bundle "$fallback_checkpoint_path" "$fallback_model_config_path" fallback
 fi
-"${uv_run[@]}" python "${extract_args[@]}"
-cp "$slim_checkpoint_path" "$stage_dir/submission/$(basename "$checkpoint_path")"
-cp "$model_config_path" "$stage_dir/submission/config.yaml"
 cp "$entrypoint_path" "$stage_dir/submission/main.py"
 
 mkdir -p "$(dirname "$output_path")"

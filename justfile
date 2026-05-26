@@ -59,16 +59,34 @@ kaggle-image: prepare
 	  --output type=docker,name=orbit-wars:kaggle,compression=zstd,compression-level=1 \
 	  .
 [group: 'build']
-kaggle-submission model submission="submission" quantization="fp32": prepare kaggle-image
+kaggle-submission model submission="submission" quantization="fp32" *extra_args: prepare kaggle-image
 	#!/usr/bin/env bash
 	set -euo pipefail
 	submission="{{submission}}"
 	quantization="{{quantization}}"
+	extra_args=({{extra_args}})
 	if [[ -z "$submission" || "$submission" == *"/"* || "$submission" == "." || "$submission" == ".." ]]; then
 	  echo "Submission name must be a non-empty file name, not a path: $submission" >&2
 	  exit 2
 	fi
 	model_abs="$(cd "$(dirname "{{model}}")" && pwd)/$(basename "{{model}}")"
+	fallback_model_abs=""
+	while [[ ${#extra_args[@]} -gt 0 ]]; do
+	  case "${extra_args[0]}" in
+	    --fallback-checkpoint)
+	      if [[ ${#extra_args[@]} -lt 2 ]]; then
+	        echo "--fallback-checkpoint requires a path argument" >&2
+	        exit 2
+	      fi
+	      fallback_model_abs="$(cd "$(dirname "${extra_args[1]}")" && pwd)/$(basename "${extra_args[1]}")"
+	      extra_args=("${extra_args[@]:2}")
+	      ;;
+	    *)
+	      echo "Unexpected kaggle-submission argument: ${extra_args[0]}" >&2
+	      exit 2
+	      ;;
+	  esac
+	done
 	if [[ "$submission" == *.tar.gz ]]; then
 	  output="artifacts/${submission}"
 	else
@@ -76,11 +94,16 @@ kaggle-submission model submission="submission" quantization="fp32": prepare kag
 	fi
 	output_abs="$(mkdir -p "$(dirname "$output")" && cd "$(dirname "$output")" && pwd)/$(basename "$output")"
 	submission_args=()
+	docker_args=(-v "$(dirname "$model_abs"):/model:ro")
+	if [[ -n "$fallback_model_abs" ]]; then
+	  submission_args+=(--fallback-checkpoint "/fallback-model/$(basename "$fallback_model_abs")")
+	  docker_args+=(-v "$(dirname "$fallback_model_abs"):/fallback-model:ro")
+	fi
 	if [[ "$quantization" != "fp32" ]]; then
 	  submission_args+=(--quantization "$quantization")
 	fi
 	docker run --rm \
-	  -v "$(dirname "$model_abs"):/model:ro" \
+	  "${docker_args[@]}" \
 	  -v "$(dirname "$output_abs"):/artifacts" \
 	  orbit-wars:kaggle "${submission_args[@]}" "/model/$(basename "$model_abs")" "/artifacts/$(basename "$output_abs")"
 
