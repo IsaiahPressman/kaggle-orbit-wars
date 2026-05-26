@@ -2,9 +2,11 @@ from pathlib import Path
 
 import pytest
 import torch
-from owl.model import RecurrentTransformerV1Config
+from owl.model import RecurrentTransformerV1Config, StatelessTransformerV1
+from owl.model.stateless_transformer_v1 import StatelessTransformerV1Config
+from owl.rl import ActionPureConfig, EntityBasedConfig
 from owl.train import FullConfig, PPOConfig
-from owl.train.utils import autocast_context
+from owl.train.utils import autocast_context, configure_model_for_training_dtype
 
 _REPO_ROOT = Path(__file__).parents[3]
 
@@ -39,6 +41,8 @@ def test_ppo_config_validates_with_pydantic() -> None:
         PPOConfig(gradient_accumulation_steps=0)
 
     assert PPOConfig(dtype="bfloat16").dtype == "bfloat16"
+    assert PPOConfig(dtype="float8").dtype == "float8"
+    assert PPOConfig(fp8_recipe="tensorwise").fp8_recipe == "tensorwise"
     assert PPOConfig(eval_replay_games=1).eval_replay_games == 1
     assert PPOConfig(ppo_clip_mode="per_entity").ppo_clip_mode == "per_entity"
 
@@ -49,6 +53,11 @@ def test_ppo_config_validates_with_pydantic() -> None:
         match="Input should be 'per_player' or 'per_entity'",
     ):
         PPOConfig(ppo_clip_mode="per_source")
+    with pytest.raises(
+        ValueError,
+        match="Input should be 'tensorwise', 'rowwise' or 'rowwise_with_gw_hp'",
+    ):
+        PPOConfig(fp8_recipe="per_token")
 
 
 def test_full_config_accepts_nested_discriminated_configs() -> None:
@@ -254,6 +263,44 @@ def test_full_config_accepts_single_launch_training_actions() -> None:
     assert config.env.action_spec.max_per_planet_launches == 1
 
 
+def test_configure_model_for_float8_training_converts_eligible_linear_layers() -> None:
+    from torchao.float8.float8_linear import Float8Linear
+
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=32, depth=1, n_heads=4, mlp_ratio=1.0),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    state_keys = set(model.state_dict())
+
+    converted = configure_model_for_training_dtype(
+        model,
+        PPOConfig(dtype="float8"),
+        device=torch.device("cuda"),
+    )
+
+    assert converted > 0
+    assert set(model.state_dict()) == state_keys
+    assert any(isinstance(module, Float8Linear) for module in model.modules())
+    assert not isinstance(model.static_planet_proj.input, Float8Linear)
+    assert not isinstance(model.critic_head.out, Float8Linear)
+
+
+def test_configure_model_for_float8_training_rejects_cpu() -> None:
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=32, depth=1, n_heads=4, mlp_ratio=1.0),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+
+    with pytest.raises(RuntimeError, match="requires a CUDA device"):
+        configure_model_for_training_dtype(
+            model,
+            PPOConfig(dtype="float8"),
+            device=torch.device("cpu"),
+        )
+
+
 def test_full_config_rejects_model_owned_obs_spec() -> None:
     with pytest.raises(
         ValueError,
@@ -450,4 +497,7 @@ def test_autocast_context_respects_dtype_config() -> None:
         assert not torch.is_autocast_enabled("cpu")
 
     with autocast_context(PPOConfig(dtype="bfloat16"), torch.device("cpu")):
+        assert torch.is_autocast_enabled("cpu")
+
+    with autocast_context(PPOConfig(dtype="float8"), torch.device("cpu")):
         assert torch.is_autocast_enabled("cpu")

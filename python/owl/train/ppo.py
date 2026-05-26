@@ -61,6 +61,9 @@ from owl.train.optimizer import (
     Optimizer as _Optimizer,
 )
 from owl.train.utils import (
+    Float8Recipe as _Float8Recipe,
+)
+from owl.train.utils import (
     TrainingDType as _TrainingDType,
 )
 from owl.train.utils import (
@@ -103,6 +106,7 @@ class PPOConfig(BaseConfig):
     eval_replay_games: int = Field(default=0, ge=0)
     compile_mode: CompileMode | None = None
     dtype: _TrainingDType = "float32"
+    fp8_recipe: _Float8Recipe = "rowwise"
 
 
 @dataclass(frozen=True)
