@@ -64,6 +64,12 @@ from owl.train.utils import (
     Float8Recipe as _Float8Recipe,
 )
 from owl.train.utils import (
+    ModelCompileMode as _ModelCompileMode,
+)
+from owl.train.utils import (
+    ModelCompileTarget as _ModelCompileTarget,
+)
+from owl.train.utils import (
     TrainingDType as _TrainingDType,
 )
 from owl.train.utils import (
@@ -107,6 +113,8 @@ class PPOConfig(BaseConfig):
     compile_mode: CompileMode | None = None
     dtype: _TrainingDType = "float32"
     fp8_recipe: _Float8Recipe = "rowwise"
+    model_compile: _ModelCompileTarget = "mlp"
+    model_compile_mode: _ModelCompileMode = "max-autotune-no-cudagraphs"
 
 
 @dataclass(frozen=True)

@@ -93,8 +93,9 @@ Training presets live in `configs/`:
 - `baseline.yaml`: vanilla PPO with the 20m stateless transformer preset,
   discrete-target actions, `max_entities=256`, one PPO epoch per rollout,
   larger rollout/minibatch sizing, Muon/AdamW optimizer rates, periodic
-  checkpoints every 20M environment steps, `torch.compile` default mode, and
-  bfloat16 autocast by default.
+  checkpoints every 20M environment steps, `torch.compile` default mode for PPO
+  tensor helpers, compiled transformer MLPs with
+  `max-autotune-no-cudagraphs`, and bfloat16 autocast by default.
 - `baseline_adam.yaml`: Adam optimizer variant with explicit optimizer
   settings, including `1e-4` learning rate, `(0.9, 0.999)` betas, `1e-5`
   epsilon, no weight decay, and the same warmup/cosine scheduler shape.
@@ -159,6 +160,11 @@ uv run python scripts/run_ppo.py configs/baseline.yaml runs --log-mode debug --m
 
 Fresh launches accept `-o`/`--overrides field.path=value`; when provided, rank 0
 prints the flattened override list before loading the config.
+`rl.model_compile` defaults to `mlp`, which compiles each transformer-block MLP
+in place with `rl.model_compile_mode: max-autotune-no-cudagraphs` and
+`dynamic=True`. This keeps attention packing and flash-attn calls eager while
+allowing Inductor to optimize the FFN path. Set `rl.model_compile=none` for
+short CPU smoke tests or compile-debugging runs.
 Set `rl.dtype=float8` to enable FP8 training with torchao. FP8 mode converts
 eligible internal `torch.nn.Linear` layers to torchao `Float8Linear` before
 optimizer construction, keeps model input/output projections and shape-ineligible

@@ -1210,9 +1210,13 @@ def test_run_training_session_sets_trainable_parameter_summary(
         distributed=DistributedContext.single_process_cpu(),
         start_env_steps=16,
         trainable_parameters=123,
+        compiled_model_modules=4,
     )
 
-    assert logger.summary == {"trainable_parameters": 123}
+    assert logger.summary == {
+        "compiled_model_modules": 4,
+        "trainable_parameters": 123,
+    }
     assert logger.closed
 
 

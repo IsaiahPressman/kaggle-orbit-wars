@@ -6,7 +6,11 @@ from owl.model import RecurrentTransformerV1Config, StatelessTransformerV1
 from owl.model.stateless_transformer_v1 import StatelessTransformerV1Config
 from owl.rl import ActionPureConfig, EntityBasedConfig
 from owl.train import FullConfig, PPOConfig
-from owl.train.utils import autocast_context, configure_model_for_training_dtype
+from owl.train.utils import (
+    autocast_context,
+    configure_model_compile,
+    configure_model_for_training_dtype,
+)
 
 _REPO_ROOT = Path(__file__).parents[3]
 
@@ -30,6 +34,8 @@ def test_ppo_config_validates_with_pydantic() -> None:
     assert config.checkpoint_freq is None
     assert config.eval_replay_games == 0
     assert config.ppo_clip_mode == "per_player"
+    assert config.model_compile == "mlp"
+    assert config.model_compile_mode == "max-autotune-no-cudagraphs"
 
     with pytest.raises(ValueError, match="greater than or equal to 0"):
         PPOConfig(gamma=-0.1)
@@ -43,6 +49,8 @@ def test_ppo_config_validates_with_pydantic() -> None:
     assert PPOConfig(dtype="bfloat16").dtype == "bfloat16"
     assert PPOConfig(dtype="float8").dtype == "float8"
     assert PPOConfig(fp8_recipe="tensorwise").fp8_recipe == "tensorwise"
+    assert PPOConfig(model_compile="none").model_compile == "none"
+    assert PPOConfig(model_compile_mode="default").model_compile_mode == "default"
     assert PPOConfig(eval_replay_games=1).eval_replay_games == 1
     assert PPOConfig(ppo_clip_mode="per_entity").ppo_clip_mode == "per_entity"
 
@@ -58,6 +66,16 @@ def test_ppo_config_validates_with_pydantic() -> None:
         match="Input should be 'tensorwise', 'rowwise' or 'rowwise_with_gw_hp'",
     ):
         PPOConfig(fp8_recipe="per_token")
+    with pytest.raises(ValueError, match="Input should be 'none' or 'mlp'"):
+        PPOConfig(model_compile="attention")
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Input should be 'default', 'reduce-overhead', 'max-autotune' or "
+            "'max-autotune-no-cudagraphs'"
+        ),
+    ):
+        PPOConfig(model_compile_mode="fast")
 
 
 def test_full_config_accepts_nested_discriminated_configs() -> None:
@@ -299,6 +317,64 @@ def test_configure_model_for_float8_training_rejects_cpu() -> None:
             PPOConfig(dtype="float8"),
             device=torch.device("cpu"),
         )
+
+
+def test_configure_model_compile_compiles_only_transformer_mlps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, tuple[object, ...], dict[str, object]]] = []
+
+    def fake_compile(
+        module: torch.nn.Module,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        calls.append((id(module), args, kwargs))
+
+    monkeypatch.setattr(torch.nn.Module, "compile", fake_compile)
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=32, depth=2, n_heads=4, mlp_ratio=1.0),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    state_keys = set(model.state_dict())
+    expected_module_ids = {id(block.mlp) for block in model.blocks}
+
+    compiled = configure_model_compile(model, PPOConfig())
+
+    assert compiled == 2
+    assert set(model.state_dict()) == state_keys
+    assert {call[0] for call in calls} == expected_module_ids
+    assert all(call[1] == () for call in calls)
+    assert all(
+        call[2] == {"mode": "max-autotune-no-cudagraphs", "dynamic": True}
+        for call in calls
+    )
+
+
+def test_configure_model_compile_can_be_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[torch.nn.Module] = []
+
+    def fake_compile(
+        module: torch.nn.Module,
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        calls.append(module)
+
+    monkeypatch.setattr(torch.nn.Module, "compile", fake_compile)
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=32, depth=1, n_heads=4, mlp_ratio=1.0),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+
+    compiled = configure_model_compile(model, PPOConfig(model_compile="none"))
+
+    assert compiled == 0
+    assert calls == []
 
 
 def test_full_config_rejects_model_owned_obs_spec() -> None:

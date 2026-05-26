@@ -167,6 +167,10 @@ construction. Model input/output projections and linears whose input or output
 dimensions are not divisible by 16 remain in higher precision, and the training
 autocast context remains bfloat16 so normalization, attention, policy sampling,
 and loss-side tensors do not become raw FP8 tensors.
+Training also defaults to compiling each transformer-block MLP in place with
+`rl.model_compile="mlp"` and
+`rl.model_compile_mode="max-autotune-no-cudagraphs"`. Packing, unpacking, and
+flash-attn varlen calls remain eager.
 
 ## Recurrent Transformer V1
 

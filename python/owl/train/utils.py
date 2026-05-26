@@ -9,6 +9,13 @@ from torch import nn
 from owl.model import BaseModelAPI
 
 Float8Recipe = Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"]
+ModelCompileTarget = Literal["none", "mlp"]
+ModelCompileMode = Literal[
+    "default",
+    "reduce-overhead",
+    "max-autotune",
+    "max-autotune-no-cudagraphs",
+]
 TrainingDType = Literal["float32", "bfloat16", "float8"]
 
 
@@ -20,6 +27,14 @@ class DTypeConfig(Protocol):
 class Float8TrainingConfig(DTypeConfig, Protocol):
     @property
     def fp8_recipe(self) -> Float8Recipe: ...
+
+
+class ModelCompileConfig(Protocol):
+    @property
+    def model_compile(self) -> ModelCompileTarget: ...
+
+    @property
+    def model_compile_mode(self) -> ModelCompileMode: ...
 
 
 def configure_torch() -> None:
@@ -97,6 +112,41 @@ def _fp8_excluded_linear_module_ids(model: BaseModelAPI) -> set[int]:
 
 def _linear_shape_supports_fp8(module: nn.Linear) -> bool:
     return module.in_features % 16 == 0 and module.out_features % 16 == 0
+
+
+def configure_model_compile(model: BaseModelAPI, cfg: ModelCompileConfig) -> int:
+    match cfg.model_compile:
+        case "none":
+            return 0
+        case "mlp":
+            return _compile_transformer_mlp_modules(
+                model,
+                mode=cfg.model_compile_mode,
+            )
+        case _:
+            assert_never(cfg.model_compile)
+
+
+def _compile_transformer_mlp_modules(
+    model: BaseModelAPI,
+    *,
+    mode: ModelCompileMode,
+) -> int:
+    compiled = 0
+    for name, module in model.named_modules():
+        if not _is_transformer_mlp_module_name(name):
+            continue
+        module.compile(mode=mode, dynamic=True)
+        compiled += 1
+    if compiled == 0:
+        raise RuntimeError(
+            "rl.model_compile='mlp' found no transformer MLP modules to compile"
+        )
+    return compiled
+
+
+def _is_transformer_mlp_module_name(name: str) -> bool:
+    return name.startswith("blocks.") and name.endswith(".mlp")
 
 
 def assert_finite(tensor: torch.Tensor, name: str) -> None:
