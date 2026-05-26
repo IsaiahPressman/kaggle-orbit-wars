@@ -13,6 +13,8 @@ import pytest
 import torch
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
+    ActionBundle,
+    ActionConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
     DecodedLaunchActions,
@@ -20,6 +22,7 @@ from owl.rl import (
     EntityBasedConfig,
     EntityBasedExtV1Config,
     ObsBatch,
+    ObsConfig,
     PureActionMask,
 )
 
@@ -33,6 +36,27 @@ assert _BENCHMARK_SPEC.loader is not None
 benchmark_checkpoints = importlib.util.module_from_spec(_BENCHMARK_SPEC)
 sys.modules["benchmark_checkpoints"] = benchmark_checkpoints
 _BENCHMARK_SPEC.loader.exec_module(benchmark_checkpoints)
+
+
+def _loaded_checkpoint(
+    model: object,
+    *,
+    obs_spec: object | None = None,
+    action_spec: object | None = None,
+    dtype: str = "float32",
+) -> benchmark_checkpoints.LoadedCheckpoint:
+    return benchmark_checkpoints.LoadedCheckpoint(
+        path=Path("checkpoint.pt"),
+        config=SimpleNamespace(
+            env=SimpleNamespace(
+                obs_spec=obs_spec or EntityBasedConfig(),
+                action_spec=action_spec or ActionPureConfig(max_per_planet_launches=1),
+            ),
+            rl=Namespace(dtype=dtype),
+        ),
+        model=model,
+        env_steps=0,
+    )
 
 
 def test_assignment_pattern_assigns_one_model_per_two_player_game() -> None:
@@ -100,6 +124,76 @@ def test_validate_args_allows_games_per_player_count_not_divisible_by_envs() -> 
     )
 
 
+@pytest.mark.parametrize(
+    ("extra_args", "expected"),
+    [
+        ([], (False, False)),
+        (["--deterministic"], (True, True)),
+        (["--deterministic", "a"], (True, False)),
+        (["--deterministic", "b"], (False, True)),
+        (["-d"], (True, True)),
+        (["-d", "a"], (True, False)),
+        (["-d", "b"], (False, True)),
+    ],
+)
+def test_parse_args_accepts_optional_deterministic_target(
+    monkeypatch: pytest.MonkeyPatch,
+    extra_args: list[str],
+    expected: tuple[bool, bool],
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_checkpoints.py",
+            "checkpoint_a.pt",
+            "checkpoint_b.pt",
+            *extra_args,
+        ],
+    )
+
+    args = benchmark_checkpoints._parse_args()
+    determinism = benchmark_checkpoints._deterministic_flags(args.deterministic)
+
+    assert (determinism.a, determinism.b) == expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (
+            ["benchmark_checkpoints.py", "-d", "checkpoint_a.pt", "checkpoint_b.pt"],
+            (True, True),
+        ),
+        (
+            [
+                "benchmark_checkpoints.py",
+                "-d",
+                "a",
+                "checkpoint_a.pt",
+                "checkpoint_b.pt",
+            ],
+            (True, False),
+        ),
+    ],
+)
+def test_parse_args_accepts_deterministic_before_checkpoints(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    expected: tuple[bool, bool],
+) -> None:
+    monkeypatch.setattr(sys, "argv", argv)
+
+    args = benchmark_checkpoints._parse_args()
+    determinism = benchmark_checkpoints._deterministic_flags(args.deterministic)
+
+    assert (args.checkpoint_a, args.checkpoint_b) == (
+        Path("checkpoint_a.pt"),
+        Path("checkpoint_b.pt"),
+    )
+    assert (determinism.a, determinism.b) == expected
+
+
 def test_record_terminal_result_counts_model_winner_by_game() -> None:
     stats = benchmark_checkpoints.MatchupStats.empty()
     assignment = torch.tensor([0, 0, 1, 1])
@@ -152,7 +246,7 @@ def test_checkpoint_config_path_rejects_missing_config(tmp_path: Path) -> None:
         benchmark_checkpoints._checkpoint_config_path(checkpoint_path)
 
 
-def test_actions_for_assignments_uses_checkpoint_autocast_context(
+def test_actions_for_checkpoints_uses_checkpoint_autocast_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeModel:
@@ -182,7 +276,7 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context(
 
         def observation_for_spec(
             self,
-            obs_spec: benchmark_checkpoints.ObsConfig,
+            obs_spec: ObsConfig,
             action_spec: ActionPureConfig,
         ) -> ObsBatch:
             self.observed_specs.append((obs_spec.obs_spec, action_spec.action_spec))
@@ -204,7 +298,7 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context(
 
         def decode_actions(
             self,
-            actions: benchmark_checkpoints.ActionBundle,
+            actions: ActionBundle,
             *,
             action_spec: ActionPureConfig,
         ) -> DecodedLaunchActions:
@@ -242,19 +336,21 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context(
     env = FakeEnv()
     assignments = torch.tensor([[0, 1, 0, 1]])
 
-    actions = benchmark_checkpoints._actions_for_assignments(
+    actions, _hidden_a, _hidden_b = benchmark_checkpoints._actions_for_checkpoints(
         env,
         assignments,
-        model_a=FakeModel(launch_value=True, ship_value=3),
-        model_b=FakeModel(launch_value=False, ship_value=7),
-        obs_spec_a=EntityBasedConfig(),
-        obs_spec_b=EntityBasedConfig(),
-        action_spec_a=ActionPureConfig(max_per_planet_launches=1),
-        action_spec_b=ActionPureConfig(max_per_planet_launches=1),
-        config_a=Namespace(dtype="bfloat16"),
-        config_b=Namespace(dtype="float32"),
+        checkpoint_a=_loaded_checkpoint(
+            FakeModel(launch_value=True, ship_value=3),
+            dtype="bfloat16",
+        ),
+        checkpoint_b=_loaded_checkpoint(
+            FakeModel(launch_value=False, ship_value=7),
+            dtype="float32",
+        ),
+        hidden_a=None,
+        hidden_b=None,
         device=torch.device("cpu"),
-        deterministic=True,
+        determinism=benchmark_checkpoints.CheckpointDeterminism(a=True, b=True),
     )
 
     assert env.observed_specs == [
@@ -270,7 +366,7 @@ def test_actions_for_assignments_uses_checkpoint_autocast_context(
     assert actions.ships[0, :, 0].tolist() == [3, 0, 3, 0]
 
 
-def test_actions_for_assignments_uses_each_checkpoint_action_spec(
+def test_actions_for_checkpoints_uses_each_checkpoint_action_spec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeEnv:
@@ -280,8 +376,8 @@ def test_actions_for_assignments_uses_each_checkpoint_action_spec(
 
         def observation_for_spec(
             self,
-            obs_spec: benchmark_checkpoints.ObsConfig,
-            action_spec: benchmark_checkpoints.ActionConfig,
+            obs_spec: ObsConfig,
+            action_spec: ActionConfig,
         ) -> ObsBatch:
             self.observed_specs.append((obs_spec.obs_spec, action_spec.action_spec))
             if isinstance(action_spec, ActionDiscreteTargetsConfig):
@@ -314,9 +410,9 @@ def test_actions_for_assignments_uses_each_checkpoint_action_spec(
 
         def decode_actions(
             self,
-            actions: benchmark_checkpoints.ActionBundle,  # noqa: ARG002
+            actions: ActionBundle,  # noqa: ARG002
             *,
-            action_spec: benchmark_checkpoints.ActionConfig,
+            action_spec: ActionConfig,
         ) -> DecodedLaunchActions:
             self.decoded_specs.append(action_spec.action_spec)
             valid = torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool)
@@ -369,19 +465,26 @@ def test_actions_for_assignments_uses_each_checkpoint_action_spec(
     )
     env = FakeEnv()
 
-    actions = benchmark_checkpoints._actions_for_assignments(
+    actions, _hidden_a, _hidden_b = benchmark_checkpoints._actions_for_checkpoints(
         env,
         torch.tensor([[0, 1, 0, 1]]),
-        model_a=FakeModel(),
-        model_b=FakeModel(),
-        obs_spec_a=EntityBasedConfig(max_entities=128),
-        obs_spec_b=EntityBasedExtV1Config(max_entities=256, ship_count_one_hot_max=5),
-        action_spec_a=ActionPureConfig(max_per_planet_launches=1),
-        action_spec_b=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
-        config_a=Namespace(dtype="float32"),
-        config_b=Namespace(dtype="float32"),
+        checkpoint_a=_loaded_checkpoint(
+            FakeModel(),
+            obs_spec=EntityBasedConfig(max_entities=128),
+            action_spec=ActionPureConfig(max_per_planet_launches=1),
+        ),
+        checkpoint_b=_loaded_checkpoint(
+            FakeModel(),
+            obs_spec=EntityBasedExtV1Config(
+                max_entities=256,
+                ship_count_one_hot_max=5,
+            ),
+            action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+        ),
+        hidden_a=None,
+        hidden_b=None,
         device=torch.device("cpu"),
-        deterministic=True,
+        determinism=benchmark_checkpoints.CheckpointDeterminism(a=True, b=True),
     )
 
     assert env.observed_specs == [
@@ -392,7 +495,7 @@ def test_actions_for_assignments_uses_each_checkpoint_action_spec(
     assert actions.ships[0, :, 0].tolist() == [3, 7, 3, 7]
 
 
-def test_actions_for_assignments_and_hidden_returns_next_hidden_state(
+def test_actions_for_checkpoints_returns_next_hidden_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeModel:
@@ -425,7 +528,7 @@ def test_actions_for_assignments_and_hidden_returns_next_hidden_state(
     class FakeEnv:
         def observation_for_spec(
             self,
-            obs_spec: benchmark_checkpoints.ObsConfig,
+            obs_spec: ObsConfig,
             action_spec: ActionPureConfig,  # noqa: ARG002
         ) -> ObsBatch:
             return ObsBatch(
@@ -446,7 +549,7 @@ def test_actions_for_assignments_and_hidden_returns_next_hidden_state(
 
         def decode_actions(
             self,
-            actions: benchmark_checkpoints.ActionBundle,
+            actions: ActionBundle,
             *,
             action_spec: ActionPureConfig,  # noqa: ARG002
         ) -> DecodedLaunchActions:
@@ -476,28 +579,20 @@ def test_actions_for_assignments_and_hidden_returns_next_hidden_state(
     model_a = FakeModel(launch_value=True, initial_seen=1.0)
     model_b = FakeModel(launch_value=False, initial_seen=10.0)
 
-    actions, hidden_a, hidden_b = (
-        benchmark_checkpoints._actions_for_assignments_and_hidden(
-            FakeEnv(),
-            torch.tensor(
-                [
-                    [0, 1, 0, 1],
-                    [1, 0, 1, 0],
-                ]
-            ),
-            model_a=model_a,
-            model_b=model_b,
-            hidden_a=torch.tensor([1.0, 2.0]),
-            hidden_b=torch.tensor([3.0, 4.0]),
-            obs_spec_a=EntityBasedConfig(),
-            obs_spec_b=EntityBasedConfig(),
-            action_spec_a=ActionPureConfig(max_per_planet_launches=1),
-            action_spec_b=ActionPureConfig(max_per_planet_launches=1),
-            config_a=Namespace(dtype="float32"),
-            config_b=Namespace(dtype="float32"),
-            device=torch.device("cpu"),
-            deterministic=True,
-        )
+    actions, hidden_a, hidden_b = benchmark_checkpoints._actions_for_checkpoints(
+        FakeEnv(),
+        torch.tensor(
+            [
+                [0, 1, 0, 1],
+                [1, 0, 1, 0],
+            ]
+        ),
+        checkpoint_a=_loaded_checkpoint(model_a),
+        checkpoint_b=_loaded_checkpoint(model_b),
+        hidden_a=torch.tensor([1.0, 2.0]),
+        hidden_b=torch.tensor([3.0, 4.0]),
+        device=torch.device("cpu"),
+        determinism=benchmark_checkpoints.CheckpointDeterminism(a=True, b=True),
     )
 
     assert [hidden.tolist() for hidden in model_a.seen_hidden] == [[1.0, 2.0]]
@@ -508,6 +603,97 @@ def test_actions_for_assignments_and_hidden_returns_next_hidden_state(
         [True, False, True, False],
         [False, True, False, True],
     ]
+
+
+def test_actions_for_checkpoints_passes_per_checkpoint_deterministic_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeModel:
+        def __init__(self) -> None:
+            self.seen_deterministic: list[bool] = []
+
+        def __call__(
+            self,
+            obs: ObsBatch,
+            *,
+            deterministic: bool = False,
+        ) -> SimpleNamespace:
+            self.seen_deterministic.append(deterministic)
+            shape = (obs.global_features.shape[0], 4, ACTION_ENTITY_SLOTS, 1)
+            actions = benchmark_checkpoints.PureActions(
+                launch=torch.ones(shape, dtype=torch.bool),
+                angle=torch.zeros(shape, dtype=torch.float32),
+                ships=torch.ones(shape, dtype=torch.int64),
+            )
+            return SimpleNamespace(actions=actions, next_hidden_state=None)
+
+    class FakeEnv:
+        def observation_for_spec(
+            self,
+            obs_spec: ObsConfig,
+            action_spec: ActionPureConfig,  # noqa: ARG002
+        ) -> ObsBatch:
+            return ObsBatch(
+                planets=torch.zeros((1, 1, obs_spec.planet_channels)),
+                orbiting_planets=torch.zeros((1, 1), dtype=torch.bool),
+                fleets=torch.zeros((1, 1, obs_spec.fleet_channels)),
+                comets=torch.zeros((1, 1, obs_spec.comet_channels)),
+                entity_mask=torch.zeros((1, obs_spec.max_entities), dtype=torch.bool),
+                still_playing=torch.ones((1, 4), dtype=torch.bool),
+                global_features=torch.zeros((1, obs_spec.global_channels)),
+                action_mask=PureActionMask(
+                    can_act=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
+                    max_launch=torch.zeros(
+                        (1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64
+                    ),
+                ),
+            )
+
+        def decode_actions(
+            self,
+            actions: ActionBundle,
+            *,
+            action_spec: ActionPureConfig,  # noqa: ARG002
+        ) -> DecodedLaunchActions:
+            valid = torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool)
+            valid[:, :, 0] = actions.launch[:, :, 0, 0]
+            ships = torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
+            ships[:, :, 0] = actions.ships[:, :, 0, 0]
+            return DecodedLaunchActions(
+                valid=valid,
+                from_planet_id=torch.zeros_like(ships),
+                angle=torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.float32),
+                ships=ships,
+            )
+
+    @contextmanager
+    def fake_autocast_context(
+        cfg: Namespace,  # noqa: ARG001
+        device: torch.device,  # noqa: ARG001
+    ) -> Iterator[None]:
+        yield
+
+    monkeypatch.setattr(
+        benchmark_checkpoints,
+        "autocast_context",
+        fake_autocast_context,
+    )
+    model_a = FakeModel()
+    model_b = FakeModel()
+
+    benchmark_checkpoints._actions_for_checkpoints(
+        FakeEnv(),
+        torch.tensor([[0, 1, 0, 1]]),
+        checkpoint_a=_loaded_checkpoint(model_a),
+        checkpoint_b=_loaded_checkpoint(model_b),
+        hidden_a=None,
+        hidden_b=None,
+        device=torch.device("cpu"),
+        determinism=benchmark_checkpoints.CheckpointDeterminism(a=True, b=False),
+    )
+
+    assert model_a.seen_deterministic == [True]
+    assert model_b.seen_deterministic == [False]
 
 
 def test_select_decoded_actions_pads_to_larger_action_capacity() -> None:

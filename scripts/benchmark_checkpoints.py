@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,6 @@ from owl.model import BaseModelAPI, ModelHiddenState, ModelOutput, create_model
 from owl.replay import ReplayRecorder
 from owl.rl import (
     ActionBundle,
-    ActionConfig,
     ActionMask,
     DecodedLaunchActions,
     DiscreteTargetActionMask,
@@ -20,14 +20,13 @@ from owl.rl import (
     DiscreteTargetBinActionMask,
     DiscreteTargetBinActions,
     ObsBatch,
-    ObsConfig,
     PureActionMask,
     PureActions,
     VectorizedEnv,
 )
 from owl.rs import assert_release_build
 from owl.train import FullConfig, configure_torch
-from owl.train.utils import DTypeConfig, autocast_context
+from owl.train.utils import autocast_context
 from tqdm import tqdm
 
 MODEL_A = 0
@@ -41,6 +40,12 @@ class LoadedCheckpoint:
     config: FullConfig
     model: BaseModelAPI
     env_steps: int
+
+
+@dataclass(frozen=True)
+class CheckpointDeterminism:
+    a: bool
+    b: bool
 
 
 @dataclass
@@ -84,6 +89,7 @@ class BenchmarkResult:
 
 def main() -> None:
     args = _parse_args()
+    determinism = _deterministic_flags(args.deterministic)
 
     assert_release_build()
     configure_torch()
@@ -101,7 +107,7 @@ def main() -> None:
             n_games=game_counts[player_count],
             n_envs=args.n_envs,
             device=device,
-            deterministic=args.deterministic,
+            determinism=determinism,
             no_progress=args.no_progress,
             replay_games=replay_counts[player_count],
             replay_output_path=_benchmark_replay_path(args, player_count),
@@ -121,7 +127,7 @@ def run_benchmark(
     n_games: int,
     n_envs: int,
     device: torch.device,
-    deterministic: bool,
+    determinism: CheckpointDeterminism,
     no_progress: bool,
     replay_games: int,
     replay_output_path: Path | None,
@@ -151,7 +157,8 @@ def run_benchmark(
                 "checkpoint_b": str(checkpoint_b.path),
                 "checkpoint_a_env_steps": checkpoint_a.env_steps,
                 "checkpoint_b_env_steps": checkpoint_b.env_steps,
-                "deterministic": deterministic,
+                "deterministic_a": determinism.a,
+                "deterministic_b": determinism.b,
             },
             rng=replay_rng,
             split_files=True,
@@ -194,21 +201,15 @@ def run_benchmark(
     started_at = time.perf_counter()
     try:
         while games < n_games:
-            actions, hidden_a, hidden_b = _actions_for_assignments_and_hidden(
+            actions, hidden_a, hidden_b = _actions_for_checkpoints(
                 env,
                 assignments,
-                model_a=checkpoint_a.model,
-                model_b=checkpoint_b.model,
+                checkpoint_a=checkpoint_a,
+                checkpoint_b=checkpoint_b,
                 hidden_a=hidden_a,
                 hidden_b=hidden_b,
-                obs_spec_a=checkpoint_a.config.env.obs_spec,
-                obs_spec_b=checkpoint_b.config.env.obs_spec,
-                action_spec_a=checkpoint_a.config.env.action_spec,
-                action_spec_b=checkpoint_b.config.env.action_spec,
-                config_a=checkpoint_a.config.rl,
-                config_b=checkpoint_b.config.rl,
                 device=device,
-                deterministic=deterministic,
+                determinism=determinism,
             )
             obs, rewards, dones, _episode_metrics = env.step_decoded_actions(actions)
             hidden_a = checkpoint_a.model.reset_hidden_state(hidden_a, dones)
@@ -304,76 +305,37 @@ def _checkpoint_config_path(checkpoint_path: Path) -> Path:
 
 
 @torch.inference_mode()
-def _actions_for_assignments(
+def _actions_for_checkpoints(
     env: VectorizedEnv,
     assignments: torch.Tensor,
     *,
-    model_a: BaseModelAPI,
-    model_b: BaseModelAPI,
-    obs_spec_a: ObsConfig,
-    obs_spec_b: ObsConfig,
-    action_spec_a: ActionConfig,
-    action_spec_b: ActionConfig,
-    config_a: DTypeConfig,
-    config_b: DTypeConfig,
-    device: torch.device,
-    deterministic: bool,
-) -> DecodedLaunchActions:
-    actions, _hidden_a, _hidden_b = _actions_for_assignments_and_hidden(
-        env,
-        assignments,
-        model_a=model_a,
-        model_b=model_b,
-        hidden_a=None,
-        hidden_b=None,
-        obs_spec_a=obs_spec_a,
-        obs_spec_b=obs_spec_b,
-        action_spec_a=action_spec_a,
-        action_spec_b=action_spec_b,
-        config_a=config_a,
-        config_b=config_b,
-        device=device,
-        deterministic=deterministic,
-    )
-    return actions
-
-
-@torch.inference_mode()
-def _actions_for_assignments_and_hidden(
-    env: VectorizedEnv,
-    assignments: torch.Tensor,
-    *,
-    model_a: BaseModelAPI,
-    model_b: BaseModelAPI,
+    checkpoint_a: LoadedCheckpoint,
+    checkpoint_b: LoadedCheckpoint,
     hidden_a: ModelHiddenState | None,
     hidden_b: ModelHiddenState | None,
-    obs_spec_a: ObsConfig,
-    obs_spec_b: ObsConfig,
-    action_spec_a: ActionConfig,
-    action_spec_b: ActionConfig,
-    config_a: DTypeConfig,
-    config_b: DTypeConfig,
     device: torch.device,
-    deterministic: bool,
+    determinism: CheckpointDeterminism,
 ) -> tuple[DecodedLaunchActions, ModelHiddenState | None, ModelHiddenState | None]:
+    obs_spec_a = checkpoint_a.config.env.obs_spec
+    obs_spec_b = checkpoint_b.config.env.obs_spec
+    action_spec_a = checkpoint_a.config.env.action_spec
+    action_spec_b = checkpoint_b.config.env.action_spec
     obs_a = env.observation_for_spec(obs_spec_a, action_spec_a)
     obs_b = env.observation_for_spec(obs_spec_b, action_spec_b)
-    device_obs_a = _obs_to_device(obs_a, device)
-    device_obs_b = _obs_to_device(obs_b, device)
-    with autocast_context(config_a, device):
-        output_a = _model_output_for_assignment(
-            model_a,
-            device_obs_a,
-            deterministic=deterministic,
-            hidden_state=hidden_a,
-        )
-    with autocast_context(config_b, device):
-        output_b = _model_output_for_assignment(
-            model_b,
-            device_obs_b,
-            deterministic=deterministic,
-            hidden_state=hidden_b,
-        )
+    output_a = _checkpoint_output(
+        checkpoint_a,
+        obs_a,
+        device=device,
+        deterministic=determinism.a,
+        hidden_state=hidden_a,
+    )
+    output_b = _checkpoint_output(
+        checkpoint_b,
+        obs_b,
+        device=device,
+        deterministic=determinism.b,
+        hidden_state=hidden_b,
+    )
     decoded_a = env.decode_actions(
         _model_actions_to_cpu(output_a.actions),
         action_spec=action_spec_a,
@@ -389,16 +351,23 @@ def _actions_for_assignments_and_hidden(
     )
 
 
-def _model_output_for_assignment(
-    model: BaseModelAPI,
+def _checkpoint_output(
+    checkpoint: LoadedCheckpoint,
     obs: ObsBatch,
     *,
+    device: torch.device,
     deterministic: bool,
     hidden_state: ModelHiddenState | None,
 ) -> ModelOutput:
-    if hidden_state is None:
-        return model(obs, deterministic=deterministic)
-    return model(obs, deterministic=deterministic, hidden_state=hidden_state)
+    device_obs = _obs_to_device(obs, device)
+    with autocast_context(checkpoint.config.rl, device):
+        if hidden_state is None:
+            return checkpoint.model(device_obs, deterministic=deterministic)
+        return checkpoint.model(
+            device_obs,
+            deterministic=deterministic,
+            hidden_state=hidden_state,
+        )
 
 
 def _obs_to_device(obs: ObsBatch, device: torch.device) -> ObsBatch:
@@ -665,9 +634,16 @@ def _parse_args() -> argparse.Namespace:
         help="Torch device for model inference.",
     )
     parser.add_argument(
+        "-d",
         "--deterministic",
-        action="store_true",
-        help="Use deterministic policy actions instead of sampling.",
+        nargs="?",
+        choices=("both", "a", "b"),
+        const="both",
+        default="none",
+        help=(
+            "Use deterministic policy actions instead of sampling. Pass without "
+            "a value for both checkpoints, or pass 'a'/'b' for one checkpoint."
+        ),
     )
     parser.add_argument(
         "--no-progress",
@@ -689,9 +665,37 @@ def _parse_args() -> argparse.Namespace:
         default=Path("replays/benchmark_checkpoints"),
         help="Directory for benchmark replay JSONL files.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(_normalize_deterministic_args(sys.argv[1:]))
     _validate_args(args)
     return args
+
+
+def _normalize_deterministic_args(argv: list[str]) -> list[str]:
+    normalized: list[str] = []
+    deterministic_modes = {"a", "b", "both"}
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg in ("-d", "--deterministic") and (
+            index + 1 == len(argv) or argv[index + 1] not in deterministic_modes
+        ):
+            normalized.append("--deterministic=both")
+        else:
+            normalized.append(arg)
+        index += 1
+    return normalized
+
+
+def _deterministic_flags(mode: str) -> CheckpointDeterminism:
+    if mode == "none":
+        return CheckpointDeterminism(a=False, b=False)
+    if mode == "both":
+        return CheckpointDeterminism(a=True, b=True)
+    if mode == "a":
+        return CheckpointDeterminism(a=True, b=False)
+    if mode == "b":
+        return CheckpointDeterminism(a=False, b=True)
+    raise ValueError(f"unknown deterministic mode: {mode}")
 
 
 def _validate_args(args: argparse.Namespace) -> None:

@@ -20,6 +20,8 @@
 
 - Run `just py-prepare` / `just rs-prepare` after any `python` / `rust` code edits, respectively. This handles formatting, linting, static type-checking, and tests.
 - Run `just prepare` before creating or recommending a commit or PR.
+- Leave touched code in better shape than you found it, while keeping cleanup
+  scoped to the task at hand.
 - Add dependencies with `uv add` / `cargo add`; don't edit `.toml` or `.lock` files directly when adding dependencies.
 - Keep `Cargo.lock` and `uv.lock` tracked. Update lockfiles with package-manager
   commands, not manual edits.
