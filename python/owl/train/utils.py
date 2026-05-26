@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from contextlib import AbstractContextManager, nullcontext
 from typing import Literal, Protocol, assert_never
 
@@ -38,9 +39,17 @@ class ModelCompileConfig(Protocol):
 
 
 def configure_torch() -> None:
-    torch.backends.fp32_precision = "tf32"  # type: ignore[attr-defined]
-    torch.backends.cuda.matmul.fp32_precision = "tf32"
-    torch.backends.cudnn.conv.fp32_precision = "tf32"  # type: ignore[attr-defined]
+    # PyTorch 2.9 Inductor still reads the legacy matmul allow_tf32 flag during
+    # lowering. Mixing the new fp32_precision setters with that read raises at
+    # compile time, so keep this on one API family until Inductor moves over.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Please use the new API settings to control TF32 behavior.*",
+            category=UserWarning,
+        )
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
 
 

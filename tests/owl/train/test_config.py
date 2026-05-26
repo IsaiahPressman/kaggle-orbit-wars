@@ -10,6 +10,7 @@ from owl.train.utils import (
     autocast_context,
     configure_model_compile,
     configure_model_for_training_dtype,
+    configure_torch,
 )
 
 _REPO_ROOT = Path(__file__).parents[3]
@@ -279,6 +280,14 @@ def test_full_config_accepts_single_launch_training_actions() -> None:
     )
 
     assert config.env.action_spec.max_per_planet_launches == 1
+
+
+def test_configure_torch_uses_legacy_tf32_flags_for_inductor() -> None:
+    configure_torch()
+
+    assert torch.backends.cuda.matmul.allow_tf32
+    assert torch.backends.cudnn.allow_tf32
+    assert torch.backends.cudnn.benchmark
 
 
 def test_configure_model_for_float8_training_converts_eligible_linear_layers() -> None:

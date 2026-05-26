@@ -111,10 +111,10 @@ class PPOConfig(BaseConfig):
     normalize_advantages: bool = False
     eval_replay_games: int = Field(default=0, ge=0)
     compile_mode: CompileMode | None = None
-    dtype: _TrainingDType = "float32"
-    fp8_recipe: _Float8Recipe = "rowwise"
     model_compile: _ModelCompileTarget = "mlp"
     model_compile_mode: _ModelCompileMode = "max-autotune-no-cudagraphs"
+    dtype: _TrainingDType = "float32"
+    fp8_recipe: _Float8Recipe = "rowwise"
 
 
 @dataclass(frozen=True)
