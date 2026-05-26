@@ -311,6 +311,30 @@ def test_configure_model_for_float8_training_converts_eligible_linear_layers() -
     assert any(isinstance(module, Float8Linear) for module in model.modules())
     assert not isinstance(model.static_planet_proj.input, Float8Linear)
     assert not isinstance(model.critic_head.out, Float8Linear)
+    block = model.blocks[0]
+
+    def assert_uses_high_precision_grad_weight(module: Float8Linear) -> None:
+        assert (
+            module.config.cast_config_input_for_grad_weight.scaling_type.value
+            == "disabled"
+        )
+        assert (
+            module.config.cast_config_grad_output_for_grad_weight.scaling_type.value
+            == "disabled"
+        )
+
+    assert isinstance(block.attn.q, Float8Linear)
+    assert isinstance(block.attn.k, Float8Linear)
+    assert isinstance(block.attn.v, Float8Linear)
+    assert isinstance(block.attn.out, Float8Linear)
+    assert isinstance(block.mlp.up, Float8Linear)
+    assert isinstance(block.mlp.down, Float8Linear)
+    assert_uses_high_precision_grad_weight(block.attn.q)
+    assert_uses_high_precision_grad_weight(block.attn.k)
+    assert_uses_high_precision_grad_weight(block.attn.v)
+    assert_uses_high_precision_grad_weight(block.attn.out)
+    assert_uses_high_precision_grad_weight(block.mlp.up)
+    assert_uses_high_precision_grad_weight(block.mlp.down)
 
 
 def test_configure_model_for_float8_training_rejects_cpu() -> None:

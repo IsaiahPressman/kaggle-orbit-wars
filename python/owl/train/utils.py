@@ -88,10 +88,17 @@ def configure_model_for_training_dtype(
     excluded_linear_ids = _fp8_excluded_linear_module_ids(model)
     converted_names: list[str] = []
 
-    def module_filter_fn(module: nn.Module, fqn: str) -> bool:
+    def module_filter_fn(
+        module: nn.Module,
+        fqn: str,
+        *,
+        uses_packed_token_rows: bool,
+    ) -> bool:
         if not isinstance(module, nn.Linear):
             return False
         if id(module) in excluded_linear_ids:
+            return False
+        if _linear_uses_packed_token_rows(fqn) != uses_packed_token_rows:
             return False
         if not _linear_shape_supports_fp8(module):
             return False
@@ -101,7 +108,20 @@ def configure_model_for_training_dtype(
     torchao_float8(
         model,
         config=Float8LinearConfig.from_recipe_name(cfg.fp8_recipe),
-        module_filter_fn=module_filter_fn,
+        module_filter_fn=lambda module, fqn: module_filter_fn(
+            module,
+            fqn,
+            uses_packed_token_rows=False,
+        ),
+    )
+    torchao_float8(
+        model,
+        config=Float8LinearConfig.from_recipe_name("rowwise_with_gw_hp"),
+        module_filter_fn=lambda module, fqn: module_filter_fn(
+            module,
+            fqn,
+            uses_packed_token_rows=True,
+        ),
     )
     if not converted_names:
         raise RuntimeError(
@@ -121,6 +141,12 @@ def _fp8_excluded_linear_module_ids(model: BaseModelAPI) -> set[int]:
 
 def _linear_shape_supports_fp8(module: nn.Linear) -> bool:
     return module.in_features % 16 == 0 and module.out_features % 16 == 0
+
+
+def _linear_uses_packed_token_rows(name: str) -> bool:
+    return name.startswith("blocks.") or (
+        name.startswith("player_count_adapters.") and ".blocks." in name
+    )
 
 
 def configure_model_compile(model: BaseModelAPI, cfg: ModelCompileConfig) -> int:

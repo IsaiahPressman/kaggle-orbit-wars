@@ -169,8 +169,11 @@ Set `rl.dtype=float8` to enable FP8 training with torchao. FP8 mode converts
 eligible internal `torch.nn.Linear` layers to torchao `Float8Linear` before
 optimizer construction, keeps model input/output projections and shape-ineligible
 linears in higher precision, and still wraps forward/eval calls in bfloat16
-autocast. FP8 requires CUDA. The default `rl.fp8_recipe: rowwise` is the
-stability-oriented starting point; use `tensorwise` for the fastest recipe, or
+autocast. Transformer-block linears always use torchao's `rowwise_with_gw_hp`
+recipe so the packed varlen token row count does not need to be divisible by 16
+for the weight-gradient matmul. FP8 requires CUDA. The default
+`rl.fp8_recipe: rowwise` is the stability-oriented starting point for the other
+eligible linears; use `tensorwise` for the fastest recipe, or
 `rowwise_with_gw_hp` if gradient-weight numerics need a more conservative path.
 For example:
 
