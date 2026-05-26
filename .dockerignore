@@ -10,6 +10,7 @@ __pycache__/
 build/
 dist/
 wheels/
+artifacts/
 target/
 python/owl/rs*.so
 

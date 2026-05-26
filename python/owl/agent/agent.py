@@ -287,7 +287,7 @@ class Agent:
         entity_count: int,
         peak_entities: int,
         remaining_overage_time: float,
-        fallback_triggered: bool = False,
+        fallback_triggered: bool,
     ) -> None:
         values = ",".join(f"{value:.3f}" for value in player_values)
         prefix = "fallback triggered - " if fallback_triggered else ""

@@ -102,9 +102,8 @@ The boolean `orbiting_planets` mask selects the orbiting-planet projection for
 orbiting rows and the static-planet projection for all other planet rows.
 Planet, comet, and fleet tokens are concatenated on the entity axis in that
 order. This keeps the action-origin hidden states contiguous as the first
-`ACTION_ENTITY_SLOTS` tokens. The global projection is added to every entity
-token and is also appended as its own global-feature token. The full trunk
-sequence is:
+`ACTION_ENTITY_SLOTS` tokens. The global projection is appended as its own
+global-feature token. The full trunk sequence is:
 
 ```text
 [planet tokens]

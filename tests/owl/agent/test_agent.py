@@ -838,6 +838,7 @@ def test_agent_log_prints_one_line_with_metrics(capsys) -> None:
         entity_count=3,
         peak_entities=5,
         remaining_overage_time=59.5,
+        fallback_triggered=False,
     )
 
     assert "\n" not in capsys.readouterr().out.rstrip()
