@@ -52,7 +52,12 @@ from owl.train.optimizer import (
     create_optimizer,
 )
 from owl.train.ppo import PPOCheckpointMetadata, _mean_env_metrics
-from owl.train.utils import DTypeConfig, autocast_context
+from owl.train.utils import (
+    DTypeConfig,
+    autocast_context,
+    configure_model_compile,
+    configure_model_for_training_dtype,
+)
 from tqdm import tqdm
 
 MODEL_CURRENT = 0
@@ -147,6 +152,12 @@ def main() -> None:
         ).to(device)
         if isinstance(launch, FreshLaunch):
             model.reset_parameters()
+        fp8_linear_layers = configure_model_for_training_dtype(
+            model,
+            cfg.rl,
+            device=device,
+        )
+        compiled_model_modules = configure_model_compile(model, cfg.rl)
 
         trainable_parameters = _trainable_parameter_count(model)
         optimizer = create_optimizer(model, cfg.optimizer)
@@ -200,6 +211,8 @@ def main() -> None:
             resume_run_id=resume_run_id,
             last_best_model=last_best_model,
             trainable_parameters=trainable_parameters,
+            fp8_linear_layers=fp8_linear_layers,
+            compiled_model_modules=compiled_model_modules,
         )
 
 
@@ -217,6 +230,8 @@ def _run_training_session(
     resume_run_id: str | None = None,
     last_best_model: BaseModelAPI | None = None,
     trainable_parameters: int | None = None,
+    fp8_linear_layers: int = 0,
+    compiled_model_modules: int = 0,
 ) -> None:
     if not distributed.is_main_process:
         _run_training_session_worker(
@@ -237,6 +252,10 @@ def _run_training_session(
     ) as logger:
         if trainable_parameters is not None:
             logger.set_summary("trainable_parameters", trainable_parameters)
+        if fp8_linear_layers > 0:
+            logger.set_summary("fp8_linear_layers", fp8_linear_layers)
+        if compiled_model_modules > 0:
+            logger.set_summary("compiled_model_modules", compiled_model_modules)
         env_steps = _run_training_loop(
             trainer=trainer,
             logger=logger,
