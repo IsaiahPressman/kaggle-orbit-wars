@@ -38,7 +38,13 @@ from owl.rl import (
 )
 
 from .checkpoint_quantization import dequantize_model_state_dict
-from .kaggle_observation import KaggleObservation
+from .kaggle_observation import (
+    FLEET_ID_INDEX,
+    FLEET_OWNER_INDEX,
+    FLEET_SHIPS_INDEX,
+    PLANET_OWNER_INDEX,
+    KaggleObservation,
+)
 
 AGENT_CONFIG_PATH = Path(__file__).with_name("agent_config.yaml")
 
@@ -347,28 +353,51 @@ def _filter_fleets_by_min_size(
     obs: dict[str, Any],
     min_fleet_size: int,
 ) -> dict[str, Any]:
-    planet_owners = {planet[1] for planet in obs["planets"] if planet[1] >= 0}
+    planet_owners = {
+        planet[PLANET_OWNER_INDEX]
+        for planet in obs["planets"]
+        if planet[PLANET_OWNER_INDEX] >= 0
+    }
     fleets = obs["fleets"]
-    kept_fleet_ids = {fleet[0] for fleet in fleets if fleet[5] >= min_fleet_size}
+    kept_fleet_ids = {
+        fleet[FLEET_ID_INDEX]
+        for fleet in fleets
+        if fleet[FLEET_SHIPS_INDEX] >= min_fleet_size
+    }
     kept_fleet_owners = {
-        fleet[1] for fleet in fleets if fleet[0] in kept_fleet_ids and fleet[1] >= 0
+        fleet[FLEET_OWNER_INDEX]
+        for fleet in fleets
+        if fleet[FLEET_ID_INDEX] in kept_fleet_ids and fleet[FLEET_OWNER_INDEX] >= 0
     }
     stranded_fleets_by_owner: dict[int, Any] = {}
     for fleet in fleets:
-        owner = fleet[1]
+        owner = fleet[FLEET_OWNER_INDEX]
         if (
             owner < 0
             or owner in planet_owners
             or owner in kept_fleet_owners
-            or fleet[5] >= min_fleet_size
+            or fleet[FLEET_SHIPS_INDEX] >= min_fleet_size
         ):
             continue
         previous = stranded_fleets_by_owner.get(owner)
-        if previous is None or (fleet[5], -fleet[0]) > (previous[5], -previous[0]):
+        if previous is None or (
+            fleet[FLEET_SHIPS_INDEX],
+            -fleet[FLEET_ID_INDEX],
+        ) > (
+            previous[FLEET_SHIPS_INDEX],
+            -previous[FLEET_ID_INDEX],
+        ):
             stranded_fleets_by_owner[owner] = fleet
 
-    kept_fleet_ids.update(fleet[0] for fleet in stranded_fleets_by_owner.values())
-    return {**obs, "fleets": [fleet for fleet in fleets if fleet[0] in kept_fleet_ids]}
+    kept_fleet_ids.update(
+        fleet[FLEET_ID_INDEX] for fleet in stranded_fleets_by_owner.values()
+    )
+    return {
+        **obs,
+        "fleets": [
+            fleet for fleet in fleets if fleet[FLEET_ID_INDEX] in kept_fleet_ids
+        ],
+    }
 
 
 def _observation_player_count(observation: KaggleObservation) -> int:

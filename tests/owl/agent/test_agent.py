@@ -21,6 +21,22 @@ from owl.agent.checkpoint_quantization import (
     FP4_E2M1FN_X2_SCALED_BLOCK16,
     quantize_model_state_dict,
 )
+from owl.agent.kaggle_observation import (
+    FLEET_ANGLE_INDEX,
+    FLEET_FROM_PLANET_ID_INDEX,
+    FLEET_ID_INDEX,
+    FLEET_OWNER_INDEX,
+    FLEET_SHIPS_INDEX,
+    FLEET_X_INDEX,
+    FLEET_Y_INDEX,
+    PLANET_ID_INDEX,
+    PLANET_OWNER_INDEX,
+    PLANET_PRODUCTION_INDEX,
+    PLANET_RADIUS_INDEX,
+    PLANET_SHIPS_INDEX,
+    PLANET_X_INDEX,
+    PLANET_Y_INDEX,
+)
 from owl.model import (
     RecurrentTransformerV1Config,
     StatelessTransformerV1Config,
@@ -52,6 +68,44 @@ from owl.train.config import FullConfig
 _ASSERT_AGENT_IMPORT_ISOLATED = Path(__file__).with_name(
     "assert_agent_import_isolated.py"
 )
+_REPO_ROOT = Path(__file__).parents[3]
+
+
+def test_kaggle_row_index_constants_match_rust_observation_parser() -> None:
+    source = (_REPO_ROOT / "src/rl/obs_spec.rs").read_text(encoding="utf-8")
+
+    assert _rust_row_index(source, "planet id") == PLANET_ID_INDEX
+    assert _rust_row_index(source, "planet owner") == PLANET_OWNER_INDEX
+    assert _rust_row_index(source, "planet x") == PLANET_X_INDEX
+    assert _rust_row_index(source, "planet y") == PLANET_Y_INDEX
+    assert _rust_row_index(source, "planet radius") == PLANET_RADIUS_INDEX
+    assert _rust_row_index(source, "planet ships") == PLANET_SHIPS_INDEX
+    assert _rust_production_row_index(source) == PLANET_PRODUCTION_INDEX
+    assert _rust_row_index(source, "fleet id") == FLEET_ID_INDEX
+    assert _rust_row_index(source, "fleet owner") == FLEET_OWNER_INDEX
+    assert _rust_row_index(source, "fleet x") == FLEET_X_INDEX
+    assert _rust_row_index(source, "fleet y") == FLEET_Y_INDEX
+    assert _rust_row_index(source, "fleet angle") == FLEET_ANGLE_INDEX
+    assert (
+        _rust_row_index(
+            source,
+            "fleet from_planet_id",
+        )
+        == FLEET_FROM_PLANET_ID_INDEX
+    )
+    assert _rust_row_index(source, "fleet ships") == FLEET_SHIPS_INDEX
+
+
+def _rust_row_index(source: str, field_label: str) -> int:
+    match = re.search(rf'row\[(\d+)\], "{re.escape(field_label)}"', source)
+    assert match is not None
+    return int(match.group(1))
+
+
+def _rust_production_row_index(source: str) -> int:
+    match = re.search(r"production: finite_production\(row\[(\d+)\]\)", source)
+    assert match is not None
+    return int(match.group(1))
 
 
 def test_agent_import_does_not_load_training_modules() -> None:
@@ -522,16 +576,28 @@ def test_filter_fleets_keeps_largest_small_fleet_for_stranded_players() -> None:
         [1, 2, 75.0, 50.0, 2.0, 10, 3],
     ]
     obs["fleets"] = [
-        [10, 0, 10.0, 10.0, 0.0, 5, 1],
-        [11, 1, 20.0, 20.0, 0.0, 4, 2],
-        [12, 1, 30.0, 30.0, 0.0, 5, 3],
-        [13, 2, 40.0, 40.0, 0.0, 3, 4],
-        [14, 3, 50.0, 50.0, 0.0, 8, 5],
+        [10, 0, 10.0, 10.0, 0.0, 9, 5],
+        [11, 1, 20.0, 20.0, 0.0, 8, 4],
+        [12, 1, 30.0, 30.0, 0.0, 7, 5],
+        [13, 2, 40.0, 40.0, 0.0, 9, 3],
+        [14, 3, 50.0, 50.0, 0.0, 0, 5],
     ]
 
     filtered = _filter_fleets_by_min_size(obs, 6)
 
-    assert [fleet[0] for fleet in filtered["fleets"]] == [12, 14]
+    assert [fleet[FLEET_ID_INDEX] for fleet in filtered["fleets"]] == [12, 14]
+
+
+def test_filter_fleets_uses_ship_count_not_from_planet_id() -> None:
+    obs = _raw_observation()
+    obs["fleets"] = [
+        [10, 0, 10.0, 10.0, 0.0, 0, 20],
+        [11, 0, 20.0, 20.0, 0.0, 20, 1],
+    ]
+
+    filtered = _filter_fleets_by_min_size(obs, 6)
+
+    assert [fleet[FLEET_ID_INDEX] for fleet in filtered["fleets"]] == [10]
 
 
 @pytest.mark.parametrize(
@@ -574,7 +640,7 @@ def test_agent_act_filters_fleets_below_configured_min_before_encoding(
     ) -> ObsBatch:
         assert obs_spec == agent.checkpoint_config.env.obs_spec
         assert action_spec == agent.checkpoint_config.env.action_spec
-        assert [fleet[0] for fleet in obs["fleets"]] == expected_fleet_ids
+        assert [fleet[FLEET_ID_INDEX] for fleet in obs["fleets"]] == expected_fleet_ids
         batch = _obs_batch(max_fleets=0)
         batch.entity_mask[0, 0] = True
         return batch
@@ -620,7 +686,7 @@ def test_agent_act_filters_fleets_below_configured_min_before_encoding(
         *,
         action_spec: ActionPureConfig,
     ) -> list[list[float]]:
-        assert [fleet[0] for fleet in obs["fleets"]] == expected_fleet_ids
+        assert [fleet[FLEET_ID_INDEX] for fleet in obs["fleets"]] == expected_fleet_ids
         assert player == 0
         assert actions.launch.shape == (
             1,
@@ -642,9 +708,9 @@ def test_agent_act_filters_fleets_below_configured_min_before_encoding(
         [1, 1, 75.0, 50.0, 2.0, 10, 3],
     ]
     raw_observation["fleets"] = [
-        [10, 0, 10.0, 10.0, 0.0, 5, 1],
-        [11, 1, 20.0, 20.0, 0.0, 6, 2],
-        [12, 2, 30.0, 30.0, 0.0, 8, 3],
+        [10, 0, 10.0, 10.0, 0.0, 9, 1],
+        [11, 1, 20.0, 20.0, 0.0, 0, 6],
+        [12, 2, 30.0, 30.0, 0.0, 1, 8],
     ]
 
     actions = agent.act(KaggleObservation.model_validate(raw_observation))
