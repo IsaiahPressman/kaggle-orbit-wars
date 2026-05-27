@@ -119,6 +119,7 @@ def main() -> None:
             launch.config_path,
             overrides=launch.overrides if isinstance(launch, FreshLaunch) else None,
         )
+        cfg = _resolve_teacher_init_path(cfg, launch.config_path)
 
         if isinstance(launch, FreshLaunch):
             cfg = _with_runtime_gpus(cfg, distributed.world_size)
@@ -152,6 +153,19 @@ def main() -> None:
         if isinstance(launch, FreshLaunch):
             model.reset_parameters()
         compiled_model_modules = configure_model_compile(model, cfg.rl)
+        teacher_init_model = (
+            None
+            if cfg.rl.teacher_init is None
+            else _load_teacher_init_model(
+                cfg.rl.teacher_init,
+                student_cfg=cfg,
+                device=device,
+            )
+        )
+        fixed_teacher_model = (
+            teacher_init_model if cfg.rl.teacher_mode == "fixed" else None
+        )
+        last_best_model = _initial_last_best_model(cfg, teacher_init_model)
 
         trainable_parameters = _trainable_parameter_count(model)
         optimizer = create_optimizer(model, cfg.optimizer)
@@ -164,11 +178,12 @@ def main() -> None:
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
             device=device,
+            teacher_model=fixed_teacher_model,
+            teacher_active=fixed_teacher_model is not None,
             distributed_context=distributed,
         )
         start_env_steps = 0
         resume_run_id: str | None = None
-        last_best_model: BaseModelAPI | None = None
         if isinstance(launch, ResumeLaunch):
             checkpoint_metadata = trainer.load_checkpoint(launch.checkpoint_path)
             resume_run_id = _resume_wandb_run_id(checkpoint_metadata, args.log_mode)
@@ -184,11 +199,19 @@ def main() -> None:
                 resume_run_id=resume_run_id,
                 checkpoint_path=launch.last_best_checkpoint_path,
             )
+            if cfg.rl.teacher_mode == "last_best":
+                trainer.set_teacher_model(last_best_model, active=True)
         elif launch.load_model_weights_path is not None:
             checkpoint_metadata = trainer.load_model_weights(
                 launch.load_model_weights_path
             )
             start_env_steps = checkpoint_metadata.env_steps
+        if (
+            isinstance(launch, FreshLaunch)
+            and cfg.rl.teacher_mode == "last_best"
+            and last_best_model is not None
+        ):
+            trainer.set_teacher_model(last_best_model, active=True)
 
         env_steps_per_iteration = cfg.rl.horizon * env.n_envs * distributed.world_size
         max_runtime_seconds = _max_runtime_seconds(args.max_runtime_hours)
@@ -371,7 +394,9 @@ def _run_training_loop(
                     >= LAST_BEST_WIN_RATE_THRESHOLD
                 )
                 if replace_last_best:
-                    _copy_model_state(last_best_model, unwrap_model(trainer.model))
+                    last_best_model = _clone_eval_model(unwrap_model(trainer.model))
+                    if cfg.rl.teacher_mode == "last_best":
+                        trainer.set_teacher_model(last_best_model, active=True)
                     if dist_ctx.is_main_process:
                         trainer.write_checkpoint(
                             run_dir / "checkpoint_last_best.pt",
@@ -605,6 +630,89 @@ def _create_model(
     return create_model(config, obs_spec=obs_spec, action_spec=action_spec)
 
 
+def _resolve_teacher_init_path(cfg: FullConfig, config_path: Path) -> FullConfig:
+    teacher_init = cfg.rl.teacher_init
+    if teacher_init is None or teacher_init.is_absolute():
+        return cfg
+    return cfg.model_copy(
+        update={
+            "rl": cfg.rl.model_copy(
+                update={"teacher_init": (config_path.parent / teacher_init).resolve()},
+            ),
+        },
+    )
+
+
+def _load_teacher_init_model(
+    checkpoint_path: Path,
+    *,
+    student_cfg: FullConfig,
+    device: torch.device,
+) -> BaseModelAPI:
+    checkpoint_path = checkpoint_path.resolve()
+    if not checkpoint_path.is_file():
+        raise ValueError(f"teacher_init checkpoint does not exist: {checkpoint_path}")
+    teacher_cfg = FullConfig.from_file(_checkpoint_config_path(checkpoint_path))
+    _validate_teacher_specs(
+        teacher_cfg,
+        student_cfg=student_cfg,
+        checkpoint_path=checkpoint_path,
+    )
+    teacher_model = _create_model(
+        teacher_cfg.model,
+        obs_spec=teacher_cfg.env.obs_spec,
+        action_spec=teacher_cfg.env.action_spec,
+    ).to(device)
+    _load_model_weights(teacher_model, path=checkpoint_path, device=device)
+    teacher_model.eval()
+    return teacher_model
+
+
+def _initial_last_best_model(
+    cfg: FullConfig,
+    teacher_init_model: BaseModelAPI | None,
+) -> BaseModelAPI | None:
+    if teacher_init_model is None:
+        return None
+    if cfg.rl.checkpoint_freq is None and cfg.rl.teacher_mode != "last_best":
+        return None
+    return _clone_eval_model(teacher_init_model)
+
+
+def _checkpoint_config_path(checkpoint_path: Path) -> Path:
+    config_path = checkpoint_path.parent / "config.yaml"
+    if not config_path.is_file():
+        raise ValueError(f"expected checkpoint config at {config_path}")
+    return config_path
+
+
+def _validate_teacher_specs(
+    teacher_cfg: FullConfig,
+    *,
+    student_cfg: FullConfig,
+    checkpoint_path: Path,
+) -> None:
+    if teacher_cfg.env.obs_spec != student_cfg.env.obs_spec:
+        raise ValueError(f"teacher obs_spec must match student: {checkpoint_path}")
+    if teacher_cfg.env.action_spec != student_cfg.env.action_spec:
+        raise ValueError(f"teacher action_spec must match student: {checkpoint_path}")
+
+
+def _load_model_weights(
+    model: BaseModelAPI,
+    *,
+    path: Path,
+    device: torch.device,
+) -> None:
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    if not isinstance(checkpoint, dict):
+        raise ValueError(f"checkpoint must be a dictionary: {path}")
+    if "model" not in checkpoint:
+        raise ValueError(f"checkpoint is missing model weights: {path}")
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+
+
 def _with_runtime_gpus(cfg: FullConfig, world_size: int) -> FullConfig:
     return cfg.model_copy(
         update={
@@ -710,11 +818,6 @@ def _clone_eval_model(model: BaseModelAPI) -> BaseModelAPI:
     last_best_model = copy.deepcopy(model)
     last_best_model.eval()
     return last_best_model
-
-
-def _copy_model_state(dst: BaseModelAPI, src: BaseModelAPI) -> None:
-    dst.load_state_dict(src.state_dict())
-    dst.eval()
 
 
 def _resume_wandb_run_id(

@@ -330,6 +330,28 @@ class RecurrentTransformerV1(StatelessTransformerV1):
         values, _winner_probabilities = self._value_from_encoded(encoded, obs)
         return values
 
+    def _encode_distillation_observations(
+        self,
+        obs: ObsBatch,
+        *,
+        sequence_shape: tuple[int, int] | None,
+        hidden_state: ModelHiddenState | None,
+        dones: torch.Tensor | None,
+    ) -> tuple[EncodedObservations, ModelHiddenState | None]:
+        if hidden_state is None:
+            batch_size = (
+                obs.planets.shape[0] if sequence_shape is None else sequence_shape[0]
+            )
+            state = self.initial_hidden_state(batch_size, device=obs.planets.device)
+        else:
+            state = _require_recurrent_hidden_state(hidden_state)
+        return self._encode_sequence(
+            obs,
+            hidden_state=state,
+            sequence_shape=sequence_shape,
+            dones=dones,
+        )
+
     def _initial_or_validate_hidden_state(
         self,
         obs: ObsBatch,

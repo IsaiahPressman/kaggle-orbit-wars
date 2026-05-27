@@ -46,6 +46,7 @@ from owl.model.base import (
     BaseModelAPI,
     InputLayer,
     ModelActionEntropies,
+    ModelActionKLDivergences,
     ModelActionLogProbs,
     ModelActions,
     ModelEvaluation,
@@ -699,6 +700,68 @@ class StatelessTransformerV1(BaseModelAPI):
             winner_probabilities=winner_probabilities,
         )
 
+    def evaluate_action_kl(
+        self,
+        obs: ObsBatch,
+        teacher: BaseModelAPI,
+        actions: ModelActions,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+        teacher_hidden_state: ModelHiddenState | None = None,
+        dones: torch.Tensor | None = None,
+    ) -> ModelActionKLDivergences:
+        if hidden_state is not None:
+            raise ValueError("StatelessTransformerV1 does not accept hidden_state")
+        if not isinstance(teacher, StatelessTransformerV1):
+            raise ValueError(
+                "teacher must be a StatelessTransformerV1-compatible model"
+            )
+        flat_obs, sequence_shape = _flatten_obs_time_if_sequence(obs)
+        flat_actions = _flatten_actions_time_if_sequence(actions, sequence_shape)
+        student_encoded, _student_next_state = self._encode_distillation_observations(
+            flat_obs,
+            sequence_shape=sequence_shape,
+            hidden_state=None,
+            dones=dones,
+        )
+        teacher_encoded, _teacher_next_state = (
+            teacher._encode_distillation_observations(
+                flat_obs,
+                sequence_shape=sequence_shape,
+                hidden_state=teacher_hidden_state,
+                dones=dones,
+            )
+        )
+        kl = self._actor_kl_divergence(
+            teacher,
+            student_encoded,
+            teacher_encoded,
+            flat_obs,
+            flat_obs.action_mask,
+            flat_actions,
+        )
+        if sequence_shape is not None:
+            return _unflatten_kl_divergences(kl, sequence_shape)
+        return kl
+
+    def _encode_distillation_observations(
+        self,
+        obs: ObsBatch,
+        *,
+        sequence_shape: tuple[int, int] | None,
+        hidden_state: ModelHiddenState | None,
+        dones: torch.Tensor | None,
+    ) -> tuple[EncodedObservations, ModelHiddenState | None]:
+        if hidden_state is not None:
+            raise ValueError("StatelessTransformerV1 does not accept hidden_state")
+        if dones is not None and sequence_shape is None:
+            raise ValueError("dones require sequence-shaped observations")
+        encoded = self.encode_observations(
+            obs,
+            action_entity_slots=_action_entity_slots_from_mask(obs.action_mask),
+        )
+        return encoded, None
+
     def compute_value(
         self,
         obs: ObsBatch,
@@ -1095,6 +1158,139 @@ class StatelessTransformerV1(BaseModelAPI):
             _merge_entropies_by_batch(batch_size, entropy_parts),
         )
 
+    def _actor_kl_divergence(
+        self,
+        teacher: StatelessTransformerV1,
+        student_encoded: EncodedObservations,
+        teacher_encoded: EncodedObservations,
+        obs: ObsBatch,
+        action_mask: ActionMask,
+        actions: ActionBundle,
+        *,
+        student_adapter: PlayerCountAdapter | None = None,
+        teacher_adapter: PlayerCountAdapter | None = None,
+    ) -> ModelActionKLDivergences:
+        if (
+            student_adapter is None
+            and teacher_adapter is None
+            and (self.player_count_adapters or teacher.player_count_adapters)
+        ):
+            return self._actor_kl_divergence_by_player_count(
+                teacher,
+                student_encoded,
+                teacher_encoded,
+                obs,
+                actions,
+            )
+
+        student_actor = self._actor_module(student_adapter)
+        teacher_actor = teacher._actor_module(teacher_adapter)
+        if isinstance(student_actor, DiscreteTargetBinsActor):
+            if not isinstance(teacher_actor, DiscreteTargetBinsActor):
+                raise ValueError("teacher action actor must match student actor")
+            if not isinstance(action_mask, DiscreteTargetBinActionMask):
+                raise RuntimeError(
+                    "discrete_target_bins actor requires a target-bin action mask"
+                )
+            if not isinstance(actions, DiscreteTargetBinActions):
+                raise ValueError(
+                    "discrete_target_bins actor requires DiscreteTargetBinActions"
+                )
+            return student_actor.kl_divergence(
+                self._discrete_actor_inputs(
+                    student_encoded, obs, adapter=student_adapter
+                ),
+                teacher_actor,
+                teacher._discrete_actor_inputs(
+                    teacher_encoded,
+                    obs,
+                    adapter=teacher_adapter,
+                ),
+                action_mask.can_act,
+                actions,
+            )
+        if isinstance(student_actor, DiscreteTargetsActor):
+            if not isinstance(teacher_actor, DiscreteTargetsActor):
+                raise ValueError("teacher action actor must match student actor")
+            if not isinstance(action_mask, DiscreteTargetActionMask):
+                raise RuntimeError(
+                    "discrete_targets actor requires a discrete-target action mask"
+                )
+            if not isinstance(actions, DiscreteTargetActions):
+                raise ValueError(
+                    "discrete_targets actor requires DiscreteTargetActions"
+                )
+            return student_actor.kl_divergence(
+                self._discrete_actor_inputs(
+                    student_encoded, obs, adapter=student_adapter
+                ),
+                teacher_actor,
+                teacher._discrete_actor_inputs(
+                    teacher_encoded,
+                    obs,
+                    adapter=teacher_adapter,
+                ),
+                action_mask.can_act,
+                action_mask.max_launch,
+                actions,
+                min_fleet_size=self.action_spec.min_fleet_size,
+            )
+        if not isinstance(teacher_actor, PureActor):
+            raise ValueError("teacher action actor must match student actor")
+        if not isinstance(action_mask, PureActionMask):
+            raise RuntimeError("pure actor requires a pure action mask")
+        if not isinstance(actions, PureActions):
+            raise ValueError("pure actor requires PureActions")
+        return student_actor.kl_divergence(
+            self._pure_actor_inputs(student_encoded, adapter=student_adapter),
+            teacher_actor,
+            teacher._pure_actor_inputs(teacher_encoded, adapter=teacher_adapter),
+            action_mask.can_act,
+            action_mask.max_launch,
+            actions,
+            min_fleet_size=self.action_spec.min_fleet_size,
+        )
+
+    def _actor_kl_divergence_by_player_count(
+        self,
+        teacher: StatelessTransformerV1,
+        student_encoded: EncodedObservations,
+        teacher_encoded: EncodedObservations,
+        obs: ObsBatch,
+        actions: ActionBundle,
+    ) -> ModelActionKLDivergences:
+        kl_parts: list[tuple[torch.Tensor, ModelActionKLDivergences]] = []
+        for player_count, batch_indices in self._player_count_index_groups(
+            obs.still_playing
+        ):
+            student_adapter = (
+                self._player_count_adapter(player_count)
+                if self.player_count_adapters
+                else None
+            )
+            teacher_adapter = (
+                teacher._player_count_adapter(player_count)
+                if teacher.player_count_adapters
+                else None
+            )
+            indexed_obs = _index_obs_batch(obs, batch_indices)
+            indexed_actions = _map_action_bundle(
+                actions,
+                _batch_selector(batch_indices),
+            )
+            kl = self._actor_kl_divergence(
+                teacher,
+                _index_encoded_observations(student_encoded, batch_indices),
+                _index_encoded_observations(teacher_encoded, batch_indices),
+                indexed_obs,
+                indexed_obs.action_mask,
+                indexed_actions,
+                student_adapter=student_adapter,
+                teacher_adapter=teacher_adapter,
+            )
+            kl_parts.append((batch_indices, kl))
+        return _merge_kl_divergences_by_batch(obs.still_playing.shape[0], kl_parts)
+
 
 class PlayerCountAdapter(nn.Module):
     def __init__(
@@ -1257,6 +1453,50 @@ def _map_action_bundle(
     assert_never(actions)
 
 
+def _flatten_obs_time_if_sequence(
+    obs: ObsBatch,
+) -> tuple[ObsBatch, tuple[int, int] | None]:
+    if obs.planets.ndim == 3:
+        return obs, None
+    if obs.planets.ndim != 4:
+        raise ValueError("obs planets must be batch-major or segment-major")
+    batch_size, time_steps = obs.planets.shape[:2]
+    return (
+        ObsBatch(
+            planets=_flatten_time_tensor(obs.planets),
+            orbiting_planets=_flatten_time_tensor(obs.orbiting_planets),
+            fleets=_flatten_time_tensor(obs.fleets),
+            comets=_flatten_time_tensor(obs.comets),
+            entity_mask=_flatten_time_tensor(obs.entity_mask),
+            still_playing=_flatten_time_tensor(obs.still_playing),
+            global_features=_flatten_time_tensor(obs.global_features),
+            action_mask=_map_action_mask(obs.action_mask, _flatten_time_tensor),
+        ),
+        (batch_size, time_steps),
+    )
+
+
+def _flatten_actions_time_if_sequence(
+    actions: ModelActions,
+    sequence_shape: tuple[int, int] | None,
+) -> ModelActions:
+    if sequence_shape is None:
+        return actions
+    return _map_action_bundle(actions, _flatten_time_tensor)
+
+
+def _flatten_time_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.reshape(tensor.shape[0] * tensor.shape[1], *tensor.shape[2:])
+
+
+def _unflatten_time_tensor(
+    tensor: torch.Tensor,
+    sequence_shape: tuple[int, int],
+) -> torch.Tensor:
+    batch_size, time_steps = sequence_shape
+    return tensor.reshape(batch_size, time_steps, *tensor.shape[1:])
+
+
 def _merge_tensors_by_batch(
     batch_size: int,
     parts: list[tuple[torch.Tensor, torch.Tensor]],
@@ -1415,6 +1655,73 @@ def _merge_entropies_by_batch(
         ),
         target=target,
         components=components,
+    )
+
+
+def _merge_kl_divergences_by_batch(
+    batch_size: int,
+    parts: list[tuple[torch.Tensor, ModelActionKLDivergences]],
+) -> ModelActionKLDivergences:
+    def component_getter(
+        name: str,
+    ) -> Callable[[ModelActionKLDivergences], torch.Tensor]:
+        def get_component(kl: ModelActionKLDivergences) -> torch.Tensor:
+            return kl.components[name]
+
+        return get_component
+
+    first = parts[0][1]
+    target = _merge_optional_tensor_field_by_batch(
+        batch_size,
+        parts,
+        lambda kl: kl.target,
+        name="target KL",
+    )
+    components = {
+        name: _merge_tensor_field_by_batch(
+            batch_size,
+            parts,
+            component_getter(name),
+        )
+        for name in first.components
+    }
+    return ModelActionKLDivergences(
+        launch=_merge_tensor_field_by_batch(
+            batch_size,
+            parts,
+            lambda kl: kl.launch,
+        ),
+        event=_merge_tensor_field_by_batch(batch_size, parts, lambda kl: kl.event),
+        per_player_entity=_merge_tensor_field_by_batch(
+            batch_size,
+            parts,
+            lambda kl: kl.per_player_entity,
+        ),
+        target=target,
+        components=components,
+    )
+
+
+def _unflatten_kl_divergences(
+    kl: ModelActionKLDivergences,
+    sequence_shape: tuple[int, int],
+) -> ModelActionKLDivergences:
+    return ModelActionKLDivergences(
+        launch=_unflatten_time_tensor(kl.launch, sequence_shape),
+        target=(
+            None
+            if kl.target is None
+            else _unflatten_time_tensor(kl.target, sequence_shape)
+        ),
+        event=_unflatten_time_tensor(kl.event, sequence_shape),
+        per_player_entity=_unflatten_time_tensor(
+            kl.per_player_entity,
+            sequence_shape,
+        ),
+        components={
+            name: _unflatten_time_tensor(component, sequence_shape)
+            for name, component in kl.components.items()
+        },
     )
 
 

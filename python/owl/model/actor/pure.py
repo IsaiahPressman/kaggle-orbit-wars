@@ -13,18 +13,22 @@ from owl.model.actor.common import (
     FeedForward,
     OutputProjectionMLP,
     binary_entropy_from_logits,
+    binary_kl_from_logits,
+    categorical_kl_from_logits,
     sample_launch,
 )
 from owl.model.actor.config import ActorPureConfig
 from owl.model.actor.logistic_mixture import (
     discretized_logistic_mixture_log_prob,
     log_interpolate,
+    logistic_mixture_kl_components,
     sample_discretized_logistic_mixture,
     truncated_logistic_mixture_entropy,
 )
 from owl.model.base import (
     InputLayer,
     ModelActionEntropies,
+    ModelActionKLDivergences,
     ModelActionLogProbs,
 )
 from owl.rl import OUTER_PLAYER_SLOTS, PureActions
@@ -364,6 +368,93 @@ class PureActor(nn.Module):
                     "event": event_entropy,
                 },
             ),
+        )
+
+    def kl_divergence(
+        self,
+        actor_inputs: PureActorInputs,
+        teacher_actor: PureActor,
+        teacher_inputs: PureActorInputs,
+        can_act: torch.Tensor,
+        max_launch: torch.Tensor,
+        actions: PureActions,
+        *,
+        min_fleet_size: int,
+    ) -> ModelActionKLDivergences:
+        _require_actions_shape(
+            actions,
+            (
+                actor_inputs.source.shape[0],
+                OUTER_PLAYER_SLOTS,
+                actor_inputs.source.shape[2],
+                self.max_per_planet_launches,
+            ),
+        )
+        active = can_act & (max_launch >= min_fleet_size)
+        launch = actions.launch[..., 0]
+        angle = actions.angle[..., 0]
+        event_mask = active & launch
+        safe_angle = torch.where(event_mask, angle, torch.zeros_like(angle))
+
+        student_angle_params = self._angle_params(actor_inputs)
+        teacher_angle_params = teacher_actor._angle_params(teacher_inputs)
+        student_params = self._policy_params_for_angle(
+            student_angle_params,
+            actor_inputs,
+            max_launch,
+            safe_angle,
+            min_fleet_size=min_fleet_size,
+        )
+        teacher_params = teacher_actor._policy_params_for_angle(
+            teacher_angle_params,
+            teacher_inputs,
+            max_launch,
+            safe_angle,
+            min_fleet_size=min_fleet_size,
+        )
+        launch_kl = binary_kl_from_logits(
+            teacher_params.continue_logits,
+            student_params.continue_logits,
+        )
+        launch_kl = torch.where(active, launch_kl, torch.zeros_like(launch_kl))
+        angle_kl = angle_policy_kl(teacher_params, student_params)
+        size_mixture_kl, size_logistic_kl = logistic_mixture_kl_components(
+            teacher_params.size_mix_logits,
+            teacher_params.size_mu,
+            teacher_params.size_scale,
+            student_params.size_mix_logits,
+            student_params.size_mu,
+            student_params.size_scale,
+            max_launch,
+            min_fleet_size=min_fleet_size,
+        )
+        size_kl = size_mixture_kl + size_logistic_kl
+        angle_kl = torch.where(event_mask, angle_kl, torch.zeros_like(angle_kl))
+        size_kl = torch.where(event_mask, size_kl, torch.zeros_like(size_kl))
+        size_mixture_kl = torch.where(
+            event_mask,
+            size_mixture_kl,
+            torch.zeros_like(size_mixture_kl),
+        )
+        size_logistic_kl = torch.where(
+            event_mask,
+            size_logistic_kl,
+            torch.zeros_like(size_logistic_kl),
+        )
+        event_kl = angle_kl + size_kl
+        per_player_entity_kl = launch_kl + event_kl
+        return ModelActionKLDivergences(
+            launch=launch_kl.unsqueeze(-1),
+            event=event_kl.unsqueeze(-1),
+            per_player_entity=per_player_entity_kl,
+            components={
+                "launch": launch_kl,
+                "angle": angle_kl,
+                "fleet_size_full": size_kl,
+                "fleet_size_mixture": size_mixture_kl,
+                "fleet_size_logistic": size_logistic_kl,
+                "event": event_kl,
+            },
         )
 
     def _angle_params(
@@ -784,6 +875,88 @@ def event_entropy_from_params(
         size_entropy,
         size_mixture_entropy,
         size_logistic_entropy,
+    )
+
+
+def angle_policy_kl(
+    teacher_params: PolicyParams,
+    student_params: PolicyParams,
+) -> torch.Tensor:
+    if (
+        teacher_params.angle_mix_logits.shape[-1]
+        != student_params.angle_mix_logits.shape[-1]
+    ):
+        return angle_policy_grid_kl(teacher_params, student_params)
+    mask = torch.ones_like(teacher_params.angle_mix_logits, dtype=torch.bool)
+    mixture_kl = categorical_kl_from_logits(
+        teacher_params.angle_mix_logits,
+        student_params.angle_mix_logits,
+        mask,
+    )
+    teacher_mix_prob = torch.softmax(teacher_params.angle_mix_logits.float(), dim=-1)
+    component_kl = von_mises_kl(
+        teacher_params.loc,
+        teacher_params.kappa,
+        student_params.loc,
+        student_params.kappa,
+    )
+    return mixture_kl + (teacher_mix_prob * component_kl).sum(dim=-1)
+
+
+def angle_policy_grid_kl(
+    teacher_params: PolicyParams,
+    student_params: PolicyParams,
+    *,
+    samples: int = 64,
+) -> torch.Tensor:
+    theta = torch.linspace(
+        0.0,
+        2.0 * math.pi,
+        samples + 1,
+        device=teacher_params.loc.device,
+        dtype=teacher_params.loc.dtype,
+    )[:-1]
+    view_shape = (*((1,) * teacher_params.loc.ndim), samples)
+    theta = theta.view(view_shape)
+    teacher_log_prob = torch.logsumexp(
+        teacher_params.angle_log_w.unsqueeze(-2)
+        + von_mises_log_prob(
+            theta,
+            teacher_params.loc.unsqueeze(-2),
+            teacher_params.kappa.unsqueeze(-2),
+        ),
+        dim=-1,
+    )
+    student_log_w = F.log_softmax(student_params.angle_mix_logits.float(), dim=-1)
+    student_log_prob = torch.logsumexp(
+        student_log_w.unsqueeze(-2)
+        + von_mises_log_prob(
+            theta,
+            student_params.loc.unsqueeze(-2),
+            student_params.kappa.unsqueeze(-2),
+        ),
+        dim=-1,
+    )
+    teacher_prob = teacher_log_prob.exp()
+    return (teacher_prob * (teacher_log_prob - student_log_prob)).mean(dim=-1) * (
+        2.0 * math.pi
+    )
+
+
+def von_mises_kl(
+    teacher_loc: torch.Tensor,
+    teacher_kappa: torch.Tensor,
+    student_loc: torch.Tensor,
+    student_kappa: torch.Tensor,
+) -> torch.Tensor:
+    teacher_log_i0 = torch.log(torch.special.i0e(teacher_kappa)) + teacher_kappa
+    student_log_i0 = torch.log(torch.special.i0e(student_kappa)) + student_kappa
+    teacher_a = torch.special.i1e(teacher_kappa) / torch.special.i0e(teacher_kappa)
+    return (
+        student_log_i0
+        - teacher_log_i0
+        + teacher_kappa * teacher_a
+        - student_kappa * teacher_a * torch.cos(teacher_loc - student_loc)
     )
 
 

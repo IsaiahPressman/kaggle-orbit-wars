@@ -92,3 +92,31 @@ def sample_launch(
 def binary_entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
     probability = torch.sigmoid(logits)
     return F.binary_cross_entropy_with_logits(logits, probability, reduction="none")
+
+
+def binary_kl_from_logits(
+    teacher_logits: torch.Tensor,
+    student_logits: torch.Tensor,
+) -> torch.Tensor:
+    teacher_logits = teacher_logits.float()
+    student_logits = student_logits.float()
+    teacher_prob = torch.sigmoid(teacher_logits)
+    teacher_log_prob = F.logsigmoid(teacher_logits)
+    teacher_log_not_prob = F.logsigmoid(-teacher_logits)
+    student_log_prob = F.logsigmoid(student_logits)
+    student_log_not_prob = F.logsigmoid(-student_logits)
+    return teacher_prob * (teacher_log_prob - student_log_prob) + (
+        1.0 - teacher_prob
+    ) * (teacher_log_not_prob - student_log_not_prob)
+
+
+def categorical_kl_from_logits(
+    teacher_logits: torch.Tensor,
+    student_logits: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    teacher_log_prob = F.log_softmax(teacher_logits.float(), dim=-1)
+    student_log_prob = F.log_softmax(student_logits.float(), dim=-1)
+    teacher_prob = teacher_log_prob.exp()
+    kl = teacher_prob * (teacher_log_prob - student_log_prob)
+    return kl.masked_fill(~mask, 0.0).sum(dim=-1)

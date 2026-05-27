@@ -144,6 +144,7 @@ class _FakeTrainer:
         self.iterations = 0
         self.model = torch.nn.Linear(1, 1)
         self.device = torch.device("cpu")
+        self.teacher_updates: list[tuple[torch.nn.Module | None, bool]] = []
 
     def train_iteration(self) -> dict[str, float]:
         self.iterations += 1
@@ -159,6 +160,14 @@ class _FakeTrainer:
         wandb_run_id: str | None = None,
     ) -> None:
         self.checkpoints.append((path, env_steps, wandb_run_id))
+
+    def set_teacher_model(
+        self,
+        teacher_model: torch.nn.Module | None,
+        *,
+        active: bool,
+    ) -> None:
+        self.teacher_updates.append((teacher_model, active))
 
 
 def test_next_periodic_checkpoint_step_handles_crossed_cadence() -> None:
@@ -327,6 +336,21 @@ def test_resolve_fresh_launch_accepts_load_model_weights(tmp_path: Path) -> None
         overrides={"rl.horizon": 8},
         load_model_weights_path=checkpoint_path,
     )
+
+
+def test_resolve_teacher_init_path_uses_config_directory(tmp_path: Path) -> None:
+    cfg = _full_config()
+    cfg = cfg.model_copy(
+        update={
+            "rl": cfg.rl.model_copy(
+                update={"teacher_init": Path("teachers/checkpoint.pt")}
+            )
+        }
+    )
+
+    resolved = run_ppo._resolve_teacher_init_path(cfg, tmp_path / "config.yaml")
+
+    assert resolved.rl.teacher_init == (tmp_path / "teachers/checkpoint.pt").resolve()
 
 
 def test_resolve_resume_launch_prefers_final_checkpoint(tmp_path: Path) -> None:
@@ -1185,6 +1209,43 @@ def test_run_training_loop_saves_last_best_when_eval_clears_threshold(
         (tmp_path / "checkpoint_last_best.pt", 1000, None),
     ]
     assert logger.logged[-1][0]["eval/game_length_mean"] == 12.0
+
+
+def test_run_training_loop_activates_last_best_teacher_after_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _full_config(checkpoint_freq=1000)
+    cfg = cfg.model_copy(
+        update={"rl": cfg.rl.model_copy(update={"teacher_mode": "last_best"})}
+    )
+    trainer = _FakeTrainer()
+    logger = _FakeLogger()
+
+    def fake_evaluate_against_last_best(**_kwargs: object) -> dict[str, float]:
+        return {"eval/win_rate_against_last_best": 0.7}
+
+    monkeypatch.setattr(
+        run_ppo,
+        "_evaluate_against_last_best",
+        fake_evaluate_against_last_best,
+    )
+
+    run_ppo._run_training_loop(
+        trainer=trainer,
+        logger=logger,
+        run_dir=tmp_path,
+        cfg=cfg,
+        env_steps_per_iteration=1000,
+        max_env_steps=1000,
+        max_runtime_seconds=None,
+        dist_ctx=DistributedContext.single_process_cpu(),
+    )
+
+    assert len(trainer.teacher_updates) == 1
+    teacher_model, active = trainer.teacher_updates[0]
+    assert teacher_model is not None
+    assert active
 
 
 def test_run_training_session_sets_trainable_parameter_summary(

@@ -55,13 +55,10 @@ def test_ppo_config_validates_with_pydantic() -> None:
     assert PPOConfig(model_compile_mode="default").model_compile_mode == "default"
     assert PPOConfig(eval_replay_games=1).eval_replay_games == 1
     assert PPOConfig(teacher_mode="last_best").teacher_mode == "last_best"
-    assert (
-        PPOConfig(
-            teacher_mode="fixed",
-            teacher_init=Path("teacher/checkpoint.pt"),
-        ).teacher_init
-        == Path("teacher/checkpoint.pt")
-    )
+    assert PPOConfig(
+        teacher_mode="fixed",
+        teacher_init=Path("teacher/checkpoint.pt"),
+    ).teacher_init == Path("teacher/checkpoint.pt")
     assert PPOConfig(ppo_clip_mode="per_entity").ppo_clip_mode == "per_entity"
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):

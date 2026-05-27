@@ -9,7 +9,11 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributions import Categorical
 
-from owl.model.actor.common import FeedForward, OutputProjectionMLP
+from owl.model.actor.common import (
+    FeedForward,
+    OutputProjectionMLP,
+    categorical_kl_from_logits,
+)
 from owl.model.actor.config import ActorDiscreteTargetBinsConfig
 from owl.model.actor.discrete_targets import (
     DiscreteActorInputs,
@@ -19,6 +23,7 @@ from owl.model.actor.discrete_targets import (
 from owl.model.base import (
     InputLayer,
     ModelActionEntropies,
+    ModelActionKLDivergences,
     ModelActionLogProbs,
 )
 from owl.rl import OUTER_PLAYER_SLOTS, DiscreteTargetBinActions
@@ -192,6 +197,79 @@ class DiscreteTargetBinsActor(nn.Module):
                     "fleet_bin": fleet_bin_entropy,
                 },
             ),
+        )
+
+    def kl_divergence(
+        self,
+        actor_inputs: DiscreteActorInputs,
+        teacher_actor: DiscreteTargetBinsActor,
+        teacher_inputs: DiscreteActorInputs,
+        can_act: torch.Tensor,
+        actions: DiscreteTargetBinActions,
+    ) -> ModelActionKLDivergences:
+        if self.config.n_bins != teacher_actor.config.n_bins:
+            raise ValueError(
+                "teacher and student target-bin actors must use same n_bins"
+            )
+        _require_discrete_target_bin_actions_shape(
+            actions,
+            (
+                actor_inputs.source.shape[0],
+                OUTER_PLAYER_SLOTS,
+                actor_inputs.source.shape[2],
+            ),
+        )
+        student_selection = self._selection_params(actor_inputs, can_act)
+        teacher_selection = teacher_actor._selection_params(teacher_inputs, can_act)
+        source_active = can_act.flatten(start_dim=-2).any(dim=-1)
+        target_valid = can_act.any(dim=-1)
+        target_kl = categorical_kl_from_logits(
+            teacher_selection.target_logits,
+            student_selection.target_logits,
+            target_valid,
+        )
+        target_kl = torch.where(
+            source_active,
+            target_kl,
+            torch.zeros_like(target_kl),
+        )
+        target_index = actions.target.clamp(
+            0, student_selection.target_values.shape[2] - 1
+        )
+        student_params = self._policy_params_for_selected_target(
+            student_selection,
+            actor_inputs.source,
+            can_act,
+            target_index,
+        )
+        teacher_params = teacher_actor._policy_params_for_selected_target(
+            teacher_selection,
+            teacher_inputs.source,
+            can_act,
+            target_index.clamp(0, teacher_selection.target_values.shape[2] - 1),
+        )
+        selected_bin_mask = gather_selected_bin_mask(can_act, target_index)
+        fleet_bin_kl = categorical_kl_from_logits(
+            teacher_params.fleet_bin_logits,
+            student_params.fleet_bin_logits,
+            selected_bin_mask,
+        )
+        fleet_bin_kl = torch.where(
+            source_active,
+            fleet_bin_kl,
+            torch.zeros_like(fleet_bin_kl),
+        )
+        per_player_entity_kl = target_kl + fleet_bin_kl
+        zeros = torch.zeros_like(per_player_entity_kl)
+        return ModelActionKLDivergences(
+            launch=zeros.unsqueeze(-1),
+            target=target_kl.unsqueeze(-1),
+            event=fleet_bin_kl.unsqueeze(-1),
+            per_player_entity=per_player_entity_kl,
+            components={
+                "target": target_kl,
+                "fleet_bin": fleet_bin_kl,
+            },
         )
 
     def _selection_params(

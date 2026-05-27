@@ -2213,6 +2213,46 @@ def test_discrete_targets_target_token_mode_appends_zero_pairwise_bias() -> None
     assert selection.target_logits[0, 0, 1].eq(0).all()
 
 
+def test_discrete_targets_teacher_kl_skips_target_and_size_for_no_launch() -> None:
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(),
+        embed_dim=16,
+        depth=1,
+        n_heads=4,
+    )
+    student = DiscreteTargetsActor(config.actor, transformer_config=config)
+    teacher = DiscreteTargetsActor(config.actor, transformer_config=config)
+    _zero_target_attention(student)
+    _zero_target_attention(teacher)
+    slot_input = torch.zeros((1, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    can_act = torch.zeros(
+        (1, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
+        dtype=torch.bool,
+    )
+    can_act[0, 0, 0, 1] = True
+    max_launch = torch.zeros((1, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
+    max_launch[0, 0, 0] = 10
+    actions = DiscreteTargetActions(
+        launch=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.bool),
+        target=torch.ones((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
+        ships=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
+    )
+
+    kl = student.kl_divergence(
+        _discrete_actor_inputs(slot_input),
+        teacher,
+        _discrete_actor_inputs(slot_input),
+        can_act,
+        max_launch,
+        actions,
+        min_fleet_size=6,
+    )
+
+    assert torch.allclose(kl.target, torch.zeros_like(kl.target))
+    assert torch.allclose(kl.event, torch.zeros_like(kl.event))
+    assert torch.allclose(kl.per_player_entity, kl.launch.squeeze(-1))
+
+
 def test_discrete_target_bins_actor_adds_pairwise_bias_before_masking() -> None:
     config = StatelessTransformerV1Config(
         actor=ActorDiscreteTargetBinsConfig(n_bins=3),

@@ -139,6 +139,43 @@ def test_ppo_loss_uses_policy_and_value_weights_separately() -> None:
     )
 
 
+def test_ppo_loss_adds_teacher_terms_with_separate_weights() -> None:
+    shape = (1, 2)
+    policy_weight = torch.tensor([[1.0, 0.0]])
+    value_weight = torch.ones(shape)
+    teacher_kl = torch.tensor([[0.25, 99.0]])
+    teacher_value_loss_values = torch.tensor([[0.2, 0.6]])
+
+    metrics, _backward_loss = _ppo_loss(
+        new_logp=torch.zeros(shape),
+        entropy=torch.zeros(shape),
+        new_values=torch.zeros(shape),
+        old_logp=torch.zeros(shape),
+        old_values=torch.zeros(shape),
+        returns=torch.zeros(shape),
+        advantages=torch.zeros(shape),
+        policy_weight=policy_weight,
+        value_weight=value_weight,
+        teacher_kl=teacher_kl,
+        teacher_value_loss_values=teacher_value_loss_values,
+        config=PPOConfig(
+            vf_coef=0.0,
+            ent_coef=0.0,
+            teacher_kl_coef=0.5,
+            teacher_value_coef=0.25,
+        ),
+    )
+
+    assert torch.allclose(metrics.teacher_kl, torch.tensor(0.25))
+    assert torch.allclose(metrics.teacher_kl_loss, torch.tensor(0.125))
+    assert torch.allclose(
+        metrics.teacher_value_cross_entropy,
+        torch.tensor(0.4),
+    )
+    assert torch.allclose(metrics.teacher_value_loss, torch.tensor(0.1))
+    assert torch.allclose(metrics.loss, torch.tensor(0.225))
+
+
 def test_ppo_loss_uses_raw_advantages() -> None:
     new_logp = torch.log(torch.tensor([[1.1, 0.9, 9.0]]))
     old_logp = torch.zeros((1, 3))
