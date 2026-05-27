@@ -79,6 +79,14 @@ to switch to the fallback model when remaining overage time drops below that
 threshold; `null` disables fallback routing even if the fallback model is
 packaged.
 
+The Kaggle agent also filters fleets smaller than the configured
+`min_fleet_size` before observation encoding. This intentionally trades a small
+amount of board-state detail for lower inference latency, because many tiny
+fleets can increase entity count enough to trigger fallback routing. To avoid
+marking a still-alive player as gone, if a player has no current planets and
+all of their fleets are below that threshold, the agent keeps that player's
+single largest fleet in the encoded observation.
+
 ## Orbit Wars reference
 
 The Rust rules engine targets the installed `kaggle-environments` Orbit Wars

@@ -11,6 +11,7 @@ from owl.agent.agent import (
     AGENT_CONFIG_PATH,
     AgentCheckpointConfig,
     AgentConfig,
+    _filter_fleets_by_min_size,
     apply_max_entities_override,
     apply_targeting_mode_override,
     compact_entities,
@@ -514,6 +515,25 @@ def _raw_observation(*, remaining_overage_time: float = 60.0) -> dict[str, objec
     }
 
 
+def test_filter_fleets_keeps_largest_small_fleet_for_stranded_players() -> None:
+    obs = _raw_observation()
+    obs["planets"] = [
+        [0, 0, 25.0, 50.0, 2.0, 10, 3],
+        [1, 2, 75.0, 50.0, 2.0, 10, 3],
+    ]
+    obs["fleets"] = [
+        [10, 0, 10.0, 10.0, 0.0, 5, 1],
+        [11, 1, 20.0, 20.0, 0.0, 4, 2],
+        [12, 1, 30.0, 30.0, 0.0, 5, 3],
+        [13, 2, 40.0, 40.0, 0.0, 3, 4],
+        [14, 3, 50.0, 50.0, 0.0, 8, 5],
+    ]
+
+    filtered = _filter_fleets_by_min_size(obs, 6)
+
+    assert [fleet[0] for fleet in filtered["fleets"]] == [12, 14]
+
+
 @pytest.mark.parametrize(
     ("agent_min_fleet_size", "expected_fleet_ids"),
     [
@@ -617,6 +637,10 @@ def test_agent_act_filters_fleets_below_configured_min_before_encoding(
     )
     monkeypatch.setattr("owl.agent.agent.actions_to_kaggle", fake_actions_to_kaggle)
     raw_observation = _raw_observation()
+    raw_observation["planets"] = [
+        [0, 0, 25.0, 50.0, 2.0, 10, 3],
+        [1, 1, 75.0, 50.0, 2.0, 10, 3],
+    ]
     raw_observation["fleets"] = [
         [10, 0, 10.0, 10.0, 0.0, 5, 1],
         [11, 1, 20.0, 20.0, 0.0, 6, 2],
