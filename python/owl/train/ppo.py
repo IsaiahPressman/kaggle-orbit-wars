@@ -5,10 +5,10 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from time import perf_counter
-from typing import Literal, cast
+from typing import Literal, Self, cast
 
 import torch
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from owl.config import BaseConfig
 from owl.model import (
@@ -83,6 +83,7 @@ CompileMode = Literal[
     "max-autotune-no-cudagraphs",
 ]
 PPOClipMode = Literal["per_player", "per_entity"]
+TeacherMode = Literal["last_best", "fixed"]
 
 
 _OBS_TENSOR_FIELDS = tuple(
@@ -107,10 +108,20 @@ class PPOConfig(BaseConfig):
     ppo_clip_mode: PPOClipMode = "per_player"
     normalize_advantages: bool = False
     eval_replay_games: int = Field(default=0, ge=0)
+    teacher_mode: TeacherMode | None = None
+    teacher_init: Path | None = None
+    teacher_kl_coef: float = Field(default=0.005, ge=0.0)
+    teacher_value_coef: float = Field(default=0.005, ge=0.0)
     compile_mode: CompileMode | None = None
     model_compile: _ModelCompileTarget = "mlp"
     model_compile_mode: _ModelCompileMode = "max-autotune-no-cudagraphs"
     dtype: _TrainingDType = "float32"
+
+    @model_validator(mode="after")
+    def _validate_teacher_config(self) -> Self:
+        if self.teacher_mode == "fixed" and self.teacher_init is None:
+            raise ValueError("rl.teacher_init is required when rl.teacher_mode='fixed'")
+        return self
 
 
 @dataclass(frozen=True)
