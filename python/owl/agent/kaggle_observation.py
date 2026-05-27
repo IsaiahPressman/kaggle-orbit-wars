@@ -14,6 +14,22 @@ Fleet = Annotated[
 ]
 Point = Annotated[tuple[float, float], Field(min_length=2, max_length=2)]
 
+PLANET_ID_INDEX = 0
+PLANET_OWNER_INDEX = 1
+PLANET_X_INDEX = 2
+PLANET_Y_INDEX = 3
+PLANET_RADIUS_INDEX = 4
+PLANET_SHIPS_INDEX = 5
+PLANET_PRODUCTION_INDEX = 6
+
+FLEET_ID_INDEX = 0
+FLEET_OWNER_INDEX = 1
+FLEET_X_INDEX = 2
+FLEET_Y_INDEX = 3
+FLEET_ANGLE_INDEX = 4
+FLEET_FROM_PLANET_ID_INDEX = 5
+FLEET_SHIPS_INDEX = 6
+
 
 class Comet(BaseModel):
     planet_ids: list[int]

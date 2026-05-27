@@ -110,13 +110,24 @@ the requested checkpoint into a temporary file, copies that file to
 recipe quantization argument is not `fp32`, and copies `config.yaml` from the
 same directory to `models/primary/config.yaml`. If `--fallback-checkpoint` is
 provided, the fallback checkpoint and adjacent config are packaged under
-`models/fallback/` using the same fixed filenames. Unique quantization prefixes
-such as `fp4` are accepted. Set `fallback_min_overage_time` in
+`models/fallback/` using the same fixed filenames. Supported quantization
+formats include `fp8_e4m3fn`, `fp4_e2m1fn_x2_scaled_block16`, and
+`nf5_g128_lsq_policy_last_fp8`/`nf5_g128_lsq_policy_final4_fp8`; unique
+quantization prefixes such as `fp4` are accepted. Set
+`fallback_min_overage_time` in
 `python/owl/agent/agent_config.yaml` to switch to the fallback model when
 remaining overage time drops below that threshold; `null` disables fallback
 routing even when the fallback model is packaged. The image build validates
 Kaggle-targeted Rust compilation directly before artifact generation runs with
 the mounted checkpoint directory.
+
+The packaged agent filters fleets smaller than the configured `min_fleet_size`
+before encoding Kaggle observations. The tradeoff is deliberate: tiny fleets are
+usually low-impact, but enough of them can materially increase inference time
+and trigger fallback routing. The filter keeps one safeguard for player liveness:
+when a player has no current planets and all of their fleets are below the
+threshold, the agent keeps that player's largest fleet instead of dropping that
+player from the encoded state entirely.
 Use `just kaggle-image` only when you want to rebuild or validate the Kaggle
 image without creating a submission tarball.
 

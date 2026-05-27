@@ -11,6 +11,7 @@ from owl.agent.agent import (
     AGENT_CONFIG_PATH,
     AgentCheckpointConfig,
     AgentConfig,
+    _filter_fleets_by_min_size,
     apply_max_entities_override,
     apply_targeting_mode_override,
     compact_entities,
@@ -19,6 +20,22 @@ from owl.agent.agent import (
 from owl.agent.checkpoint_quantization import (
     FP4_E2M1FN_X2_SCALED_BLOCK16,
     quantize_model_state_dict,
+)
+from owl.agent.kaggle_observation import (
+    FLEET_ANGLE_INDEX,
+    FLEET_FROM_PLANET_ID_INDEX,
+    FLEET_ID_INDEX,
+    FLEET_OWNER_INDEX,
+    FLEET_SHIPS_INDEX,
+    FLEET_X_INDEX,
+    FLEET_Y_INDEX,
+    PLANET_ID_INDEX,
+    PLANET_OWNER_INDEX,
+    PLANET_PRODUCTION_INDEX,
+    PLANET_RADIUS_INDEX,
+    PLANET_SHIPS_INDEX,
+    PLANET_X_INDEX,
+    PLANET_Y_INDEX,
 )
 from owl.model import (
     RecurrentTransformerV1Config,
@@ -51,6 +68,44 @@ from owl.train.config import FullConfig
 _ASSERT_AGENT_IMPORT_ISOLATED = Path(__file__).with_name(
     "assert_agent_import_isolated.py"
 )
+_REPO_ROOT = Path(__file__).parents[3]
+
+
+def test_kaggle_row_index_constants_match_rust_observation_parser() -> None:
+    source = (_REPO_ROOT / "src/rl/obs_spec.rs").read_text(encoding="utf-8")
+
+    assert _rust_row_index(source, "planet id") == PLANET_ID_INDEX
+    assert _rust_row_index(source, "planet owner") == PLANET_OWNER_INDEX
+    assert _rust_row_index(source, "planet x") == PLANET_X_INDEX
+    assert _rust_row_index(source, "planet y") == PLANET_Y_INDEX
+    assert _rust_row_index(source, "planet radius") == PLANET_RADIUS_INDEX
+    assert _rust_row_index(source, "planet ships") == PLANET_SHIPS_INDEX
+    assert _rust_production_row_index(source) == PLANET_PRODUCTION_INDEX
+    assert _rust_row_index(source, "fleet id") == FLEET_ID_INDEX
+    assert _rust_row_index(source, "fleet owner") == FLEET_OWNER_INDEX
+    assert _rust_row_index(source, "fleet x") == FLEET_X_INDEX
+    assert _rust_row_index(source, "fleet y") == FLEET_Y_INDEX
+    assert _rust_row_index(source, "fleet angle") == FLEET_ANGLE_INDEX
+    assert (
+        _rust_row_index(
+            source,
+            "fleet from_planet_id",
+        )
+        == FLEET_FROM_PLANET_ID_INDEX
+    )
+    assert _rust_row_index(source, "fleet ships") == FLEET_SHIPS_INDEX
+
+
+def _rust_row_index(source: str, field_label: str) -> int:
+    match = re.search(rf'row\[(\d+)\], "{re.escape(field_label)}"', source)
+    assert match is not None
+    return int(match.group(1))
+
+
+def _rust_production_row_index(source: str) -> int:
+    match = re.search(r"production: finite_production\(row\[(\d+)\]\)", source)
+    assert match is not None
+    return int(match.group(1))
 
 
 def test_agent_import_does_not_load_training_modules() -> None:
@@ -70,6 +125,11 @@ def test_agent_import_does_not_load_training_modules() -> None:
 
 def test_agent_config_path_valid() -> None:
     _ = AgentConfig.from_file(AGENT_CONFIG_PATH)
+
+
+def test_agent_config_rejects_nonpositive_min_fleet_size() -> None:
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        AgentConfig(deterministic=True, min_fleet_size=0)
 
 
 def test_agent_checkpoint_config_fields_exist_on_full_config() -> None:
@@ -507,6 +567,155 @@ def _raw_observation(*, remaining_overage_time: float = 60.0) -> dict[str, objec
         "next_fleet_id": 0,
         "comets": [],
     }
+
+
+def test_filter_fleets_keeps_largest_small_fleet_for_stranded_players() -> None:
+    obs = _raw_observation()
+    obs["planets"] = [
+        [0, 0, 25.0, 50.0, 2.0, 10, 3],
+        [1, 2, 75.0, 50.0, 2.0, 10, 3],
+    ]
+    obs["fleets"] = [
+        [10, 0, 10.0, 10.0, 0.0, 9, 5],
+        [11, 1, 20.0, 20.0, 0.0, 8, 4],
+        [12, 1, 30.0, 30.0, 0.0, 7, 5],
+        [13, 2, 40.0, 40.0, 0.0, 9, 3],
+        [14, 3, 50.0, 50.0, 0.0, 0, 5],
+    ]
+
+    filtered = _filter_fleets_by_min_size(obs, 6)
+
+    assert [fleet[FLEET_ID_INDEX] for fleet in filtered["fleets"]] == [12, 14]
+
+
+def test_filter_fleets_uses_ship_count_not_from_planet_id() -> None:
+    obs = _raw_observation()
+    obs["fleets"] = [
+        [10, 0, 10.0, 10.0, 0.0, 0, 20],
+        [11, 0, 20.0, 20.0, 0.0, 20, 1],
+    ]
+
+    filtered = _filter_fleets_by_min_size(obs, 6)
+
+    assert [fleet[FLEET_ID_INDEX] for fleet in filtered["fleets"]] == [10]
+
+
+@pytest.mark.parametrize(
+    ("agent_min_fleet_size", "expected_fleet_ids"),
+    [
+        ("match", [11, 12]),
+        (8, [12]),
+    ],
+)
+def test_agent_act_filters_fleets_below_configured_min_before_encoding(
+    agent_min_fleet_size: object,
+    expected_fleet_ids: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=1, min_fleet_size=6)
+    agent = Agent.__new__(Agent)
+    agent.checkpoint_config = SimpleNamespace(
+        env=SimpleNamespace(
+            obs_spec=EntityBasedConfig(),
+            action_spec=action_spec,
+        ),
+        model=StatelessTransformerV1Config(),
+    )
+    agent.config = AgentConfig(
+        deterministic=False,
+        min_fleet_size=agent_min_fleet_size,
+    )
+    agent.device = torch.device("cpu")
+    agent.hidden_state = None
+    agent.fallback_model = None
+    agent.fallback_checkpoint_config = None
+    agent._peak_total_ms = 0
+    agent._peak_entities = 0
+
+    def fake_encode_python_observation(
+        obs: dict[str, object],
+        *,
+        obs_spec: EntityBasedConfig,
+        action_spec: ActionPureConfig,
+    ) -> ObsBatch:
+        assert obs_spec == agent.checkpoint_config.env.obs_spec
+        assert action_spec == agent.checkpoint_config.env.action_spec
+        assert [fleet[FLEET_ID_INDEX] for fleet in obs["fleets"]] == expected_fleet_ids
+        batch = _obs_batch(max_fleets=0)
+        batch.entity_mask[0, 0] = True
+        return batch
+
+    class FakeModel:
+        def initial_hidden_state(
+            self,
+            _batch_size: int,
+            *,
+            device: torch.device,  # noqa: ARG002
+        ) -> None:
+            return None
+
+        def serve(
+            self,
+            obs: ObsBatch,
+            *,
+            deterministic: bool,
+            hidden_state: object | None,
+        ) -> object:
+            assert not deterministic
+            assert hidden_state is None
+            action_shape = (
+                1,
+                4,
+                obs.action_mask.can_act.shape[2],
+                action_spec.max_per_planet_launches,
+            )
+            return SimpleNamespace(
+                actions=PureActions(
+                    launch=torch.zeros(action_shape, dtype=torch.bool),
+                    angle=torch.zeros(action_shape, dtype=torch.float32),
+                    ships=torch.zeros(action_shape, dtype=torch.int64),
+                ),
+                values=torch.tensor([[0.25, -0.5, 0.0, 0.75]]),
+                next_hidden_state=None,
+            )
+
+    def fake_actions_to_kaggle(
+        obs: dict[str, object],
+        player: int,
+        actions: PureActions,
+        *,
+        action_spec: ActionPureConfig,
+    ) -> list[list[float]]:
+        assert [fleet[FLEET_ID_INDEX] for fleet in obs["fleets"]] == expected_fleet_ids
+        assert player == 0
+        assert actions.launch.shape == (
+            1,
+            4,
+            ACTION_ENTITY_SLOTS,
+            action_spec.max_per_planet_launches,
+        )
+        return []
+
+    agent.model = FakeModel()
+    monkeypatch.setattr(
+        "owl.agent.agent.encode_python_observation",
+        fake_encode_python_observation,
+    )
+    monkeypatch.setattr("owl.agent.agent.actions_to_kaggle", fake_actions_to_kaggle)
+    raw_observation = _raw_observation()
+    raw_observation["planets"] = [
+        [0, 0, 25.0, 50.0, 2.0, 10, 3],
+        [1, 1, 75.0, 50.0, 2.0, 10, 3],
+    ]
+    raw_observation["fleets"] = [
+        [10, 0, 10.0, 10.0, 0.0, 9, 1],
+        [11, 1, 20.0, 20.0, 0.0, 0, 6],
+        [12, 2, 30.0, 30.0, 0.0, 1, 8],
+    ]
+
+    actions = agent.act(KaggleObservation.model_validate(raw_observation))
+
+    assert actions == []
 
 
 def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:

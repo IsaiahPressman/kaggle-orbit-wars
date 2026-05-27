@@ -6,6 +6,8 @@ from owl.agent.agent import Agent, AgentCheckpointConfig, AgentConfig
 from owl.agent.checkpoint_quantization import (
     FP4_E2M1FN_X2_SCALED_BLOCK16,
     FP8_E4M3FN,
+    NF5_G128_LSQ_POLICY_FINAL4_FP8,
+    NF5_G128_LSQ_POLICY_LAST_FP8,
     dequantize_model_state_dict,
     quantize_model_state_dict,
 )
@@ -34,6 +36,7 @@ _FP4_E2M1FN_VALUES = torch.tensor(
     dtype=torch.float32,
 )
 _FP4_BLOCK_SIZE = 16
+_NF5_GROUP_SIZE = 128
 
 
 def test_fp8_quantization_matches_torch_cast_bits() -> None:
@@ -152,7 +155,108 @@ def test_fp4_dequantization_unpacks_low_nibble_then_high_nibble() -> None:
     _assert_float32_bits_equal(dequantized, _FP4_E2M1FN_VALUES)
 
 
-@pytest.mark.parametrize("quantization", [FP8_E4M3FN, FP4_E2M1FN_X2_SCALED_BLOCK16])
+@pytest.mark.parametrize(
+    "quantization",
+    [NF5_G128_LSQ_POLICY_LAST_FP8, NF5_G128_LSQ_POLICY_FINAL4_FP8],
+)
+def test_nf5_quantized_payload_uses_packed_5bit_codes_and_fp16_group_scales(
+    quantization: str,
+) -> None:
+    values = torch.linspace(-2.5, 2.5, steps=258, dtype=torch.float32).reshape(2, 129)
+
+    quantized = quantize_model_state_dict(
+        {"linear.weight": values},
+        quantization,
+    )
+
+    payload = quantized["tensors"]["linear.weight"]
+    data = payload["data"]
+    scale = payload["scale"]
+    expected_group_count = values.shape[0] * (
+        (values.shape[1] + _NF5_GROUP_SIZE - 1) // _NF5_GROUP_SIZE
+    )
+    expected_packed_bytes = expected_group_count * _NF5_GROUP_SIZE * 5 // 8
+    assert payload["format"] == quantization
+    assert payload["cols"] == values.shape[1]
+    assert data.dtype == torch.uint8
+    assert data.numel() == expected_packed_bytes
+    assert _tensor_storage_nbytes(data) == expected_packed_bytes
+    assert scale.dtype == torch.float16
+    assert scale.numel() == expected_group_count
+    assert _tensor_storage_nbytes(scale) == expected_group_count * 2
+
+    dequantized = dequantize_model_state_dict(quantized)["linear.weight"]
+    assert dequantized.dtype == torch.float32
+    assert dequantized.shape == values.shape
+
+
+def test_nf5_quantization_uses_fp8_for_targeted_policy_tensors() -> None:
+    values = torch.tensor([[0.375, 1.125, -2.25]], dtype=torch.float32)
+
+    quantized = quantize_model_state_dict(
+        {"source_actor_input_proj.weight": values},
+        NF5_G128_LSQ_POLICY_LAST_FP8,
+    )
+
+    payload = quantized["tensors"]["source_actor_input_proj.weight"]
+    expected_lowp = values.to(torch.float8_e4m3fn)
+    assert payload["format"] == FP8_E4M3FN
+    assert torch.equal(payload["data"], expected_lowp.view(torch.uint8))
+
+    dequantized = dequantize_model_state_dict(quantized)[
+        "source_actor_input_proj.weight"
+    ]
+    _assert_float32_bits_equal(dequantized, expected_lowp.to(torch.float32))
+
+
+def test_nf5_final4_quantization_upgrades_final_four_output_tensors_to_fp8() -> None:
+    values = torch.tensor([[0.375, 1.125, -2.25]], dtype=torch.float32)
+
+    last_quantized = quantize_model_state_dict(
+        {"blocks.24.attn.out.weight": values},
+        NF5_G128_LSQ_POLICY_LAST_FP8,
+    )
+    final4_quantized = quantize_model_state_dict(
+        {"blocks.24.attn.out.weight": values},
+        NF5_G128_LSQ_POLICY_FINAL4_FP8,
+    )
+
+    assert (
+        last_quantized["tensors"]["blocks.24.attn.out.weight"]["format"]
+        == NF5_G128_LSQ_POLICY_LAST_FP8
+    )
+    assert (
+        final4_quantized["tensors"]["blocks.24.attn.out.weight"]["format"] == FP8_E4M3FN
+    )
+
+
+def test_nf5_quantization_stores_non_2d_floating_tensors_as_fp16() -> None:
+    values = torch.tensor([0.1, 1.5, 8.0], dtype=torch.float32)
+
+    quantized = quantize_model_state_dict(
+        {"linear.bias": values},
+        NF5_G128_LSQ_POLICY_LAST_FP8,
+    )
+
+    payload = quantized["tensors"]["linear.bias"]
+    expected_lowp = values.to(torch.float16)
+    assert payload["format"] == "fp16"
+    assert payload["data"].dtype == torch.float16
+    assert torch.equal(payload["data"], expected_lowp)
+
+    dequantized = dequantize_model_state_dict(quantized)["linear.bias"]
+    _assert_float32_bits_equal(dequantized, expected_lowp.to(torch.float32))
+
+
+@pytest.mark.parametrize(
+    "quantization",
+    [
+        FP8_E4M3FN,
+        FP4_E2M1FN_X2_SCALED_BLOCK16,
+        NF5_G128_LSQ_POLICY_LAST_FP8,
+        NF5_G128_LSQ_POLICY_FINAL4_FP8,
+    ],
+)
 def test_quantized_checkpoint_file_round_trips_to_expected_fp32(
     tmp_path: Path,
     quantization: str,
@@ -242,6 +346,13 @@ def _expected_dequantized(values: torch.Tensor, quantization: str) -> torch.Tens
         return values.to(torch.float8_e4m3fn).to(torch.float32)
     if quantization == FP4_E2M1FN_X2_SCALED_BLOCK16:
         return _reference_fp4_e2m1fn_scaled_block16(values)[2]
+    if quantization in (
+        NF5_G128_LSQ_POLICY_LAST_FP8,
+        NF5_G128_LSQ_POLICY_FINAL4_FP8,
+    ):
+        return dequantize_model_state_dict(
+            quantize_model_state_dict({"weight": values}, quantization)
+        )["weight"]
     raise AssertionError(f"unexpected quantization: {quantization}")
 
 

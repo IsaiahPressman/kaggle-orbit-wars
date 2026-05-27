@@ -8,13 +8,19 @@ import torch
 QuantizationFormat: TypeAlias = Literal[
     "fp8_e4m3fn",
     "fp4_e2m1fn_x2_scaled_block16",
+    "nf5_g128_lsq_policy_last_fp8",
+    "nf5_g128_lsq_policy_final4_fp8",
 ]
 
 FP8_E4M3FN: QuantizationFormat = "fp8_e4m3fn"
 FP4_E2M1FN_X2_SCALED_BLOCK16: QuantizationFormat = "fp4_e2m1fn_x2_scaled_block16"
+NF5_G128_LSQ_POLICY_LAST_FP8: QuantizationFormat = "nf5_g128_lsq_policy_last_fp8"
+NF5_G128_LSQ_POLICY_FINAL4_FP8: QuantizationFormat = "nf5_g128_lsq_policy_final4_fp8"
 SUPPORTED_QUANTIZATION_FORMATS: tuple[QuantizationFormat, ...] = (
     FP8_E4M3FN,
     FP4_E2M1FN_X2_SCALED_BLOCK16,
+    NF5_G128_LSQ_POLICY_LAST_FP8,
+    NF5_G128_LSQ_POLICY_FINAL4_FP8,
 )
 
 _QUANTIZED_STATE_MARKER = "__owl_quantized_model_state_dict__"
@@ -25,8 +31,11 @@ _TENSOR_SHAPE_KEY = "shape"
 _TENSOR_DATA_KEY = "data"
 _TENSOR_SCALE_KEY = "scale"
 _TENSOR_SOURCE_DTYPE_KEY = "source_dtype"
+_TENSOR_COLS_KEY = "cols"
 
 _FP4_BLOCK_SIZE = 16
+_NF5_GROUP_SIZE = 128
+_FP16: Literal["fp16"] = "fp16"
 
 _FP4_E2M1FN_VALUES = torch.tensor(
     (
@@ -52,6 +61,41 @@ _FP4_E2M1FN_VALUES = torch.tensor(
 _FP4_E2M1FN_ROUNDING_THRESHOLDS = torch.tensor(
     (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0),
     dtype=torch.float32,
+)
+_NF5_NORMAL_VALUES = torch.erfinv(
+    2.0 * ((torch.arange(32, dtype=torch.float32) + 0.5) / 32.0) - 1.0
+) * (2.0**0.5)
+_NF5_NORMAL_VALUES = _NF5_NORMAL_VALUES / _NF5_NORMAL_VALUES.abs().max()
+_NF5_NORMAL_THRESHOLDS = (_NF5_NORMAL_VALUES[:-1] + _NF5_NORMAL_VALUES[1:]) / 2.0
+_NF5_POLICY_FP8_TENSOR_NAMES = frozenset(
+    (
+        "source_actor_input_proj.weight",
+        "target_actor_input_proj.weight",
+        "critic_head.up.weight",
+        "actor.continue_source_proj.weight",
+        "actor.size_pair_proj.weight",
+        "actor.mix_head.out.weight",
+        "actor.mean_head.out.weight",
+        "actor.scale_head.out.weight",
+    )
+)
+_NF5_POLICY_LAST_FP8_TENSOR_NAMES = _NF5_POLICY_FP8_TENSOR_NAMES | frozenset(
+    (
+        "blocks.27.attn.out.weight",
+        "blocks.27.mlp.down.weight",
+    )
+)
+_NF5_POLICY_FINAL4_FP8_TENSOR_NAMES = _NF5_POLICY_FP8_TENSOR_NAMES | frozenset(
+    (
+        "blocks.24.attn.out.weight",
+        "blocks.24.mlp.down.weight",
+        "blocks.25.attn.out.weight",
+        "blocks.25.mlp.down.weight",
+        "blocks.26.attn.out.weight",
+        "blocks.26.mlp.down.weight",
+        "blocks.27.attn.out.weight",
+        "blocks.27.mlp.down.weight",
+    )
 )
 
 
@@ -126,6 +170,20 @@ def _quantize_state_tensor(
             _TENSOR_DATA_KEY: data,
             _TENSOR_SCALE_KEY: scale,
         }
+    if quantization == NF5_G128_LSQ_POLICY_LAST_FP8:
+        return _quantize_nf5_g128_policy_fp8_state_tensor(
+            name,
+            tensor,
+            quantization,
+            _NF5_POLICY_LAST_FP8_TENSOR_NAMES,
+        )
+    if quantization == NF5_G128_LSQ_POLICY_FINAL4_FP8:
+        return _quantize_nf5_g128_policy_fp8_state_tensor(
+            name,
+            tensor,
+            quantization,
+            _NF5_POLICY_FINAL4_FP8_TENSOR_NAMES,
+        )
     raise ValueError(f"unsupported quantization format: {quantization}")
 
 
@@ -157,6 +215,24 @@ def _dequantize_state_tensor(name: object, payload: object) -> torch.Tensor:
                 f"quantized model state '{state_key}' scale must be a tensor"
             )
         return _dequantize_fp4_e2m1fn_scaled_block16(data, scale, shape)
+    if quantization == _FP16:
+        return data.to(torch.float16).to(torch.float32).reshape(shape)
+    if quantization in (
+        NF5_G128_LSQ_POLICY_LAST_FP8,
+        NF5_G128_LSQ_POLICY_FINAL4_FP8,
+    ):
+        scale = payload.get(_TENSOR_SCALE_KEY)
+        if not isinstance(scale, torch.Tensor):
+            raise ValueError(
+                f"quantized model state '{state_key}' scale must be a tensor"
+            )
+        cols = payload.get(_TENSOR_COLS_KEY)
+        if not isinstance(cols, int) or cols < 0:
+            raise ValueError(
+                f"quantized model state '{state_key}' cols must be a "
+                "non-negative integer"
+            )
+        return _dequantize_nf5_g128_lsq(data, scale, shape, cols)
     raise ValueError(
         f"quantized model state '{state_key}' has unsupported format: {quantization}"
     )
@@ -257,6 +333,153 @@ def _dequantize_fp4_e2m1fn_scaled_block16(
         _FP4_BLOCK_SIZE
     )[:numel]
     return (values[codes[:numel].long()] * block_scale).reshape(shape)
+
+
+def _quantize_nf5_g128_policy_fp8_state_tensor(
+    name: str,
+    tensor: torch.Tensor,
+    quantization: QuantizationFormat,
+    fp8_tensor_names: frozenset[str],
+) -> dict[str, object]:
+    if name in fp8_tensor_names:
+        return {
+            _TENSOR_QUANTIZED_KEY: True,
+            _TENSOR_FORMAT_KEY: FP8_E4M3FN,
+            _TENSOR_SHAPE_KEY: tuple(tensor.shape),
+            _TENSOR_SOURCE_DTYPE_KEY: str(tensor.dtype),
+            _TENSOR_DATA_KEY: _quantize_fp8_e4m3fn(tensor),
+        }
+    if tensor.ndim != 2:
+        return {
+            _TENSOR_QUANTIZED_KEY: True,
+            _TENSOR_FORMAT_KEY: _FP16,
+            _TENSOR_SHAPE_KEY: tuple(tensor.shape),
+            _TENSOR_SOURCE_DTYPE_KEY: str(tensor.dtype),
+            _TENSOR_DATA_KEY: tensor.to(torch.float16),
+        }
+
+    data, scale = _quantize_nf5_g128_lsq(tensor)
+    return {
+        _TENSOR_QUANTIZED_KEY: True,
+        _TENSOR_FORMAT_KEY: quantization,
+        _TENSOR_SHAPE_KEY: tuple(tensor.shape),
+        _TENSOR_COLS_KEY: tensor.shape[1],
+        _TENSOR_SOURCE_DTYPE_KEY: str(tensor.dtype),
+        _TENSOR_DATA_KEY: data,
+        _TENSOR_SCALE_KEY: scale,
+    }
+
+
+def _quantize_nf5_g128_lsq(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    tensor = tensor.to(torch.float32)
+    if tensor.ndim != 2:
+        raise ValueError("nf5_g128_lsq quantization requires 2D tensors")
+    if not torch.isfinite(tensor).all().item():
+        raise ValueError("nf5_g128_lsq quantization requires finite tensors")
+
+    rows, cols = tensor.shape
+    group_count = (cols + _NF5_GROUP_SIZE - 1) // _NF5_GROUP_SIZE
+    padded_cols = group_count * _NF5_GROUP_SIZE
+    padded = torch.zeros((rows, padded_cols), dtype=torch.float32, device=tensor.device)
+    padded[:, :cols] = tensor
+    groups = padded.reshape(rows * group_count, _NF5_GROUP_SIZE)
+
+    scale = groups.abs().amax(dim=1, keepdim=True)
+    values = _NF5_NORMAL_VALUES.to(device=tensor.device)
+    thresholds = _NF5_NORMAL_THRESHOLDS.to(device=tensor.device)
+    for _ in range(2):
+        safe_scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+        codes = torch.bucketize(groups / safe_scale, thresholds).to(torch.long)
+        quantized = values[codes]
+        denominator = (quantized * quantized).sum(dim=1, keepdim=True)
+        improved = torch.where(
+            denominator > 0,
+            ((groups * quantized).sum(dim=1, keepdim=True) / denominator).clamp_min(
+                0.0
+            ),
+            torch.zeros_like(scale),
+        )
+        scale = torch.where(scale == 0, scale, improved)
+
+    safe_scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+    codes = torch.bucketize(groups / safe_scale, thresholds).to(torch.uint8).reshape(-1)
+    return _pack_5bit_codes(codes), scale.reshape(-1).to(torch.float16)
+
+
+def _dequantize_nf5_g128_lsq(
+    data: torch.Tensor,
+    scale: torch.Tensor,
+    shape: tuple[int, ...],
+    cols: int,
+) -> torch.Tensor:
+    if len(shape) != 2:
+        raise ValueError(f"nf5 payload shape must be 2D, got {shape}")
+    rows = shape[0]
+    if cols != shape[1]:
+        raise ValueError(f"nf5 payload cols {cols} does not match shape {shape}")
+    group_count = (cols + _NF5_GROUP_SIZE - 1) // _NF5_GROUP_SIZE
+    expected_codes = rows * group_count * _NF5_GROUP_SIZE
+    codes = _unpack_5bit_codes(data, expected_codes)
+    flat_scale = scale.contiguous().to(torch.float32).reshape(-1)
+    expected_scales = rows * group_count
+    if flat_scale.numel() != expected_scales:
+        raise ValueError(
+            f"nf5 payload has {flat_scale.numel()} scale values, "
+            f"expected {expected_scales}"
+        )
+
+    values = _NF5_NORMAL_VALUES.to(device=codes.device)
+    group_scale = flat_scale.to(device=codes.device).repeat_interleave(_NF5_GROUP_SIZE)
+    dequantized = values[codes.long()] * group_scale
+    return dequantized.reshape(rows, group_count * _NF5_GROUP_SIZE)[:, :cols].reshape(
+        shape
+    )
+
+
+def _pack_5bit_codes(codes: torch.Tensor) -> torch.Tensor:
+    flat = codes.reshape(-1).to(torch.uint8)
+    if ((flat & 0xE0) != 0).any().item():
+        raise ValueError("5-bit packing requires codes in [0, 32)")
+    padding = (-flat.numel()) % 8
+    if padding:
+        flat = torch.cat(
+            (
+                flat,
+                torch.zeros(padding, dtype=torch.uint8, device=flat.device),
+            )
+        )
+    values = flat.reshape(-1, 8).to(torch.int64)
+    packed = torch.empty((values.shape[0], 5), dtype=torch.uint8, device=flat.device)
+    packed[:, 0] = (values[:, 0] | (values[:, 1] << 5)).to(torch.uint8)
+    packed[:, 1] = ((values[:, 1] >> 3) | (values[:, 2] << 2) | (values[:, 3] << 7)).to(
+        torch.uint8
+    )
+    packed[:, 2] = ((values[:, 3] >> 1) | (values[:, 4] << 4)).to(torch.uint8)
+    packed[:, 3] = ((values[:, 4] >> 4) | (values[:, 5] << 1) | (values[:, 6] << 6)).to(
+        torch.uint8
+    )
+    packed[:, 4] = ((values[:, 6] >> 2) | (values[:, 7] << 3)).to(torch.uint8)
+    return packed.reshape(-1)
+
+
+def _unpack_5bit_codes(data: torch.Tensor, count: int) -> torch.Tensor:
+    packed = data.contiguous().view(torch.uint8).reshape(-1)
+    expected_bytes = ((count + 7) // 8) * 5
+    if packed.numel() < expected_bytes:
+        raise ValueError(
+            f"5-bit payload has {packed.numel()} bytes, expected {expected_bytes}"
+        )
+    packed = packed[:expected_bytes].reshape(-1, 5).to(torch.int64)
+    codes = torch.empty((packed.shape[0], 8), dtype=torch.uint8, device=packed.device)
+    codes[:, 0] = (packed[:, 0] & 0x1F).to(torch.uint8)
+    codes[:, 1] = (((packed[:, 0] >> 5) | (packed[:, 1] << 3)) & 0x1F).to(torch.uint8)
+    codes[:, 2] = ((packed[:, 1] >> 2) & 0x1F).to(torch.uint8)
+    codes[:, 3] = (((packed[:, 1] >> 7) | (packed[:, 2] << 1)) & 0x1F).to(torch.uint8)
+    codes[:, 4] = (((packed[:, 2] >> 4) | (packed[:, 3] << 4)) & 0x1F).to(torch.uint8)
+    codes[:, 5] = ((packed[:, 3] >> 1) & 0x1F).to(torch.uint8)
+    codes[:, 6] = (((packed[:, 3] >> 6) | (packed[:, 4] << 2)) & 0x1F).to(torch.uint8)
+    codes[:, 7] = ((packed[:, 4] >> 3) & 0x1F).to(torch.uint8)
+    return codes.reshape(-1)[:count]
 
 
 def _is_quantized_model_state_dict(

@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import torch
 from pydantic import ConfigDict, Field
@@ -38,7 +38,13 @@ from owl.rl import (
 )
 
 from .checkpoint_quantization import dequantize_model_state_dict
-from .kaggle_observation import KaggleObservation
+from .kaggle_observation import (
+    FLEET_ID_INDEX,
+    FLEET_OWNER_INDEX,
+    FLEET_SHIPS_INDEX,
+    PLANET_OWNER_INDEX,
+    KaggleObservation,
+)
 
 AGENT_CONFIG_PATH = Path(__file__).with_name("agent_config.yaml")
 
@@ -55,6 +61,7 @@ class AgentConfig(BaseConfig):
     deterministic: bool
     max_entities_override: int | None = None
     targeting_mode_override: TargetingMode | None = None
+    min_fleet_size: Literal["match"] | Annotated[int, Field(ge=1)] = "match"
     min_overage_time: float = Field(default=0.0, ge=0.0, le=60.0)
     fallback_min_overage_time: float | None = Field(default=None, ge=0.0, le=60.0)
 
@@ -177,7 +184,14 @@ class Agent:
             checkpoint_config = self.fallback_checkpoint_config
             hidden_state = None
 
-        obs_dict = observation.to_rl_observation()
+        min_fleet_size = _resolve_min_fleet_size(
+            self.config,
+            checkpoint_config.env.action_spec,
+        )
+        obs_dict = _filter_fleets_by_min_size(
+            observation.to_rl_observation(),
+            min_fleet_size,
+        )
         obs = encode_python_observation(
             obs_dict,
             obs_spec=checkpoint_config.env.obs_spec,
@@ -327,6 +341,63 @@ class Agent:
 
 def _elapsed_ms(start: float) -> int:
     return round((perf_counter() - start) * 1000)
+
+
+def _resolve_min_fleet_size(config: AgentConfig, action_spec: ActionConfig) -> int:
+    if config.min_fleet_size == "match":
+        return action_spec.min_fleet_size
+    return config.min_fleet_size
+
+
+def _filter_fleets_by_min_size(
+    obs: dict[str, Any],
+    min_fleet_size: int,
+) -> dict[str, Any]:
+    planet_owners = {
+        planet[PLANET_OWNER_INDEX]
+        for planet in obs["planets"]
+        if planet[PLANET_OWNER_INDEX] >= 0
+    }
+    fleets = obs["fleets"]
+    kept_fleet_ids = {
+        fleet[FLEET_ID_INDEX]
+        for fleet in fleets
+        if fleet[FLEET_SHIPS_INDEX] >= min_fleet_size
+    }
+    kept_fleet_owners = {
+        fleet[FLEET_OWNER_INDEX]
+        for fleet in fleets
+        if fleet[FLEET_ID_INDEX] in kept_fleet_ids and fleet[FLEET_OWNER_INDEX] >= 0
+    }
+    stranded_fleets_by_owner: dict[int, Any] = {}
+    for fleet in fleets:
+        owner = fleet[FLEET_OWNER_INDEX]
+        if (
+            owner < 0
+            or owner in planet_owners
+            or owner in kept_fleet_owners
+            or fleet[FLEET_SHIPS_INDEX] >= min_fleet_size
+        ):
+            continue
+        previous = stranded_fleets_by_owner.get(owner)
+        if previous is None or (
+            fleet[FLEET_SHIPS_INDEX],
+            -fleet[FLEET_ID_INDEX],
+        ) > (
+            previous[FLEET_SHIPS_INDEX],
+            -previous[FLEET_ID_INDEX],
+        ):
+            stranded_fleets_by_owner[owner] = fleet
+
+    kept_fleet_ids.update(
+        fleet[FLEET_ID_INDEX] for fleet in stranded_fleets_by_owner.values()
+    )
+    return {
+        **obs,
+        "fleets": [
+            fleet for fleet in fleets if fleet[FLEET_ID_INDEX] in kept_fleet_ids
+        ],
+    }
 
 
 def _observation_player_count(observation: KaggleObservation) -> int:

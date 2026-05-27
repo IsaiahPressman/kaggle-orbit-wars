@@ -20,8 +20,9 @@ Options:
                      same directory.
   --quantization FORMAT
                      Optional slim-checkpoint quantization format:
-                     fp32, fp8_e4m3fn, or
-                     fp4_e2m1fn_x2_scaled_block16. Unique prefixes such as
+                     fp32, fp8_e4m3fn, fp4_e2m1fn_x2_scaled_block16, or
+                     nf5_g128_lsq_policy_last_fp8 /
+                     nf5_g128_lsq_policy_final4_fp8. Unique prefixes such as
                      fp4 are accepted.
   -h, --help         Show this help.
 EOF

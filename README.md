@@ -69,13 +69,23 @@ Rebuilding the image during submission generation keeps the packaged Python code
 aligned with the current checkout. The packaged checkpoint keeps the original
 checkpoint contents only for the model weights needed by the Kaggle agent. To
 store packaged models below fp32 precision, pass a quantization format such as
-`fp8_e4m3fn` or `fp4_e2m1fn_x2_scaled_block16`; unique prefixes such as `fp4`
-are accepted. The default `fp32` leaves checkpoint weights unchanged. The Kaggle
-agent dequantizes quantized slim checkpoints back to fp32 before loading the
-model. Set `fallback_min_overage_time` in `python/owl/agent/agent_config.yaml`
+`fp8_e4m3fn`, `fp4_e2m1fn_x2_scaled_block16`, or
+`nf5_g128_lsq_policy_last_fp8`/`nf5_g128_lsq_policy_final4_fp8`; unique prefixes
+such as `fp4` are accepted. The default `fp32` leaves checkpoint weights
+unchanged. The Kaggle agent dequantizes quantized slim checkpoints back to fp32
+before loading the model. Set `fallback_min_overage_time` in
+`python/owl/agent/agent_config.yaml`
 to switch to the fallback model when remaining overage time drops below that
 threshold; `null` disables fallback routing even if the fallback model is
 packaged.
+
+The Kaggle agent also filters fleets smaller than the configured
+`min_fleet_size` before observation encoding. This intentionally trades a small
+amount of board-state detail for lower inference latency, because many tiny
+fleets can increase entity count enough to trigger fallback routing. To avoid
+marking a still-alive player as gone, if a player has no current planets and
+all of their fleets are below that threshold, the agent keeps that player's
+single largest fleet in the encoded observation.
 
 ## Orbit Wars reference
 
