@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import torch
 from pydantic import ConfigDict, Field
@@ -55,6 +55,7 @@ class AgentConfig(BaseConfig):
     deterministic: bool
     max_entities_override: int | None = None
     targeting_mode_override: TargetingMode | None = None
+    min_fleet_size: Literal["match"] | Annotated[int, Field(ge=1)] = "match"
     min_overage_time: float = Field(default=0.0, ge=0.0, le=60.0)
     fallback_min_overage_time: float | None = Field(default=None, ge=0.0, le=60.0)
 
@@ -177,7 +178,14 @@ class Agent:
             checkpoint_config = self.fallback_checkpoint_config
             hidden_state = None
 
-        obs_dict = observation.to_rl_observation()
+        min_fleet_size = _resolve_min_fleet_size(
+            self.config,
+            checkpoint_config.env.action_spec,
+        )
+        obs_dict = _filter_fleets_by_min_size(
+            observation.to_rl_observation(),
+            min_fleet_size,
+        )
         obs = encode_python_observation(
             obs_dict,
             obs_spec=checkpoint_config.env.obs_spec,
@@ -327,6 +335,22 @@ class Agent:
 
 def _elapsed_ms(start: float) -> int:
     return round((perf_counter() - start) * 1000)
+
+
+def _resolve_min_fleet_size(config: AgentConfig, action_spec: ActionConfig) -> int:
+    if config.min_fleet_size == "match":
+        return action_spec.min_fleet_size
+    return config.min_fleet_size
+
+
+def _filter_fleets_by_min_size(
+    obs: dict[str, Any],
+    min_fleet_size: int,
+) -> dict[str, Any]:
+    return {
+        **obs,
+        "fleets": [fleet for fleet in obs["fleets"] if fleet[5] >= min_fleet_size],
+    }
 
 
 def _observation_player_count(observation: KaggleObservation) -> int:

@@ -1,5 +1,6 @@
 deterministic: true
 max_entities_override: 96
 targeting_mode_override: full_mask
+min_fleet_size: match
 min_overage_time: 0.5
 fallback_min_overage_time: 1.5

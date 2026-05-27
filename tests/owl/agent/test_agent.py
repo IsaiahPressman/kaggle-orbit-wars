@@ -72,6 +72,11 @@ def test_agent_config_path_valid() -> None:
     _ = AgentConfig.from_file(AGENT_CONFIG_PATH)
 
 
+def test_agent_config_rejects_nonpositive_min_fleet_size() -> None:
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        AgentConfig(deterministic=True, min_fleet_size=0)
+
+
 def test_agent_checkpoint_config_fields_exist_on_full_config() -> None:
     assert set(AgentCheckpointConfig.model_fields) <= set(FullConfig.model_fields)
 
@@ -507,6 +512,120 @@ def _raw_observation(*, remaining_overage_time: float = 60.0) -> dict[str, objec
         "next_fleet_id": 0,
         "comets": [],
     }
+
+
+@pytest.mark.parametrize(
+    ("agent_min_fleet_size", "expected_fleet_ids"),
+    [
+        ("match", [11, 12]),
+        (8, [12]),
+    ],
+)
+def test_agent_act_filters_fleets_below_configured_min_before_encoding(
+    agent_min_fleet_size: object,
+    expected_fleet_ids: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=1, min_fleet_size=6)
+    agent = Agent.__new__(Agent)
+    agent.checkpoint_config = SimpleNamespace(
+        env=SimpleNamespace(
+            obs_spec=EntityBasedConfig(),
+            action_spec=action_spec,
+        ),
+        model=StatelessTransformerV1Config(),
+    )
+    agent.config = AgentConfig(
+        deterministic=False,
+        min_fleet_size=agent_min_fleet_size,
+    )
+    agent.device = torch.device("cpu")
+    agent.hidden_state = None
+    agent.fallback_model = None
+    agent.fallback_checkpoint_config = None
+    agent._peak_total_ms = 0
+    agent._peak_entities = 0
+
+    def fake_encode_python_observation(
+        obs: dict[str, object],
+        *,
+        obs_spec: EntityBasedConfig,
+        action_spec: ActionPureConfig,
+    ) -> ObsBatch:
+        assert obs_spec == agent.checkpoint_config.env.obs_spec
+        assert action_spec == agent.checkpoint_config.env.action_spec
+        assert [fleet[0] for fleet in obs["fleets"]] == expected_fleet_ids
+        batch = _obs_batch(max_fleets=0)
+        batch.entity_mask[0, 0] = True
+        return batch
+
+    class FakeModel:
+        def initial_hidden_state(
+            self,
+            _batch_size: int,
+            *,
+            device: torch.device,  # noqa: ARG002
+        ) -> None:
+            return None
+
+        def serve(
+            self,
+            obs: ObsBatch,
+            *,
+            deterministic: bool,
+            hidden_state: object | None,
+        ) -> object:
+            assert not deterministic
+            assert hidden_state is None
+            action_shape = (
+                1,
+                4,
+                obs.action_mask.can_act.shape[2],
+                action_spec.max_per_planet_launches,
+            )
+            return SimpleNamespace(
+                actions=PureActions(
+                    launch=torch.zeros(action_shape, dtype=torch.bool),
+                    angle=torch.zeros(action_shape, dtype=torch.float32),
+                    ships=torch.zeros(action_shape, dtype=torch.int64),
+                ),
+                values=torch.tensor([[0.25, -0.5, 0.0, 0.75]]),
+                next_hidden_state=None,
+            )
+
+    def fake_actions_to_kaggle(
+        obs: dict[str, object],
+        player: int,
+        actions: PureActions,
+        *,
+        action_spec: ActionPureConfig,
+    ) -> list[list[float]]:
+        assert [fleet[0] for fleet in obs["fleets"]] == expected_fleet_ids
+        assert player == 0
+        assert actions.launch.shape == (
+            1,
+            4,
+            ACTION_ENTITY_SLOTS,
+            action_spec.max_per_planet_launches,
+        )
+        return []
+
+    agent.model = FakeModel()
+    monkeypatch.setattr(
+        "owl.agent.agent.encode_python_observation",
+        fake_encode_python_observation,
+    )
+    monkeypatch.setattr("owl.agent.agent.actions_to_kaggle", fake_actions_to_kaggle)
+    raw_observation = _raw_observation()
+    raw_observation["fleets"] = [
+        [10, 0, 10.0, 10.0, 0.0, 5, 1],
+        [11, 1, 20.0, 20.0, 0.0, 6, 2],
+        [12, 2, 30.0, 30.0, 0.0, 8, 3],
+    ]
+
+    actions = agent.act(KaggleObservation.model_validate(raw_observation))
+
+    assert actions == []
 
 
 def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
