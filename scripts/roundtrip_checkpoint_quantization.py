@@ -247,7 +247,15 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("checkpoint_path", type=Path)
-    parser.add_argument("target_format", type=_parse_target_format_arg)
+    parser.add_argument(
+        "target_format",
+        type=_parse_target_format_arg,
+        help=(
+            "Target dtype or quantization format. "
+            f"Choices: {', '.join(TARGET_FORMATS)}. Unique prefixes are "
+            "accepted when unambiguous."
+        ),
+    )
     return parser.parse_args()
 
 

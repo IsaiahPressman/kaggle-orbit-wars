@@ -9,6 +9,8 @@ import torch
 from owl.agent.checkpoint_quantization import (
     FP4_E2M1FN_X2_SCALED_BLOCK16,
     FP8_E4M3FN,
+    NF5_G128_LSQ_POLICY_FINAL4_FP8,
+    NF5_G128_LSQ_POLICY_LAST_FP8,
     dequantize_model_state_dict,
     quantize_model_state_dict,
 )
@@ -65,7 +67,15 @@ def test_roundtrip_checkpoint_model_dtype_preserves_non_model_keys(
     )
 
 
-@pytest.mark.parametrize("quantization", [FP8_E4M3FN, FP4_E2M1FN_X2_SCALED_BLOCK16])
+@pytest.mark.parametrize(
+    "quantization",
+    [
+        FP8_E4M3FN,
+        FP4_E2M1FN_X2_SCALED_BLOCK16,
+        NF5_G128_LSQ_POLICY_LAST_FP8,
+        NF5_G128_LSQ_POLICY_FINAL4_FP8,
+    ],
+)
 def test_roundtrip_checkpoint_model_dtype_supports_agent_quantization_formats(
     tmp_path: Path,
     quantization: str,
@@ -274,6 +284,26 @@ def test_main_rejects_ambiguous_target_format_prefix(
     captured = capsys.readouterr()
     assert "target format prefix 'fp' is ambiguous" in captured.err
     assert "fp4_e2m1fn_x2_scaled_block16" in captured.err
+
+
+def test_main_help_lists_target_format_choices(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["roundtrip_checkpoint_quantization.py", "-h"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        roundtrip_checkpoint_quantization.main()
+
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert "target_format" in captured.out
+    assert "fp16" in captured.out
+    assert "bf16" in captured.out
+    assert FP8_E4M3FN in captured.out
+    assert FP4_E2M1FN_X2_SCALED_BLOCK16 in captured.out
+    assert NF5_G128_LSQ_POLICY_LAST_FP8 in captured.out
+    assert NF5_G128_LSQ_POLICY_FINAL4_FP8 in captured.out
 
 
 def _assert_float32_bits_equal(actual: torch.Tensor, expected: torch.Tensor) -> None:

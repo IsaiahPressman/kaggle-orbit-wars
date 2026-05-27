@@ -69,7 +69,11 @@ def _parse_args() -> argparse.Namespace:
         "--quantization",
         type=_parse_quantization_arg,
         default=ResolvedFormat(value=FP32),
-        help="Optional model-weight quantization format for the slim checkpoint.",
+        help=(
+            "Optional model-weight quantization format for the slim checkpoint. "
+            f"Choices: {', '.join(SUPPORTED_OUTPUT_MODEL_FORMATS)}. Unique "
+            "prefixes are accepted when unambiguous."
+        ),
     )
     return parser.parse_args()
 

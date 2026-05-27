@@ -110,8 +110,11 @@ the requested checkpoint into a temporary file, copies that file to
 recipe quantization argument is not `fp32`, and copies `config.yaml` from the
 same directory to `models/primary/config.yaml`. If `--fallback-checkpoint` is
 provided, the fallback checkpoint and adjacent config are packaged under
-`models/fallback/` using the same fixed filenames. Unique quantization prefixes
-such as `fp4` are accepted. Set `fallback_min_overage_time` in
+`models/fallback/` using the same fixed filenames. Supported quantization
+formats include `fp8_e4m3fn`, `fp4_e2m1fn_x2_scaled_block16`, and
+`nf5_g128_lsq_policy_last_fp8`/`nf5_g128_lsq_policy_final4_fp8`; unique
+quantization prefixes such as `fp4` are accepted. Set
+`fallback_min_overage_time` in
 `python/owl/agent/agent_config.yaml` to switch to the fallback model when
 remaining overage time drops below that threshold; `null` disables fallback
 routing even when the fallback model is packaged. The image build validates
