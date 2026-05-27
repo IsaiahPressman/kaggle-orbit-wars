@@ -188,10 +188,12 @@ class Agent:
             self.config,
             checkpoint_config.env.action_spec,
         )
+        raw_obs_dict = observation.to_rl_observation()
         obs_dict = _filter_fleets_by_min_size(
-            observation.to_rl_observation(),
+            raw_obs_dict,
             min_fleet_size,
         )
+        filtered_fleets = len(raw_obs_dict["fleets"]) - len(obs_dict["fleets"])
         obs = encode_python_observation(
             obs_dict,
             obs_spec=checkpoint_config.env.obs_spec,
@@ -259,6 +261,7 @@ class Agent:
             player_values=[float(value) for value in values.tolist()],
             entity_count=entity_count,
             peak_entities=peak_entities,
+            filtered_fleets=filtered_fleets,
             remaining_overage_time=observation.remaining_overage_time,
             fallback_triggered=use_fallback,
         )
@@ -300,6 +303,7 @@ class Agent:
         player_values: list[float],
         entity_count: int,
         peak_entities: int,
+        filtered_fleets: int,
         remaining_overage_time: float,
         fallback_triggered: bool,
     ) -> None:
@@ -318,6 +322,7 @@ class Agent:
             f"values=[{values}] - "
             f"entities={entity_count} - "
             f"peak_entities={peak_entities} - "
+            f"filtered_fleets={filtered_fleets} - "
             f"remaining_overage_s={remaining_overage_time:.1f}",
             flush=True,
         )
