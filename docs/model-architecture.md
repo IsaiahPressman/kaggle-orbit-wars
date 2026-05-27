@@ -523,3 +523,30 @@ log-probs, entropies, and critic values from one encode.
 
 Inactive and stopped slots are given finite dummy event inputs before masking so
 their zeroed log-prob contributions do not introduce NaN gradients.
+
+## Teacher Distillation
+
+Training can add a frozen teacher model through `rl.teacher_mode`. The action
+term uses `KL(teacher || student)` for each replayed state and sums the relevant
+action-head divergences back to the player-step before applying
+`rl.teacher_kl_coef`. The value term uses cross-entropy from the teacher winner
+distribution to the student winner distribution over active player slots, then
+averages that per-state value over active states before applying
+`rl.teacher_value_coef`.
+
+`evaluate_action_kl(obs, teacher, actions)` re-encodes the replay segment with
+both models and compares the policy distributions using the same masks and
+factorization gates used by PPO replay. Non-acting source rows contribute zero
+KL. For binary discrete-target launch mode, no-launch replay rows include only
+the Bernoulli launch KL; target and fleet-size KL are computed only for rows
+where the replayed action launched. Discrete target-bin KL compares the target
+categorical and the selected target's fleet-bin categorical. Pure-action KL
+compares launch, angle, and selected fleet-size distributions for launched
+rows.
+
+Fleet-size KL is computed on the selected truncated logistic mixture. Matching
+mixture counts use aligned component terms; incompatible mixture counts fall
+back to the full marginal mixture where supported. Per-action portions are
+logged with the same component naming style as entropy logging, for example
+`launch`, `target`, `angle`, `fleet_size_mixture`, `fleet_size_logistic`, and
+`fleet_size_full`.

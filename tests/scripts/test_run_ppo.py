@@ -144,7 +144,7 @@ class _FakeTrainer:
         self.iterations = 0
         self.model = torch.nn.Linear(1, 1)
         self.device = torch.device("cpu")
-        self.teacher_updates: list[tuple[torch.nn.Module | None, bool]] = []
+        self.teacher_updates: list[tuple[torch.nn.Module | None, bool, bool]] = []
 
     def train_iteration(self) -> dict[str, float]:
         self.iterations += 1
@@ -166,8 +166,9 @@ class _FakeTrainer:
         teacher_model: torch.nn.Module | None,
         *,
         active: bool,
+        match_student_hidden_state: bool = False,
     ) -> None:
-        self.teacher_updates.append((teacher_model, active))
+        self.teacher_updates.append((teacher_model, active, match_student_hidden_state))
 
 
 def test_next_periodic_checkpoint_step_handles_crossed_cadence() -> None:
@@ -1243,9 +1244,10 @@ def test_run_training_loop_activates_last_best_teacher_after_replacement(
     )
 
     assert len(trainer.teacher_updates) == 1
-    teacher_model, active = trainer.teacher_updates[0]
+    teacher_model, active, match_student_hidden_state = trainer.teacher_updates[0]
     assert teacher_model is not None
     assert active
+    assert match_student_hidden_state
 
 
 def test_run_training_session_sets_trainable_parameter_summary(

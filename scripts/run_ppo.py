@@ -396,7 +396,11 @@ def _run_training_loop(
                 if replace_last_best:
                     last_best_model = _clone_eval_model(unwrap_model(trainer.model))
                     if cfg.rl.teacher_mode == "last_best":
-                        trainer.set_teacher_model(last_best_model, active=True)
+                        trainer.set_teacher_model(
+                            last_best_model,
+                            active=True,
+                            match_student_hidden_state=True,
+                        )
                     if dist_ctx.is_main_process:
                         trainer.write_checkpoint(
                             run_dir / "checkpoint_last_best.pt",

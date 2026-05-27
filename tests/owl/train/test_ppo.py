@@ -1512,7 +1512,7 @@ def test_trainer_compile_mode_compiles_only_tensor_helpers(
     monkeypatch.setattr(ppo.torch, "compile", fake_compile)
     env = TinyOrbitEnv(n_envs=2)
     model = TinyOrbitModel()
-    ppo.PPOTrainer(
+    trainer = ppo.PPOTrainer(
         env=env,
         model=model,
         optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
@@ -1528,6 +1528,9 @@ def test_trainer_compile_mode_compiles_only_tensor_helpers(
         ("_compute_gae_tensors", "default"),
         ("_ppo_loss_components", "default"),
     ]
+    metrics = trainer.train_iteration()
+    assert metrics["loss/teacher_kl_loss"] == pytest.approx(0.0)
+    assert metrics["loss/teacher_value_loss"] == pytest.approx(0.0)
 
 
 def test_trainer_overwrites_dones_when_envs_terminate_inside_rollout() -> None:
@@ -1750,6 +1753,50 @@ def test_discrete_target_transformer_train_iteration_keeps_parameters_finite() -
         assert torch.isfinite(parameter).all()
         if parameter.grad is not None:
             assert torch.isfinite(parameter.grad).all()
+
+
+def test_recurrent_transformer_train_iteration_runs_with_teacher() -> None:
+    torch.manual_seed(0)
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model_config = RecurrentTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(
+            n_action_mixtures=2,
+            entropy_ship_quantiles=8,
+        ),
+        embed_dim=16,
+        depth=1,
+        n_heads=4,
+    )
+    model = RecurrentTransformerV1(
+        model_config,
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    teacher_model = RecurrentTransformerV1(
+        model_config,
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    model.reset_parameters()
+    teacher_model.reset_parameters()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segments_per_minibatch=1,
+        ),
+        device=torch.device("cpu"),
+        teacher_model=teacher_model,
+        teacher_active=True,
+    )
+
+    metrics = trainer.train_iteration()
+
+    assert torch.isfinite(torch.tensor(list(metrics.values()))).all()
+    assert metrics["teacher/kl"] >= 0.0
+    assert metrics["teacher/value_cross_entropy"] >= 0.0
 
 
 def test_recurrent_transformer_train_iteration_keeps_parameters_finite() -> None:

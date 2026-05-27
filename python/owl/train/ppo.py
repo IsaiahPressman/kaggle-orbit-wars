@@ -463,6 +463,7 @@ class PPOTrainer:
         teacher_model: BaseModelAPI | None,
         *,
         active: bool,
+        match_student_hidden_state: bool = False,
     ) -> None:
         if (
             teacher_model is not None
@@ -477,9 +478,13 @@ class PPOTrainer:
             teacher_model.eval()
             for parameter in teacher_model.parameters():
                 parameter.requires_grad_(False)
-            self._teacher_hidden_state = teacher_model.initial_hidden_state(
-                self.n_envs,
-                device=self.device,
+            self._teacher_hidden_state = (
+                teacher_model.detach_hidden_state(self._hidden_state)
+                if match_student_hidden_state
+                else teacher_model.initial_hidden_state(
+                    self.n_envs,
+                    device=self.device,
+                )
             )
         else:
             self._teacher_hidden_state = None
@@ -881,6 +886,8 @@ class PPOTrainer:
             teacher_kl_components: dict[str, torch.Tensor] = {}
             teacher_value_loss_values = torch.zeros_like(batch_old_values)
         else:
+            if teacher_action_kl is None:
+                raise RuntimeError("teacher action KL was not computed")
             teacher_kl = _output_action_kl(
                 teacher_action_kl,
                 batch_policy_weight,
@@ -1052,9 +1059,7 @@ def _compile_ppo_loss(
         *,
         new_logp: torch.Tensor,
         entropy: torch.Tensor,
-        teacher_kl: torch.Tensor,
         new_values: torch.Tensor,
-        teacher_value_loss_values: torch.Tensor,
         old_logp: torch.Tensor,
         old_values: torch.Tensor,
         returns: torch.Tensor,
@@ -1062,6 +1067,8 @@ def _compile_ppo_loss(
         policy_weight: torch.Tensor,
         value_weight: torch.Tensor,
         config: PPOConfig,
+        teacher_kl: torch.Tensor | None = None,
+        teacher_value_loss_values: torch.Tensor | None = None,
         context: DistributedContext | None = None,
         entity_policy_weight: torch.Tensor | None = None,
     ) -> tuple[_PPOLossMetrics, torch.Tensor]:
@@ -1109,7 +1116,7 @@ def _ppo_loss(
     if teacher_kl is None:
         teacher_kl = torch.zeros_like(policy_weight)
     if teacher_value_loss_values is None:
-        teacher_value_loss_values = torch.zeros_like(value_weight)
+        teacher_value_loss_values = torch.zeros_like(value_weight[..., 0])
     return _ppo_loss_metrics_from_components(
         loss_components(
             new_logp,
@@ -1218,7 +1225,7 @@ def _local_ppo_loss_metrics(
     value_loss = weighted_mean(value_loss_values, value_weight)
     entropy_mean = weighted_mean(entropy_values, policy_weight)
     teacher_kl = weighted_mean(teacher_kl_values, policy_weight)
-    teacher_value_cross_entropy = weighted_mean(
+    teacher_value_cross_entropy = _teacher_value_weighted_mean(
         teacher_value_loss_values,
         value_weight,
     )
@@ -1293,7 +1300,7 @@ def _distributed_ppo_loss_metrics(
         policy_weight,
         context,
     )
-    teacher_value_cross_entropy = _distributed_weighted_mean(
+    teacher_value_cross_entropy = _distributed_teacher_value_weighted_mean(
         teacher_value_loss_values.detach(),
         value_weight,
         context,
@@ -1327,7 +1334,7 @@ def _distributed_ppo_loss_metrics(
         policy_weight,
         context,
     )
-    backward_teacher_value = _distributed_backward_weighted_mean(
+    backward_teacher_value = _distributed_backward_teacher_value_weighted_mean(
         teacher_value_loss_values,
         value_weight,
         context,
@@ -2018,7 +2025,7 @@ def _teacher_value_cross_entropy(
     return (
         -teacher_winner_probabilities.detach()
         * student_winner_probabilities.clamp_min(1e-8).log()
-    )
+    ).sum(dim=-1)
 
 
 def _output_actions(output: ModelOutput) -> ModelActions:
@@ -2192,6 +2199,19 @@ def _mean_masked_entities(values: torch.Tensor, weights: torch.Tensor) -> torch.
     return weighted_sum / weights.sum(dim=-1).clamp_min(1e-8)
 
 
+def _teacher_value_weighted_mean(
+    values: torch.Tensor,
+    value_weight: torch.Tensor,
+) -> torch.Tensor:
+    state_weight = _teacher_value_state_weight(value_weight, dtype=values.dtype)
+    if values.shape != state_weight.shape:
+        raise ValueError(
+            "teacher value loss values must have shape "
+            f"{tuple(state_weight.shape)}, got {tuple(values.shape)}"
+        )
+    return weighted_mean(values, state_weight)
+
+
 def _distributed_weighted_mean(
     values: torch.Tensor,
     weights: torch.Tensor,
@@ -2207,6 +2227,20 @@ def _distributed_weighted_mean(
     return totals[0] / totals[1].clamp_min(1e-8)
 
 
+def _distributed_teacher_value_weighted_mean(
+    values: torch.Tensor,
+    value_weight: torch.Tensor,
+    context: DistributedContext,
+) -> torch.Tensor:
+    state_weight = _teacher_value_state_weight(value_weight, dtype=values.dtype)
+    if values.shape != state_weight.shape:
+        raise ValueError(
+            "teacher value loss values must have shape "
+            f"{tuple(state_weight.shape)}, got {tuple(values.shape)}"
+        )
+    return _distributed_weighted_mean(values, state_weight, context)
+
+
 def _distributed_backward_weighted_mean(
     values: torch.Tensor,
     weights: torch.Tensor,
@@ -2215,6 +2249,28 @@ def _distributed_backward_weighted_mean(
     local_numerator = (values * weights).sum()
     global_denominator = all_reduce_sum(weights.sum().to(dtype=values.dtype), context)
     return local_numerator * context.world_size / global_denominator.clamp_min(1e-8)
+
+
+def _distributed_backward_teacher_value_weighted_mean(
+    values: torch.Tensor,
+    value_weight: torch.Tensor,
+    context: DistributedContext,
+) -> torch.Tensor:
+    state_weight = _teacher_value_state_weight(value_weight, dtype=values.dtype)
+    if values.shape != state_weight.shape:
+        raise ValueError(
+            "teacher value loss values must have shape "
+            f"{tuple(state_weight.shape)}, got {tuple(values.shape)}"
+        )
+    return _distributed_backward_weighted_mean(values, state_weight, context)
+
+
+def _teacher_value_state_weight(
+    value_weight: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    return value_weight.gt(0).any(dim=-1).to(dtype=dtype)
 
 
 def _distributed_masked_max_or_zero(

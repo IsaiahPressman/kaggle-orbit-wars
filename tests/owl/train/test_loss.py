@@ -144,7 +144,7 @@ def test_ppo_loss_adds_teacher_terms_with_separate_weights() -> None:
     policy_weight = torch.tensor([[1.0, 0.0]])
     value_weight = torch.ones(shape)
     teacher_kl = torch.tensor([[0.25, 99.0]])
-    teacher_value_loss_values = torch.tensor([[0.2, 0.6]])
+    teacher_value_loss_values = torch.tensor([0.4])
 
     metrics, _backward_loss = _ppo_loss(
         new_logp=torch.zeros(shape),
@@ -174,6 +174,23 @@ def test_ppo_loss_adds_teacher_terms_with_separate_weights() -> None:
     )
     assert torch.allclose(metrics.teacher_value_loss, torch.tensor(0.1))
     assert torch.allclose(metrics.loss, torch.tensor(0.225))
+
+
+def test_teacher_value_cross_entropy_sums_active_winner_distribution() -> None:
+    student = torch.tensor(
+        [
+            [0.5, 0.5, 0.0, 0.0],
+            [0.25, 0.25, 0.25, 0.25],
+        ]
+    )
+    teacher = student.clone()
+
+    cross_entropy = ppo._teacher_value_cross_entropy(student, teacher)
+
+    assert torch.allclose(
+        cross_entropy,
+        torch.log(torch.tensor([2.0, 4.0])),
+    )
 
 
 def test_ppo_loss_uses_raw_advantages() -> None:

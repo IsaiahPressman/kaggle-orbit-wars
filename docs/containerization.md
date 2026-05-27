@@ -282,6 +282,15 @@ paths under `ORBIT_WARS_OUTPUT_DIR` are mapped into the container's `/runs`
 mount before launch; other host checkpoint directories are mounted read-only at
 `/model-weights`.
 
+Teacher checkpoints configured with `rl.teacher_init` are loaded by
+`scripts/run_ppo.py` itself, not by the Slurm wrapper. The checkpoint path must
+therefore be visible inside the container, and the checkpoint's parent
+directory must also contain the teacher `config.yaml`. Relative
+`rl.teacher_init` values are resolved against the training config path; with
+the default `/config` mount, prefer container-visible paths such as
+`/runs/<run>/checkpoint_last_best.pt` or add an explicit mount for any external
+teacher directory.
+
 When the first batch-script argument is a positional target, the arguments after
 the batch script use the same shape as `scripts/run_ppo.py`, with default
 `--log-mode` and `--max-runtime-hours` supplied by the wrapper:

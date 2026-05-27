@@ -710,8 +710,6 @@ class StatelessTransformerV1(BaseModelAPI):
         teacher_hidden_state: ModelHiddenState | None = None,
         dones: torch.Tensor | None = None,
     ) -> ModelActionKLDivergences:
-        if hidden_state is not None:
-            raise ValueError("StatelessTransformerV1 does not accept hidden_state")
         if not isinstance(teacher, StatelessTransformerV1):
             raise ValueError(
                 "teacher must be a StatelessTransformerV1-compatible model"
@@ -721,7 +719,7 @@ class StatelessTransformerV1(BaseModelAPI):
         student_encoded, _student_next_state = self._encode_distillation_observations(
             flat_obs,
             sequence_shape=sequence_shape,
-            hidden_state=None,
+            hidden_state=hidden_state,
             dones=dones,
         )
         teacher_encoded, _teacher_next_state = (
