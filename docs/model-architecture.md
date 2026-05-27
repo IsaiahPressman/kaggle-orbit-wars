@@ -33,6 +33,8 @@ configs may contain either architecture.
 | `depth` | `4` | Number of transformer blocks. |
 | `n_heads` | `8` | Attention heads; must evenly divide `embed_dim`. |
 | `mlp_ratio` | `4.0` | FFN hidden width multiplier. |
+| `player_count_adapters_enabled` | `False` | Enable per-still-playing-player-count actor/critic heads and optional trunk adapter blocks. |
+| `player_count_adapter_blocks` | `0` | Number of final transformer blocks to move from the shared trunk into each per-player-count branch; requires `player_count_adapters_enabled=True`. |
 | `activation` | `"gelu"` | FFN activation: `"gelu"`, `"silu"`, or `"swiglu"`. |
 | `force_flash_attn` | `False` | Require packed varlen flash-attn; raise an error instead of falling back when tensors are not flash-compatible. |
 | `use_learned_pairwise_bias` | `False` | Enable an auxiliary source-target feature MLP for discrete target selection. Only valid with `"discrete_targets"` and `"discrete_target_bins"` actors. |
@@ -70,7 +72,9 @@ against the supplied environment action spec.
 `"discrete_targets"` actor with `launch_mode="binary"`. The policy first samples
 whether to launch, then samples the target, then samples fleet size. Pure,
 target-bin, `binary_after`, and `target_token` actor modes are rejected for this
-architecture. Its recurrent-token scope is controlled by
+architecture. The stateless per-player-count adapter option is disabled and
+fixed at `0` blocks for this architecture. Its recurrent-token scope is
+controlled by
 `recurrence_mode`, which defaults to `"global_only"` and can be set to
 `"include_planets"`.
 
@@ -148,6 +152,21 @@ The shared trunk is a stack of pre-norm transformer blocks configured by:
 be at least 1. The default activation is GELU. LayerNorm is used for
 normalization, and no dropout is applied.
 
+When `player_count_adapters_enabled=True`, the stateless model creates one
+adapter branch for each still-playing player count from two through four. If
+`player_count_adapter_blocks > 0`, that count is subtracted from the shared
+trunk depth and moved into each branch. For example, `depth=16` and
+`player_count_adapter_blocks=4` builds 12 shared blocks followed by four
+per-count blocks. If `player_count_adapter_blocks=0`, the full transformer trunk
+remains shared and only the actor/critic heads are per-count. The per-count
+branch also owns the actor input projections, actor module, learned pairwise-bias
+MLP if enabled, and critic head. Rows are selected by
+`obs.still_playing.sum(dim=1)` and scattered back to the original batch order;
+one-player terminal-like rows are routed through the two-player branch while
+keeping their original `still_playing` mask. With packed flash attention, each
+branch with trunk adapter blocks receives a packed subsequence for its selected
+batch rows and keeps the original maximum sequence length.
+
 CPU execution uses torch scaled-dot-product attention over regular
 `(batch, seq, dim)` tensors with the token mask passed as the attention key
 mask. CUDA execution uses packed varlen `flash-attn` when it is installed and
@@ -170,7 +189,8 @@ and loss-side tensors do not become raw FP8 tensors.
 Training also defaults to compiling each transformer-block MLP in place with
 `rl.model_compile="mlp"` and
 `rl.model_compile_mode="max-autotune-no-cudagraphs"`. Packing, unpacking, and
-flash-attn varlen calls remain eager.
+flash-attn varlen calls remain eager. Per-player-count adapter block MLPs are
+compiled by the same setting.
 
 ## Recurrent Transformer V1
 
@@ -226,7 +246,8 @@ construct the module and load saved weights without resetting first.
 Linear layers use orthogonal initialization with zero biases. Only the first
 linear layer in each observation stem is treated as an input projection and
 uses unit gain; hidden projections use ReLU-style gain, and transformer
-residual output projections are scaled by `1 / sqrt(2 * depth)`.
+residual output projections, including per-count adapter blocks, are scaled by
+`1 / sqrt(2 * depth)`.
 Learned token state parameters, including player, board scratch, actor-plan,
 critic-value, and discrete source/target role tags, are also classified as
 input layers for optimizer grouping so Muon does not update them.
@@ -236,13 +257,17 @@ Actor and critic output heads are two-layer MLP projections with hidden width
 widths. Only the second linear layer in each output MLP is treated as an output
 layer for optimizer grouping and final-head initialization. Actor final output
 layers use small `0.01` gain with zero biases, matching the normal RL
-policy-layer initialization. The critic final output layer uses unit gain.
+policy-layer initialization. The critic final output layer uses unit gain. When
+per-player-count adapters are enabled, each branch has its own actor and critic
+heads with the same initialization rules.
 
 ## Critic
 
 The critic reads the per-player `critic_value_hidden` field from
 `EncodedObservations`. A two-layer MLP head produces one logit per player, then
 applies a masked softmax using `obs.still_playing` with shape `(batch, 4)`.
+With per-player-count adapters enabled, the branch selected by each row's
+still-playing player count owns the critic head for that row.
 
 The resulting winner probabilities are mapped linearly into value targets:
 
@@ -279,6 +304,8 @@ Both actor heads start from the same shared transformer trunk. For each
 The final action head is selected by `config.actor.action_spec`. The concrete
 heads live under `python/owl/model/actor/`: `PureActor` for raw angles and
 `DiscreteTargetsActor` for target slots.
+With per-player-count adapters enabled, the selected branch owns these actor
+input projections and action heads for its rows.
 
 When `use_learned_pairwise_bias=True`, the discrete-target and discrete
 target-bin actors receive an auxiliary learned bias after the shared

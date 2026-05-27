@@ -155,7 +155,10 @@ def _compile_transformer_mlp_modules(
 
 
 def _is_transformer_mlp_module_name(name: str) -> bool:
-    return name.startswith("blocks.") and name.endswith(".mlp")
+    return (
+        name.startswith("blocks.")
+        or (".blocks." in name and name.startswith("player_count_adapters."))
+    ) and name.endswith(".mlp")
 
 
 def assert_finite(tensor: torch.Tensor, name: str) -> None:

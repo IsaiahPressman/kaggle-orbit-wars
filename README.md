@@ -160,8 +160,9 @@ uv run python scripts/run_ppo.py configs/baseline.yaml runs --log-mode debug --m
 
 Fresh launches accept `-o`/`--overrides field.path=value`; when provided, rank 0
 prints the flattened override list before loading the config.
-`rl.model_compile` defaults to `mlp`, which compiles each transformer-block MLP
-in place with `rl.model_compile_mode: max-autotune-no-cudagraphs` and
+`rl.model_compile` defaults to `mlp`, which compiles each shared or
+per-player-count adapter transformer-block MLP in place with
+`rl.model_compile_mode: max-autotune-no-cudagraphs` and
 `dynamic=True`. This keeps attention packing and flash-attn calls eager while
 allowing Inductor to optimize the FFN path. Set `rl.model_compile=none` for
 short CPU smoke tests or compile-debugging runs.
