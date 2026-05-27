@@ -165,22 +165,6 @@ in place with `rl.model_compile_mode: max-autotune-no-cudagraphs` and
 `dynamic=True`. This keeps attention packing and flash-attn calls eager while
 allowing Inductor to optimize the FFN path. Set `rl.model_compile=none` for
 short CPU smoke tests or compile-debugging runs.
-Set `rl.dtype=float8` to enable FP8 training with torchao. FP8 mode converts
-eligible internal `torch.nn.Linear` layers to torchao `Float8Linear` before
-optimizer construction, keeps model input/output projections and shape-ineligible
-linears in higher precision, and still wraps forward/eval calls in bfloat16
-autocast. Transformer-block linears always use torchao's `rowwise_with_gw_hp`
-recipe so the packed varlen token row count does not need to be divisible by 16
-for the weight-gradient matmul. FP8 requires CUDA. The default
-`rl.fp8_recipe: rowwise` is the stability-oriented starting point for the other
-eligible linears; use `tensorwise` for the fastest recipe, or
-`rowwise_with_gw_hp` if gradient-weight numerics need a more conservative path.
-For example:
-
-```sh
-uv run python scripts/run_ppo.py configs/baseline.yaml runs \
-  --log-mode debug --max-env-steps 16 -o rl.dtype=float8
-```
 
 Fresh launches can also initialize the model from an existing full training
 checkpoint without resuming the optimizer, scheduler, config, or W&B run:

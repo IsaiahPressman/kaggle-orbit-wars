@@ -13,7 +13,6 @@ dependencies = [
     "pydantic>=2.13.2",
     "pyyaml>=6.0.3",
     "torch==2.9.0",
-    "torchao==0.14.1",
     "tqdm>=4.67.3",
     "wandb>=0.26.0",
 ]
@@ -125,7 +124,6 @@ no_implicit_reexport = true
 module = [
     "flash_attn.*",
     "kaggle.*",
-    "torchao.*",
 ]
 ignore_missing_imports = true
 

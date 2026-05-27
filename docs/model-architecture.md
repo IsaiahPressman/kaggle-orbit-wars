@@ -161,15 +161,6 @@ Attention uses separate `q`, `k`, and `v` linear layers instead of one packed
 QKV projection. SwiGLU also uses separate gate and value projections. This keeps
 each weight matrix tied to one projection role, which is a better fit for Muon
 optimizer assumptions than packing multiple operations into one parameter.
-When PPO is configured with `rl.dtype="float8"`, training converts eligible
-internal `torch.nn.Linear` modules to torchao `Float8Linear` before optimizer
-construction. Model input/output projections and linears whose input or output
-dimensions are not divisible by 16 remain in higher precision. Transformer-block
-linears use torchao's `rowwise_with_gw_hp` recipe regardless of `rl.fp8_recipe`
-so the packed varlen token row count does not need to be divisible by 16 for the
-weight-gradient matmul. The training autocast context remains bfloat16 so
-normalization, attention, policy sampling, and loss-side tensors do not become
-raw FP8 tensors.
 Training also defaults to compiling each transformer-block MLP in place with
 `rl.model_compile="mlp"` and
 `rl.model_compile_mode="max-autotune-no-cudagraphs"`. Packing, unpacking, and

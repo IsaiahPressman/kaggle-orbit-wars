@@ -9,7 +9,6 @@ from owl.train import FullConfig, PPOConfig
 from owl.train.utils import (
     autocast_context,
     configure_model_compile,
-    configure_model_for_training_dtype,
     configure_torch,
 )
 
@@ -48,8 +47,6 @@ def test_ppo_config_validates_with_pydantic() -> None:
         PPOConfig(gradient_accumulation_steps=0)
 
     assert PPOConfig(dtype="bfloat16").dtype == "bfloat16"
-    assert PPOConfig(dtype="float8").dtype == "float8"
-    assert PPOConfig(fp8_recipe="tensorwise").fp8_recipe == "tensorwise"
     assert PPOConfig(model_compile="none").model_compile == "none"
     assert PPOConfig(model_compile_mode="default").model_compile_mode == "default"
     assert PPOConfig(eval_replay_games=1).eval_replay_games == 1
@@ -62,11 +59,6 @@ def test_ppo_config_validates_with_pydantic() -> None:
         match="Input should be 'per_player' or 'per_entity'",
     ):
         PPOConfig(ppo_clip_mode="per_source")
-    with pytest.raises(
-        ValueError,
-        match="Input should be 'tensorwise', 'rowwise' or 'rowwise_with_gw_hp'",
-    ):
-        PPOConfig(fp8_recipe="per_token")
     with pytest.raises(ValueError, match="Input should be 'none' or 'mlp'"):
         PPOConfig(model_compile="attention")
     with pytest.raises(
@@ -288,68 +280,6 @@ def test_configure_torch_uses_legacy_tf32_flags_for_inductor() -> None:
     assert torch.backends.cuda.matmul.allow_tf32
     assert torch.backends.cudnn.allow_tf32
     assert torch.backends.cudnn.benchmark
-
-
-def test_configure_model_for_float8_training_converts_eligible_linear_layers() -> None:
-    from torchao.float8.float8_linear import Float8Linear
-
-    model = StatelessTransformerV1(
-        StatelessTransformerV1Config(embed_dim=32, depth=1, n_heads=4, mlp_ratio=1.0),
-        obs_spec=EntityBasedConfig(max_entities=64),
-        action_spec=ActionPureConfig(max_per_planet_launches=1),
-    )
-    state_keys = set(model.state_dict())
-
-    converted = configure_model_for_training_dtype(
-        model,
-        PPOConfig(dtype="float8"),
-        device=torch.device("cuda"),
-    )
-
-    assert converted > 0
-    assert set(model.state_dict()) == state_keys
-    assert any(isinstance(module, Float8Linear) for module in model.modules())
-    assert not isinstance(model.static_planet_proj.input, Float8Linear)
-    assert not isinstance(model.critic_head.out, Float8Linear)
-    block = model.blocks[0]
-
-    def assert_uses_high_precision_grad_weight(module: Float8Linear) -> None:
-        assert (
-            module.config.cast_config_input_for_grad_weight.scaling_type.value
-            == "disabled"
-        )
-        assert (
-            module.config.cast_config_grad_output_for_grad_weight.scaling_type.value
-            == "disabled"
-        )
-
-    assert isinstance(block.attn.q, Float8Linear)
-    assert isinstance(block.attn.k, Float8Linear)
-    assert isinstance(block.attn.v, Float8Linear)
-    assert isinstance(block.attn.out, Float8Linear)
-    assert isinstance(block.mlp.up, Float8Linear)
-    assert isinstance(block.mlp.down, Float8Linear)
-    assert_uses_high_precision_grad_weight(block.attn.q)
-    assert_uses_high_precision_grad_weight(block.attn.k)
-    assert_uses_high_precision_grad_weight(block.attn.v)
-    assert_uses_high_precision_grad_weight(block.attn.out)
-    assert_uses_high_precision_grad_weight(block.mlp.up)
-    assert_uses_high_precision_grad_weight(block.mlp.down)
-
-
-def test_configure_model_for_float8_training_rejects_cpu() -> None:
-    model = StatelessTransformerV1(
-        StatelessTransformerV1Config(embed_dim=32, depth=1, n_heads=4, mlp_ratio=1.0),
-        obs_spec=EntityBasedConfig(max_entities=64),
-        action_spec=ActionPureConfig(max_per_planet_launches=1),
-    )
-
-    with pytest.raises(RuntimeError, match="requires a CUDA device"):
-        configure_model_for_training_dtype(
-            model,
-            PPOConfig(dtype="float8"),
-            device=torch.device("cpu"),
-        )
 
 
 def test_configure_model_compile_compiles_only_transformer_mlps(
@@ -606,7 +536,4 @@ def test_autocast_context_respects_dtype_config() -> None:
         assert not torch.is_autocast_enabled("cpu")
 
     with autocast_context(PPOConfig(dtype="bfloat16"), torch.device("cpu")):
-        assert torch.is_autocast_enabled("cpu")
-
-    with autocast_context(PPOConfig(dtype="float8"), torch.device("cpu")):
         assert torch.is_autocast_enabled("cpu")
