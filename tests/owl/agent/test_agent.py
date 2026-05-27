@@ -601,15 +601,17 @@ def test_filter_fleets_uses_ship_count_not_from_planet_id() -> None:
 
 
 @pytest.mark.parametrize(
-    ("agent_min_fleet_size", "expected_fleet_ids"),
+    ("agent_min_fleet_size", "expected_fleet_ids", "expected_filtered_fleets"),
     [
-        ("match", [11, 12]),
-        (8, [12]),
+        ("match", [11, 12], 1),
+        (8, [12], 2),
     ],
 )
 def test_agent_act_filters_fleets_below_configured_min_before_encoding(
     agent_min_fleet_size: object,
     expected_fleet_ids: list[int],
+    expected_filtered_fleets: int,
+    capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     action_spec = ActionPureConfig(max_per_planet_launches=1, min_fleet_size=6)
@@ -716,6 +718,7 @@ def test_agent_act_filters_fleets_below_configured_min_before_encoding(
     actions = agent.act(KaggleObservation.model_validate(raw_observation))
 
     assert actions == []
+    assert f"filtered_fleets={expected_filtered_fleets}" in capsys.readouterr().out
 
 
 def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
@@ -1046,6 +1049,7 @@ def test_agent_log_prints_one_line_with_metrics(capsys) -> None:
         player_values=[0.25, -0.5, 0.0, 0.75],
         entity_count=3,
         peak_entities=5,
+        filtered_fleets=2,
         remaining_overage_time=59.5,
         fallback_triggered=False,
     )
@@ -1068,6 +1072,7 @@ def test_agent_log_prefixes_fallback_trigger(capsys) -> None:
         player_values=[0.25, -0.5, 0.0, 0.75],
         entity_count=3,
         peak_entities=5,
+        filtered_fleets=2,
         remaining_overage_time=4.5,
         fallback_triggered=True,
     )
@@ -1147,7 +1152,7 @@ def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
         r"conversion_ms=\d+ - value_self=0\.250 - advantage=0\.250 - "
         r"values=\[0\.250,-0\.500,0\.000,0\.750\] - "
         r"entities=1 - "
-        r"peak_entities=1 - remaining_overage_s=60\.0\n",
+        r"peak_entities=1 - filtered_fleets=0 - remaining_overage_s=60\.0\n",
         log_line,
     )
 
