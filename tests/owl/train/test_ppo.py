@@ -947,6 +947,10 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "train/advantage_mean",
         "train/advantage_std",
         "train/max_entities",
+        "train/1p_rate",
+        "train/2p_rate",
+        "train/3p_rate",
+        "train/4p_rate",
         "train/player_step_total",
         "time/rollout_seconds",
         "time/update_seconds",
@@ -962,6 +966,10 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(0.0)
     assert metrics["policy/target_kl_exceeded_total"] == pytest.approx(0.0)
     assert metrics["train/max_entities"] == pytest.approx(2.0)
+    assert metrics["train/1p_rate"] == pytest.approx(0.0)
+    assert metrics["train/2p_rate"] == pytest.approx(0.0)
+    assert metrics["train/3p_rate"] == pytest.approx(0.0)
+    assert metrics["train/4p_rate"] == pytest.approx(1.0)
     assert metrics["train/player_step_total"] == pytest.approx(80.0)
     assert metrics["optimizer/steps"] == pytest.approx(2.0)
     assert metrics["optimizer/learning_rate"] == pytest.approx(0.05)
@@ -1090,11 +1098,37 @@ def test_trainer_masks_inactive_player_slots() -> None:
         device=torch.device("cpu"),
     )
 
-    trainer.train_iteration()
+    metrics = trainer.train_iteration()
     segments = trainer.rollout.segment_major()
 
     assert not segments.obs.still_playing[:, :, 2:].any()
     assert segments.dones[:, :, 2:].all()
+    assert metrics["train/1p_rate"] == pytest.approx(0.0)
+    assert metrics["train/2p_rate"] == pytest.approx(1.0)
+    assert metrics["train/3p_rate"] == pytest.approx(0.0)
+    assert metrics["train/4p_rate"] == pytest.approx(0.0)
+
+
+def test_player_count_rates_count_raw_alive_players() -> None:
+    still_playing = torch.tensor(
+        [
+            [
+                [True, False, False, False],
+                [True, True, False, False],
+            ],
+            [
+                [True, True, True, False],
+                [True, True, True, True],
+            ],
+        ]
+    )
+
+    metrics = ppo._player_count_rates(still_playing)
+
+    assert metrics["train/1p_rate"].item() == pytest.approx(0.25)
+    assert metrics["train/2p_rate"].item() == pytest.approx(0.25)
+    assert metrics["train/3p_rate"].item() == pytest.approx(0.25)
+    assert metrics["train/4p_rate"].item() == pytest.approx(0.25)
 
 
 def test_normalize_masked_advantages_uses_valid_policy_samples() -> None:

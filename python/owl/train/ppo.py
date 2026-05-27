@@ -481,6 +481,8 @@ class PPOTrainer:
         metrics["train/max_entities"] = float(
             self._masked_max(max_entities_seen).item()
         )
+        for key, rate in _player_count_rates(segments.obs.still_playing).items():
+            metrics[key] = float(self._mean_scalar(rate).item())
         self.player_step_total += self._sum_int(value_mask.sum())
         metrics["train/player_step_total"] = float(self.player_step_total)
         env_metrics_logged = _mean_env_metrics(
@@ -1819,6 +1821,14 @@ def _output_values(output: ModelOutput | ModelEvaluation) -> torch.Tensor:
 def _policy_mask(obs: ObsBatch) -> torch.Tensor:
     can_act = obs.action_mask.can_act.flatten(start_dim=3).any(dim=-1)
     return obs.still_playing & can_act
+
+
+def _player_count_rates(still_playing: torch.Tensor) -> dict[str, torch.Tensor]:
+    alive_counts = still_playing.sum(dim=-1)
+    return {
+        f"train/{player_count}p_rate": alive_counts.eq(player_count).float().mean()
+        for player_count in range(1, OUTER_PLAYER_SLOTS + 1)
+    }
 
 
 def _policy_entity_mask(obs: ObsBatch) -> torch.Tensor:
