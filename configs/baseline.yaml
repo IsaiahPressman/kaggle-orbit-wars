@@ -46,4 +46,3 @@ rl:
   eval_replay_games: 8
   compile_mode: default
   dtype: bfloat16
-  fp8_recipe: rowwise

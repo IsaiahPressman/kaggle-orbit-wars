@@ -5,11 +5,9 @@ from contextlib import AbstractContextManager, nullcontext
 from typing import Literal, Protocol, assert_never
 
 import torch
-from torch import nn
 
 from owl.model import BaseModelAPI
 
-Float8Recipe = Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"]
 ModelCompileTarget = Literal["none", "mlp"]
 ModelCompileMode = Literal[
     "default",
@@ -17,17 +15,12 @@ ModelCompileMode = Literal[
     "max-autotune",
     "max-autotune-no-cudagraphs",
 ]
-TrainingDType = Literal["float32", "bfloat16", "float8"]
+TrainingDType = Literal["float32", "bfloat16"]
 
 
 class DTypeConfig(Protocol):
     @property
     def dtype(self) -> TrainingDType: ...
-
-
-class Float8TrainingConfig(DTypeConfig, Protocol):
-    @property
-    def fp8_recipe(self) -> Float8Recipe: ...
 
 
 class ModelCompileConfig(Protocol):
@@ -60,67 +53,10 @@ def autocast_context(
     match cfg.dtype:
         case "bfloat16":
             return torch.autocast(device_type=device.type, dtype=torch.bfloat16)
-        case "float8":
-            return torch.autocast(device_type=device.type, dtype=torch.bfloat16)
         case "float32":
             return nullcontext()
         case _:
             assert_never(cfg.dtype)
-
-
-def configure_model_for_training_dtype(
-    model: BaseModelAPI,
-    cfg: Float8TrainingConfig,
-    *,
-    device: torch.device,
-) -> int:
-    if cfg.dtype != "float8":
-        return 0
-    if device.type != "cuda":
-        raise RuntimeError("rl.dtype='float8' requires a CUDA device")
-
-    try:
-        from torchao.float8 import Float8LinearConfig
-        from torchao.float8 import convert_to_float8_training as torchao_float8
-    except ImportError as exc:
-        raise RuntimeError("rl.dtype='float8' requires the torchao package") from exc
-
-    excluded_linear_ids = _fp8_excluded_linear_module_ids(model)
-    converted_names: list[str] = []
-
-    def module_filter_fn(module: nn.Module, fqn: str) -> bool:
-        if not isinstance(module, nn.Linear):
-            return False
-        if id(module) in excluded_linear_ids:
-            return False
-        if not _linear_shape_supports_fp8(module):
-            return False
-        converted_names.append(fqn)
-        return True
-
-    torchao_float8(
-        model,
-        config=Float8LinearConfig.from_recipe_name(cfg.fp8_recipe),
-        module_filter_fn=module_filter_fn,
-    )
-    if not converted_names:
-        raise RuntimeError(
-            "rl.dtype='float8' found no eligible Linear layers; FP8 training "
-            "requires non-input/output Linear dimensions divisible by 16"
-        )
-    return len(converted_names)
-
-
-def _fp8_excluded_linear_module_ids(model: BaseModelAPI) -> set[int]:
-    excluded: set[int] = set()
-    for layer in (*model.get_input_layers(), *model.get_output_layers()):
-        if isinstance(layer, nn.Linear):
-            excluded.add(id(layer))
-    return excluded
-
-
-def _linear_shape_supports_fp8(module: nn.Linear) -> bool:
-    return module.in_features % 16 == 0 and module.out_features % 16 == 0
 
 
 def configure_model_compile(model: BaseModelAPI, cfg: ModelCompileConfig) -> int:

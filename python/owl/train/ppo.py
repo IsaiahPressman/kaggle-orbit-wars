@@ -61,9 +61,6 @@ from owl.train.optimizer import (
     Optimizer as _Optimizer,
 )
 from owl.train.utils import (
-    Float8Recipe as _Float8Recipe,
-)
-from owl.train.utils import (
     ModelCompileMode as _ModelCompileMode,
 )
 from owl.train.utils import (
@@ -114,7 +111,6 @@ class PPOConfig(BaseConfig):
     model_compile: _ModelCompileTarget = "mlp"
     model_compile_mode: _ModelCompileMode = "max-autotune-no-cudagraphs"
     dtype: _TrainingDType = "float32"
-    fp8_recipe: _Float8Recipe = "rowwise"
 
 
 @dataclass(frozen=True)
