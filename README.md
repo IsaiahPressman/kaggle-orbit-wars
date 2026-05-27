@@ -160,8 +160,9 @@ uv run python scripts/run_ppo.py configs/baseline.yaml runs --log-mode debug --m
 
 Fresh launches accept `-o`/`--overrides field.path=value`; when provided, rank 0
 prints the flattened override list before loading the config.
-`rl.model_compile` defaults to `mlp`, which compiles each transformer-block MLP
-in place with `rl.model_compile_mode: max-autotune-no-cudagraphs` and
+`rl.model_compile` defaults to `mlp`, which compiles each shared or
+per-player-count adapter transformer-block MLP in place with
+`rl.model_compile_mode: max-autotune-no-cudagraphs` and
 `dynamic=True`. This keeps attention packing and flash-attn calls eager while
 allowing Inductor to optimize the FFN path. Set `rl.model_compile=none` for
 short CPU smoke tests or compile-debugging runs.
@@ -222,6 +223,8 @@ planet occupancy for 2-player and 4-player games, max-entity overflow counts,
 terminal ship counts, completed game counts, planet captures, launch and fleet-size statistics,
 neutral planet/comet undershot rates, full-length game rate, cumulative active
 player-step totals, and fleet/ship losses in combat, the sun, or out of bounds.
+Rollout observation mix is logged as `train/1p_rate`, `train/2p_rate`,
+`train/3p_rate`, and `train/4p_rate` from `obs.still_playing` alive counts.
 Planet occupancy is reported at terminal as
 `train/terminal_planet_occupancy_rate_2p` and
 `train/terminal_planet_occupancy_rate_4p`.

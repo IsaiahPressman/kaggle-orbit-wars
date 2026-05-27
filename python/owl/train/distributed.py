@@ -18,6 +18,7 @@ from owl.model import (
     ModelEvaluation,
     ModelHiddenState,
     ModelOutput,
+    StatelessTransformerV1,
 )
 from owl.rl import ObsBatch
 
@@ -223,6 +224,7 @@ class DistributedModelAdapter(BaseModelAPI):
             _DistributedModelDispatch(model),
             device_ids=[context.local_rank],
             output_device=context.local_rank,
+            find_unused_parameters=_requires_unused_parameter_detection(model),
         )
 
     @property
@@ -310,6 +312,13 @@ def wrap_model_for_distributed(
     if not context.initialized:
         return model
     return DistributedModelAdapter(model, context)
+
+
+def _requires_unused_parameter_detection(model: BaseModelAPI) -> bool:
+    return (
+        isinstance(model, StatelessTransformerV1)
+        and model.config.player_count_adapters_enabled
+    )
 
 
 def unwrap_model(model: BaseModelAPI) -> BaseModelAPI:

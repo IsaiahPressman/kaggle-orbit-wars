@@ -290,6 +290,26 @@ def test_model_config_requires_positive_feedforward_width() -> None:
         StatelessTransformerV1Config(embed_dim=1, n_heads=1, mlp_ratio=0.5)
 
 
+def test_model_config_requires_player_count_adapter_blocks_within_depth() -> None:
+    with pytest.raises(
+        ValueError,
+        match="player_count_adapter_blocks must be less than or equal to depth",
+    ):
+        StatelessTransformerV1Config(
+            depth=2,
+            player_count_adapters_enabled=True,
+            player_count_adapter_blocks=3,
+        )
+
+
+def test_model_config_requires_enabled_player_count_adapters_for_blocks() -> None:
+    with pytest.raises(
+        ValueError,
+        match="player_count_adapter_blocks requires player_count_adapters_enabled=True",
+    ):
+        StatelessTransformerV1Config(player_count_adapter_blocks=1)
+
+
 def test_actor_pure_config_requires_ordered_kappa_bounds() -> None:
     assert ActorPureConfig().kappa_max == 1_000_000.0
     with pytest.raises(ValueError, match="kappa_min must be <= kappa_max"):
@@ -1138,6 +1158,166 @@ def test_flash_encoder_packs_once_before_trunk_and_unpacks_once_after(
     assert pack_calls == 1
     assert unpack_calls == 1
     assert varlen_calls == config.depth
+
+
+def test_player_count_adapter_blocks_split_depth_and_packed_masks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PassBlock(nn.Module):
+        def forward(
+            self,
+            x: torch.Tensor,
+            _token_mask: torch.Tensor | None,
+            _packed: model_impl.PackedSequence | None,
+        ) -> torch.Tensor:
+            return x
+
+    class RecordingBlock(nn.Module):
+        def __init__(self, player_count: int) -> None:
+            super().__init__()
+            self.player_count = player_count
+
+        def forward(
+            self,
+            x: torch.Tensor,
+            token_mask: torch.Tensor | None,
+            packed: model_impl.PackedSequence | None,
+        ) -> torch.Tensor:
+            assert token_mask is None
+            assert packed is not None
+            calls.append(
+                (
+                    self.player_count,
+                    tuple(x.shape),
+                    packed.cu_seqlens.tolist(),
+                    packed.max_seqlen,
+                    packed.batch_size,
+                )
+            )
+            delta = torch.zeros_like(x)
+            delta[:, 0] = float(self.player_count)
+            return x + delta
+
+    calls: list[tuple[int, tuple[int, ...], list[int], int, int]] = []
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 4)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    config = StatelessTransformerV1Config(
+        embed_dim=16,
+        depth=4,
+        n_heads=4,
+        n_scratch_tokens=0,
+        player_count_adapters_enabled=True,
+        player_count_adapter_blocks=2,
+    )
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    assert list(model.player_count_adapters.keys()) == ["2", "3", "4"]
+    model.blocks = nn.ModuleList([PassBlock(), PassBlock()])
+    for player_count, adapter in model.player_count_adapters.items():
+        adapter.blocks = nn.ModuleList(
+            [RecordingBlock(int(player_count)), RecordingBlock(int(player_count))]
+        )
+    model.final_norm = nn.Identity()
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+    obs = _obs_batch(batch_size=3, obs_spec=obs_spec, action_spec=action_spec)
+    obs.still_playing = torch.tensor(
+        [
+            [True, True, False, False],
+            [True, True, True, False],
+            [True, True, True, True],
+        ]
+    )
+    obs.entity_mask.zero_()
+    obs.entity_mask[0, :2] = True
+    obs.entity_mask[1, :3] = True
+    obs.entity_mask[2, :4] = True
+
+    monkeypatch.setattr(model_impl, "use_flash_attn", lambda _x: True)
+
+    encoded = model.encode_observations(obs)
+
+    assert len(model.blocks) == 2
+    assert all(
+        len(adapter.blocks) == 2 for adapter in model.player_count_adapters.values()
+    )
+    assert [call[0] for call in calls] == [2, 2, 3, 3, 4, 4]
+    expected_seqlens = {2: 9, 3: 13, 4: 17}
+    for player_count, shape, cu_seqlens, max_seqlen, batch_size in calls:
+        seqlen = expected_seqlens[player_count]
+        assert shape == (seqlen, config.embed_dim)
+        assert cu_seqlens == [0, seqlen]
+        assert max_seqlen == 17
+        assert batch_size == 1
+    torch.testing.assert_close(
+        encoded.hidden[:, 0, 0],
+        torch.tensor([4.0, 6.0, 8.0]),
+    )
+
+
+def test_player_count_adapter_heads_route_actor_and_critic_by_alive_count() -> None:
+    class ConstantCriticHead(nn.Module):
+        def __init__(self, logits: list[float]) -> None:
+            super().__init__()
+            self.register_buffer(
+                "logits",
+                torch.tensor(logits, dtype=torch.float32).view(
+                    1,
+                    OUTER_PLAYER_SLOTS,
+                    1,
+                ),
+            )
+
+        def forward(self, player_hidden: torch.Tensor) -> torch.Tensor:
+            return self.logits.to(
+                device=player_hidden.device,
+                dtype=player_hidden.dtype,
+            ).expand(player_hidden.shape[0], -1, -1)
+
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=1, min_fleet_size=1)
+    config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        player_count_adapters_enabled=True,
+        player_count_adapter_blocks=0,
+        actor=ActorPureConfig(n_angle_mixtures=2, n_fleet_size_mixtures=2),
+    )
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    assert len(model.blocks) == 1
+    assert list(model.player_count_adapters.keys()) == ["2", "3", "4"]
+    for player_count, adapter in model.player_count_adapters.items():
+        assert len(adapter.blocks) == 0
+        assert isinstance(adapter.actor, PureActor)
+        with torch.no_grad():
+            adapter.actor.actor_heads.continue_head.out.weight.zero_()
+            adapter.actor.actor_heads.continue_head.out.bias.fill_(
+                10.0 if player_count == "2" else -10.0
+            )
+        if player_count == "2":
+            adapter.critic_head = ConstantCriticHead([2.0, 0.0, 0.0, 0.0])
+        elif player_count == "3":
+            adapter.critic_head = ConstantCriticHead([0.0, 2.0, 0.0, 0.0])
+
+    obs = _obs_batch(batch_size=3, obs_spec=obs_spec, action_spec=action_spec)
+    obs.still_playing = torch.tensor(
+        [
+            [True, True, False, False],
+            [True, True, True, False],
+            [True, False, False, False],
+        ]
+    )
+
+    output = model(obs, deterministic=True)
+
+    assert isinstance(output.actions, PureActions)
+    assert output.actions.launch[0, 0, 0, 0]
+    assert not output.actions.launch[1, 0, 0, 0]
+    assert output.actions.launch[2, 0, 0, 0]
+    assert output.winner_probabilities[0, 0] > output.winner_probabilities[0, 1]
+    assert output.winner_probabilities[1, 1] > output.winner_probabilities[1, 0]
+    assert output.winner_probabilities[2, 0] == 1.0
 
 
 def test_autocast_encoder_packs_after_appending_player_tokens(

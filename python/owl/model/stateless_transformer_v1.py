@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, Self, assert_never, cast
+from typing import Literal, Self, TypeVar, assert_never, cast
 
 import torch
 import torch.nn.functional as F
@@ -127,6 +128,9 @@ _COMET_X = 52
 _COMET_Y = 53
 _NEUTRAL_SHIP_NORMALIZER = 100.0
 _SHIP_NORMALIZER = 500.0
+_PLAYER_COUNT_ADAPTER_COUNTS = tuple(range(2, OUTER_PLAYER_SLOTS + 1))
+_MIN_PLAYER_COUNT_ADAPTER_COUNT = _PLAYER_COUNT_ADAPTER_COUNTS[0]
+_T = TypeVar("_T")
 
 
 class StatelessTransformerV1Config(BaseConfig):
@@ -135,6 +139,8 @@ class StatelessTransformerV1Config(BaseConfig):
     depth: int = Field(default=4, ge=1)
     n_heads: int = Field(default=8, ge=1)
     mlp_ratio: float = Field(default=4.0, gt=0.0)
+    player_count_adapters_enabled: bool = False
+    player_count_adapter_blocks: int = Field(default=0, ge=0)
     n_scratch_tokens: int = Field(default=4, ge=0)
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
     force_flash_attn: bool = False
@@ -151,6 +157,18 @@ class StatelessTransformerV1Config(BaseConfig):
             raise ValueError("n_heads must evenly divide embed_dim")
         if int(self.embed_dim * self.mlp_ratio) < 1:
             raise ValueError("embed_dim * mlp_ratio must be at least 1")
+        if (
+            not self.player_count_adapters_enabled
+            and self.player_count_adapter_blocks != 0
+        ):
+            raise ValueError(
+                "player_count_adapter_blocks requires "
+                "player_count_adapters_enabled=True"
+            )
+        if self.player_count_adapter_blocks > self.depth:
+            raise ValueError(
+                "player_count_adapter_blocks must be less than or equal to depth"
+            )
         return self
 
 
@@ -236,43 +254,42 @@ class StatelessTransformerV1(BaseModelAPI):
         self.actor_plan_tokens = nn.Parameter(torch.empty(OUTER_PLAYER_SLOTS, dim))
         self.critic_value_tokens = nn.Parameter(torch.empty(OUTER_PLAYER_SLOTS, dim))
 
+        shared_depth = self.config.depth - (
+            self.config.player_count_adapter_blocks
+            if self.config.player_count_adapters_enabled
+            else 0
+        )
         self.blocks = nn.ModuleList(
-            TransformerBlock(self.config) for _ in range(self.config.depth)
+            TransformerBlock(self.config) for _ in range(shared_depth)
         )
         self.final_norm = nn.LayerNorm(dim)
+        self.player_count_adapters = nn.ModuleDict()
 
-        self.critic_head = OutputProjectionMLP(self.config, 1)
-        self.pairwise_bias_mlp: PairwiseBiasMLP | None = (
-            PairwiseBiasMLP(self.config)
-            if self.config.use_learned_pairwise_bias
-            else None
-        )
+        self.critic_head: OutputProjectionMLP | None = None
+        self.pairwise_bias_mlp: PairwiseBiasMLP | None = None
         self.source_actor_input_proj: nn.Linear | None = None
         self.target_actor_input_proj: nn.Linear | None = None
-        self.actor: PureActor | DiscreteTargetsActor | DiscreteTargetBinsActor
-        if isinstance(action_spec, ActionPureConfig):
-            self.source_actor_input_proj = nn.Linear(dim * 3, dim)
-            self.target_actor_input_proj = nn.Linear(dim * 3, dim)
-            self.actor = PureActor(
-                cast(ActorPureConfig, self.config.actor),
-                embed_dim=dim,
-                max_per_planet_launches=action_spec.max_per_planet_launches,
-                activation=self.config.activation,
+        self.actor: (
+            PureActor | DiscreteTargetsActor | DiscreteTargetBinsActor | None
+        ) = None
+        if not self.config.player_count_adapters_enabled:
+            self.critic_head = OutputProjectionMLP(self.config, 1)
+            self.pairwise_bias_mlp = (
+                PairwiseBiasMLP(self.config)
+                if self.config.use_learned_pairwise_bias
+                else None
             )
-        elif isinstance(action_spec, ActionDiscreteTargetsConfig):
-            self.source_actor_input_proj = nn.Linear(dim * 3, dim)
-            self.target_actor_input_proj = nn.Linear(dim * 3, dim)
-            self.actor = DiscreteTargetsActor(
-                cast(ActorDiscreteTargetsConfig, self.config.actor),
-                transformer_config=self.config,
-            )
+            (
+                self.source_actor_input_proj,
+                self.target_actor_input_proj,
+                self.actor,
+            ) = _build_actor_modules(self.config, action_spec)
         else:
-            self.source_actor_input_proj = nn.Linear(dim * 3, dim)
-            self.target_actor_input_proj = nn.Linear(dim * 3, dim)
-            self.actor = DiscreteTargetBinsActor(
-                cast(ActorDiscreteTargetBinsConfig, self.config.actor),
-                transformer_config=self.config,
-            )
+            for player_count in _PLAYER_COUNT_ADAPTER_COUNTS:
+                self.player_count_adapters[str(player_count)] = PlayerCountAdapter(
+                    self.config,
+                    action_spec,
+                )
 
     def reset_parameters(self) -> None:
         self.apply(_init_module)
@@ -280,39 +297,79 @@ class StatelessTransformerV1(BaseModelAPI):
             _init_input_layer(layer)
         if isinstance(self.actor, PureActor):
             self.actor.reset_base_dirs()
+        for adapter in self.player_count_adapters.values():
+            adapter = cast(PlayerCountAdapter, adapter)
+            if isinstance(adapter.actor, PureActor):
+                adapter.actor.reset_base_dirs()
         residual_gain = 1.0 / math.sqrt(2.0 * self.config.depth)
         for module in self.blocks:
             block = cast(TransformerBlock, module)
             _init_linear(block.attn.out, gain=residual_gain)
             _init_linear(block.mlp.down, gain=residual_gain)
+        for adapter in self.player_count_adapters.values():
+            adapter = cast(PlayerCountAdapter, adapter)
+            for module in adapter.blocks:
+                block = cast(TransformerBlock, module)
+                _init_linear(block.attn.out, gain=residual_gain)
+                _init_linear(block.mlp.down, gain=residual_gain)
+        critic_output_layer_ids = {
+            id(adapter.critic_head.out)
+            for adapter in cast(
+                list[PlayerCountAdapter],
+                list(self.player_count_adapters.values()),
+            )
+        }
+        if self.critic_head is not None:
+            critic_output_layer_ids.add(id(self.critic_head.out))
         for layer in self.get_output_layers():
             gain = (
                 _CRITIC_HEAD_INIT_GAIN
-                if layer is self.critic_head.out
+                if id(layer) in critic_output_layer_ids
                 else _ACTOR_HEAD_INIT_GAIN
             )
             _init_linear(layer, gain=gain)
 
     def get_input_layers(self) -> tuple[InputLayer, ...]:
+        head_input_layers: tuple[InputLayer, ...]
+        if self.player_count_adapters:
+            head_input_layers = tuple(
+                layer
+                for adapter in self.player_count_adapters.values()
+                for layer in cast(PlayerCountAdapter, adapter).get_input_layers()
+            )
+        else:
+            actor = self._shared_actor()
+            head_input_layers = (
+                *(
+                    ()
+                    if self.pairwise_bias_mlp is None
+                    else self.pairwise_bias_mlp.get_input_layers()
+                ),
+                *actor.get_input_layers(),
+            )
         return (
             self.static_planet_proj.input,
             self.orbit_planet_proj.input,
             self.fleet_proj.input,
             self.comet_proj.input,
             self.global_proj.input,
-            *(
-                ()
-                if self.pairwise_bias_mlp is None
-                else self.pairwise_bias_mlp.get_input_layers()
-            ),
             self.player_tokens,
             self.board_tokens,
             self.actor_plan_tokens,
             self.critic_value_tokens,
-            *self.actor.get_input_layers(),
+            *head_input_layers,
         )
 
     def get_output_layers(self) -> tuple[nn.Linear, ...]:
+        if self.player_count_adapters:
+            return tuple(
+                layer
+                for adapter in self.player_count_adapters.values()
+                for layer in cast(PlayerCountAdapter, adapter).get_output_layers()
+            )
+        if self.critic_head is None:
+            raise RuntimeError("shared critic head is not initialized")
+        actor = self._shared_actor()
         return (
             self.critic_head.out,
             *(
@@ -320,7 +377,7 @@ class StatelessTransformerV1(BaseModelAPI):
                 if self.pairwise_bias_mlp is None
                 else self.pairwise_bias_mlp.get_output_layers()
             ),
-            *self.actor.get_output_layers(),
+            *actor.get_output_layers(),
         )
 
     def encode_observations(
@@ -407,6 +464,12 @@ class StatelessTransformerV1(BaseModelAPI):
             block_token_mask = token_mask
         for block in self.blocks:
             x = block(x, block_token_mask, packed)
+        x = self._apply_player_count_adapter_blocks(
+            x,
+            token_mask,
+            packed,
+            obs.still_playing,
+        )
         x = self.final_norm(x)
         if packed is not None:
             x = unpack_sequence(x, packed)
@@ -431,6 +494,126 @@ class StatelessTransformerV1(BaseModelAPI):
                 :,
             ],
         )
+
+    def _apply_player_count_adapter_blocks(
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor,
+        packed: PackedSequence | None,
+        still_playing: torch.Tensor,
+    ) -> torch.Tensor:
+        if (
+            not self.player_count_adapters
+            or self.config.player_count_adapter_blocks == 0
+        ):
+            return x
+
+        out = x
+        for player_count, batch_indices in self._player_count_index_groups(
+            still_playing
+        ):
+            adapter = self._player_count_adapter(player_count)
+            if packed is None:
+                x_indices = batch_indices.to(device=x.device)
+                branch_x = x.index_select(0, x_indices)
+                branch_token_mask = token_mask.index_select(
+                    0,
+                    batch_indices.to(device=token_mask.device),
+                )
+                for block in adapter.blocks:
+                    branch_x = block(branch_x, branch_token_mask, None)
+                out = out.index_copy(0, x_indices, branch_x)
+                continue
+
+            packed_positions, branch_packed = _packed_subset_for_batch_indices(
+                packed,
+                batch_indices,
+            )
+            packed_positions = packed_positions.to(device=x.device)
+            branch_x = x.index_select(0, packed_positions)
+            for block in adapter.blocks:
+                branch_x = block(branch_x, None, branch_packed)
+            out = out.index_copy(0, packed_positions, branch_x)
+        return out
+
+    def _player_count_index_groups(
+        self,
+        still_playing: torch.Tensor,
+    ) -> list[tuple[int, torch.Tensor]]:
+        alive_counts = still_playing.sum(dim=1)
+        if not alive_counts.gt(0).all():
+            raise ValueError(
+                "still_playing must include at least one player per batch row"
+            )
+
+        adapter_counts = alive_counts.clamp_min(_MIN_PLAYER_COUNT_ADAPTER_COUNT)
+        groups: list[tuple[int, torch.Tensor]] = []
+        grouped_rows = 0
+        for player_count in _PLAYER_COUNT_ADAPTER_COUNTS:
+            batch_indices = (
+                (adapter_counts == player_count).nonzero(as_tuple=False).flatten()
+            )
+            if batch_indices.numel() == 0:
+                continue
+            groups.append((player_count, batch_indices))
+            grouped_rows += batch_indices.numel()
+        if grouped_rows != still_playing.shape[0]:
+            raise ValueError(
+                "player-count adapters support one to four still-playing "
+                "players per batch row"
+            )
+        return groups
+
+    def _player_count_adapter(self, player_count: int) -> PlayerCountAdapter:
+        key = str(player_count)
+        if key not in self.player_count_adapters:
+            raise RuntimeError(
+                f"player-count adapter {player_count}p is not initialized"
+            )
+        return cast(PlayerCountAdapter, self.player_count_adapters[key])
+
+    def _shared_actor(
+        self,
+    ) -> PureActor | DiscreteTargetsActor | DiscreteTargetBinsActor:
+        if self.actor is None:
+            raise RuntimeError("shared actor is not initialized")
+        return self.actor
+
+    def _critic_head(
+        self,
+        adapter: PlayerCountAdapter | None,
+    ) -> nn.Module:
+        if adapter is not None:
+            return adapter.critic_head
+        if self.critic_head is None:
+            raise RuntimeError("shared critic head is not initialized")
+        return self.critic_head
+
+    def _actor_module(
+        self,
+        adapter: PlayerCountAdapter | None,
+    ) -> PureActor | DiscreteTargetsActor | DiscreteTargetBinsActor:
+        if adapter is not None:
+            return adapter.actor
+        return self._shared_actor()
+
+    def _actor_input_projections(
+        self,
+        adapter: PlayerCountAdapter | None,
+    ) -> tuple[nn.Linear, nn.Linear]:
+        if adapter is not None:
+            return adapter.source_actor_input_proj, adapter.target_actor_input_proj
+        if self.source_actor_input_proj is None or self.target_actor_input_proj is None:
+            raise RuntimeError("actor input projections are not initialized")
+        return self.source_actor_input_proj, self.target_actor_input_proj
+
+    def _pairwise_bias_head(
+        self,
+        adapter: PlayerCountAdapter | None,
+    ) -> PairwiseBiasMLP | None:
+        if adapter is not None:
+            return adapter.pairwise_bias_mlp
+        return self.pairwise_bias_mlp
 
     def forward(
         self,
@@ -536,12 +719,40 @@ class StatelessTransformerV1(BaseModelAPI):
         encoded: EncodedObservations,
         obs: ObsBatch,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.player_count_adapters:
+            return self._value_by_player_count(encoded, obs)
         return self._critic(encoded.critic_value_hidden, obs.still_playing)
+
+    def _value_by_player_count(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        value_parts: list[tuple[torch.Tensor, torch.Tensor]] = []
+        probability_parts: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for player_count, batch_indices in self._player_count_index_groups(
+            obs.still_playing
+        ):
+            adapter = self._player_count_adapter(player_count)
+            values, probabilities = self._critic(
+                _batch_select(encoded.critic_value_hidden, batch_indices),
+                _batch_select(obs.still_playing, batch_indices),
+                adapter=adapter,
+            )
+            value_parts.append((batch_indices, values))
+            probability_parts.append((batch_indices, probabilities))
+
+        batch_size = obs.still_playing.shape[0]
+        values = _merge_tensors_by_batch(batch_size, value_parts)
+        probabilities = _merge_tensors_by_batch(batch_size, probability_parts)
+        return values, probabilities
 
     def _critic(
         self,
         player_hidden: torch.Tensor,
         still_playing: torch.Tensor,
+        *,
+        adapter: PlayerCountAdapter | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if still_playing.shape != player_hidden.shape[:2]:
             raise ValueError(
@@ -553,7 +764,7 @@ class StatelessTransformerV1(BaseModelAPI):
                 "still_playing must include at least one player per batch row"
             )
 
-        logits = self.critic_head(player_hidden).squeeze(-1)
+        logits = self._critic_head(adapter)(player_hidden).squeeze(-1)
         probabilities = masked_softmax(logits, still_playing, dim=-1)
         values = 2.0 * probabilities - 1.0
         return values, probabilities
@@ -561,6 +772,8 @@ class StatelessTransformerV1(BaseModelAPI):
     def _pure_actor_inputs(
         self,
         encoded: EncodedObservations,
+        *,
+        adapter: PlayerCountAdapter | None = None,
     ) -> PureActorInputs:
         action_entity_hidden = encoded.action_entity_hidden
         action_entity_slots = action_entity_hidden.shape[1]
@@ -582,12 +795,13 @@ class StatelessTransformerV1(BaseModelAPI):
             action_entity_slots,
             -1,
         )
-        if self.source_actor_input_proj is None or self.target_actor_input_proj is None:
-            raise RuntimeError("pure actor input projections are not initialized")
-        source = self.source_actor_input_proj(
+        source_actor_input_proj, target_actor_input_proj = (
+            self._actor_input_projections(adapter)
+        )
+        source = source_actor_input_proj(
             torch.cat((entity_features, player_features, plan_features), dim=-1)
         )
-        target = self.target_actor_input_proj(
+        target = target_actor_input_proj(
             torch.cat((entity_features, player_features, plan_features), dim=-1)
         )
         return PureActorInputs(
@@ -600,6 +814,8 @@ class StatelessTransformerV1(BaseModelAPI):
         self,
         encoded: EncodedObservations,
         obs: ObsBatch,
+        *,
+        adapter: PlayerCountAdapter | None = None,
     ) -> DiscreteActorInputs:
         action_entity_hidden = encoded.action_entity_hidden
         action_entity_slots = action_entity_hidden.shape[1]
@@ -621,17 +837,19 @@ class StatelessTransformerV1(BaseModelAPI):
             action_entity_slots,
             -1,
         )
-        if self.source_actor_input_proj is None or self.target_actor_input_proj is None:
-            raise RuntimeError("discrete actor input projections are not initialized")
-        source = self.source_actor_input_proj(
+        source_actor_input_proj, target_actor_input_proj = (
+            self._actor_input_projections(adapter)
+        )
+        source = source_actor_input_proj(
             torch.cat((entity_features, player_features, plan_features), dim=-1)
         )
-        target = self.target_actor_input_proj(
+        target = target_actor_input_proj(
             torch.cat((entity_features, player_features, plan_features), dim=-1)
         )
         pairwise_bias: torch.Tensor | None = None
-        if self.pairwise_bias_mlp is not None:
-            pairwise_bias = self.pairwise_bias_mlp(build_pairwise_action_features(obs))
+        pairwise_bias_mlp = self._pairwise_bias_head(adapter)
+        if pairwise_bias_mlp is not None:
+            pairwise_bias = pairwise_bias_mlp(build_pairwise_action_features(obs))
             pairwise_bias = pairwise_bias[:, None, :, :].expand(
                 -1,
                 OUTER_PLAYER_SLOTS,
@@ -651,24 +869,33 @@ class StatelessTransformerV1(BaseModelAPI):
         action_mask: ActionMask,
         *,
         deterministic: bool,
+        adapter: PlayerCountAdapter | None = None,
     ) -> tuple[ActionBundle, ModelActionLogProbs, ModelActionEntropies]:
-        if isinstance(self.actor, DiscreteTargetBinsActor):
+        if adapter is None and self.player_count_adapters:
+            return self._actor_by_player_count(
+                encoded,
+                obs,
+                deterministic=deterministic,
+            )
+
+        actor = self._actor_module(adapter)
+        if isinstance(actor, DiscreteTargetBinsActor):
             if not isinstance(action_mask, DiscreteTargetBinActionMask):
                 raise RuntimeError(
                     "discrete_target_bins actor requires a target-bin action mask"
                 )
-            return self.actor(
-                self._discrete_actor_inputs(encoded, obs),
+            return actor(
+                self._discrete_actor_inputs(encoded, obs, adapter=adapter),
                 action_mask.can_act,
                 deterministic=deterministic,
             )
-        if isinstance(self.actor, DiscreteTargetsActor):
+        if isinstance(actor, DiscreteTargetsActor):
             if not isinstance(action_mask, DiscreteTargetActionMask):
                 raise RuntimeError(
                     "discrete_targets actor requires a discrete-target action mask"
                 )
-            return self.actor(
-                self._discrete_actor_inputs(encoded, obs),
+            return actor(
+                self._discrete_actor_inputs(encoded, obs, adapter=adapter),
                 action_mask.can_act,
                 action_mask.max_launch,
                 min_fleet_size=self.action_spec.min_fleet_size,
@@ -676,12 +903,45 @@ class StatelessTransformerV1(BaseModelAPI):
             )
         if not isinstance(action_mask, PureActionMask):
             raise RuntimeError("pure actor requires a pure action mask")
-        return self.actor(
-            self._pure_actor_inputs(encoded),
+        return actor(
+            self._pure_actor_inputs(encoded, adapter=adapter),
             action_mask.can_act,
             action_mask.max_launch,
             min_fleet_size=self.action_spec.min_fleet_size,
             deterministic=deterministic,
+        )
+
+    def _actor_by_player_count(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+        *,
+        deterministic: bool,
+    ) -> tuple[ActionBundle, ModelActionLogProbs, ModelActionEntropies]:
+        action_parts: list[tuple[torch.Tensor, ActionBundle]] = []
+        log_prob_parts: list[tuple[torch.Tensor, ModelActionLogProbs]] = []
+        entropy_parts: list[tuple[torch.Tensor, ModelActionEntropies]] = []
+        for player_count, batch_indices in self._player_count_index_groups(
+            obs.still_playing
+        ):
+            adapter = self._player_count_adapter(player_count)
+            indexed_encoded = _index_encoded_observations(encoded, batch_indices)
+            indexed_obs = _index_obs_batch(obs, batch_indices)
+            actions, log_probs, entropies = self._actor(
+                indexed_encoded,
+                indexed_obs,
+                indexed_obs.action_mask,
+                deterministic=deterministic,
+                adapter=adapter,
+            )
+            action_parts.append((batch_indices, actions))
+            log_prob_parts.append((batch_indices, log_probs))
+            entropy_parts.append((batch_indices, entropies))
+        batch_size = obs.still_playing.shape[0]
+        return (
+            _merge_action_bundles_by_batch(batch_size, action_parts),
+            _merge_log_probs_by_batch(batch_size, log_prob_parts),
+            _merge_entropies_by_batch(batch_size, entropy_parts),
         )
 
     def _actor_actions(
@@ -691,14 +951,23 @@ class StatelessTransformerV1(BaseModelAPI):
         action_mask: ActionMask,
         *,
         deterministic: bool,
+        adapter: PlayerCountAdapter | None = None,
     ) -> ActionBundle:
-        if isinstance(self.actor, DiscreteTargetsActor):
+        if adapter is None and self.player_count_adapters:
+            return self._actor_actions_by_player_count(
+                encoded,
+                obs,
+                deterministic=deterministic,
+            )
+
+        actor = self._actor_module(adapter)
+        if isinstance(actor, DiscreteTargetsActor):
             if not isinstance(action_mask, DiscreteTargetActionMask):
                 raise RuntimeError(
                     "discrete_targets actor requires a discrete-target action mask"
                 )
-            return self.actor.sample_actions(
-                self._discrete_actor_inputs(encoded, obs),
+            return actor.sample_actions(
+                self._discrete_actor_inputs(encoded, obs, adapter=adapter),
                 action_mask.can_act,
                 action_mask.max_launch,
                 min_fleet_size=self.action_spec.min_fleet_size,
@@ -710,8 +979,33 @@ class StatelessTransformerV1(BaseModelAPI):
             obs,
             action_mask,
             deterministic=deterministic,
+            adapter=adapter,
         )
         return actions
+
+    def _actor_actions_by_player_count(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+        *,
+        deterministic: bool,
+    ) -> ActionBundle:
+        action_parts: list[tuple[torch.Tensor, ActionBundle]] = []
+        for player_count, batch_indices in self._player_count_index_groups(
+            obs.still_playing
+        ):
+            adapter = self._player_count_adapter(player_count)
+            indexed_encoded = _index_encoded_observations(encoded, batch_indices)
+            indexed_obs = _index_obs_batch(obs, batch_indices)
+            actions = self._actor_actions(
+                indexed_encoded,
+                indexed_obs,
+                indexed_obs.action_mask,
+                deterministic=deterministic,
+                adapter=adapter,
+            )
+            action_parts.append((batch_indices, actions))
+        return _merge_action_bundles_by_batch(obs.still_playing.shape[0], action_parts)
 
     def _actor_log_prob(
         self,
@@ -719,8 +1013,14 @@ class StatelessTransformerV1(BaseModelAPI):
         obs: ObsBatch,
         action_mask: ActionMask,
         actions: ActionBundle,
+        *,
+        adapter: PlayerCountAdapter | None = None,
     ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
-        if isinstance(self.actor, DiscreteTargetBinsActor):
+        if adapter is None and self.player_count_adapters:
+            return self._actor_log_prob_by_player_count(encoded, obs, actions)
+
+        actor = self._actor_module(adapter)
+        if isinstance(actor, DiscreteTargetBinsActor):
             if not isinstance(action_mask, DiscreteTargetBinActionMask):
                 raise RuntimeError(
                     "discrete_target_bins actor requires a target-bin action mask"
@@ -729,12 +1029,12 @@ class StatelessTransformerV1(BaseModelAPI):
                 raise ValueError(
                     "discrete_target_bins actor requires DiscreteTargetBinActions"
                 )
-            return self.actor.log_prob(
-                self._discrete_actor_inputs(encoded, obs),
+            return actor.log_prob(
+                self._discrete_actor_inputs(encoded, obs, adapter=adapter),
                 action_mask.can_act,
                 actions,
             )
-        if isinstance(self.actor, DiscreteTargetsActor):
+        if isinstance(actor, DiscreteTargetsActor):
             if not isinstance(action_mask, DiscreteTargetActionMask):
                 raise RuntimeError(
                     "discrete_targets actor requires a discrete-target action mask"
@@ -743,8 +1043,8 @@ class StatelessTransformerV1(BaseModelAPI):
                 raise ValueError(
                     "discrete_targets actor requires DiscreteTargetActions"
                 )
-            return self.actor.log_prob(
-                self._discrete_actor_inputs(encoded, obs),
+            return actor.log_prob(
+                self._discrete_actor_inputs(encoded, obs, adapter=adapter),
                 action_mask.can_act,
                 action_mask.max_launch,
                 actions,
@@ -754,13 +1054,368 @@ class StatelessTransformerV1(BaseModelAPI):
             raise RuntimeError("pure actor requires a pure action mask")
         if not isinstance(actions, PureActions):
             raise ValueError("pure actor requires PureActions")
-        return self.actor.log_prob(
-            self._pure_actor_inputs(encoded),
+        return actor.log_prob(
+            self._pure_actor_inputs(encoded, adapter=adapter),
             action_mask.can_act,
             action_mask.max_launch,
             actions,
             min_fleet_size=self.action_spec.min_fleet_size,
         )
+
+    def _actor_log_prob_by_player_count(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+        actions: ActionBundle,
+    ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
+        log_prob_parts: list[tuple[torch.Tensor, ModelActionLogProbs]] = []
+        entropy_parts: list[tuple[torch.Tensor, ModelActionEntropies]] = []
+        for player_count, batch_indices in self._player_count_index_groups(
+            obs.still_playing
+        ):
+            adapter = self._player_count_adapter(player_count)
+            indexed_encoded = _index_encoded_observations(encoded, batch_indices)
+            indexed_obs = _index_obs_batch(obs, batch_indices)
+            indexed_actions = _map_action_bundle(
+                actions,
+                _batch_selector(batch_indices),
+            )
+            log_probs, entropies = self._actor_log_prob(
+                indexed_encoded,
+                indexed_obs,
+                indexed_obs.action_mask,
+                indexed_actions,
+                adapter=adapter,
+            )
+            log_prob_parts.append((batch_indices, log_probs))
+            entropy_parts.append((batch_indices, entropies))
+        batch_size = obs.still_playing.shape[0]
+        return (
+            _merge_log_probs_by_batch(batch_size, log_prob_parts),
+            _merge_entropies_by_batch(batch_size, entropy_parts),
+        )
+
+
+class PlayerCountAdapter(nn.Module):
+    def __init__(
+        self,
+        config: StatelessTransformerV1Config,
+        action_spec: ActionConfig,
+    ) -> None:
+        super().__init__()
+        self.blocks = nn.ModuleList(
+            TransformerBlock(config) for _ in range(config.player_count_adapter_blocks)
+        )
+        self.critic_head = OutputProjectionMLP(config, 1)
+        self.pairwise_bias_mlp: PairwiseBiasMLP | None = (
+            PairwiseBiasMLP(config) if config.use_learned_pairwise_bias else None
+        )
+        (
+            self.source_actor_input_proj,
+            self.target_actor_input_proj,
+            self.actor,
+        ) = _build_actor_modules(config, action_spec)
+
+    def get_input_layers(self) -> tuple[InputLayer, ...]:
+        return (
+            *(
+                ()
+                if self.pairwise_bias_mlp is None
+                else self.pairwise_bias_mlp.get_input_layers()
+            ),
+            *self.actor.get_input_layers(),
+        )
+
+    def get_output_layers(self) -> tuple[nn.Linear, ...]:
+        return (
+            self.critic_head.out,
+            *(
+                ()
+                if self.pairwise_bias_mlp is None
+                else self.pairwise_bias_mlp.get_output_layers()
+            ),
+            *self.actor.get_output_layers(),
+        )
+
+
+def _build_actor_modules(
+    config: StatelessTransformerV1Config,
+    action_spec: ActionConfig,
+) -> tuple[
+    nn.Linear,
+    nn.Linear,
+    PureActor | DiscreteTargetsActor | DiscreteTargetBinsActor,
+]:
+    dim = config.embed_dim
+    source_actor_input_proj = nn.Linear(dim * 3, dim)
+    target_actor_input_proj = nn.Linear(dim * 3, dim)
+    if isinstance(action_spec, ActionPureConfig):
+        actor: PureActor | DiscreteTargetsActor | DiscreteTargetBinsActor = PureActor(
+            cast(ActorPureConfig, config.actor),
+            embed_dim=dim,
+            max_per_planet_launches=action_spec.max_per_planet_launches,
+            activation=config.activation,
+        )
+    elif isinstance(action_spec, ActionDiscreteTargetsConfig):
+        actor = DiscreteTargetsActor(
+            cast(ActorDiscreteTargetsConfig, config.actor),
+            transformer_config=config,
+        )
+    else:
+        actor = DiscreteTargetBinsActor(
+            cast(ActorDiscreteTargetBinsConfig, config.actor),
+            transformer_config=config,
+        )
+    return source_actor_input_proj, target_actor_input_proj, actor
+
+
+def _batch_select(tensor: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    return tensor.index_select(0, indices.to(device=tensor.device))
+
+
+def _batch_selector(indices: torch.Tensor) -> Callable[[torch.Tensor], torch.Tensor]:
+    def select(tensor: torch.Tensor) -> torch.Tensor:
+        return _batch_select(tensor, indices)
+
+    return select
+
+
+def _index_encoded_observations(
+    encoded: EncodedObservations,
+    indices: torch.Tensor,
+) -> EncodedObservations:
+    return EncodedObservations(
+        hidden=_batch_select(encoded.hidden, indices),
+        token_mask=_batch_select(encoded.token_mask, indices),
+        action_entity_hidden=_batch_select(encoded.action_entity_hidden, indices),
+        player_hidden=_batch_select(encoded.player_hidden, indices),
+        global_feature_hidden=_batch_select(encoded.global_feature_hidden, indices),
+        board_hidden=_batch_select(encoded.board_hidden, indices),
+        actor_plan_hidden=_batch_select(encoded.actor_plan_hidden, indices),
+        critic_value_hidden=_batch_select(encoded.critic_value_hidden, indices),
+    )
+
+
+def _index_obs_batch(obs: ObsBatch, indices: torch.Tensor) -> ObsBatch:
+    return ObsBatch(
+        planets=_batch_select(obs.planets, indices),
+        orbiting_planets=_batch_select(obs.orbiting_planets, indices),
+        fleets=_batch_select(obs.fleets, indices),
+        comets=_batch_select(obs.comets, indices),
+        entity_mask=_batch_select(obs.entity_mask, indices),
+        still_playing=_batch_select(obs.still_playing, indices),
+        global_features=_batch_select(obs.global_features, indices),
+        action_mask=_map_action_mask(
+            obs.action_mask,
+            _batch_selector(indices),
+        ),
+    )
+
+
+def _map_action_mask(
+    action_mask: ActionMask,
+    fn: Callable[[torch.Tensor], torch.Tensor],
+) -> ActionMask:
+    if isinstance(action_mask, PureActionMask):
+        return PureActionMask(
+            can_act=fn(action_mask.can_act),
+            max_launch=fn(action_mask.max_launch),
+        )
+    if isinstance(action_mask, DiscreteTargetActionMask):
+        return DiscreteTargetActionMask(
+            can_act=fn(action_mask.can_act),
+            max_launch=fn(action_mask.max_launch),
+        )
+    if isinstance(action_mask, DiscreteTargetBinActionMask):
+        return DiscreteTargetBinActionMask(
+            can_act=fn(action_mask.can_act),
+        )
+    assert_never(action_mask)
+
+
+def _map_action_bundle(
+    actions: ActionBundle,
+    fn: Callable[[torch.Tensor], torch.Tensor],
+) -> ActionBundle:
+    if isinstance(actions, PureActions):
+        return PureActions(
+            launch=fn(actions.launch),
+            angle=fn(actions.angle),
+            ships=fn(actions.ships),
+        )
+    if isinstance(actions, DiscreteTargetActions):
+        return DiscreteTargetActions(
+            launch=fn(actions.launch),
+            target=fn(actions.target),
+            ships=fn(actions.ships),
+        )
+    if isinstance(actions, DiscreteTargetBinActions):
+        return DiscreteTargetBinActions(
+            target=fn(actions.target),
+            fleet_bin=fn(actions.fleet_bin),
+        )
+    assert_never(actions)
+
+
+def _merge_tensors_by_batch(
+    batch_size: int,
+    parts: list[tuple[torch.Tensor, torch.Tensor]],
+) -> torch.Tensor:
+    if not parts:
+        raise ValueError("cannot merge empty player-count outputs")
+    first = parts[0][1]
+    out = first.new_zeros((batch_size, *first.shape[1:]))
+    for indices, tensor in parts:
+        out = out.index_copy(0, indices.to(device=out.device), tensor)
+    return out
+
+
+def _merge_tensor_field_by_batch(
+    batch_size: int,
+    parts: list[tuple[torch.Tensor, _T]],
+    field: Callable[[_T], torch.Tensor],
+) -> torch.Tensor:
+    return _merge_tensors_by_batch(
+        batch_size,
+        [(indices, field(value)) for indices, value in parts],
+    )
+
+
+def _merge_optional_tensor_field_by_batch(
+    batch_size: int,
+    parts: list[tuple[torch.Tensor, _T]],
+    field: Callable[[_T], torch.Tensor | None],
+    *,
+    name: str,
+) -> torch.Tensor | None:
+    first = field(parts[0][1])
+    if first is None:
+        return None
+
+    tensor_parts: list[tuple[torch.Tensor, torch.Tensor]] = []
+    for indices, value in parts:
+        tensor = field(value)
+        if tensor is None:
+            raise RuntimeError(f"expected {name} tensor")
+        tensor_parts.append((indices, tensor))
+    return _merge_tensors_by_batch(batch_size, tensor_parts)
+
+
+def _merge_action_bundles_by_batch(
+    batch_size: int,
+    parts: list[tuple[torch.Tensor, ActionBundle]],
+) -> ActionBundle:
+    if not parts:
+        raise ValueError("cannot merge empty player-count actions")
+    first = parts[0][1]
+    if isinstance(first, PureActions):
+        pure_parts = [
+            (indices, cast(PureActions, actions)) for indices, actions in parts
+        ]
+        return PureActions(
+            launch=_merge_tensor_field_by_batch(
+                batch_size, pure_parts, lambda actions: actions.launch
+            ),
+            angle=_merge_tensor_field_by_batch(
+                batch_size, pure_parts, lambda actions: actions.angle
+            ),
+            ships=_merge_tensor_field_by_batch(
+                batch_size, pure_parts, lambda actions: actions.ships
+            ),
+        )
+    if isinstance(first, DiscreteTargetActions):
+        discrete_parts = [
+            (indices, cast(DiscreteTargetActions, actions))
+            for indices, actions in parts
+        ]
+        return DiscreteTargetActions(
+            launch=_merge_tensor_field_by_batch(
+                batch_size, discrete_parts, lambda actions: actions.launch
+            ),
+            target=_merge_tensor_field_by_batch(
+                batch_size, discrete_parts, lambda actions: actions.target
+            ),
+            ships=_merge_tensor_field_by_batch(
+                batch_size, discrete_parts, lambda actions: actions.ships
+            ),
+        )
+    bin_parts = [
+        (indices, cast(DiscreteTargetBinActions, actions)) for indices, actions in parts
+    ]
+    return DiscreteTargetBinActions(
+        target=_merge_tensor_field_by_batch(
+            batch_size, bin_parts, lambda actions: actions.target
+        ),
+        fleet_bin=_merge_tensor_field_by_batch(
+            batch_size, bin_parts, lambda actions: actions.fleet_bin
+        ),
+    )
+
+
+def _merge_log_probs_by_batch(
+    batch_size: int,
+    parts: list[tuple[torch.Tensor, ModelActionLogProbs]],
+) -> ModelActionLogProbs:
+    target = _merge_optional_tensor_field_by_batch(
+        batch_size,
+        parts,
+        lambda log_probs: log_probs.target,
+        name="target log-prob",
+    )
+    return ModelActionLogProbs(
+        launch=_merge_tensor_field_by_batch(
+            batch_size, parts, lambda log_probs: log_probs.launch
+        ),
+        event=_merge_tensor_field_by_batch(
+            batch_size, parts, lambda log_probs: log_probs.event
+        ),
+        per_player_entity=_merge_tensor_field_by_batch(
+            batch_size, parts, lambda log_probs: log_probs.per_player_entity
+        ),
+        target=target,
+    )
+
+
+def _merge_entropies_by_batch(
+    batch_size: int,
+    parts: list[tuple[torch.Tensor, ModelActionEntropies]],
+) -> ModelActionEntropies:
+    def component_getter(
+        name: str,
+    ) -> Callable[[ModelActionEntropies], torch.Tensor]:
+        def get_component(entropies: ModelActionEntropies) -> torch.Tensor:
+            return entropies.components[name]
+
+        return get_component
+
+    first = parts[0][1]
+    target = _merge_optional_tensor_field_by_batch(
+        batch_size,
+        parts,
+        lambda entropies: entropies.target,
+        name="target entropy",
+    )
+    components = {
+        name: _merge_tensor_field_by_batch(
+            batch_size,
+            parts,
+            component_getter(name),
+        )
+        for name in first.components
+    }
+    return ModelActionEntropies(
+        launch=_merge_tensor_field_by_batch(
+            batch_size, parts, lambda entropies: entropies.launch
+        ),
+        event=_merge_tensor_field_by_batch(
+            batch_size, parts, lambda entropies: entropies.event
+        ),
+        per_player_entity=_merge_tensor_field_by_batch(
+            batch_size, parts, lambda entropies: entropies.per_player_entity
+        ),
+        target=target,
+        components=components,
+    )
 
 
 class ObservationInputStem(nn.Module):
@@ -1038,6 +1693,54 @@ def pack_sequence(
 ) -> tuple[torch.Tensor, PackedSequence]:
     packed = build_packed_sequence(token_mask)
     return pack_tensor(x, packed), packed
+
+
+def _packed_subset_for_batch_indices(
+    packed: PackedSequence,
+    batch_indices: torch.Tensor,
+) -> tuple[torch.Tensor, PackedSequence]:
+    index_device = packed.indices.device
+    seqlen_device = packed.seqlens.device
+    batch_indices = batch_indices.to(device=index_device).sort().values
+    selected_rows = torch.zeros(
+        (packed.batch_size,),
+        dtype=torch.bool,
+        device=index_device,
+    )
+    selected_rows[batch_indices] = True
+    packed_batch_indices = torch.div(
+        packed.indices,
+        packed.padded_seq_len,
+        rounding_mode="floor",
+    )
+    positions = selected_rows[packed_batch_indices].nonzero(as_tuple=False).flatten()
+    seqlens = packed.seqlens.index_select(0, batch_indices.to(device=seqlen_device))
+
+    original_indices = packed.indices.index_select(0, positions)
+    original_batch = packed_batch_indices.index_select(0, positions)
+    token_indices = original_indices.remainder(packed.padded_seq_len)
+    subset_row_for_original = torch.empty(
+        (packed.batch_size,),
+        dtype=torch.long,
+        device=index_device,
+    )
+    subset_row_for_original[batch_indices] = torch.arange(
+        batch_indices.numel(),
+        device=index_device,
+    )
+    subset_indices = (
+        subset_row_for_original[original_batch] * packed.padded_seq_len + token_indices
+    )
+
+    subset_packed = PackedSequence(
+        indices=subset_indices,
+        cu_seqlens=F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)),
+        seqlens=seqlens,
+        max_seqlen=packed.max_seqlen,
+        batch_size=int(batch_indices.numel()),
+        padded_seq_len=packed.padded_seq_len,
+    )
+    return positions, subset_packed
 
 
 def unpack_sequence(x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:

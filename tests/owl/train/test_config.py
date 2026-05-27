@@ -315,6 +315,43 @@ def test_configure_model_compile_compiles_only_transformer_mlps(
     )
 
 
+def test_configure_model_compile_includes_player_count_adapter_mlps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, tuple[object, ...], dict[str, object]]] = []
+
+    def fake_compile(
+        module: torch.nn.Module,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        calls.append((id(module), args, kwargs))
+
+    monkeypatch.setattr(torch.nn.Module, "compile", fake_compile)
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(
+            embed_dim=32,
+            depth=2,
+            n_heads=4,
+            mlp_ratio=1.0,
+            player_count_adapters_enabled=True,
+            player_count_adapter_blocks=2,
+        ),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    expected_module_ids = {
+        id(block.mlp)
+        for adapter in model.player_count_adapters.values()
+        for block in adapter.blocks
+    }
+
+    compiled = configure_model_compile(model, PPOConfig())
+
+    assert compiled == len(expected_module_ids)
+    assert {call[0] for call in calls} == expected_module_ids
+
+
 def test_configure_model_compile_can_be_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

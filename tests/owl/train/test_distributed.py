@@ -8,11 +8,14 @@ from owl.model import (
     ModelActionLogProbs,
     ModelEvaluation,
     ModelOutput,
+    StatelessTransformerV1,
+    StatelessTransformerV1Config,
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     ActionBundle,
     ActionPureConfig,
+    EntityBasedConfig,
     ObsBatch,
     PureActionMask,
     PureActions,
@@ -92,11 +95,13 @@ class _FakeDDP(torch.nn.Module):
         *,
         device_ids: list[int],
         output_device: int,
+        find_unused_parameters: bool = False,
     ) -> None:
         super().__init__()
         self.module = module
         self.device_ids = device_ids
         self.output_device = output_device
+        self.find_unused_parameters = find_unused_parameters
 
     def forward(self, *args: object) -> object:
         return self.module(*args)
@@ -378,6 +383,36 @@ def test_wrap_model_for_distributed_uses_ddp_adapter(
     assert isinstance(wrapped._ddp, _FakeDDP)
     assert wrapped._ddp.device_ids == [3]
     assert wrapped._ddp.output_device == 3
+    assert not wrapped._ddp.find_unused_parameters
+
+
+def test_wrap_model_for_distributed_finds_unused_player_count_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(distributed_module, "DistributedDataParallel", _FakeDDP)
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+            player_count_adapters_enabled=True,
+        ),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    context = DistributedContext(
+        device=torch.device("cuda", 0),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=True,
+    )
+
+    wrapped = wrap_model_for_distributed(model, context)
+
+    assert isinstance(wrapped, DistributedModelAdapter)
+    assert isinstance(wrapped._ddp, _FakeDDP)
+    assert wrapped._ddp.find_unused_parameters
     assert wrapped.action_spec == model.action_spec
 
 

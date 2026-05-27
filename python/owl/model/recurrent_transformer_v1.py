@@ -59,6 +59,8 @@ class RecurrentTransformerV1Config(BaseConfig):
     depth: int = Field(default=4, ge=1)
     n_heads: int = Field(default=8, ge=1)
     mlp_ratio: float = Field(default=4.0, gt=0.0)
+    player_count_adapters_enabled: Literal[False] = False
+    player_count_adapter_blocks: Literal[0] = 0
     n_scratch_tokens: int = Field(default=4, ge=0)
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
     force_flash_attn: bool = False
@@ -139,11 +141,12 @@ class RecurrentTransformerV1(StatelessTransformerV1):
             _init_linear(block.transformer.attn.out, gain=residual_gain)
             _init_linear(block.transformer.mlp.down, gain=residual_gain)
             _init_linear(block.recurrent.out, gain=residual_gain)
+        if self.critic_head is None:
+            raise RuntimeError("recurrent transformer critic head is not initialized")
+        critic_out = self.critic_head.out
         for layer in self.get_output_layers():
             gain = (
-                _CRITIC_HEAD_INIT_GAIN
-                if layer is self.critic_head.out
-                else _ACTOR_HEAD_INIT_GAIN
+                _CRITIC_HEAD_INIT_GAIN if layer is critic_out else _ACTOR_HEAD_INIT_GAIN
             )
             _init_linear(layer, gain=gain)
 
