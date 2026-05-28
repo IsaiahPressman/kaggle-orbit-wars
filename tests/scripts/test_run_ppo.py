@@ -171,6 +171,31 @@ class _FakeTrainer:
         self.teacher_updates.append((teacher_model, active))
 
 
+def _patch_eval_model_from_weights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[torch.nn.Module]:
+    created_models: list[torch.nn.Module] = []
+
+    def fake_create_eval_model_from_weights(
+        source_model: torch.nn.Module,
+        _cfg: FullConfig,
+        *,
+        device: torch.device,
+    ) -> torch.nn.Module:
+        model = torch.nn.Linear(1, 1).to(device)
+        model.load_state_dict(source_model.state_dict())
+        model.eval()
+        created_models.append(model)
+        return model
+
+    monkeypatch.setattr(
+        run_ppo,
+        "_create_eval_model_from_weights",
+        fake_create_eval_model_from_weights,
+    )
+    return created_models
+
+
 def test_next_periodic_checkpoint_step_handles_crossed_cadence() -> None:
     assert run_ppo._next_periodic_checkpoint_step(checkpoint_freq=None) is None
     assert run_ppo._next_periodic_checkpoint_step(checkpoint_freq=1000) == 1000
@@ -368,11 +393,14 @@ def test_fresh_launch_from_checkpoint_uses_starting_checkpoint_as_teacher(
     checkpoint_path.touch()
     output_dir = tmp_path / "runs"
     run_dir = output_dir / "run"
-    model = torch.nn.Linear(1, 1)
-    model.weight.data.fill_(1.0)
-    model.bias.data.fill_(1.0)
+    student_model = torch.nn.Linear(1, 1)
+    student_model.weight.data.fill_(1.0)
+    student_model.bias.data.fill_(1.0)
+    teacher_model = torch.nn.Linear(1, 1)
     trainer_ref: dict[str, object] = {}
     session_ref: dict[str, object] = {}
+    models = iter((student_model, teacher_model))
+    compiled_models: list[torch.nn.Module] = []
 
     class FakeEnv:
         def __init__(
@@ -420,6 +448,16 @@ def test_fresh_launch_from_checkpoint_uses_starting_checkpoint_as_teacher(
     def fake_run_training_session(**kwargs: object) -> None:
         session_ref.update(kwargs)
 
+    def fake_create_model(*_args: object, **_kwargs: object) -> torch.nn.Linear:
+        return next(models)
+
+    def fake_configure_model_compile(
+        model_arg: torch.nn.Module,
+        _cfg: object,
+    ) -> int:
+        compiled_models.append(model_arg)
+        return 0
+
     monkeypatch.setattr(
         sys,
         "argv",
@@ -442,8 +480,10 @@ def test_fresh_launch_from_checkpoint_uses_starting_checkpoint_as_teacher(
     )
     monkeypatch.setattr(run_ppo, "_create_run_dir", fake_create_run_dir)
     monkeypatch.setattr(run_ppo, "VectorizedEnv", FakeEnv)
-    monkeypatch.setattr(run_ppo, "_create_model", lambda *_args, **_kwargs: model)
-    monkeypatch.setattr(run_ppo, "configure_model_compile", lambda *_args: 0)
+    monkeypatch.setattr(run_ppo, "_create_model", fake_create_model)
+    monkeypatch.setattr(
+        run_ppo, "configure_model_compile", fake_configure_model_compile
+    )
     monkeypatch.setattr(
         run_ppo,
         "create_optimizer",
@@ -458,13 +498,16 @@ def test_fresh_launch_from_checkpoint_uses_starting_checkpoint_as_teacher(
     trainer = trainer_ref["trainer"]
     assert isinstance(trainer, FakeTrainer)
     assert len(trainer.teacher_updates) == 1
-    teacher_model, active = trainer.teacher_updates[0]
+    active_teacher_model, active = trainer.teacher_updates[0]
     assert active
-    assert teacher_model is not model
-    assert teacher_model.weight.item() == pytest.approx(7.0)
+    assert active_teacher_model is teacher_model
+    assert active_teacher_model is not student_model
+    assert active_teacher_model.weight.item() == pytest.approx(7.0)
+    assert compiled_models == [student_model, teacher_model]
     assert session_ref["start_env_steps"] == 123
     last_best_model = session_ref["last_best_model"]
     assert isinstance(last_best_model, torch.nn.Linear)
+    assert last_best_model is teacher_model
     assert last_best_model.weight.item() == pytest.approx(7.0)
 
 
@@ -979,6 +1022,48 @@ def test_create_model_uses_env_owned_specs() -> None:
     assert model.actor.max_per_planet_launches == 1
 
 
+def test_create_eval_model_from_weights_builds_fresh_compiled_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _full_config()
+    source_model = run_ppo._create_model(
+        cfg.model,
+        obs_spec=cfg.env.obs_spec,
+        action_spec=cfg.env.action_spec,
+    )
+    with torch.no_grad():
+        for index, parameter in enumerate(source_model.parameters()):
+            parameter.fill_(float(index + 1))
+    compiled_models: list[torch.nn.Module] = []
+
+    def fake_configure_model_compile(
+        model: torch.nn.Module,
+        compile_cfg: object,
+    ) -> int:
+        assert compile_cfg is cfg.rl
+        compiled_models.append(model)
+        return 0
+
+    monkeypatch.setattr(
+        run_ppo, "configure_model_compile", fake_configure_model_compile
+    )
+
+    teacher_model = run_ppo._create_eval_model_from_weights(
+        source_model,
+        cfg,
+        device=torch.device("cpu"),
+    )
+
+    assert teacher_model is not source_model
+    assert not teacher_model.training
+    assert compiled_models == [teacher_model]
+    for key, source_tensor in source_model.state_dict().items():
+        assert torch.equal(teacher_model.state_dict()[key], source_tensor)
+    source_param = next(source_model.parameters())
+    teacher_param = next(teacher_model.parameters())
+    assert teacher_param.data_ptr() != source_param.data_ptr()
+
+
 def test_trainable_parameter_count_ignores_frozen_parameters() -> None:
     model = torch.nn.Sequential(torch.nn.Linear(2, 3), torch.nn.Linear(3, 1))
     model[1].weight.requires_grad = False
@@ -1189,6 +1274,7 @@ def test_run_training_loop_writes_periodic_checkpoints(
     trainer = _FakeTrainer(metrics={"loss": 1.0, "train/max_entities": 17.0})
     logger = _FakeLogger()
     eval_calls = 0
+    _patch_eval_model_from_weights(monkeypatch)
 
     def fake_evaluate_against_last_best(**_kwargs: object) -> dict[str, float]:
         nonlocal eval_calls
@@ -1232,6 +1318,7 @@ def test_run_training_loop_resumes_checkpoint_cadence(
     cfg = _full_config(checkpoint_freq=1000)
     trainer = _FakeTrainer()
     logger = _FakeLogger()
+    _patch_eval_model_from_weights(monkeypatch)
 
     def fake_evaluate_against_last_best(**_kwargs: object) -> dict[str, float]:
         return {"eval/win_rate_against_last_best": 0.25}
@@ -1264,10 +1351,12 @@ def test_run_training_loop_resumes_checkpoint_cadence(
 
 def test_run_training_loop_returns_immediately_when_resume_reached_step_limit(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg = _full_config(checkpoint_freq=1000)
     trainer = _FakeTrainer()
     logger = _FakeLogger()
+    _patch_eval_model_from_weights(monkeypatch)
 
     env_steps = run_ppo._run_training_loop(
         trainer=trainer,
@@ -1294,6 +1383,7 @@ def test_run_training_loop_saves_last_best_when_eval_clears_threshold(
     cfg = _full_config(checkpoint_freq=1000)
     trainer = _FakeTrainer()
     logger = _FakeLogger()
+    _patch_eval_model_from_weights(monkeypatch)
 
     def fake_evaluate_against_last_best(**_kwargs: object) -> dict[str, float]:
         return {
@@ -1336,6 +1426,7 @@ def test_run_training_loop_activates_last_best_teacher_after_replacement(
     )
     trainer = _FakeTrainer()
     logger = _FakeLogger()
+    _patch_eval_model_from_weights(monkeypatch)
 
     def fake_evaluate_against_last_best(**_kwargs: object) -> dict[str, float]:
         return {"eval/win_rate_against_last_best": 0.7}
