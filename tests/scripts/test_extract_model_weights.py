@@ -239,3 +239,23 @@ def test_extract_model_weights_rejects_missing_model_key(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="missing 'model'"):
         extract_model_weights.extract_model_weights(checkpoint_path, output_path)
+
+
+@pytest.mark.parametrize(
+    ("model_state", "message"),
+    [
+        ({"linear.weight": "bad"}, "must be a tensor"),
+        ({1: torch.ones(1)}, "model state keys must be non-empty strings"),
+    ],
+)
+def test_extract_model_weights_rejects_malformed_fp32_model_state(
+    tmp_path: Path,
+    model_state: dict[object, object],
+    message: str,
+) -> None:
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    output_path = tmp_path / "slim.pt"
+    torch.save({"model": model_state}, checkpoint_path)
+
+    with pytest.raises(ValueError, match=message):
+        extract_model_weights.extract_model_weights(checkpoint_path, output_path)

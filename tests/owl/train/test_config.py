@@ -132,6 +132,31 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
     assert config.runtime.n_runtime_gpus == 1
 
 
+def test_full_config_rejects_more_eval_replays_than_envs() -> None:
+    with pytest.raises(ValueError, match=r"eval_replay_games must be <= env\.n_envs"):
+        FullConfig.model_validate(
+            {
+                "env": {
+                    "n_envs": 2,
+                },
+                "model": {
+                    "model_arch": "stateless_transformer_v1",
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                },
+                "optimizer": {
+                    "optimizer": "adamw",
+                    "learning_rate": 0.001,
+                },
+                "rl": {
+                    "horizon": 4,
+                    "eval_replay_games": 3,
+                },
+            }
+        )
+
+
 def test_full_config_accepts_adam_optimizer_config() -> None:
     config = FullConfig.model_validate(
         {

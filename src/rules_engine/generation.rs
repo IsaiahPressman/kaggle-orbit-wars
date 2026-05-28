@@ -9,6 +9,8 @@ use super::utils::{distance, fourfold_symmetric_points, is_orbiting, orbit_posit
 
 pub trait RandomSource {
     fn randint(&mut self, low: i32, high: i32) -> i32;
+    /// Matches Python's `random.uniform(a, b)`: endpoints are admissible and
+    /// equal bounds return that bound.
     fn uniform(&mut self, low: f64, high: f64) -> f64;
 }
 
@@ -18,7 +20,7 @@ impl<T: rand::Rng + ?Sized> RandomSource for T {
     }
 
     fn uniform(&mut self, low: f64, high: f64) -> f64 {
-        self.random_range(low..high)
+        self.random_range(low..=high)
     }
 }
 
@@ -42,7 +44,7 @@ pub fn generate_planets(rng: &mut impl RandomSource) -> Vec<Planet> {
         let angle = rng.uniform(0.0, std::f64::consts::FRAC_PI_2);
         let min_orbital = ROTATION_RADIUS_LIMIT - radius;
         let max_orbital = (BOARD_SIZE - CENTER - radius) / angle.cos().max(angle.sin());
-        if min_orbital >= max_orbital {
+        if min_orbital > max_orbital {
             continue;
         }
 
@@ -425,8 +427,11 @@ mod tests {
         }
 
         fn uniform(&mut self, low: f64, high: f64) -> f64 {
-            assert!(low < high, "uniform range must be non-empty");
+            assert!(low <= high, "uniform range must be non-empty");
             self.float_calls += 1;
+            if low == high {
+                return low;
+            }
             if self.float_calls == 1 {
                 return low;
             }
@@ -585,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_planets_skips_degenerate_static_orbital_range() {
+    fn generate_planets_accepts_degenerate_uniform_endpoints() {
         let mut rng = DegenerateFirstAngleRandom { float_calls: 0 };
 
         let planets = generate_planets(&mut rng);

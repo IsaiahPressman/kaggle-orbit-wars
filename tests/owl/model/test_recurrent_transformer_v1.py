@@ -490,3 +490,28 @@ def test_recurrent_sequence_evaluation_matches_stepwise_evaluation(
         torch.stack(log_probs, dim=1),
         atol=1e-5,
     )
+
+
+def test_recurrent_single_step_evaluation_validates_dones_shape() -> None:
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
+    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+    model = RecurrentTransformerV1(
+        RecurrentTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    sequence_actions = _actions(batch_size=2, time_steps=1)
+    actions = DiscreteTargetActions(
+        launch=sequence_actions.launch[:, 0],
+        target=sequence_actions.target[:, 0],
+        ships=sequence_actions.ships[:, 0],
+    )
+
+    with pytest.raises(ValueError, match="dones must have shape"):
+        model.evaluate_actions(
+            obs,
+            actions,
+            hidden_state=model.initial_hidden_state(2, device=torch.device("cpu")),
+            dones=torch.zeros((2, OUTER_PLAYER_SLOTS), dtype=torch.bool),
+        )

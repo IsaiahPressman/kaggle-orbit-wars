@@ -317,9 +317,10 @@ def _dequantize_fp4_e2m1fn_scaled_block16(
     codes[0::2] = packed & 0x0F
     codes[1::2] = (packed >> 4) & 0x0F
     numel = _shape_numel(shape)
-    if codes.numel() < numel:
+    expected_bytes = (numel + 1) // 2
+    if packed.numel() != expected_bytes:
         raise ValueError(
-            f"fp4 payload has {codes.numel()} unpacked values, expected {numel}"
+            f"fp4 payload has {packed.numel()} bytes, expected {expected_bytes}"
         )
     expected_blocks = (numel + _FP4_BLOCK_SIZE - 1) // _FP4_BLOCK_SIZE
     flat_scale = scale.contiguous().to(torch.float32).reshape(-1)
@@ -465,7 +466,7 @@ def _pack_5bit_codes(codes: torch.Tensor) -> torch.Tensor:
 def _unpack_5bit_codes(data: torch.Tensor, count: int) -> torch.Tensor:
     packed = data.contiguous().view(torch.uint8).reshape(-1)
     expected_bytes = ((count + 7) // 8) * 5
-    if packed.numel() < expected_bytes:
+    if packed.numel() != expected_bytes:
         raise ValueError(
             f"5-bit payload has {packed.numel()} bytes, expected {expected_bytes}"
         )

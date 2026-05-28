@@ -136,6 +136,34 @@ class DiscreteTargetBinsActor(nn.Module):
             ),
         )
 
+    def sample_actions(
+        self,
+        actor_inputs: DiscreteActorInputs,
+        can_act: torch.Tensor,
+        *,
+        deterministic: bool,
+    ) -> DiscreteTargetBinActions:
+        selection = self._selection_params(actor_inputs, can_act)
+        source_active = can_act.flatten(start_dim=-2).any(dim=-1)
+        if deterministic:
+            target = selection.target_logits.argmax(dim=-1)
+        else:
+            target = Categorical(logits=selection.target_logits.float()).sample()
+        target = torch.where(source_active, target, torch.zeros_like(target))
+
+        params = self._policy_params_for_selected_target(
+            selection,
+            actor_inputs.source,
+            can_act,
+            target,
+        )
+        if deterministic:
+            fleet_bin = params.fleet_bin_logits.argmax(dim=-1)
+        else:
+            fleet_bin = Categorical(logits=params.fleet_bin_logits.float()).sample()
+        fleet_bin = torch.where(source_active, fleet_bin, torch.zeros_like(fleet_bin))
+        return DiscreteTargetBinActions(target=target, fleet_bin=fleet_bin)
+
     def log_prob(
         self,
         actor_inputs: DiscreteActorInputs,

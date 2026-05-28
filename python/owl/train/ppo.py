@@ -804,6 +804,11 @@ class PPOTrainer:
             batch_advantages = _normalize_masked_advantages(
                 batch_advantages,
                 batch_policy_mask,
+                context=(
+                    self.distributed_context
+                    if self.distributed_context.initialized
+                    else None
+                ),
             )
         batch_policy_weight = batch_policy_mask.to(dtype=batch_advantages.dtype)
         batch_value_weight = batch_value_mask.to(dtype=batch_advantages.dtype)
@@ -863,12 +868,12 @@ class PPOTrainer:
         entropy_components = _output_entropy_components(output, segments.logp[idx])
         new_values = _output_values(output).view_as(batch_old_values)
         if teacher_model is None:
-            teacher_kl = torch.zeros_like(entropy)
+            teacher_kl = torch.zeros_like(batch_policy_weight)
             teacher_kl_components: dict[str, torch.Tensor] = {}
             teacher_value_loss_values = torch.zeros_like(batch_old_values[..., 0])
         else:
             if not compute_teacher_action_kl:
-                teacher_kl = torch.zeros_like(entropy)
+                teacher_kl = torch.zeros_like(batch_policy_weight)
                 teacher_kl_components = {}
             elif teacher_action_kl is None:
                 raise RuntimeError("teacher action KL was not computed")
@@ -2281,15 +2286,31 @@ def _normalize_masked_advantages(
     advantages: torch.Tensor,
     mask: torch.Tensor,
     eps: float = 1e-8,
+    *,
+    context: DistributedContext | None = None,
 ) -> torch.Tensor:
     require_same_shape(advantages, mask, left_name="advantages", right_name="mask")
     mask_float = mask.to(dtype=advantages.dtype)
-    denom = mask_float.sum().clamp_min(1.0)
+    if context is not None and context.initialized:
+        totals = all_reduce_sum(
+            torch.stack(
+                (
+                    (advantages * mask_float).sum(),
+                    (advantages.square() * mask_float).sum(),
+                    mask_float.sum(),
+                )
+            ),
+            context,
+        )
+        denom = totals[2].clamp_min(1.0)
+        mean = totals[0] / denom
+        var = totals[1] / denom - mean.pow(2)
+    else:
+        denom = mask_float.sum().clamp_min(1.0)
+        mean = (advantages * mask_float).sum() / denom
+        var = ((advantages - mean).pow(2) * mask_float).sum() / denom
 
-    mean = (advantages * mask_float).sum() / denom
-    var = ((advantages - mean).pow(2) * mask_float).sum() / denom
-
-    return (advantages - mean) / (var.sqrt() + eps)
+    return (advantages - mean) / (var.clamp_min(0.0).sqrt() + eps)
 
 
 def _mean_loss_metrics(metrics: list[_PPOLossMetrics]) -> dict[str, float]:

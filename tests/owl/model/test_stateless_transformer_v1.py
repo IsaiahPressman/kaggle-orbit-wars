@@ -2,6 +2,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+import owl.model.actor.discrete_target_bins as discrete_target_bins_impl
 import owl.model.actor.discrete_targets as discrete_targets_impl
 import owl.model.actor.logistic_mixture as logistic_mixture_impl
 import owl.model.stateless_transformer_v1 as model_impl
@@ -1908,6 +1909,46 @@ def test_discrete_targets_serving_path_skips_log_probs_and_entropies(
     assert torch.equal(output.actions.launch, expected.actions.launch)
     assert torch.equal(output.actions.target, expected.actions.target)
     assert torch.equal(output.actions.ships, expected.actions.ships)
+    assert torch.allclose(output.values, expected.values)
+    assert torch.allclose(output.winner_probabilities, expected.winner_probabilities)
+
+
+def test_discrete_target_bins_serving_path_skips_log_probs_and_entropies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(17)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionDiscreteTargetBinsConfig(n_bins=7)
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetBinsConfig(n_bins=7),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    assert isinstance(model.actor, DiscreteTargetBinsActor)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+
+    expected = model(obs, deterministic=True)
+
+    def fail_log_prob(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("serving should not compute action log probs")
+
+    def fail_entropy(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("serving should not compute action entropies")
+
+    monkeypatch.setattr(
+        discrete_target_bins_impl,
+        "discrete_target_bin_log_probs",
+        fail_log_prob,
+    )
+    monkeypatch.setattr(model.actor, "_entropy", fail_entropy)
+
+    output = model.serve(obs, deterministic=True)
+
+    assert isinstance(output.actions, DiscreteTargetBinActions)
+    assert torch.equal(output.actions.target, expected.actions.target)
+    assert torch.equal(output.actions.fleet_bin, expected.actions.fleet_bin)
     assert torch.allclose(output.values, expected.values)
     assert torch.allclose(output.winner_probabilities, expected.winner_probabilities)
 

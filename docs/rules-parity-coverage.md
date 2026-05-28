@@ -55,7 +55,8 @@ The generated fixture currently covers:
 
 - planet generation from seed `42`
 - current Python-reference random static and fill phases, including the
-  reference fourfold symmetry ordering
+  reference fourfold symmetry ordering and inclusive `uniform(a, b)` endpoint
+  behavior for degenerate equal bounds
 - full reset for 2-player and 4-player games, including angular velocity,
   planet generation, initial planets, and current random-group home assignment
 - comet paths at spawn steps `50`, `150`, `250`, `350`, and `450`
@@ -84,6 +85,7 @@ replays:
 - neutral non-comet planet and comet undershot counters
 - comet spawning before same-step movement
 - comet movement and expiry
+- comet planet/path alignment when only part of a comet group expires
 - terminal score ties where all tied players win
 
 ## Known Boundaries

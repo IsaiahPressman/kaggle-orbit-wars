@@ -379,26 +379,39 @@ pub(super) fn decode_discrete_target_bin_actions(
     let mut actions = vec![Vec::new(); state.config.player_count];
     let mut launch_failures = 0_u32;
     let mut orbit_target_cache = OrbitTargetCache::new(state, entities, min_fleet_size);
+    let mut entity_planets = [None; ACTION_ENTITY_SLOTS];
+    let mut entity_static = [false; ACTION_ENTITY_SLOTS];
+    for (entity_index, slot) in entities.iter().enumerate() {
+        if let Some(planet) = slot.and_then(|slot| planet_for_slot(state, slot)) {
+            entity_planets[entity_index] = Some(planet);
+            entity_static[entity_index] = is_static_planet_cached(state, planet);
+        }
+    }
     for outer_player in 0..OUTER_PLAYER_SLOTS {
         let player_offset = outer_player * ACTION_ENTITY_SLOTS;
         let Some(internal_player) = player_map
             .outer_to_internal(outer_player)
             .filter(|player| *player < state.config.player_count)
         else {
+            for entity_index in 0..ACTION_ENTITY_SLOTS {
+                let action_index = player_offset + entity_index;
+                let fleet_bin = fleet_bin[action_index];
+                if !(0..n_bins as i64).contains(&fleet_bin) {
+                    return Err(format!(
+                        "player {outer_player} entity slot {entity_index} fleet_bin must be in [0, {n_bins})"
+                    ));
+                }
+                if fleet_bin != 0 {
+                    return Err(format!(
+                        "player {outer_player} entity slot {entity_index} cannot launch from inactive player slot"
+                    ));
+                }
+            }
             continue;
         };
         let player_actions = &mut actions[internal_player];
         for (entity_index, source_slot) in entities.iter().enumerate() {
             let action_index = player_offset + entity_index;
-            let Some(source_slot) = source_slot else {
-                continue;
-            };
-            let Some(source) = planet_for_slot(state, *source_slot) else {
-                continue;
-            };
-            if source.owner != internal_player as i32 || i64::from(source.ships) < min_fleet_size {
-                continue;
-            }
             let fleet_bin = fleet_bin[action_index];
             if !(0..n_bins as i64).contains(&fleet_bin) {
                 return Err(format!(
@@ -406,10 +419,32 @@ pub(super) fn decode_discrete_target_bin_actions(
                 ));
             }
             let fleet_bin = fleet_bin as usize;
-            let ship_count = fleet_bin_to_ships(fleet_bin, i64::from(source.ships), n_bins);
-            if ship_count == 0 {
+            if fleet_bin == 0 {
                 continue;
             }
+            let Some(source_slot) = source_slot else {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} cannot launch from empty action entity slot"
+                ));
+            };
+            let Some(source) = planet_for_slot(state, *source_slot) else {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} cannot launch from stale action entity slot"
+                ));
+            };
+            if source.owner != internal_player as i32 {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} cannot launch from planet {} owned by {}",
+                    source.id, source.owner
+                ));
+            }
+            if i64::from(source.ships) < min_fleet_size {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} planet {} has {} ships, below min_fleet_size {min_fleet_size}",
+                    source.id, source.ships
+                ));
+            }
+            let ship_count = fleet_bin_to_ships(fleet_bin, i64::from(source.ships), n_bins);
             let target_index = target[action_index];
             if !(0..ACTION_ENTITY_SLOTS as i64).contains(&target_index) {
                 return Err(format!(
@@ -432,6 +467,20 @@ pub(super) fn decode_discrete_target_bin_actions(
                     "player {outer_player} entity slot {entity_index} cannot target stale action entity slot {target_index}"
                 ));
             };
+            if !target_eligible_for_mode(
+                state,
+                source,
+                entity_index,
+                target_index,
+                entity_static[entity_index],
+                &entity_planets,
+                &entity_static,
+                targeting_mode,
+            ) {
+                return Err(format!(
+                    "player {outer_player} entity slot {entity_index} target-bin pair is masked by can_act"
+                ));
+            }
             if ship_count < min_fleet_size {
                 return Err(format!(
                     "player {outer_player} entity slot {entity_index} fleet_bin {fleet_bin} maps to {ship_count} ships, below min_fleet_size {min_fleet_size}"
@@ -4359,6 +4408,39 @@ mod tests {
 
         assert_eq!(decoded.launch_failures, 1);
         assert!(decoded.actions.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn full_mask_target_bins_reject_masked_nonzero_target_bin() {
+        let planets = vec![
+            planet(0, 0, 0.0, 50.0, 2.0, 100),
+            planet(1, -1, 100.0, 50.0, 2.0, 20),
+            planet(2, -1, 100.0, 80.0, 2.0, 20),
+        ];
+        let mut config = ResetConfig::new(4);
+        config.planets = Some(planets.clone());
+        config.initial_planets = Some(planets);
+        config.angular_velocity = Some(0.025);
+        let state = reset(config);
+        let entities = action_entity_slots(&state);
+        let mut targets = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        let mut fleet_bins = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
+        targets[0] = 1;
+        fleet_bins[0] = 4;
+
+        let err = decode_discrete_target_bin_actions(
+            &state,
+            &PlayerMap::identity(),
+            &entities,
+            &targets,
+            &fleet_bins,
+            5,
+            1,
+            TargetingMode::FullMask,
+        )
+        .expect_err("nonzero target-bin actions must obey full-mask can_act");
+
+        assert!(err.contains("masked by can_act"));
     }
 
     #[test]

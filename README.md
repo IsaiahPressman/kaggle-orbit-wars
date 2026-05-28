@@ -67,8 +67,10 @@ the requested model bundle, and its adjacent `config.yaml` under
 adjacent `config.yaml` are packaged under `models/fallback/`.
 Rebuilding the image during submission generation keeps the packaged Python code
 aligned with the current checkout. The packaged checkpoint keeps the original
-checkpoint contents only for the model weights needed by the Kaggle agent. To
-store packaged models below fp32 precision, pass a quantization format such as
+checkpoint contents only for validated model state-dict tensor weights needed by
+the Kaggle agent; malformed model entries fail during packaging rather than at
+agent startup. To store packaged models below fp32 precision, pass a
+quantization format such as
 `fp8_e4m3fn`, `fp4_e2m1fn_x2_scaled_block16`, or
 `nf5_g128_lsq_policy_last_fp8`/`nf5_g128_lsq_policy_final4_fp8`; unique prefixes
 such as `fp4` are accepted. The default `fp32` leaves checkpoint weights
@@ -150,6 +152,10 @@ with a different GPU count derive an equivalent per-rank config by scaling
 `rl.segments_per_minibatch` at or below the saved value, so the per-minibatch
 training batch does not increase; resume fails if the scaled values are
 fractional or config-invalid.
+When `rl.normalize_advantages` is enabled under distributed PPO, advantage mean
+and variance are computed over the masked global minibatch across ranks.
+`rl.eval_replay_games` must be no larger than `env.n_envs` because evaluation
+samples replay games from the same vectorized eval batch.
 `rl.ppo_clip_mode` defaults to `per_player`, which clips the summed per-player
 joint action log-probability. Set it to `per_entity` to clip each controllable
 action entity independently before summing those clipped policy-loss terms back
@@ -231,14 +237,15 @@ Checkpoints do not save the Rust environment state or current observation, so
 resumed runs continue from a fresh environment batch rather than acting as exact
 simulator snapshots. Periodic checkpoint names use grouped zero-padded
 environment-step labels such as `checkpoint_00_022_000_000.pt`. At each
-periodic checkpoint, the
-current model is evaluated against the last-best model snapshot using
-sampled policy actions across `env.n_envs` games using the configured
-`env.two_player_weight`, with current and last-best seats randomly shuffled
-across active player slots for each eval game, and logs
+periodic checkpoint, the current model is evaluated against the last-best
+snapshot using sampled policy actions across `env.n_envs` games using the
+configured `env.two_player_weight`, with current and last-best seats randomly
+shuffled across active player slots for each eval game, and logs
 `eval/win_rate_against_last_best` plus terminal environment metrics under
 `eval/`. When the current model reaches at least 70% eval win rate, the
 last-best snapshot is replaced and also saved as `checkpoint_last_best.pt`.
+Runs that never promote a last-best snapshot may not have this file and are not
+resumable from numbered checkpoints.
 Set `rl.eval_replay_games` to a positive count to save random eval replay
 samples from the weighted eval game set under
 `eval_replays/<checkpoint-name>/` in the run directory. The sampled game

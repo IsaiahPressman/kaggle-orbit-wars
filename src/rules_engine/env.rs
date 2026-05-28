@@ -267,7 +267,25 @@ fn remove_comet_planets(state: &mut State, is_expired: impl Fn(u32) -> bool) {
         .retain(|planet_id| !is_expired(*planet_id));
 
     for group in &mut state.comets {
-        group.planet_ids.retain(|planet_id| !is_expired(*planet_id));
+        let mut retained_planet_ids = Vec::with_capacity(group.planet_ids.len());
+        let mut retained_paths = Vec::with_capacity(group.paths.len());
+        let old_planet_ids = std::mem::take(&mut group.planet_ids);
+        let mut old_paths = std::mem::take(&mut group.paths).into_iter();
+        for planet_id in old_planet_ids {
+            let path = old_paths
+                .next()
+                .expect("comet path exists for every comet planet id");
+            if !is_expired(planet_id) {
+                retained_planet_ids.push(planet_id);
+                retained_paths.push(path);
+            }
+        }
+        assert!(
+            old_paths.next().is_none(),
+            "comet paths must match comet planet ids"
+        );
+        group.planet_ids = retained_planet_ids;
+        group.paths = retained_paths;
     }
     state.comets.retain(|group| !group.planet_ids.is_empty());
 }
@@ -1602,6 +1620,7 @@ mod tests {
         assert_eq!(state.initial_planets.len(), 1);
         assert_eq!(state.comet_planet_ids, vec![11]);
         assert_eq!(state.comets[0].planet_ids, vec![11]);
+        assert_eq!(state.comets[0].paths, vec![vec![Point::new(2.0, 2.0)]]);
     }
 
     #[test]

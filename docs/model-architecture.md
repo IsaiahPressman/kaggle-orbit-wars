@@ -391,8 +391,8 @@ Entropy outputs also carry policy-specific component names for logging, such as
 Serving callers that only need actions and critic values use
 `BaseModelAPI.serve()`, which returns a `ModelServingOutput` without
 log-probability or entropy tensors. `StatelessTransformerV1` specializes this
-path for the discrete-target actor by sampling actions directly from the
-policy parameters needed for action selection. `RecurrentTransformerV1`
+path for the discrete-target and target-bin actors by sampling actions directly
+from the policy parameters needed for action selection. `RecurrentTransformerV1`
 overrides the same serving path so runtime hidden state is consumed and the next
 hidden state is returned without computing PPO-only action statistics. Training
 still uses `forward()` to return the full PPO action statistics.

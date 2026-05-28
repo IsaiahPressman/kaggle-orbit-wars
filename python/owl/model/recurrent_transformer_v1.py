@@ -695,13 +695,15 @@ def _recurrent_reset_mask(
         dtype=torch.bool,
         device=device,
     )
-    if dones is None or time_steps == 1:
+    if dones is None:
         return reset
     if dones.shape != (batch_size, time_steps, OUTER_PLAYER_SLOTS):
         raise ValueError(
             "dones must have shape "
             f"{(batch_size, time_steps, OUTER_PLAYER_SLOTS)}, got {tuple(dones.shape)}"
         )
+    if time_steps == 1:
+        return reset
     previous_dones = dones[:, :-1].to(device=device)
     reset[:, 1:, : layout.shared_count] = previous_dones.all(dim=-1, keepdim=True)
     player_index = layout.player_index[layout.shared_count :].to(device=device)

@@ -277,6 +277,10 @@ integers rather than coerced strings or floats, comet groups must provide
 matching `planet_ids`, `paths`, and `path_index`, and comet/path overflow is
 rejected rather than truncated. It also rejects non-finite `angular_velocity`
 and requires `episode_steps > 0` before computing these values.
+The parser is still an internal high-throughput bridge into typed Rust state:
+impossible ID invariants such as duplicate planet IDs or IDs outside the fixed
+rules-engine limit may trip Rust assertions instead of being converted into
+Python `ValueError`s.
 `encode_python_observation()` returns a single-env `ObsBatch` with tensors
 shaped as `(1, ...)`, matching model input shape directly.
 

@@ -17,6 +17,9 @@ teacher-vs-candidate policy/value drift on realistic observations.
 
 Any custom format that is not supported by `owl.agent.checkpoint_quantization`
 must be treated as experimental until the Kaggle agent can load it.
+Supported custom payloads are strict artifact schemas: packed fp4 and NF5 data
+must have the exact byte length implied by the tensor shape and format, and
+extra trailing bytes are rejected as corrupt or stale checkpoint data.
 
 ## Measurement Protocol
 

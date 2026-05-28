@@ -672,26 +672,32 @@
       function renderHeader(planets, fleets) {
         const currentFrame = frame();
         if (!episode || !currentFrame) {
-          header.innerHTML = "";
+          header.replaceChildren();
           return;
         }
         const values = scores(planets, fleets);
         const active = activePlayers(planets, fleets);
         const slots = activeOuterSlots(episode, currentFrame);
-        const parts = [];
+        header.replaceChildren();
         for (let i = 0; i < slots.length; i++) {
           const slot = slots[i];
-          const activeClass = active.has(slot) ? " active" : "";
-          parts.push(
-            `<span class="player-card${activeClass}">` +
-              `<span class="color-dot" style="background-color:${playerColor(slot)}"></span>` +
-              `${playerName(episode, slot)}` +
-              `<span class="ship-count">${values[slot] || 0}</span>` +
-              `</span>`,
-          );
-          if (i < slots.length - 1) parts.push(`<span style="color:#666;">vs</span>`);
+          const card = document.createElement("span");
+          card.className = `player-card${active.has(slot) ? " active" : ""}`;
+          const dot = document.createElement("span");
+          dot.className = "color-dot";
+          dot.style.backgroundColor = playerColor(slot);
+          const ships = document.createElement("span");
+          ships.className = "ship-count";
+          ships.textContent = String(values[slot] || 0);
+          card.append(dot, document.createTextNode(playerName(episode, slot)), ships);
+          header.appendChild(card);
+          if (i < slots.length - 1) {
+            const vs = document.createElement("span");
+            vs.style.color = "#666";
+            vs.textContent = "vs";
+            header.appendChild(vs);
+          }
         }
-        header.innerHTML = parts.join("");
       }
 
       function render() {
@@ -788,14 +794,16 @@
       }
 
       function renderTimelineLegend(slots) {
-        timelineLegend.innerHTML = slots
-          .map(
-            (slot) =>
-              `<span class="legend-item" style="color:${playerColor(slot)}">` +
-              `<span class="legend-line"></span>${playerName(episode, slot)}` +
-              `</span>`,
-          )
-          .join("");
+        timelineLegend.replaceChildren();
+        for (const slot of slots) {
+          const item = document.createElement("span");
+          item.className = "legend-item";
+          item.style.color = playerColor(slot);
+          const line = document.createElement("span");
+          line.className = "legend-line";
+          item.append(line, document.createTextNode(playerName(episode, slot)));
+          timelineLegend.appendChild(item);
+        }
       }
 
       function drawTimelineBand(c, data, band, metric, left, plotWidth) {
@@ -1133,13 +1141,20 @@
         const scoreText = slots.map((slot) => `${playerName(episode, slot)}: ${values[slot] || 0}`).join(" — ");
         const overlay = document.createElement("div");
         overlay.className = "game-over-overlay";
-        overlay.innerHTML = `
-          <div class="game-over-modal">
-            <h2>Game Over</h2>
-            <div class="result-text">${winnerText}</div>
-            <div style="margin-top:8px;font-size:0.85rem;color:#888;">${scoreText}</div>
-          </div>
-        `;
+        const modal = document.createElement("div");
+        modal.className = "game-over-modal";
+        const title = document.createElement("h2");
+        title.textContent = "Game Over";
+        const result = document.createElement("div");
+        result.className = "result-text";
+        result.textContent = winnerText;
+        const score = document.createElement("div");
+        score.style.marginTop = "8px";
+        score.style.fontSize = "0.85rem";
+        score.style.color = "#888";
+        score.textContent = scoreText;
+        modal.append(title, result, score);
+        overlay.appendChild(modal);
         canvasWrapper.appendChild(overlay);
       }
 
@@ -1176,9 +1191,13 @@
         const file = fileInput.files?.[0];
         if (!file) return;
         episodes = parseReplayText(await file.text());
-        episodeSelect.innerHTML = episodes
-          .map((row, index) => `<option value="${index}">${episodeLabel(row, index)}</option>`)
-          .join("");
+        episodeSelect.replaceChildren();
+        for (let index = 0; index < episodes.length; index++) {
+          const option = document.createElement("option");
+          option.value = String(index);
+          option.textContent = episodeLabel(episodes[index], index);
+          episodeSelect.appendChild(option);
+        }
         episodeSelect.classList.toggle("hidden", episodes.length <= 1);
         fileStatus.textContent = `${episodes.length} game${episodes.length === 1 ? "" : "s"}`;
         loadEpisode(0);

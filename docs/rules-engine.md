@@ -12,13 +12,17 @@ uv run python -c 'from importlib import import_module; from pathlib import Path;
 
 - The Rust simulator is the inner rules API. It receives typed actions and fails
   fast on invalid API inputs.
+- Fail-fast means invalid typed/manual inputs may panic after earlier mutations
+  in the same call. The simulator does not provide transactional rollback for
+  impossible action sets because valid generated/RL states are the hot path.
 - Python/Kaggle-compatible action parsing stays outside the simulator.
 - Floating-point state uses `f64`. Parity tests compare floats with
   `math.isclose`-style tolerances, while ids, owners, ship counts, removals, and
   termination state must match exactly.
 - Procedural generation does not need to match from the same integer seed across
   Python and Rust RNGs. It should match when driven by the same stream of random
-  integers/floats.
+  integers/floats. The `RandomSource::uniform` contract follows Python's
+  inclusive `random.uniform(a, b)` endpoint behavior, including `a == b`.
 - The engine supports both 2-player and 4-player games from the start.
 
 ## Public API
@@ -174,6 +178,10 @@ The current downloaded reference episodes are:
   position.
 - Manual states with duplicate planet IDs or planet IDs at/above
   `MAX_PLANET_ID` panic during state construction.
+- Public Rust state/config structs are optimized for tests and fixture
+  injection, not for defensive construction. Constructors establish supported
+  2-player/4-player and ID invariants; hand-built invalid structs may panic in
+  later fixed-size indexed paths instead of being rejected up front.
 - Manual planet owners must be neutral (`-1`) or within `0..player_count`, and
   manual fleet owners must be within `0..player_count`; result, alive-player,
   and combat paths panic with explicit owner messages when malformed states

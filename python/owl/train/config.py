@@ -37,6 +37,8 @@ class FullConfig(BaseConfig):
                 "env.n_envs must be divisible by rl.segments_per_minibatch * "
                 "rl.gradient_accumulation_steps"
             )
+        if self.rl.eval_replay_games > self.env.n_envs:
+            raise ValueError("rl.eval_replay_games must be <= env.n_envs")
         return self
 
     @classmethod

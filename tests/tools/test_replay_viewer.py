@@ -36,6 +36,41 @@ def test_orbit_wars_replay_viewer_accepts_kaggle_replay_json() -> None:
         const vm = require("vm");
         const html = fs.readFileSync(process.argv[2], "utf8");
         const source = html.match(/<script>([\\s\\S]*)<\\/script>/)[1];
+        function element() {
+          return {
+            children: [],
+            className: "",
+            innerHTML: "",
+            style: {},
+            textContent: "",
+            value: "0",
+            options: [],
+            selectedIndex: 0,
+            addEventListener() {},
+            append(...nodes) { this.children.push(...nodes); },
+            appendChild(node) { this.children.push(node); return node; },
+            replaceChildren(...nodes) { this.children = [...nodes]; },
+            classList: { add() {}, remove() {}, toggle() {} },
+            getBoundingClientRect() {
+              return { width: 300, height: 180, left: 0 };
+            },
+            getContext() {
+              return {
+                scale() {},
+                fillRect() {},
+                fillText() {},
+                beginPath() {},
+                moveTo() {},
+                lineTo() {},
+                stroke() {},
+              };
+            },
+            querySelector() { return null; },
+            setPointerCapture() {},
+            hasPointerCapture() { return false; },
+            releasePointerCapture() {},
+          };
+        }
         const context = {
           console,
           JSON,
@@ -52,35 +87,10 @@ def test_orbit_wars_replay_viewer_accepts_kaggle_replay_json() -> None:
             setInterval() {},
           },
           document: {
-            getElementById() {
-              return {
-                addEventListener() {},
-                classList: { add() {}, remove() {}, toggle() {} },
-                getBoundingClientRect() {
-                  return { width: 300, height: 180, left: 0 };
-                },
-                getContext() {
-                  return {
-                    scale() {},
-                    fillRect() {},
-                    fillText() {},
-                    beginPath() {},
-                    moveTo() {},
-                    lineTo() {},
-                    stroke() {},
-                  };
-                },
-                querySelector() { return null; },
-                setPointerCapture() {},
-                hasPointerCapture() { return false; },
-                releasePointerCapture() {},
-                options: [],
-                selectedIndex: 0,
-                value: "0",
-              };
-            },
+            getElementById() { return element(); },
             querySelectorAll() { return []; },
-            createElement() { return { className: "", innerHTML: "" }; },
+            createElement() { return element(); },
+            createTextNode(text) { return { textContent: String(text) }; },
           },
         };
         vm.createContext(context);

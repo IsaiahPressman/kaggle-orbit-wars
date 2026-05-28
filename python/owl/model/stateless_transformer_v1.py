@@ -1256,6 +1256,16 @@ class StatelessTransformerV1(BaseModelAPI):
                 min_fleet_size=self.action_spec.min_fleet_size,
                 deterministic=deterministic,
             )
+        if isinstance(actor, DiscreteTargetBinsActor):
+            if not isinstance(action_mask, DiscreteTargetBinActionMask):
+                raise RuntimeError(
+                    "discrete_target_bins actor requires a target-bin action mask"
+                )
+            return actor.sample_actions(
+                self._discrete_actor_inputs(encoded, obs, adapter=adapter),
+                action_mask.can_act,
+                deterministic=deterministic,
+            )
 
         actions, _log_probs, _entropies = self._actor(
             encoded,

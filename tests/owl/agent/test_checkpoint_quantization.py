@@ -133,6 +133,21 @@ def test_fp4_quantized_payload_uses_packed_bytes_and_fp16_block_scales() -> None
     assert _tensor_storage_nbytes(scale) == expected_scale_values * 2
 
 
+def test_fp4_dequantization_rejects_trailing_payload_bytes() -> None:
+    values = torch.arange(17, dtype=torch.float32)
+    quantized = quantize_model_state_dict(
+        {"weight": values},
+        FP4_E2M1FN_X2_SCALED_BLOCK16,
+    )
+    payload = quantized["tensors"]["weight"]
+    payload["data"] = torch.cat(
+        (payload["data"], torch.zeros(1, dtype=torch.uint8)),
+    )
+
+    with pytest.raises(ValueError, match=r"fp4 payload has .* bytes"):
+        dequantize_model_state_dict(quantized)
+
+
 def test_fp4_dequantization_unpacks_low_nibble_then_high_nibble() -> None:
     codes = torch.arange(16, dtype=torch.uint8)
     quantized = {
@@ -277,6 +292,24 @@ def test_quantized_checkpoint_file_round_trips_to_expected_fp32(
 
     assert dequantized.keys() == {"weight"}
     _assert_float32_bits_equal(dequantized["weight"], expected)
+
+
+@pytest.mark.parametrize(
+    "quantization",
+    [NF5_G128_LSQ_POLICY_LAST_FP8, NF5_G128_LSQ_POLICY_FINAL4_FP8],
+)
+def test_nf5_dequantization_rejects_trailing_payload_bytes(
+    quantization: str,
+) -> None:
+    values = torch.arange(130, dtype=torch.float32).reshape(1, 130)
+    quantized = quantize_model_state_dict({"weight": values}, quantization)
+    payload = quantized["tensors"]["weight"]
+    payload["data"] = torch.cat(
+        (payload["data"], torch.zeros(1, dtype=torch.uint8)),
+    )
+
+    with pytest.raises(ValueError, match=r"5-bit payload has .* bytes"):
+        dequantize_model_state_dict(quantized)
 
 
 def test_unquantized_model_state_still_loads_unchanged() -> None:

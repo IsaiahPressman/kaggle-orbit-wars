@@ -8,6 +8,7 @@ import torch
 from owl.agent.checkpoint_quantization import (
     SUPPORTED_QUANTIZATION_FORMATS,
     QuantizationFormat,
+    dequantize_model_state_dict,
     quantize_model_state_dict,
 )
 from owl.utils import ResolvedFormat, parse_format_prefix_arg
@@ -46,7 +47,9 @@ def extract_model_weights(
     model_state = checkpoint["model"]
     if not isinstance(model_state, dict):
         raise ValueError(f"checkpoint['model'] must be a dictionary: {checkpoint_path}")
+    model_state = dequantize_model_state_dict(model_state)
 
+    output_model_state: dict[str, torch.Tensor] | dict[str, object]
     if quantization is None or quantization == FP32:
         output_model_state = model_state
     else:

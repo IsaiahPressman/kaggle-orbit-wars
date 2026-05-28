@@ -12,7 +12,12 @@ DOCS_CURRENT_ENV = "DOCS_CURRENT"
 DOC_RULES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     (
         "rules-engine",
-        ("src/rules_engine/",),
+        (
+            "src/rules_engine/",
+            "scripts/download_replays.py",
+            "scripts/regenerate_test_fixtures.sh",
+            "tests/fixtures/generation/",
+        ),
         ("docs/rules-engine.md", "docs/rules-parity-coverage.md"),
     ),
     (
@@ -29,6 +34,25 @@ DOC_RULES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
         "training",
         ("python/owl/train/", "scripts/run_ppo.py"),
         ("README.md",),
+    ),
+    (
+        "kaggle-packaging",
+        (
+            "Dockerfile.kaggle",
+            "python/main.py",
+            "python/owl/agent/",
+            "scripts/build_kaggle_submission.sh",
+        ),
+        ("README.md", "docs/containerization.md"),
+    ),
+    (
+        "checkpoint-quantization",
+        (
+            "python/owl/agent/checkpoint_quantization.py",
+            "scripts/extract_model_weights.py",
+            "scripts/roundtrip_checkpoint_quantization.py",
+        ),
+        ("docs/containerization.md", "docs/quantization-optimizations.md"),
     ),
 )
 

@@ -6,16 +6,17 @@ from pathlib import Path
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[1] / "python"
+    repo_root = Path(__file__).resolve().parents[1]
+    roots = (repo_root / "python", repo_root / "scripts")
     failures: list[str] = []
 
-    python_files = sorted(path for path in root.rglob("*.py"))
+    python_files = sorted(path for root in roots for path in root.rglob("*.py"))
     if not python_files:
-        print(f"No python files found in {root}")
+        print(f"No python files found in {', '.join(str(root) for root in roots)}")
         return 1
 
     for path in python_files:
-        relative_path = path.relative_to(root)
+        relative_path = path.relative_to(repo_root)
         try:
             ast.parse(
                 path.read_text(encoding="utf-8"),

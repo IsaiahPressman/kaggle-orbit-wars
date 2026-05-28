@@ -1186,6 +1186,37 @@ def test_normalize_masked_advantages_uses_valid_policy_samples() -> None:
     assert torch.allclose(normalized[:, 2], torch.tensor([98.0]))
 
 
+def test_normalize_masked_advantages_uses_distributed_policy_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=True,
+    )
+
+    def fake_all_reduce_sum(
+        tensor: torch.Tensor,
+        _context: ppo.DistributedContext,
+    ) -> torch.Tensor:
+        return tensor + torch.tensor([6.0, 36.0, 1.0])
+
+    monkeypatch.setattr(ppo, "all_reduce_sum", fake_all_reduce_sum)
+
+    normalized = ppo._normalize_masked_advantages(
+        torch.tensor([[1.0, 3.0, 100.0]]),
+        torch.tensor([[True, True, False]]),
+        context=context,
+    )
+
+    mean = torch.tensor(10.0 / 3.0)
+    variance = torch.tensor(46.0 / 3.0) - mean.pow(2)
+    expected = (torch.tensor([[1.0, 3.0, 100.0]]) - mean) / variance.sqrt()
+    assert torch.allclose(normalized, expected)
+
+
 def test_update_minibatch_normalizes_policy_advantages_only() -> None:
     seen: dict[str, torch.Tensor] = {}
     env = TinyOrbitEnv(n_envs=1)
@@ -2064,6 +2095,32 @@ def test_teacher_update_skips_teacher_when_coefficients_are_zero(
     metrics = trainer.train_iteration()
 
     assert evaluate_calls > 0
+    assert metrics["loss/teacher_kl_loss"] == pytest.approx(0.0)
+    assert metrics["loss/teacher_value_loss"] == pytest.approx(0.0)
+
+
+def test_per_entity_teacher_update_skips_zero_kl_without_shape_error() -> None:
+    env = TinyOrbitEnv(n_envs=2)
+    model = TinyOrbitModel()
+    teacher_model = TinyOrbitModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            ppo_clip_mode="per_entity",
+            segments_per_minibatch=1,
+            teacher_kl_coef=0.0,
+            teacher_value_coef=0.0,
+        ),
+        device=torch.device("cpu"),
+        teacher_model=teacher_model,
+        teacher_active=True,
+    )
+
+    metrics = trainer.train_iteration()
+
     assert metrics["loss/teacher_kl_loss"] == pytest.approx(0.0)
     assert metrics["loss/teacher_value_loss"] == pytest.approx(0.0)
 

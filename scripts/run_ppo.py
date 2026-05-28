@@ -412,8 +412,12 @@ def _run_training_loop(
                             active=True,
                         )
                     if dist_ctx.is_main_process:
+                        # Only promoted snapshots are persisted as last-best.
+                        # Short or unsuccessful fresh runs may have no
+                        # checkpoint_last_best.pt and are intentionally not
+                        # resumable from numbered checkpoints.
                         trainer.write_checkpoint(
-                            run_dir / "checkpoint_last_best.pt",
+                            run_dir / CHECKPOINT_LAST_BEST,
                             env_steps=env_steps,
                             wandb_run_id=wandb_run_id,
                         )
