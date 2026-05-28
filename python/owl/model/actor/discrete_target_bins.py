@@ -226,16 +226,16 @@ class DiscreteTargetBinsActor(nn.Module):
                 can_act,
             )
         source_active = can_act.flatten(start_dim=-2).any(dim=-1)
-        target_valid = can_act.any(dim=-1)
-        target_kl = categorical_kl_from_logits(
-            teacher_selection.target_logits,
-            student_selection.target_logits,
-            target_valid,
+        target_kl = torch.zeros(
+            source_active.shape,
+            dtype=torch.float32,
+            device=source_active.device,
         )
-        target_kl = torch.where(
-            source_active,
-            target_kl,
-            torch.zeros_like(target_kl),
+        target_valid = can_act.any(dim=-1)
+        target_kl[source_active] = categorical_kl_from_logits(
+            teacher_selection.target_logits[source_active],
+            student_selection.target_logits[source_active],
+            target_valid[source_active],
         )
         target_index = actions.target.clamp(
             0, student_selection.target_values.shape[2] - 1
@@ -254,15 +254,11 @@ class DiscreteTargetBinsActor(nn.Module):
                 target_index.clamp(0, teacher_selection.target_values.shape[2] - 1),
             )
         selected_bin_mask = gather_selected_bin_mask(can_act, target_index)
-        fleet_bin_kl = categorical_kl_from_logits(
-            teacher_params.fleet_bin_logits,
-            student_params.fleet_bin_logits,
-            selected_bin_mask,
-        )
-        fleet_bin_kl = torch.where(
-            source_active,
-            fleet_bin_kl,
-            torch.zeros_like(fleet_bin_kl),
+        fleet_bin_kl = torch.zeros_like(target_kl)
+        fleet_bin_kl[source_active] = categorical_kl_from_logits(
+            teacher_params.fleet_bin_logits[source_active],
+            student_params.fleet_bin_logits[source_active],
+            selected_bin_mask[source_active],
         )
         per_player_entity_kl = target_kl + fleet_bin_kl
         zeros = torch.zeros_like(per_player_entity_kl)

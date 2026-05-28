@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import itertools
 import random
 import re
@@ -154,18 +153,16 @@ def main() -> None:
             model.reset_parameters()
         compiled_model_modules = configure_model_compile(model, cfg.rl)
         teacher_init_model = (
-            None
-            if cfg.rl.teacher_init is None
-            else _load_teacher_init_model(
+            _load_teacher_init_model(
                 cfg.rl.teacher_init,
                 student_cfg=cfg,
                 device=device,
             )
+            if cfg.rl.teacher_init is not None and cfg.rl.teacher_mode == "fixed"
+            else None
         )
-        fixed_teacher_model = (
-            teacher_init_model if cfg.rl.teacher_mode == "fixed" else None
-        )
-        last_best_model = _initial_last_best_model(cfg, teacher_init_model)
+        fixed_teacher_model = teacher_init_model
+        last_best_model = _initial_last_best_model(cfg, device=device)
 
         trainable_parameters = _trainable_parameter_count(model)
         optimizer = create_optimizer(model, cfg.optimizer)
@@ -188,12 +185,13 @@ def main() -> None:
             checkpoint_metadata = trainer.load_checkpoint(launch.checkpoint_path)
             resume_run_id = _resume_wandb_run_id(checkpoint_metadata, args.log_mode)
             start_env_steps = checkpoint_metadata.env_steps
-            last_best_model = _clone_eval_model(unwrap_model(model))
+            last_best_model = _create_eval_model_for_config(cfg, device=device)
             last_best_metadata = _load_model_from_checkpoint(
                 last_best_model,
                 path=launch.last_best_checkpoint_path,
                 device=device,
             )
+            _compile_eval_model(last_best_model, cfg)
             _validate_last_best_run_id(
                 last_best_metadata,
                 resume_run_id=resume_run_id,
@@ -207,7 +205,11 @@ def main() -> None:
             )
             start_env_steps = checkpoint_metadata.env_steps
             if cfg.rl.teacher_mode == "last_best":
-                last_best_model = _clone_eval_model(unwrap_model(model))
+                last_best_model = _create_eval_model_from_weights(
+                    unwrap_model(model),
+                    cfg,
+                    device=device,
+                )
         if (
             isinstance(launch, FreshLaunch)
             and cfg.rl.teacher_mode == "last_best"
@@ -338,7 +340,11 @@ def _run_training_loop(
         env_steps=env_steps,
     )
     if next_checkpoint_env_steps is not None and last_best_model is None:
-        last_best_model = _clone_eval_model(unwrap_model(trainer.model))
+        last_best_model = _create_eval_model_from_weights(
+            unwrap_model(trainer.model),
+            cfg,
+            device=trainer.device,
+        )
     if _should_stop_training(
         env_steps=env_steps,
         started_at=started_at,
@@ -396,7 +402,10 @@ def _run_training_loop(
                     >= LAST_BEST_WIN_RATE_THRESHOLD
                 )
                 if replace_last_best:
-                    last_best_model = _clone_eval_model(unwrap_model(trainer.model))
+                    _refresh_eval_model_from_weights(
+                        last_best_model,
+                        unwrap_model(trainer.model),
+                    )
                     if cfg.rl.teacher_mode == "last_best":
                         trainer.set_teacher_model(
                             last_best_model,
@@ -669,19 +678,25 @@ def _load_teacher_init_model(
         action_spec=teacher_cfg.env.action_spec,
     ).to(device)
     _load_model_weights(teacher_model, path=checkpoint_path, device=device)
+    _compile_eval_model(teacher_model, student_cfg)
     teacher_model.eval()
     return teacher_model
 
 
 def _initial_last_best_model(
     cfg: FullConfig,
-    teacher_init_model: BaseModelAPI | None,
+    *,
+    device: torch.device,
 ) -> BaseModelAPI | None:
-    if teacher_init_model is None:
+    if cfg.rl.teacher_init is None:
         return None
     if cfg.rl.checkpoint_freq is None and cfg.rl.teacher_mode != "last_best":
         return None
-    return _clone_eval_model(teacher_init_model)
+    return _load_teacher_init_model(
+        cfg.rl.teacher_init,
+        student_cfg=cfg,
+        device=device,
+    )
 
 
 def _checkpoint_config_path(checkpoint_path: Path) -> Path:
@@ -819,10 +834,44 @@ def _trainable_parameter_count(model: torch.nn.Module) -> int:
     return sum(param.numel() for param in model.parameters() if param.requires_grad)
 
 
-def _clone_eval_model(model: BaseModelAPI) -> BaseModelAPI:
-    last_best_model = copy.deepcopy(model)
-    last_best_model.eval()
-    return last_best_model
+def _create_eval_model_for_config(
+    cfg: FullConfig,
+    *,
+    device: torch.device,
+) -> BaseModelAPI:
+    model = _create_model(
+        cfg.model,
+        obs_spec=cfg.env.obs_spec,
+        action_spec=cfg.env.action_spec,
+    ).to(device)
+    model.eval()
+    return model
+
+
+def _create_eval_model_from_weights(
+    source_model: BaseModelAPI,
+    cfg: FullConfig,
+    *,
+    device: torch.device,
+) -> BaseModelAPI:
+    model = _create_eval_model_for_config(cfg, device=device)
+    model.load_state_dict(source_model.state_dict())
+    _compile_eval_model(model, cfg)
+    model.eval()
+    return model
+
+
+def _refresh_eval_model_from_weights(
+    target_model: BaseModelAPI,
+    source_model: BaseModelAPI,
+) -> None:
+    target_model.load_state_dict(source_model.state_dict())
+    target_model.eval()
+
+
+def _compile_eval_model(model: BaseModelAPI, cfg: FullConfig) -> None:
+    configure_model_compile(model, cfg.rl)
+    model.eval()
 
 
 def _resume_wandb_run_id(

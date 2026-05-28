@@ -1,5 +1,3 @@
-from math import prod
-
 import owl.train.ppo as ppo
 import pytest
 import torch
@@ -177,15 +175,18 @@ def test_ppo_loss_adds_teacher_terms_with_separate_weights() -> None:
 
 
 def test_teacher_value_cross_entropy_sums_active_winner_distribution() -> None:
-    student = torch.tensor(
+    student_probabilities = torch.tensor(
         [
             [0.5, 0.5, 0.0, 0.0],
             [0.25, 0.25, 0.25, 0.25],
         ]
     )
-    teacher = student.clone()
+    teacher = student_probabilities.clone()
 
-    cross_entropy = ppo._teacher_value_cross_entropy(student, teacher)
+    cross_entropy = ppo._teacher_value_cross_entropy(
+        student_probabilities.clamp_min(1e-8).log(),
+        teacher,
+    )
 
     assert torch.allclose(
         cross_entropy,
@@ -306,5 +307,4 @@ def test_distributed_ppo_loss_only_reduces_scalar_summaries(
 
     assert backward_loss is not metrics.loss
     backward_loss.backward()
-    assert reduced_shapes
-    assert all(prod(shape) <= 2 for shape in reduced_shapes)
+    assert reduced_shapes == [(12,), (2,)]

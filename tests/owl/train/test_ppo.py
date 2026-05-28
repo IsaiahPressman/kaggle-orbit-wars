@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import Any, Literal
 
@@ -1404,6 +1405,84 @@ def test_ppo_epoch_one_uses_shuffled_single_pass_minibatches(
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(0.0)
 
 
+def test_update_uses_no_sync_for_gradient_accumulation_microbatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(11)
+    env = TinyOrbitEnv(n_envs=4)
+    model = TinyOrbitModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segments_per_minibatch=1,
+            gradient_accumulation_steps=2,
+        ),
+        device=torch.device("cpu"),
+    )
+    trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+    policy_mask = ppo._policy_mask(segments.obs)
+    value_mask = segments.obs.still_playing
+    advantages = torch.ones_like(segments.rewards)
+    returns = advantages + segments.values
+    context_enabled: list[bool] = []
+    minibatch_context_enabled: list[bool] = []
+    active_contexts: list[bool] = []
+
+    @contextmanager
+    def fake_model_no_sync_context(
+        model_arg: BaseModelAPI,
+        *,
+        enabled: bool,
+    ) -> object:
+        assert model_arg is model
+        context_enabled.append(enabled)
+        active_contexts.append(enabled)
+        try:
+            yield
+        finally:
+            active_contexts.pop()
+
+    def fake_update_minibatch(
+        segments: ppo._PPORolloutSegments,
+        advantages: torch.Tensor,  # noqa: ARG001
+        returns: torch.Tensor,  # noqa: ARG001
+        policy_mask: torch.Tensor,  # noqa: ARG001
+        value_mask: torch.Tensor,  # noqa: ARG001
+        indices: torch.Tensor,
+        *,
+        value_clip_anchor: torch.Tensor,  # noqa: ARG001
+        loss_scale: float = 1.0,  # noqa: ARG001
+        step_optimizer: bool = True,  # noqa: ARG001
+    ) -> ppo._PPOUpdateResult:
+        assert len(active_contexts) == 1
+        minibatch_context_enabled.append(active_contexts[-1])
+        zero = segments.logp.new_zeros(())
+        return ppo._PPOUpdateResult(
+            metrics=_zero_loss_metrics(zero),
+            indices=indices,
+            new_values=segments.values[indices],
+            grad_norm=zero,
+        )
+
+    monkeypatch.setattr(ppo, "model_no_sync_context", fake_model_no_sync_context)
+    monkeypatch.setattr(trainer, "_update_minibatch", fake_update_minibatch)
+
+    trainer._update(
+        segments,
+        advantages,
+        returns,
+        policy_mask,
+        value_mask,
+    )
+
+    assert context_enabled == [True, False, True, False]
+    assert minibatch_context_enabled == [True, False, True, False]
+
+
 def test_update_reports_target_kl_guard_when_exceeded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1866,9 +1945,11 @@ def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
     model.reset_parameters()
     teacher_model.reset_parameters()
     combined_calls = 0
+    student_actor_input_grad_enabled: list[bool] = []
     teacher_encode_grad_enabled: list[bool] = []
     teacher_actor_input_grad_enabled: list[bool] = []
     original_combined = model.evaluate_actions_with_teacher
+    original_student_actor_inputs = model._discrete_actor_inputs
     original_teacher_encode = teacher_model.encode_observations
     original_teacher_actor_inputs = teacher_model._discrete_actor_inputs
 
@@ -1886,6 +1967,10 @@ def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
     def fail_teacher_evaluate_actions(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("teacher evaluate_actions should not be called")
 
+    def student_actor_inputs_wrapper(*args: object, **kwargs: object) -> object:
+        student_actor_input_grad_enabled.append(torch.is_grad_enabled())
+        return original_student_actor_inputs(*args, **kwargs)
+
     def teacher_encode_wrapper(*args: object, **kwargs: object) -> object:
         teacher_encode_grad_enabled.append(torch.is_grad_enabled())
         return original_teacher_encode(*args, **kwargs)
@@ -1897,6 +1982,11 @@ def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
     monkeypatch.setattr(model, "evaluate_actions_with_teacher", combined_wrapper)
     monkeypatch.setattr(model, "evaluate_actions", fail_evaluate_actions)
     monkeypatch.setattr(model, "evaluate_action_kl", fail_evaluate_action_kl)
+    monkeypatch.setattr(
+        model,
+        "_discrete_actor_inputs",
+        student_actor_inputs_wrapper,
+    )
     monkeypatch.setattr(
         teacher_model,
         "evaluate_actions",
@@ -1924,10 +2014,90 @@ def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
     trainer.train_iteration()
 
     assert combined_calls > 0
+    assert sum(student_actor_input_grad_enabled) == combined_calls
     assert teacher_encode_grad_enabled
     assert not any(teacher_encode_grad_enabled)
     assert teacher_actor_input_grad_enabled
     assert not any(teacher_actor_input_grad_enabled)
+
+
+def test_teacher_update_skips_teacher_when_coefficients_are_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(0)
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model = TinyDiscreteTargetModel()
+    teacher_model = TinyDiscreteTargetModel()
+    evaluate_calls = 0
+
+    original_evaluate_actions = model.evaluate_actions
+
+    def evaluate_actions_wrapper(*args: object, **kwargs: object) -> object:
+        nonlocal evaluate_calls
+        evaluate_calls += 1
+        return original_evaluate_actions(*args, **kwargs)
+
+    def fail_combined_teacher_eval(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("teacher evaluation should be skipped")
+
+    monkeypatch.setattr(model, "evaluate_actions", evaluate_actions_wrapper)
+    monkeypatch.setattr(
+        model,
+        "evaluate_actions_with_teacher",
+        fail_combined_teacher_eval,
+    )
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segments_per_minibatch=1,
+            teacher_kl_coef=0.0,
+            teacher_value_coef=0.0,
+        ),
+        device=torch.device("cpu"),
+        teacher_model=teacher_model,
+        teacher_active=True,
+    )
+
+    metrics = trainer.train_iteration()
+
+    assert evaluate_calls > 0
+    assert metrics["loss/teacher_kl_loss"] == pytest.approx(0.0)
+    assert metrics["loss/teacher_value_loss"] == pytest.approx(0.0)
+
+
+def test_detach_loss_metrics_drops_metric_graphs() -> None:
+    value = torch.tensor(1.0, requires_grad=True)
+    metrics = replace(
+        _zero_loss_metrics(value * 2.0),
+        entropy_components={"launch": value * 3.0},
+        teacher_kl_components={"launch": value * 4.0},
+    )
+
+    detached = ppo._detach_loss_metrics(metrics)
+
+    metric_values = (
+        detached.loss,
+        detached.policy_loss,
+        detached.value_loss,
+        detached.entropy_loss,
+        detached.teacher_kl_loss,
+        detached.teacher_value_loss,
+        detached.entropy,
+        detached.teacher_kl,
+        detached.teacher_value_cross_entropy,
+        detached.approx_kl,
+        detached.clipfrac,
+        detached.ratio_mean,
+        detached.ratio_max,
+        detached.logratio_mean,
+        detached.logratio_abs_max,
+        detached.entropy_components["launch"],
+        detached.teacher_kl_components["launch"],
+    )
+    assert not any(metric.requires_grad for metric in metric_values)
 
 
 def test_trainer_rejects_recurrent_teacher() -> None:

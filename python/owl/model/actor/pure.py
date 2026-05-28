@@ -99,6 +99,19 @@ class PolicyParams:
         )
 
 
+def _index_policy_params(params: PolicyParams, index: torch.Tensor) -> PolicyParams:
+    return PolicyParams(
+        continue_logits=params.continue_logits[index],
+        angle_mix_logits=params.angle_mix_logits[index],
+        angle_log_w=params.angle_log_w[index],
+        loc=params.loc[index],
+        kappa=params.kappa[index],
+        size_mix_logits=params.size_mix_logits[index],
+        size_mu=params.size_mu[index],
+        size_scale=params.size_scale[index],
+    )
+
+
 class PureActor(nn.Module):
     def __init__(
         self,
@@ -419,30 +432,32 @@ class PureActor(nn.Module):
             student_params.continue_logits,
         )
         launch_kl = torch.where(active, launch_kl, torch.zeros_like(launch_kl))
-        angle_kl = angle_policy_kl(teacher_params, student_params)
-        size_mixture_kl, size_logistic_kl = logistic_mixture_kl_components(
-            teacher_params.size_mix_logits,
-            teacher_params.size_mu,
-            teacher_params.size_scale,
-            student_params.size_mix_logits,
-            student_params.size_mu,
-            student_params.size_scale,
-            max_launch,
-            min_fleet_size=min_fleet_size,
+        angle_kl = torch.zeros(
+            event_mask.shape,
+            dtype=torch.float32,
+            device=event_mask.device,
         )
+        angle_kl[event_mask] = angle_policy_kl(
+            _index_policy_params(teacher_params, event_mask),
+            _index_policy_params(student_params, event_mask),
+        )
+        size_mixture_kl = torch.zeros_like(angle_kl)
+        size_logistic_kl = torch.zeros_like(angle_kl)
+        compact_size_mixture_kl, compact_size_logistic_kl = (
+            logistic_mixture_kl_components(
+                teacher_params.size_mix_logits[event_mask],
+                teacher_params.size_mu[event_mask],
+                teacher_params.size_scale[event_mask],
+                student_params.size_mix_logits[event_mask],
+                student_params.size_mu[event_mask],
+                student_params.size_scale[event_mask],
+                max_launch[event_mask],
+                min_fleet_size=min_fleet_size,
+            )
+        )
+        size_mixture_kl[event_mask] = compact_size_mixture_kl
+        size_logistic_kl[event_mask] = compact_size_logistic_kl
         size_kl = size_mixture_kl + size_logistic_kl
-        angle_kl = torch.where(event_mask, angle_kl, torch.zeros_like(angle_kl))
-        size_kl = torch.where(event_mask, size_kl, torch.zeros_like(size_kl))
-        size_mixture_kl = torch.where(
-            event_mask,
-            size_mixture_kl,
-            torch.zeros_like(size_mixture_kl),
-        )
-        size_logistic_kl = torch.where(
-            event_mask,
-            size_logistic_kl,
-            torch.zeros_like(size_logistic_kl),
-        )
         event_kl = angle_kl + size_kl
         per_player_entity_kl = launch_kl + event_kl
         return ModelActionKLDivergences(

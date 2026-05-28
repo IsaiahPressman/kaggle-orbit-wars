@@ -45,6 +45,7 @@ from owl.train.distributed import (
     all_gather_object,
     all_reduce_max,
     all_reduce_sum,
+    model_no_sync_context,
     unwrap_model,
 )
 from owl.train.metrics import (
@@ -712,17 +713,19 @@ class PPOTrainer:
             if sample_index % accumulation_steps == 0:
                 self.optimizer.zero_grad(set_to_none=True)
             sampled_segments += int(sample_indices.numel())
-            update = self._update_minibatch(
-                segments,
-                advantages,
-                returns,
-                policy_mask,
-                value_mask,
-                sample_indices,
-                value_clip_anchor=current_values,
-                loss_scale=1.0 / accumulation_steps,
-                step_optimizer=False,
-            )
+            sync_gradients = (sample_index + 1) % accumulation_steps == 0
+            with model_no_sync_context(self.model, enabled=not sync_gradients):
+                update = self._update_minibatch(
+                    segments,
+                    advantages,
+                    returns,
+                    policy_mask,
+                    value_mask,
+                    sample_indices,
+                    value_clip_anchor=current_values,
+                    loss_scale=1.0 / accumulation_steps,
+                    step_optimizer=False,
+                )
             loss_metrics.append(update.metrics)
             current_values[update.indices] = update.new_values
             target_kl_exceeded = target_kl_exceeded or update.target_kl_exceeded
@@ -809,9 +812,16 @@ class PPOTrainer:
             if batch_entity_policy_mask is None
             else batch_entity_policy_mask.to(dtype=batch_advantages.dtype)
         )
+        compute_teacher_action_kl = (
+            teacher_model is not None and self.config.teacher_kl_coef > 0.0
+        )
+        compute_teacher_value = (
+            teacher_model is not None and self.config.teacher_value_coef > 0.0
+        )
+        use_teacher_model = compute_teacher_action_kl or compute_teacher_value
 
         with _autocast_context(self.config, self.device):
-            if teacher_model is None:
+            if teacher_model is None or not use_teacher_model:
                 output = _model_evaluate_actions(
                     self.model,
                     batch_obs,
@@ -821,6 +831,7 @@ class PPOTrainer:
                 )
                 teacher_action_kl = None
                 teacher_winner_probabilities = None
+                student_winner_log_probabilities = None
             else:
                 teacher_evaluation = _model_evaluate_actions_with_teacher(
                     self.model,
@@ -829,11 +840,16 @@ class PPOTrainer:
                     teacher_model,
                     hidden_state=batch_hidden_state,
                     dones=segments.dones[idx],
+                    compute_teacher_action_kl=compute_teacher_action_kl,
+                    compute_teacher_value=compute_teacher_value,
                 )
                 output = teacher_evaluation.student
                 teacher_action_kl = teacher_evaluation.action_kl
                 teacher_winner_probabilities = (
                     teacher_evaluation.teacher_winner_probabilities
+                )
+                student_winner_log_probabilities = (
+                    teacher_evaluation.student_winner_log_probabilities
                 )
         new_logp = _output_logp_for_clip_mode(
             output,
@@ -846,30 +862,36 @@ class PPOTrainer:
         )
         entropy_components = _output_entropy_components(output, segments.logp[idx])
         new_values = _output_values(output).view_as(batch_old_values)
-        student_winner_probabilities = output.winner_probabilities.view_as(
-            batch_old_values
-        )
         if teacher_model is None:
             teacher_kl = torch.zeros_like(entropy)
             teacher_kl_components: dict[str, torch.Tensor] = {}
-            teacher_value_loss_values = torch.zeros_like(batch_old_values)
+            teacher_value_loss_values = torch.zeros_like(batch_old_values[..., 0])
         else:
-            if teacher_action_kl is None:
+            if not compute_teacher_action_kl:
+                teacher_kl = torch.zeros_like(entropy)
+                teacher_kl_components = {}
+            elif teacher_action_kl is None:
                 raise RuntimeError("teacher action KL was not computed")
-            if teacher_winner_probabilities is None:
+            else:
+                teacher_kl = _output_action_kl(
+                    teacher_action_kl,
+                    batch_policy_weight,
+                )
+                teacher_kl_components = _output_action_kl_components(
+                    teacher_action_kl,
+                    segments.logp[idx],
+                )
+            if not compute_teacher_value:
+                teacher_value_loss_values = torch.zeros_like(batch_old_values[..., 0])
+            elif teacher_winner_probabilities is None:
                 raise RuntimeError("teacher winner probabilities were not computed")
-            teacher_kl = _output_action_kl(
-                teacher_action_kl,
-                batch_policy_weight,
-            )
-            teacher_kl_components = _output_action_kl_components(
-                teacher_action_kl,
-                segments.logp[idx],
-            )
-            teacher_value_loss_values = _teacher_value_cross_entropy(
-                student_winner_probabilities,
-                teacher_winner_probabilities.view_as(batch_old_values),
-            )
+            elif student_winner_log_probabilities is None:
+                raise RuntimeError("student winner log probabilities were not computed")
+            else:
+                teacher_value_loss_values = _teacher_value_cross_entropy(
+                    student_winner_log_probabilities.view_as(batch_old_values),
+                    teacher_winner_probabilities.view_as(batch_old_values),
+                )
 
         loss_kwargs = {
             "new_logp": new_logp,
@@ -905,6 +927,7 @@ class PPOTrainer:
                 for name, component in teacher_kl_components.items()
             },
         )
+        metrics = _detach_loss_metrics(metrics)
         if step_optimizer:
             self.optimizer.zero_grad(set_to_none=True)
         (backward_loss * loss_scale).backward()
@@ -1242,29 +1265,57 @@ def _distributed_ppo_loss_metrics(
     ent_coef: float,
     context: DistributedContext,
 ) -> tuple[_PPOLossMetrics, torch.Tensor]:
-    policy_loss = _distributed_weighted_mean(
-        policy_loss_values.detach(),
-        policy_weight,
-        context,
-    )
-    value_loss = _distributed_weighted_mean(
-        value_loss_values.detach(),
+    teacher_value_weight = _teacher_value_state_weight(
         value_weight,
+        dtype=teacher_value_loss_values.dtype,
+    )
+    if teacher_value_loss_values.shape != teacher_value_weight.shape:
+        raise ValueError(
+            "teacher value loss values must have shape "
+            f"{tuple(teacher_value_weight.shape)}, "
+            f"got {tuple(teacher_value_loss_values.shape)}"
+        )
+    policy_denominator_local = policy_weight.sum().to(dtype=policy_loss_values.dtype)
+    value_denominator_local = value_weight.sum().to(dtype=value_loss_values.dtype)
+    teacher_value_denominator_local = teacher_value_weight.sum()
+    reduced_sums = all_reduce_sum(
+        torch.stack(
+            [
+                (policy_loss_values.detach() * policy_weight).sum(),
+                (value_loss_values.detach() * value_weight).sum(),
+                (entropy_values.detach() * policy_weight).sum(),
+                (teacher_kl_values.detach() * policy_weight).sum(),
+                (teacher_value_loss_values.detach() * teacher_value_weight).sum(),
+                (approx_kl_values.detach() * policy_weight).sum(),
+                (clipfrac_values.detach() * policy_weight).sum(),
+                (ratio.detach() * policy_weight).sum(),
+                (logratio.detach() * policy_weight).sum(),
+                policy_denominator_local,
+                value_denominator_local,
+                teacher_value_denominator_local,
+            ]
+        ),
         context,
     )
-    entropy_mean = _distributed_weighted_mean(
-        entropy_values.detach(),
-        policy_weight,
-        context,
-    )
-    teacher_kl = _distributed_weighted_mean(
-        teacher_kl_values.detach(),
-        policy_weight,
-        context,
-    )
-    teacher_value_cross_entropy = _distributed_teacher_value_weighted_mean(
-        teacher_value_loss_values.detach(),
-        value_weight,
+    policy_denominator = reduced_sums[9].clamp_min(1e-8)
+    value_denominator = reduced_sums[10].clamp_min(1e-8)
+    teacher_value_denominator = reduced_sums[11].clamp_min(1e-8)
+    policy_loss = reduced_sums[0] / policy_denominator
+    value_loss = reduced_sums[1] / value_denominator
+    entropy_mean = reduced_sums[2] / policy_denominator
+    teacher_kl = reduced_sums[3] / policy_denominator
+    teacher_value_cross_entropy = reduced_sums[4] / teacher_value_denominator
+    approx_kl = reduced_sums[5] / policy_denominator
+    clipfrac = reduced_sums[6] / policy_denominator
+    ratio_mean = reduced_sums[7] / policy_denominator
+    logratio_mean = reduced_sums[8] / policy_denominator
+    reduced_maxes = all_reduce_max(
+        torch.stack(
+            [
+                _masked_max_or_zero(ratio.detach(), policy_weight > 0),
+                _masked_max_or_zero(logratio.detach().abs(), policy_weight > 0),
+            ]
+        ),
         context,
     )
     teacher_kl_loss = teacher_kl_coef * teacher_kl
@@ -1276,30 +1327,28 @@ def _distributed_ppo_loss_metrics(
         + teacher_kl_loss
         + teacher_value_loss
     )
-    backward_policy_loss = _distributed_backward_weighted_mean(
-        policy_loss_values,
-        policy_weight,
-        context,
+    backward_policy_loss = (
+        (policy_loss_values * policy_weight).sum()
+        * context.world_size
+        / policy_denominator
     )
-    backward_value_loss = _distributed_backward_weighted_mean(
-        value_loss_values,
-        value_weight,
-        context,
+    backward_value_loss = (
+        (value_loss_values * value_weight).sum()
+        * context.world_size
+        / value_denominator
     )
-    backward_entropy = _distributed_backward_weighted_mean(
-        entropy_values,
-        policy_weight,
-        context,
+    backward_entropy = (
+        (entropy_values * policy_weight).sum() * context.world_size / policy_denominator
     )
-    backward_teacher_kl = _distributed_backward_weighted_mean(
-        teacher_kl_values,
-        policy_weight,
-        context,
+    backward_teacher_kl = (
+        (teacher_kl_values * policy_weight).sum()
+        * context.world_size
+        / policy_denominator
     )
-    backward_teacher_value = _distributed_backward_teacher_value_weighted_mean(
-        teacher_value_loss_values,
-        value_weight,
-        context,
+    backward_teacher_value = (
+        (teacher_value_loss_values * teacher_value_weight).sum()
+        * context.world_size
+        / teacher_value_denominator
     )
     backward_loss = (
         backward_policy_loss
@@ -1320,36 +1369,12 @@ def _distributed_ppo_loss_metrics(
             entropy=entropy_mean,
             teacher_kl=teacher_kl,
             teacher_value_cross_entropy=teacher_value_cross_entropy,
-            approx_kl=_distributed_weighted_mean(
-                approx_kl_values.detach(),
-                policy_weight,
-                context,
-            ),
-            clipfrac=_distributed_weighted_mean(
-                clipfrac_values,
-                policy_weight,
-                context,
-            ),
-            ratio_mean=_distributed_weighted_mean(
-                ratio.detach(),
-                policy_weight,
-                context,
-            ),
-            ratio_max=_distributed_masked_max_or_zero(
-                ratio.detach(),
-                policy_weight > 0,
-                context,
-            ),
-            logratio_mean=_distributed_weighted_mean(
-                logratio.detach(),
-                policy_weight,
-                context,
-            ),
-            logratio_abs_max=_distributed_masked_max_or_zero(
-                logratio.detach().abs(),
-                policy_weight > 0,
-                context,
-            ),
+            approx_kl=approx_kl,
+            clipfrac=clipfrac,
+            ratio_mean=ratio_mean,
+            ratio_max=reduced_maxes[0],
+            logratio_mean=logratio_mean,
+            logratio_abs_max=reduced_maxes[1],
         ),
         backward_loss,
     )
@@ -1947,6 +1972,8 @@ def _model_evaluate_actions_with_teacher(
     *,
     hidden_state: ModelHiddenState | None,
     dones: torch.Tensor,
+    compute_teacher_action_kl: bool,
+    compute_teacher_value: bool,
 ) -> ModelTeacherEvaluation:
     return model.evaluate_actions_with_teacher(
         obs,
@@ -1954,16 +1981,17 @@ def _model_evaluate_actions_with_teacher(
         teacher,
         hidden_state=hidden_state,
         dones=dones,
+        compute_teacher_action_kl=compute_teacher_action_kl,
+        compute_teacher_value=compute_teacher_value,
     )
 
 
 def _teacher_value_cross_entropy(
-    student_winner_probabilities: torch.Tensor,
+    student_winner_log_probabilities: torch.Tensor,
     teacher_winner_probabilities: torch.Tensor,
 ) -> torch.Tensor:
     return (
-        -teacher_winner_probabilities.detach()
-        * student_winner_probabilities.clamp_min(1e-8).log()
+        -teacher_winner_probabilities.detach() * student_winner_log_probabilities
     ).sum(dim=-1)
 
 
@@ -2302,6 +2330,34 @@ def _mean_loss_metrics(metrics: list[_PPOLossMetrics]) -> dict[str, float]:
             .item()
         )
     return logged
+
+
+def _detach_loss_metrics(metrics: _PPOLossMetrics) -> _PPOLossMetrics:
+    return replace(
+        metrics,
+        loss=metrics.loss.detach(),
+        policy_loss=metrics.policy_loss.detach(),
+        value_loss=metrics.value_loss.detach(),
+        entropy_loss=metrics.entropy_loss.detach(),
+        teacher_kl_loss=metrics.teacher_kl_loss.detach(),
+        teacher_value_loss=metrics.teacher_value_loss.detach(),
+        entropy=metrics.entropy.detach(),
+        teacher_kl=metrics.teacher_kl.detach(),
+        teacher_value_cross_entropy=metrics.teacher_value_cross_entropy.detach(),
+        approx_kl=metrics.approx_kl.detach(),
+        clipfrac=metrics.clipfrac.detach(),
+        ratio_mean=metrics.ratio_mean.detach(),
+        ratio_max=metrics.ratio_max.detach(),
+        logratio_mean=metrics.logratio_mean.detach(),
+        logratio_abs_max=metrics.logratio_abs_max.detach(),
+        entropy_components={
+            name: value.detach() for name, value in metrics.entropy_components.items()
+        },
+        teacher_kl_components={
+            name: value.detach()
+            for name, value in metrics.teacher_kl_components.items()
+        },
+    )
 
 
 def _entropy_component_names(metrics: list[_PPOLossMetrics]) -> tuple[str, ...]:

@@ -2213,7 +2213,9 @@ def test_discrete_targets_target_token_mode_appends_zero_pairwise_bias() -> None
     assert selection.target_logits[0, 0, 1].eq(0).all()
 
 
-def test_discrete_targets_teacher_kl_skips_target_and_size_for_no_launch() -> None:
+def test_discrete_targets_teacher_kl_skips_target_and_size_for_no_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config = StatelessTransformerV1Config(
         actor=ActorDiscreteTargetsConfig(),
         embed_dim=16,
@@ -2237,6 +2239,22 @@ def test_discrete_targets_teacher_kl_skips_target_and_size_for_no_launch() -> No
         target=torch.ones((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
         ships=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
     )
+    size_kl_rows: list[int] = []
+    original_size_kl = discrete_targets_impl.logistic_mixture_kl_components
+
+    def recording_size_kl(
+        *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        residual_budget = args[6]
+        assert isinstance(residual_budget, torch.Tensor)
+        size_kl_rows.append(residual_budget.numel())
+        return original_size_kl(*args, **kwargs)
+
+    monkeypatch.setattr(
+        discrete_targets_impl,
+        "logistic_mixture_kl_components",
+        recording_size_kl,
+    )
 
     kl = student.kl_divergence(
         _discrete_actor_inputs(slot_input),
@@ -2251,6 +2269,24 @@ def test_discrete_targets_teacher_kl_skips_target_and_size_for_no_launch() -> No
     assert torch.allclose(kl.target, torch.zeros_like(kl.target))
     assert torch.allclose(kl.event, torch.zeros_like(kl.event))
     assert torch.allclose(kl.per_player_entity, kl.launch.squeeze(-1))
+    assert size_kl_rows == [0]
+
+
+def test_logistic_mixture_kl_components_handles_empty_budget() -> None:
+    shape = (0, 2)
+    mixture_kl, logistic_kl = logistic_mixture_impl.logistic_mixture_kl_components(
+        torch.empty(shape),
+        torch.empty(shape),
+        torch.empty(shape),
+        torch.empty(shape),
+        torch.empty(shape),
+        torch.empty(shape),
+        torch.empty((0,), dtype=torch.int64),
+        min_fleet_size=3,
+    )
+
+    assert mixture_kl.shape == (0,)
+    assert logistic_kl.shape == (0,)
 
 
 def test_discrete_target_bins_actor_adds_pairwise_bias_before_masking() -> None:

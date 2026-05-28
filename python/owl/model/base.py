@@ -62,8 +62,9 @@ class ModelEvaluation:
 @dataclass
 class ModelTeacherEvaluation:
     student: ModelEvaluation
-    action_kl: ModelActionKLDivergences
-    teacher_winner_probabilities: torch.Tensor
+    action_kl: ModelActionKLDivergences | None
+    teacher_winner_probabilities: torch.Tensor | None
+    student_winner_log_probabilities: torch.Tensor | None
 
 
 @dataclass
@@ -131,6 +132,8 @@ class BaseModelAPI(nn.Module, ABC):
         *,
         hidden_state: ModelHiddenState | None = None,
         dones: torch.Tensor | None = None,
+        compute_teacher_action_kl: bool = True,
+        compute_teacher_value: bool = True,
     ) -> ModelTeacherEvaluation:
         raise NotImplementedError(
             f"{type(self).__name__} does not implement teacher evaluation"

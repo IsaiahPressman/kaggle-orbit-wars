@@ -131,6 +131,8 @@ _COMET_Y = 53
 _NEUTRAL_SHIP_NORMALIZER = 100.0
 _SHIP_NORMALIZER = 500.0
 _PLAYER_COUNT_ADAPTER_COUNTS = tuple(range(2, OUTER_PLAYER_SLOTS + 1))
+
+_ActorInputs = DiscreteActorInputs | PureActorInputs
 _MIN_PLAYER_COUNT_ADAPTER_COUNT = _PLAYER_COUNT_ADAPTER_COUNTS[0]
 _T = TypeVar("_T")
 
@@ -194,6 +196,13 @@ class EncodedObservations:
     board_hidden: torch.Tensor
     actor_plan_hidden: torch.Tensor
     critic_value_hidden: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _ValueDistillationOutput:
+    values: torch.Tensor
+    winner_probabilities: torch.Tensor
+    winner_log_probabilities: torch.Tensor
 
 
 class StatelessTransformerV1(BaseModelAPI):
@@ -709,6 +718,8 @@ class StatelessTransformerV1(BaseModelAPI):
         *,
         hidden_state: ModelHiddenState | None = None,
         dones: torch.Tensor | None = None,
+        compute_teacher_action_kl: bool = True,
+        compute_teacher_value: bool = True,
     ) -> ModelTeacherEvaluation:
         if not isinstance(teacher, StatelessTransformerV1):
             raise ValueError(
@@ -736,37 +747,63 @@ class StatelessTransformerV1(BaseModelAPI):
             hidden_state=hidden_state,
             dones=dones,
         )
-        student_values, student_winner_probabilities = self._value_from_encoded(
-            student_encoded,
-            flat_obs,
+        student_winner_log_probabilities: torch.Tensor | None = None
+        if compute_teacher_value:
+            student_value_output = self._value_distillation_from_encoded(
+                student_encoded,
+                flat_obs,
+            )
+            student_values = student_value_output.values
+            student_winner_probabilities = student_value_output.winner_probabilities
+            student_winner_log_probabilities = (
+                student_value_output.winner_log_probabilities
+            )
+        else:
+            student_values, student_winner_probabilities = self._value_from_encoded(
+                student_encoded,
+                flat_obs,
+            )
+        student_actor_inputs = (
+            self._actor_inputs_for_encoded(student_encoded, flat_obs)
+            if compute_teacher_action_kl and not self.player_count_adapters
+            else None
         )
         student_log_probs, student_entropies = self._actor_log_prob(
             student_encoded,
             flat_obs,
             flat_obs.action_mask,
             flat_actions,
+            actor_inputs=student_actor_inputs,
         )
-        with torch.no_grad():
-            teacher_encoded, _teacher_next_state = (
-                teacher._encode_distillation_observations(
-                    flat_obs,
-                    sequence_shape=sequence_shape,
-                    hidden_state=None,
-                    dones=dones,
+        action_kl: ModelActionKLDivergences | None = None
+        teacher_winner_probabilities: torch.Tensor | None = None
+        if compute_teacher_action_kl or compute_teacher_value:
+            with torch.no_grad():
+                teacher_encoded, _teacher_next_state = (
+                    teacher._encode_distillation_observations(
+                        flat_obs,
+                        sequence_shape=sequence_shape,
+                        hidden_state=None,
+                        dones=dones,
+                    )
                 )
-            )
-            _teacher_values, teacher_winner_probabilities = teacher._value_from_encoded(
-                teacher_encoded,
-                flat_obs,
-            )
-        action_kl = self._actor_kl_divergence(
-            teacher,
-            student_encoded,
-            teacher_encoded,
-            flat_obs,
-            flat_obs.action_mask,
-            flat_actions,
-        )
+                if compute_teacher_value:
+                    _teacher_values, teacher_winner_probabilities = (
+                        teacher._value_from_encoded(
+                            teacher_encoded,
+                            flat_obs,
+                        )
+                    )
+            if compute_teacher_action_kl:
+                action_kl = self._actor_kl_divergence(
+                    teacher,
+                    student_encoded,
+                    teacher_encoded,
+                    flat_obs,
+                    flat_obs.action_mask,
+                    flat_actions,
+                    student_actor_inputs=student_actor_inputs,
+                )
         student = ModelEvaluation(
             log_probs=student_log_probs,
             entropies=student_entropies,
@@ -776,15 +813,23 @@ class StatelessTransformerV1(BaseModelAPI):
         )
         if sequence_shape is not None:
             student = _unflatten_evaluation(student, sequence_shape)
-            teacher_winner_probabilities = _unflatten_time_tensor(
-                teacher_winner_probabilities,
-                sequence_shape,
-            )
-            action_kl = _unflatten_kl_divergences(action_kl, sequence_shape)
+            if teacher_winner_probabilities is not None:
+                teacher_winner_probabilities = _unflatten_time_tensor(
+                    teacher_winner_probabilities,
+                    sequence_shape,
+                )
+            if student_winner_log_probabilities is not None:
+                student_winner_log_probabilities = _unflatten_time_tensor(
+                    student_winner_log_probabilities,
+                    sequence_shape,
+                )
+            if action_kl is not None:
+                action_kl = _unflatten_kl_divergences(action_kl, sequence_shape)
         return ModelTeacherEvaluation(
             student=student,
             action_kl=action_kl,
             teacher_winner_probabilities=teacher_winner_probabilities,
+            student_winner_log_probabilities=student_winner_log_probabilities,
         )
 
     def evaluate_action_kl(
@@ -884,6 +929,18 @@ class StatelessTransformerV1(BaseModelAPI):
             return self._value_by_player_count(encoded, obs)
         return self._critic(encoded.critic_value_hidden, obs.still_playing)
 
+    def _value_distillation_from_encoded(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+    ) -> _ValueDistillationOutput:
+        if self.player_count_adapters:
+            return self._value_distillation_by_player_count(encoded, obs)
+        return self._critic_distillation(
+            encoded.critic_value_hidden,
+            obs.still_playing,
+        )
+
     def _value_by_player_count(
         self,
         encoded: EncodedObservations,
@@ -908,6 +965,42 @@ class StatelessTransformerV1(BaseModelAPI):
         probabilities = _merge_tensors_by_batch(batch_size, probability_parts)
         return values, probabilities
 
+    def _value_distillation_by_player_count(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+    ) -> _ValueDistillationOutput:
+        value_parts: list[tuple[torch.Tensor, torch.Tensor]] = []
+        probability_parts: list[tuple[torch.Tensor, torch.Tensor]] = []
+        log_probability_parts: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for player_count, batch_indices in self._player_count_index_groups(
+            obs.still_playing
+        ):
+            adapter = self._player_count_adapter(player_count)
+            output = self._critic_distillation(
+                _batch_select(encoded.critic_value_hidden, batch_indices),
+                _batch_select(obs.still_playing, batch_indices),
+                adapter=adapter,
+            )
+            value_parts.append((batch_indices, output.values))
+            probability_parts.append((batch_indices, output.winner_probabilities))
+            log_probability_parts.append(
+                (batch_indices, output.winner_log_probabilities)
+            )
+
+        batch_size = obs.still_playing.shape[0]
+        return _ValueDistillationOutput(
+            values=_merge_tensors_by_batch(batch_size, value_parts),
+            winner_probabilities=_merge_tensors_by_batch(
+                batch_size,
+                probability_parts,
+            ),
+            winner_log_probabilities=_merge_tensors_by_batch(
+                batch_size,
+                log_probability_parts,
+            ),
+        )
+
     def _critic(
         self,
         player_hidden: torch.Tensor,
@@ -915,6 +1008,38 @@ class StatelessTransformerV1(BaseModelAPI):
         *,
         adapter: PlayerCountAdapter | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        logits = self._critic_logits(player_hidden, still_playing, adapter=adapter)
+        probabilities = masked_softmax(logits, still_playing, dim=-1)
+        values = 2.0 * probabilities - 1.0
+        return values, probabilities
+
+    def _critic_distillation(
+        self,
+        player_hidden: torch.Tensor,
+        still_playing: torch.Tensor,
+        *,
+        adapter: PlayerCountAdapter | None = None,
+    ) -> _ValueDistillationOutput:
+        logits = self._critic_logits(player_hidden, still_playing, adapter=adapter)
+        masked_logits = logits.masked_fill(
+            ~still_playing,
+            torch.finfo(logits.dtype).min,
+        )
+        winner_log_probabilities = F.log_softmax(masked_logits, dim=-1)
+        winner_probabilities = winner_log_probabilities.exp()
+        return _ValueDistillationOutput(
+            values=2.0 * winner_probabilities - 1.0,
+            winner_probabilities=winner_probabilities,
+            winner_log_probabilities=winner_log_probabilities,
+        )
+
+    def _critic_logits(
+        self,
+        player_hidden: torch.Tensor,
+        still_playing: torch.Tensor,
+        *,
+        adapter: PlayerCountAdapter | None = None,
+    ) -> torch.Tensor:
         if still_playing.shape != player_hidden.shape[:2]:
             raise ValueError(
                 "still_playing must have shape "
@@ -925,10 +1050,7 @@ class StatelessTransformerV1(BaseModelAPI):
                 "still_playing must include at least one player per batch row"
             )
 
-        logits = self._critic_head(adapter)(player_hidden).squeeze(-1)
-        probabilities = masked_softmax(logits, still_playing, dim=-1)
-        values = 2.0 * probabilities - 1.0
-        return values, probabilities
+        return self._critic_head(adapter)(player_hidden).squeeze(-1)
 
     def _pure_actor_inputs(
         self,
@@ -1176,6 +1298,7 @@ class StatelessTransformerV1(BaseModelAPI):
         actions: ActionBundle,
         *,
         adapter: PlayerCountAdapter | None = None,
+        actor_inputs: _ActorInputs | None = None,
     ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
         if adapter is None and self.player_count_adapters:
             return self._actor_log_prob_by_player_count(encoded, obs, actions)
@@ -1190,8 +1313,12 @@ class StatelessTransformerV1(BaseModelAPI):
                 raise ValueError(
                     "discrete_target_bins actor requires DiscreteTargetBinActions"
                 )
+            discrete_inputs = _require_discrete_actor_inputs(
+                actor_inputs,
+                lambda: self._discrete_actor_inputs(encoded, obs, adapter=adapter),
+            )
             return actor.log_prob(
-                self._discrete_actor_inputs(encoded, obs, adapter=adapter),
+                discrete_inputs,
                 action_mask.can_act,
                 actions,
             )
@@ -1204,8 +1331,12 @@ class StatelessTransformerV1(BaseModelAPI):
                 raise ValueError(
                     "discrete_targets actor requires DiscreteTargetActions"
                 )
+            discrete_inputs = _require_discrete_actor_inputs(
+                actor_inputs,
+                lambda: self._discrete_actor_inputs(encoded, obs, adapter=adapter),
+            )
             return actor.log_prob(
-                self._discrete_actor_inputs(encoded, obs, adapter=adapter),
+                discrete_inputs,
                 action_mask.can_act,
                 action_mask.max_launch,
                 actions,
@@ -1215,13 +1346,29 @@ class StatelessTransformerV1(BaseModelAPI):
             raise RuntimeError("pure actor requires a pure action mask")
         if not isinstance(actions, PureActions):
             raise ValueError("pure actor requires PureActions")
+        pure_inputs = _require_pure_actor_inputs(
+            actor_inputs,
+            lambda: self._pure_actor_inputs(encoded, adapter=adapter),
+        )
         return actor.log_prob(
-            self._pure_actor_inputs(encoded, adapter=adapter),
+            pure_inputs,
             action_mask.can_act,
             action_mask.max_launch,
             actions,
             min_fleet_size=self.action_spec.min_fleet_size,
         )
+
+    def _actor_inputs_for_encoded(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+        *,
+        adapter: PlayerCountAdapter | None = None,
+    ) -> _ActorInputs:
+        actor = self._actor_module(adapter)
+        if isinstance(actor, DiscreteTargetBinsActor | DiscreteTargetsActor):
+            return self._discrete_actor_inputs(encoded, obs, adapter=adapter)
+        return self._pure_actor_inputs(encoded, adapter=adapter)
 
     def _actor_log_prob_by_player_count(
         self,
@@ -1267,6 +1414,7 @@ class StatelessTransformerV1(BaseModelAPI):
         *,
         student_adapter: PlayerCountAdapter | None = None,
         teacher_adapter: PlayerCountAdapter | None = None,
+        student_actor_inputs: _ActorInputs | None = None,
     ) -> ModelActionKLDivergences:
         if (
             student_adapter is None
@@ -1294,10 +1442,13 @@ class StatelessTransformerV1(BaseModelAPI):
                 raise ValueError(
                     "discrete_target_bins actor requires DiscreteTargetBinActions"
                 )
-            student_inputs = self._discrete_actor_inputs(
-                student_encoded,
-                obs,
-                adapter=student_adapter,
+            student_inputs = _require_discrete_actor_inputs(
+                student_actor_inputs,
+                lambda: self._discrete_actor_inputs(
+                    student_encoded,
+                    obs,
+                    adapter=student_adapter,
+                ),
             )
             with torch.no_grad():
                 teacher_inputs = teacher._discrete_actor_inputs(
@@ -1323,10 +1474,13 @@ class StatelessTransformerV1(BaseModelAPI):
                 raise ValueError(
                     "discrete_targets actor requires DiscreteTargetActions"
                 )
-            student_inputs = self._discrete_actor_inputs(
-                student_encoded,
-                obs,
-                adapter=student_adapter,
+            student_inputs = _require_discrete_actor_inputs(
+                student_actor_inputs,
+                lambda: self._discrete_actor_inputs(
+                    student_encoded,
+                    obs,
+                    adapter=student_adapter,
+                ),
             )
             with torch.no_grad():
                 teacher_inputs = teacher._discrete_actor_inputs(
@@ -1349,9 +1503,12 @@ class StatelessTransformerV1(BaseModelAPI):
             raise RuntimeError("pure actor requires a pure action mask")
         if not isinstance(actions, PureActions):
             raise ValueError("pure actor requires PureActions")
-        student_pure_inputs = self._pure_actor_inputs(
-            student_encoded,
-            adapter=student_adapter,
+        student_pure_inputs = _require_pure_actor_inputs(
+            student_actor_inputs,
+            lambda: self._pure_actor_inputs(
+                student_encoded,
+                adapter=student_adapter,
+            ),
         )
         with torch.no_grad():
             teacher_pure_inputs = teacher._pure_actor_inputs(
@@ -1407,6 +1564,28 @@ class StatelessTransformerV1(BaseModelAPI):
             )
             kl_parts.append((batch_indices, kl))
         return _merge_kl_divergences_by_batch(obs.still_playing.shape[0], kl_parts)
+
+
+def _require_discrete_actor_inputs(
+    actor_inputs: _ActorInputs | None,
+    fallback: Callable[[], DiscreteActorInputs],
+) -> DiscreteActorInputs:
+    if actor_inputs is None:
+        return fallback()
+    if not isinstance(actor_inputs, DiscreteActorInputs):
+        raise TypeError("expected discrete actor inputs")
+    return actor_inputs
+
+
+def _require_pure_actor_inputs(
+    actor_inputs: _ActorInputs | None,
+    fallback: Callable[[], PureActorInputs],
+) -> PureActorInputs:
+    if actor_inputs is None:
+        return fallback()
+    if not isinstance(actor_inputs, PureActorInputs):
+        raise TypeError("expected pure actor inputs")
+    return actor_inputs
 
 
 class PlayerCountAdapter(nn.Module):

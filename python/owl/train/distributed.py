@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Self, TypeVar, cast
 
@@ -178,6 +178,8 @@ class _DistributedModelDispatch(nn.Module):
         hidden_state: object | None = None,
         dones: object | None = None,
         teacher: object | None = None,
+        compute_teacher_action_kl: bool = True,
+        compute_teacher_value: bool = True,
     ) -> object:
         if mode == "forward":
             if hidden_state is None:
@@ -235,6 +237,8 @@ class _DistributedModelDispatch(nn.Module):
                 cast(BaseModelAPI, teacher),
                 hidden_state=hidden_state,
                 dones=cast(torch.Tensor | None, dones),
+                compute_teacher_action_kl=compute_teacher_action_kl,
+                compute_teacher_value=compute_teacher_value,
             )
         raise ValueError(f"unknown distributed model mode: {mode}")
 
@@ -261,6 +265,9 @@ class DistributedModelAdapter(BaseModelAPI):
     @property
     def wrapped_model(self) -> BaseModelAPI:
         return self._ddp.module.model
+
+    def no_sync(self) -> AbstractContextManager[None]:
+        return self._ddp.no_sync()
 
     def forward(
         self,
@@ -328,6 +335,8 @@ class DistributedModelAdapter(BaseModelAPI):
         *,
         hidden_state: ModelHiddenState | None = None,
         dones: torch.Tensor | None = None,
+        compute_teacher_action_kl: bool = True,
+        compute_teacher_value: bool = True,
     ) -> ModelTeacherEvaluation:
         return cast(
             ModelTeacherEvaluation,
@@ -339,6 +348,8 @@ class DistributedModelAdapter(BaseModelAPI):
                 hidden_state,
                 dones,
                 teacher,
+                compute_teacher_action_kl,
+                compute_teacher_value,
             ),
         )
 
@@ -387,6 +398,18 @@ def wrap_model_for_distributed(
     if not context.initialized:
         return model
     return DistributedModelAdapter(model, context)
+
+
+def model_no_sync_context(
+    model: BaseModelAPI,
+    *,
+    enabled: bool,
+) -> AbstractContextManager[None]:
+    if not enabled:
+        return nullcontext()
+    if isinstance(model, DistributedModelAdapter):
+        return model.no_sync()
+    return nullcontext()
 
 
 def _requires_unused_parameter_detection(model: BaseModelAPI) -> bool:

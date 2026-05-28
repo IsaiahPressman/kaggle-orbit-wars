@@ -405,39 +405,39 @@ class DiscreteTargetsActor(nn.Module):
             source_active,
             self.config.launch_mode,
         )
-        target_valid = target_kl_mask(can_act, self.config.launch_mode)
-        target_kl = categorical_kl_from_logits(
-            teacher_params.target_logits,
-            student_params.target_logits,
-            target_valid,
-        )
         target_mask = (
             source_active
             if self.config.launch_mode in {"binary_after", "target_token"}
             else source_active & launch
         )
-        target_kl = torch.where(target_mask, target_kl, torch.zeros_like(target_kl))
-        size_mixture_kl, size_logistic_kl = logistic_mixture_kl_components(
-            teacher_params.size_mix_logits,
-            teacher_params.size_mu,
-            teacher_params.size_scale,
-            student_params.size_mix_logits,
-            student_params.size_mu,
-            student_params.size_scale,
-            max_launch,
-            min_fleet_size=min_fleet_size,
+        target_kl = torch.zeros(
+            target_mask.shape,
+            dtype=torch.float32,
+            device=target_mask.device,
+        )
+        target_valid = target_kl_mask(can_act, self.config.launch_mode)
+        target_kl[target_mask] = categorical_kl_from_logits(
+            teacher_params.target_logits[target_mask],
+            student_params.target_logits[target_mask],
+            target_valid[target_mask],
         )
         event_mask = source_active & launch
-        size_mixture_kl = torch.where(
-            event_mask,
-            size_mixture_kl,
-            torch.zeros_like(size_mixture_kl),
+        size_mixture_kl = torch.zeros_like(target_kl)
+        size_logistic_kl = torch.zeros_like(target_kl)
+        compact_size_mixture_kl, compact_size_logistic_kl = (
+            logistic_mixture_kl_components(
+                teacher_params.size_mix_logits[event_mask],
+                teacher_params.size_mu[event_mask],
+                teacher_params.size_scale[event_mask],
+                student_params.size_mix_logits[event_mask],
+                student_params.size_mu[event_mask],
+                student_params.size_scale[event_mask],
+                max_launch[event_mask],
+                min_fleet_size=min_fleet_size,
+            )
         )
-        size_logistic_kl = torch.where(
-            event_mask,
-            size_logistic_kl,
-            torch.zeros_like(size_logistic_kl),
-        )
+        size_mixture_kl[event_mask] = compact_size_mixture_kl
+        size_logistic_kl[event_mask] = compact_size_logistic_kl
         size_kl = size_mixture_kl + size_logistic_kl
         per_player_entity_kl = launch_kl + target_kl + size_kl
         return ModelActionKLDivergences(
