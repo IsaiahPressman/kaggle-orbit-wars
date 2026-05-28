@@ -115,8 +115,8 @@ class PPOConfig(BaseConfig):
     eval_replay_games: int = Field(default=0, ge=0)
     teacher_mode: TeacherMode | None = None
     teacher_init: Path | None = None
-    teacher_kl_coef: float = Field(default=0.005, ge=0.0)
-    teacher_value_coef: float = Field(default=0.005, ge=0.0)
+    teacher_kl_coef: float = Field(default=0.001, ge=0.0)
+    teacher_value_coef: float = Field(default=0.001, ge=0.0)
     compile_mode: CompileMode | None = None
     model_compile: _ModelCompileTarget = "mlp"
     model_compile_mode: _ModelCompileMode = "max-autotune-no-cudagraphs"

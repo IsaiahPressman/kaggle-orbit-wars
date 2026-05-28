@@ -44,5 +44,7 @@ rl:
   ppo_clip_mode: per_player
   normalize_advantages: true
   eval_replay_games: 8
+  teacher_kl_coef: 0.001
+  teacher_value_coef: 0.001
   compile_mode: default
   dtype: bfloat16

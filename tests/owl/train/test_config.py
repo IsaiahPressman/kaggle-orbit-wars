@@ -35,8 +35,8 @@ def test_ppo_config_validates_with_pydantic() -> None:
     assert config.eval_replay_games == 0
     assert config.teacher_mode is None
     assert config.teacher_init is None
-    assert config.teacher_kl_coef == pytest.approx(0.005)
-    assert config.teacher_value_coef == pytest.approx(0.005)
+    assert config.teacher_kl_coef == pytest.approx(0.001)
+    assert config.teacher_value_coef == pytest.approx(0.001)
     assert config.ppo_clip_mode == "per_player"
     assert config.model_compile == "mlp"
     assert config.model_compile_mode == "max-autotune-no-cudagraphs"

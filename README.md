@@ -184,7 +184,7 @@ updates use one student replay evaluation and one no-grad teacher evaluation
 per PPO minibatch.
 `rl.teacher_kl_coef` and `rl.teacher_value_coef` weight the action KL and
 per-state winner-distribution cross-entropy stabilization losses; both default
-to `0.005`.
+to `0.001`.
 
 Run a preset with:
 
