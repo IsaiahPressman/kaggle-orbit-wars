@@ -14,6 +14,7 @@ from torch.nn.parallel import DistributedDataParallel
 from owl.model import (
     BaseModelAPI,
     InputLayer,
+    ModelActionKLDivergences,
     ModelActions,
     ModelEvaluation,
     ModelHiddenState,
@@ -175,6 +176,7 @@ class _DistributedModelDispatch(nn.Module):
         deterministic: bool = False,
         hidden_state: object | None = None,
         dones: object | None = None,
+        teacher: object | None = None,
     ) -> object:
         if mode == "forward":
             if hidden_state is None:
@@ -204,6 +206,18 @@ class _DistributedModelDispatch(nn.Module):
             return self.model.compute_value(
                 cast(ObsBatch, obs),
                 hidden_state=hidden_state,
+            )
+        if mode == "evaluate_action_kl":
+            if actions is None:
+                raise ValueError("actions are required for evaluate_action_kl")
+            if teacher is None:
+                raise ValueError("teacher is required for evaluate_action_kl")
+            return self.model.evaluate_action_kl(
+                cast(ObsBatch, obs),
+                cast(BaseModelAPI, teacher),
+                cast(ModelActions, actions),
+                hidden_state=hidden_state,
+                dones=cast(torch.Tensor | None, dones),
             )
         raise ValueError(f"unknown distributed model mode: {mode}")
 
@@ -265,6 +279,28 @@ class DistributedModelAdapter(BaseModelAPI):
         return cast(
             torch.Tensor,
             self._ddp("compute_value", obs, None, False, hidden_state, None),
+        )
+
+    def evaluate_action_kl(
+        self,
+        obs: ObsBatch,
+        teacher: BaseModelAPI,
+        actions: ModelActions,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+        dones: torch.Tensor | None = None,
+    ) -> ModelActionKLDivergences:
+        return cast(
+            ModelActionKLDivergences,
+            self._ddp(
+                "evaluate_action_kl",
+                obs,
+                actions,
+                False,
+                hidden_state,
+                dones,
+                teacher,
+            ),
         )
 
     def reset_parameters(self) -> None:

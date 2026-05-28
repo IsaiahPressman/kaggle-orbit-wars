@@ -33,6 +33,10 @@ def test_ppo_config_validates_with_pydantic() -> None:
     assert config.gamma == pytest.approx(0.9)
     assert config.checkpoint_freq is None
     assert config.eval_replay_games == 0
+    assert config.teacher_mode is None
+    assert config.teacher_init is None
+    assert config.teacher_kl_coef == pytest.approx(0.005)
+    assert config.teacher_value_coef == pytest.approx(0.005)
     assert config.ppo_clip_mode == "per_player"
     assert config.model_compile == "mlp"
     assert config.model_compile_mode == "max-autotune-no-cudagraphs"
@@ -50,10 +54,23 @@ def test_ppo_config_validates_with_pydantic() -> None:
     assert PPOConfig(model_compile="none").model_compile == "none"
     assert PPOConfig(model_compile_mode="default").model_compile_mode == "default"
     assert PPOConfig(eval_replay_games=1).eval_replay_games == 1
+    assert PPOConfig(teacher_mode="last_best").teacher_mode == "last_best"
+    assert PPOConfig(
+        teacher_mode="fixed",
+        teacher_init=Path("teacher/checkpoint.pt"),
+    ).teacher_init == Path("teacher/checkpoint.pt")
     assert PPOConfig(ppo_clip_mode="per_entity").ppo_clip_mode == "per_entity"
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         PPOConfig(removed_field=True)
+    with pytest.raises(ValueError, match="greater than or equal to 0"):
+        PPOConfig(teacher_kl_coef=-0.1)
+    with pytest.raises(ValueError, match="greater than or equal to 0"):
+        PPOConfig(teacher_value_coef=-0.1)
+    with pytest.raises(ValueError, match="Input should be 'last_best' or 'fixed'"):
+        PPOConfig(teacher_mode="latest")
+    with pytest.raises(ValueError, match="teacher_init is required"):
+        PPOConfig(teacher_mode="fixed")
     with pytest.raises(
         ValueError,
         match="Input should be 'per_player' or 'per_entity'",

@@ -4,6 +4,7 @@ import importlib.util
 import sys
 import time
 from argparse import Namespace
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -144,6 +145,7 @@ class _FakeTrainer:
         self.iterations = 0
         self.model = torch.nn.Linear(1, 1)
         self.device = torch.device("cpu")
+        self.teacher_updates: list[tuple[torch.nn.Module | None, bool]] = []
 
     def train_iteration(self) -> dict[str, float]:
         self.iterations += 1
@@ -159,6 +161,14 @@ class _FakeTrainer:
         wandb_run_id: str | None = None,
     ) -> None:
         self.checkpoints.append((path, env_steps, wandb_run_id))
+
+    def set_teacher_model(
+        self,
+        teacher_model: torch.nn.Module | None,
+        *,
+        active: bool,
+    ) -> None:
+        self.teacher_updates.append((teacher_model, active))
 
 
 def test_next_periodic_checkpoint_step_handles_crossed_cadence() -> None:
@@ -327,6 +337,135 @@ def test_resolve_fresh_launch_accepts_load_model_weights(tmp_path: Path) -> None
         overrides={"rl.horizon": 8},
         load_model_weights_path=checkpoint_path,
     )
+
+
+def test_resolve_teacher_init_path_uses_config_directory(tmp_path: Path) -> None:
+    cfg = _full_config()
+    cfg = cfg.model_copy(
+        update={
+            "rl": cfg.rl.model_copy(
+                update={"teacher_init": Path("teachers/checkpoint.pt")}
+            )
+        }
+    )
+
+    resolved = run_ppo._resolve_teacher_init_path(cfg, tmp_path / "config.yaml")
+
+    assert resolved.rl.teacher_init == (tmp_path / "teachers/checkpoint.pt").resolve()
+
+
+def test_fresh_launch_from_checkpoint_uses_starting_checkpoint_as_teacher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _full_config()
+    cfg = cfg.model_copy(
+        update={"rl": cfg.rl.model_copy(update={"teacher_mode": "last_best"})}
+    )
+    config_path = tmp_path / "config.yaml"
+    cfg.to_file(config_path)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.touch()
+    output_dir = tmp_path / "runs"
+    run_dir = output_dir / "run"
+    model = torch.nn.Linear(1, 1)
+    model.weight.data.fill_(1.0)
+    model.bias.data.fill_(1.0)
+    trainer_ref: dict[str, object] = {}
+    session_ref: dict[str, object] = {}
+
+    class FakeEnv:
+        def __init__(
+            self,
+            *,
+            n_envs: int,
+            obs_spec: object,
+            action_spec: object,
+            two_player_weight: float,
+            pin_memory: bool,
+        ) -> None:
+            del two_player_weight, pin_memory
+            self.n_envs = n_envs
+            self.obs_spec = obs_spec
+            self.action_spec = action_spec
+
+    class FakeTrainer:
+        def __init__(self, **kwargs: object) -> None:
+            self.model = kwargs["model"]
+            self.teacher_updates: list[tuple[torch.nn.Module, bool]] = []
+            trainer_ref["trainer"] = self
+
+        def load_model_weights(self, path: Path) -> run_ppo.PPOCheckpointMetadata:
+            assert path == checkpoint_path
+            loaded_model = self.model
+            assert isinstance(loaded_model, torch.nn.Linear)
+            loaded_model.weight.data.fill_(7.0)
+            loaded_model.bias.data.fill_(7.0)
+            return run_ppo.PPOCheckpointMetadata(env_steps=123)
+
+        def set_teacher_model(
+            self,
+            teacher_model: torch.nn.Module | None,
+            *,
+            active: bool,
+        ) -> None:
+            assert teacher_model is not None
+            self.teacher_updates.append((teacher_model, active))
+
+    def fake_create_run_dir(output: Path) -> Path:
+        assert output == output_dir
+        run_dir.mkdir(parents=True)
+        return run_dir
+
+    def fake_run_training_session(**kwargs: object) -> None:
+        session_ref.update(kwargs)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_ppo.py",
+            str(config_path),
+            str(output_dir),
+            "--load-model-weights",
+            str(checkpoint_path),
+            "--log-mode",
+            "debug",
+        ],
+    )
+    monkeypatch.setattr(run_ppo, "assert_release_build", lambda: None)
+    monkeypatch.setattr(run_ppo, "configure_torch", lambda: None)
+    monkeypatch.setattr(
+        run_ppo,
+        "distributed_session",
+        lambda: nullcontext(DistributedContext.single_process_cpu()),
+    )
+    monkeypatch.setattr(run_ppo, "_create_run_dir", fake_create_run_dir)
+    monkeypatch.setattr(run_ppo, "VectorizedEnv", FakeEnv)
+    monkeypatch.setattr(run_ppo, "_create_model", lambda *_args, **_kwargs: model)
+    monkeypatch.setattr(run_ppo, "configure_model_compile", lambda *_args: 0)
+    monkeypatch.setattr(
+        run_ppo,
+        "create_optimizer",
+        lambda trainer_model, _cfg: torch.optim.SGD(trainer_model.parameters(), lr=0.1),
+    )
+    monkeypatch.setattr(run_ppo, "create_lr_scheduler", lambda *_args: None)
+    monkeypatch.setattr(run_ppo, "PPOTrainer", FakeTrainer)
+    monkeypatch.setattr(run_ppo, "_run_training_session", fake_run_training_session)
+
+    run_ppo.main()
+
+    trainer = trainer_ref["trainer"]
+    assert isinstance(trainer, FakeTrainer)
+    assert len(trainer.teacher_updates) == 1
+    teacher_model, active = trainer.teacher_updates[0]
+    assert active
+    assert teacher_model is not model
+    assert teacher_model.weight.item() == pytest.approx(7.0)
+    assert session_ref["start_env_steps"] == 123
+    last_best_model = session_ref["last_best_model"]
+    assert isinstance(last_best_model, torch.nn.Linear)
+    assert last_best_model.weight.item() == pytest.approx(7.0)
 
 
 def test_resolve_resume_launch_prefers_final_checkpoint(tmp_path: Path) -> None:
@@ -1185,6 +1324,43 @@ def test_run_training_loop_saves_last_best_when_eval_clears_threshold(
         (tmp_path / "checkpoint_last_best.pt", 1000, None),
     ]
     assert logger.logged[-1][0]["eval/game_length_mean"] == 12.0
+
+
+def test_run_training_loop_activates_last_best_teacher_after_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _full_config(checkpoint_freq=1000)
+    cfg = cfg.model_copy(
+        update={"rl": cfg.rl.model_copy(update={"teacher_mode": "last_best"})}
+    )
+    trainer = _FakeTrainer()
+    logger = _FakeLogger()
+
+    def fake_evaluate_against_last_best(**_kwargs: object) -> dict[str, float]:
+        return {"eval/win_rate_against_last_best": 0.7}
+
+    monkeypatch.setattr(
+        run_ppo,
+        "_evaluate_against_last_best",
+        fake_evaluate_against_last_best,
+    )
+
+    run_ppo._run_training_loop(
+        trainer=trainer,
+        logger=logger,
+        run_dir=tmp_path,
+        cfg=cfg,
+        env_steps_per_iteration=1000,
+        max_env_steps=1000,
+        max_runtime_seconds=None,
+        dist_ctx=DistributedContext.single_process_cpu(),
+    )
+
+    assert len(trainer.teacher_updates) == 1
+    teacher_model, active = trainer.teacher_updates[0]
+    assert teacher_model is not None
+    assert active
 
 
 def test_run_training_session_sets_trainable_parameter_summary(

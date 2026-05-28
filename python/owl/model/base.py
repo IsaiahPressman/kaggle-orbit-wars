@@ -32,6 +32,15 @@ class ModelActionEntropies:
 
 
 @dataclass
+class ModelActionKLDivergences:
+    launch: torch.Tensor
+    event: torch.Tensor
+    per_player_entity: torch.Tensor
+    components: dict[str, torch.Tensor]
+    target: torch.Tensor | None = None
+
+
+@dataclass
 class ModelOutput:
     actions: ModelActions
     log_probs: ModelActionLogProbs
@@ -93,6 +102,19 @@ class BaseModelAPI(nn.Module, ABC):
         *,
         hidden_state: ModelHiddenState | None = None,
     ) -> torch.Tensor: ...
+
+    def evaluate_action_kl(
+        self,
+        obs: ObsBatch,
+        teacher: BaseModelAPI,
+        actions: ModelActions,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+        dones: torch.Tensor | None = None,
+    ) -> ModelActionKLDivergences:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement action KL evaluation"
+        )
 
     def serve(
         self,

@@ -13,6 +13,8 @@ from owl.model.actor.common import (
     FeedForward,
     OutputProjectionMLP,
     binary_entropy_from_logits,
+    binary_kl_from_logits,
+    categorical_kl_from_logits,
     sample_launch,
 )
 from owl.model.actor.config import ActorDiscreteTargetsConfig
@@ -20,6 +22,7 @@ from owl.model.actor.logistic_mixture import (
     discretized_logistic_mixture_log_prob,
     log_interpolate,
     logistic_cdf_diff_logprob,
+    logistic_mixture_kl_components,
     logsubexp,
     sample_discretized_logistic_mixture,
     ship_support,
@@ -28,6 +31,7 @@ from owl.model.actor.logistic_mixture import (
 from owl.model.base import (
     InputLayer,
     ModelActionEntropies,
+    ModelActionKLDivergences,
     ModelActionLogProbs,
 )
 from owl.rl import OUTER_PLAYER_SLOTS, DiscreteTargetActions
@@ -343,6 +347,106 @@ class DiscreteTargetsActor(nn.Module):
                     "fleet_size_logistic": size_logistic_entropy,
                 },
             ),
+        )
+
+    def kl_divergence(
+        self,
+        actor_inputs: DiscreteActorInputs,
+        teacher_actor: DiscreteTargetsActor,
+        teacher_inputs: DiscreteActorInputs,
+        can_act: torch.Tensor,
+        max_launch: torch.Tensor,
+        actions: DiscreteTargetActions,
+        *,
+        min_fleet_size: int,
+    ) -> ModelActionKLDivergences:
+        if self.config.launch_mode != teacher_actor.config.launch_mode:
+            raise ValueError(
+                "teacher and student discrete-target launch_mode must match"
+            )
+        _require_discrete_actions_shape(
+            actions,
+            (
+                actor_inputs.source.shape[0],
+                OUTER_PLAYER_SLOTS,
+                actor_inputs.source.shape[2],
+                1,
+            ),
+        )
+        launch = actions.launch[..., 0]
+        target = actions.target[..., 0]
+        student_selection = self._selection_params(actor_inputs, can_act)
+        teacher_selection = teacher_actor._selection_params(teacher_inputs, can_act)
+        source_active = can_act.any(dim=-1) & (max_launch >= min_fleet_size)
+        selected_target = target.clamp(0, student_selection.target_values.shape[2] - 1)
+        student_params = self._policy_params_for_selected_target(
+            student_selection,
+            actor_inputs.source,
+            max_launch,
+            selected_target,
+            min_fleet_size=min_fleet_size,
+        )
+        teacher_params = teacher_actor._policy_params_for_selected_target(
+            teacher_selection,
+            teacher_inputs.source,
+            max_launch,
+            selected_target.clamp(0, teacher_selection.target_values.shape[2] - 1),
+            min_fleet_size=min_fleet_size,
+        )
+
+        launch_kl = discrete_launch_kl(
+            teacher_params,
+            student_params,
+            source_active,
+            self.config.launch_mode,
+        )
+        target_valid = target_kl_mask(can_act, self.config.launch_mode)
+        target_kl = categorical_kl_from_logits(
+            teacher_params.target_logits,
+            student_params.target_logits,
+            target_valid,
+        )
+        target_mask = (
+            source_active
+            if self.config.launch_mode in {"binary_after", "target_token"}
+            else source_active & launch
+        )
+        target_kl = torch.where(target_mask, target_kl, torch.zeros_like(target_kl))
+        size_mixture_kl, size_logistic_kl = logistic_mixture_kl_components(
+            teacher_params.size_mix_logits,
+            teacher_params.size_mu,
+            teacher_params.size_scale,
+            student_params.size_mix_logits,
+            student_params.size_mu,
+            student_params.size_scale,
+            max_launch,
+            min_fleet_size=min_fleet_size,
+        )
+        event_mask = source_active & launch
+        size_mixture_kl = torch.where(
+            event_mask,
+            size_mixture_kl,
+            torch.zeros_like(size_mixture_kl),
+        )
+        size_logistic_kl = torch.where(
+            event_mask,
+            size_logistic_kl,
+            torch.zeros_like(size_logistic_kl),
+        )
+        size_kl = size_mixture_kl + size_logistic_kl
+        per_player_entity_kl = launch_kl + target_kl + size_kl
+        return ModelActionKLDivergences(
+            launch=launch_kl.unsqueeze(-1),
+            target=target_kl.unsqueeze(-1),
+            event=size_kl.unsqueeze(-1),
+            per_player_entity=per_player_entity_kl,
+            components={
+                "launch": launch_kl,
+                "target": target_kl,
+                "fleet_size_full": size_kl,
+                "fleet_size_mixture": size_mixture_kl,
+                "fleet_size_logistic": size_logistic_kl,
+            },
         )
 
     def _selection_params(
@@ -777,6 +881,27 @@ def discrete_action_entropy(
             torch.zeros_like(size_logistic_entropy),
         ),
     )
+
+
+def discrete_launch_kl(
+    teacher_params: DiscreteTargetPolicyParams,
+    student_params: DiscreteTargetPolicyParams,
+    source_active: torch.Tensor,
+    launch_mode: str,
+) -> torch.Tensor:
+    if launch_mode == "target_token":
+        return torch.zeros_like(source_active, dtype=torch.float32)
+    teacher_continue = _require_continue_logits(teacher_params.continue_logits)
+    student_continue = _require_continue_logits(student_params.continue_logits)
+    kl = binary_kl_from_logits(teacher_continue, student_continue)
+    return torch.where(source_active, kl, torch.zeros_like(kl))
+
+
+def target_kl_mask(can_act: torch.Tensor, launch_mode: str) -> torch.Tensor:
+    if launch_mode != "target_token":
+        return can_act
+    no_launch_valid = can_act.any(dim=-1, keepdim=True)
+    return torch.cat((can_act, no_launch_valid), dim=-1)
 
 
 def _require_continue_logits(continue_logits: torch.Tensor | None) -> torch.Tensor:

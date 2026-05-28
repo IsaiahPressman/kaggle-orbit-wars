@@ -355,6 +355,21 @@ class TinyOrbitModel(BaseModelAPI):
         )
 
 
+class CountingForwardModel(TinyOrbitModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.forward_calls = 0
+
+    def forward(
+        self,
+        obs: ObsBatch,
+        *,
+        deterministic: bool = False,
+    ) -> ModelOutput:
+        self.forward_calls += 1
+        return super().forward(obs, deterministic=deterministic)
+
+
 class TinyDiscreteTargetModel(BaseModelAPI):
     def __init__(self) -> None:
         super().__init__()
@@ -508,7 +523,11 @@ def _zero_loss_metrics(zero: torch.Tensor) -> ppo._PPOLossMetrics:
         policy_loss=zero,
         value_loss=zero,
         entropy_loss=zero,
+        teacher_kl_loss=zero,
+        teacher_value_loss=zero,
         entropy=zero,
+        teacher_kl=zero,
+        teacher_value_cross_entropy=zero,
         approx_kl=zero,
         clipfrac=zero,
         ratio_mean=zero,
@@ -900,6 +919,31 @@ def test_collect_rollout_keeps_pre_step_obs_with_reused_cpu_buffers() -> None:
         trainer._obs.global_features[:, 1],
         torch.full((2,), 3.0),
     )
+
+
+def test_collect_rollout_does_not_call_teacher_model() -> None:
+    torch.manual_seed(4)
+    env = TinyOrbitEnv(n_envs=2)
+    model = TinyOrbitModel()
+    teacher = CountingForwardModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=3,
+            segments_per_minibatch=1,
+        ),
+        device=torch.device("cpu"),
+        teacher_model=teacher,
+        teacher_active=True,
+    )
+
+    trainer._collect_rollout()
+
+    assert teacher.forward_calls == 0
+    assert not teacher.training
+    assert all(not parameter.requires_grad for parameter in teacher.parameters())
 
 
 def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
@@ -1508,7 +1552,7 @@ def test_trainer_compile_mode_compiles_only_tensor_helpers(
     monkeypatch.setattr(ppo.torch, "compile", fake_compile)
     env = TinyOrbitEnv(n_envs=2)
     model = TinyOrbitModel()
-    ppo.PPOTrainer(
+    trainer = ppo.PPOTrainer(
         env=env,
         model=model,
         optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
@@ -1524,6 +1568,9 @@ def test_trainer_compile_mode_compiles_only_tensor_helpers(
         ("_compute_gae_tensors", "default"),
         ("_ppo_loss_components", "default"),
     ]
+    metrics = trainer.train_iteration()
+    assert metrics["loss/teacher_kl_loss"] == pytest.approx(0.0)
+    assert metrics["loss/teacher_value_loss"] == pytest.approx(0.0)
 
 
 def test_trainer_overwrites_dones_when_envs_terminate_inside_rollout() -> None:
@@ -1746,6 +1793,84 @@ def test_discrete_target_transformer_train_iteration_keeps_parameters_finite() -
         assert torch.isfinite(parameter).all()
         if parameter.grad is not None:
             assert torch.isfinite(parameter.grad).all()
+
+
+def test_stateless_transformer_train_iteration_runs_with_teacher() -> None:
+    torch.manual_seed(0)
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model_config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(
+            n_action_mixtures=2,
+            entropy_ship_quantiles=8,
+        ),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    model = StatelessTransformerV1(
+        model_config,
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    teacher_model = StatelessTransformerV1(
+        model_config,
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    model.reset_parameters()
+    teacher_model.reset_parameters()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segments_per_minibatch=1,
+        ),
+        device=torch.device("cpu"),
+        teacher_model=teacher_model,
+        teacher_active=True,
+    )
+
+    metrics = trainer.train_iteration()
+
+    assert torch.isfinite(torch.tensor(list(metrics.values()))).all()
+    assert metrics["teacher/kl"] >= 0.0
+    assert metrics["teacher/value_cross_entropy"] >= 0.0
+
+
+def test_trainer_rejects_recurrent_teacher() -> None:
+    torch.manual_seed(0)
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model = TinyDiscreteTargetModel()
+    teacher_model = RecurrentTransformerV1(
+        RecurrentTransformerV1Config(
+            actor=ActorDiscreteTargetsConfig(
+                n_action_mixtures=2,
+                entropy_ship_quantiles=8,
+            ),
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+        ),
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    teacher_model.reset_parameters()
+
+    with pytest.raises(ValueError, match="recurrent hidden state"):
+        ppo.PPOTrainer(
+            env=env,
+            model=model,
+            optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+            config=ppo.PPOConfig(
+                horizon=2,
+                segments_per_minibatch=1,
+            ),
+            device=torch.device("cpu"),
+            teacher_model=teacher_model,
+            teacher_active=True,
+        )
 
 
 def test_recurrent_transformer_train_iteration_keeps_parameters_finite() -> None:
