@@ -10,7 +10,7 @@ use crate::rules_engine::state::MAX_PLAYERS;
 
 use obs_spec::{
     discrete_target_actions_to_kaggle, discrete_target_bin_actions_to_kaggle, encode_entity_based,
-    pure_actions_to_kaggle,
+    encode_entity_based_with_player_features, pure_actions_to_kaggle,
 };
 use vec_env::PyRlVecEnv;
 
@@ -54,6 +54,8 @@ pub const FLEET_CHANNELS: usize =
 pub const COMET_CHANNELS: usize =
     COMET_BASE_CHANNELS + COMET_CURRENT_STATE_CHANNELS + COMET_PATH_CHANNELS;
 pub const GLOBAL_CHANNELS: usize = 3;
+pub const GLOBAL_EXT_V2_CHANNELS: usize = 8;
+pub const PLAYER_FEATURE_CHANNELS: usize = 10;
 pub const OUTER_PLAYER_SLOTS: usize = MAX_PLAYERS;
 pub const ACTION_ENTITY_SLOTS: usize = MAX_PLANETS + MAX_COMETS;
 
@@ -168,10 +170,20 @@ pub fn rl_obs_constants() -> (
     )
 }
 
+#[pyfunction]
+pub fn rl_obs_ext_v2_constants() -> (usize, usize) {
+    (GLOBAL_EXT_V2_CHANNELS, PLAYER_FEATURE_CHANNELS)
+}
+
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRlVecEnv>()?;
     m.add_function(wrap_pyfunction!(rl_obs_constants, m)?)?;
+    m.add_function(wrap_pyfunction!(rl_obs_ext_v2_constants, m)?)?;
     m.add_function(wrap_pyfunction!(encode_entity_based, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        encode_entity_based_with_player_features,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(pure_actions_to_kaggle, m)?)?;
     m.add_function(wrap_pyfunction!(discrete_target_actions_to_kaggle, m)?)?;
     m.add_function(wrap_pyfunction!(discrete_target_bin_actions_to_kaggle, m)?)?;

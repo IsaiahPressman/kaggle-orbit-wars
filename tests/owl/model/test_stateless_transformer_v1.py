@@ -55,7 +55,9 @@ from owl.rl import (
     DiscreteTargetActions,
     DiscreteTargetBinActionMask,
     DiscreteTargetBinActions,
+    EntityBasedBaseConfig,
     EntityBasedConfig,
+    EntityBasedExtV2Config,
     ObsBatch,
     PureActionMask,
     PureActions,
@@ -87,7 +89,7 @@ def _python_obs(**overrides: object) -> dict[str, object]:
 def _obs_batch(
     *,
     batch_size: int,
-    obs_spec: EntityBasedConfig,
+    obs_spec: EntityBasedBaseConfig,
     action_spec: ActionConfig,
 ) -> ObsBatch:
     planets = torch.zeros(
@@ -186,13 +188,21 @@ def _obs_batch(
         still_playing=still_playing,
         global_features=global_features,
         action_mask=action_mask,
+        player_features=(
+            None
+            if obs_spec.player_feature_channels == 0
+            else torch.zeros(
+                (batch_size, 4, obs_spec.player_feature_channels),
+                dtype=torch.float32,
+            )
+        ),
     )
 
 
 def _compacted_obs_batch(
     *,
     batch_size: int,
-    obs_spec: EntityBasedConfig,
+    obs_spec: EntityBasedBaseConfig,
     action_spec: ActionConfig,
 ) -> ObsBatch:
     obs = _obs_batch(batch_size=batch_size, obs_spec=obs_spec, action_spec=action_spec)
@@ -224,13 +234,14 @@ def _compacted_obs_batch(
         still_playing=obs.still_playing,
         global_features=obs.global_features,
         action_mask=action_mask,
+        player_features=obs.player_features,
     )
 
 
 def _model(
     config: StatelessTransformerV1Config,
     *,
-    obs_spec: EntityBasedConfig | None = None,
+    obs_spec: EntityBasedBaseConfig | None = None,
     action_spec: ActionConfig | None = None,
 ) -> StatelessTransformerV1:
     model = StatelessTransformerV1(
@@ -1530,6 +1541,42 @@ def test_observation_encoder_returns_structured_token_fields() -> None:
         model.player_tokens[0],
         model.player_tokens[1],
     )
+
+
+def test_entity_based_ext_v2_player_features_feed_player_tokens() -> None:
+    obs_spec = EntityBasedExtV2Config(max_entities=MAX_PLANETS + MAX_COMETS + 3)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    model = _model(
+        StatelessTransformerV1Config(embed_dim=32, depth=1, n_heads=4),
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    assert model.player_feature_proj is not None
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    assert obs.player_features is not None
+
+    encoded_without_features = model.encode_observations(obs)
+    obs.player_features[:, 0, 0] = 1.0
+    encoded_with_features = model.encode_observations(obs)
+
+    assert not torch.allclose(
+        encoded_without_features.player_hidden[:, 0],
+        encoded_with_features.player_hidden[:, 0],
+    )
+    with pytest.raises(ValueError, match="player_features are required"):
+        model.encode_observations(obs.model_copy(update={"player_features": None}))
+
+
+def test_entity_based_models_keep_legacy_state_dict_shape() -> None:
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 3)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    config = StatelessTransformerV1Config(embed_dim=32, depth=1, n_heads=4)
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    assert model.player_feature_proj is None
+    assert not any(key.startswith("player_feature_proj.") for key in model.state_dict())
+
+    reloaded = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    reloaded.load_state_dict(model.state_dict())
 
 
 @pytest.mark.parametrize(

@@ -90,7 +90,9 @@ TeacherMode = Literal["last_best", "fixed"]
 
 
 _OBS_TENSOR_FIELDS = tuple(
-    field for field in ObsBatch.model_fields if field != "action_mask"
+    field
+    for field in ObsBatch.model_fields
+    if field not in {"action_mask", "player_features"}
 )
 
 
@@ -286,6 +288,20 @@ class _PPORolloutBuffer:
                 device=device,
             ),
             action_mask=action_mask,
+            player_features=(
+                None
+                if obs_spec.player_feature_channels == 0
+                else torch.zeros(
+                    (
+                        horizon,
+                        n_envs,
+                        OUTER_PLAYER_SLOTS,
+                        obs_spec.player_feature_channels,
+                    ),
+                    dtype=torch.float32,
+                    device=device,
+                )
+            ),
         )
         if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
             action_shape: tuple[int, ...] = (
@@ -1605,6 +1621,13 @@ def _copy_obs_time_step(dst: ObsBatch, step: int, src: ObsBatch) -> None:
         dst_tensor = getattr(dst, field)
         src_tensor = getattr(src, field)
         dst_tensor[step].copy_(src_tensor)
+    if dst.player_features is None:
+        if src.player_features is not None:
+            raise ValueError("rollout obs has no player_features buffer")
+    elif src.player_features is None:
+        raise ValueError("source obs is missing player_features")
+    else:
+        dst.player_features[step].copy_(src.player_features)
     _copy_action_mask_time_step(dst.action_mask, step, src.action_mask)
 
 
@@ -1625,6 +1648,11 @@ def _obs_segment_major(obs: ObsBatch) -> ObsBatch:
             for field in _OBS_TENSOR_FIELDS
         },
         action_mask=_action_mask_segment_major(obs.action_mask),
+        player_features=(
+            None
+            if obs.player_features is None
+            else obs.player_features.transpose(0, 1).contiguous()
+        ),
     )
 
 
@@ -1639,6 +1667,9 @@ def _obs_index(obs: ObsBatch, idx: torch.Tensor) -> ObsBatch:
     return ObsBatch(
         **{field: getattr(obs, field)[idx] for field in _OBS_TENSOR_FIELDS},
         action_mask=_action_mask_index(obs.action_mask, idx),
+        player_features=(
+            None if obs.player_features is None else obs.player_features[idx]
+        ),
     )
 
 
@@ -1664,6 +1695,11 @@ def _obs_to_device(
                 non_blocking=non_blocking,
                 clone=True,
             ),
+            player_features=(
+                None
+                if obs.player_features is None
+                else obs.player_features.to(device, non_blocking=non_blocking).clone()
+            ),
         )
 
     return ObsBatch(
@@ -1676,6 +1712,11 @@ def _obs_to_device(
             device,
             non_blocking=non_blocking,
             clone=False,
+        ),
+        player_features=(
+            None
+            if obs.player_features is None
+            else obs.player_features.to(device, non_blocking=non_blocking)
         ),
     )
 
@@ -1690,6 +1731,13 @@ def _copy_obs_to_device_(
         dst_tensor = getattr(dst, field)
         src_tensor = getattr(src, field)
         dst_tensor.copy_(src_tensor, non_blocking=non_blocking)
+    if dst.player_features is None:
+        if src.player_features is not None:
+            raise ValueError("destination obs has no player_features buffer")
+    elif src.player_features is None:
+        raise ValueError("source obs is missing player_features")
+    else:
+        dst.player_features.copy_(src.player_features, non_blocking=non_blocking)
     _copy_action_mask_to_device_(
         dst.action_mask,
         src.action_mask,
@@ -1719,6 +1767,11 @@ def _flatten_obs_time(obs: ObsBatch) -> ObsBatch:
             for field in _OBS_TENSOR_FIELDS
         },
         action_mask=_action_mask_flatten_time(obs.action_mask),
+        player_features=(
+            None
+            if obs.player_features is None
+            else _flatten_tensor_time(obs.player_features)
+        ),
     )
 
 

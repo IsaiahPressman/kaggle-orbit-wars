@@ -8,10 +8,12 @@ from owl.rl import (
     COMET_CHANNELS,
     FLEET_CHANNELS,
     GLOBAL_CHANNELS,
+    GLOBAL_EXT_V2_CHANNELS,
     MAX_COMET_PATH_LENGTH,
     MAX_COMETS,
     MAX_PLANETS,
     PLANET_CHANNELS,
+    PLAYER_FEATURE_CHANNELS,
     ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
@@ -21,6 +23,7 @@ from owl.rl import (
     DiscreteTargetBinActions,
     EntityBasedConfig,
     EntityBasedExtV1Config,
+    EntityBasedExtV2Config,
     EnvConfig,
     ObsBatch,
     PureActions,
@@ -30,6 +33,8 @@ from owl.rl import (
     encode_python_observation,
     encode_python_observation_with_metrics,
 )
+from owl.rs import RlVecEnv as RustRlVecEnv
+from owl.rs import encode_entity_based_with_player_features
 
 
 def _python_obs(**overrides: object) -> dict[str, object]:
@@ -211,6 +216,85 @@ def test_entity_based_ext_v1_adds_ship_count_one_hot_channels() -> None:
     np.testing.assert_array_equal(encoded.comets.shape, (1, MAX_COMETS, COMET_CHANNELS))
 
 
+def test_entity_based_ext_v2_adds_global_and_player_summary_features() -> None:
+    spec = EntityBasedExtV2Config(max_entities=MAX_PLANETS + MAX_COMETS + 4)
+
+    assert spec.planet_channels == PLANET_CHANNELS
+    assert spec.fleet_channels == FLEET_CHANNELS
+    assert spec.global_channels == GLOBAL_CHANNELS + GLOBAL_EXT_V2_CHANNELS
+    assert spec.player_feature_channels == PLAYER_FEATURE_CHANNELS
+
+    encoded = encode_python_observation(
+        _python_obs(
+            planets=[
+                [0, 0, 25.0, 75.0, 2.0, 100, 3],
+                [1, 0, 75.0, 25.0, 2.0, 50, 2],
+                [2, 1, 50.0, 25.0, 2.0, 40, 4],
+                [3, -1, 25.0, 25.0, 2.0, 30, 5],
+                [10, 0, 50.0, 50.0, 1.0, 25, 1],
+                [11, 1, 60.0, 50.0, 1.0, 15, 1],
+                [12, -1, 70.0, 50.0, 1.0, 20, 1],
+            ],
+            fleets=[
+                [20, 0, 0.0, 100.0, 0.0, 0, 10],
+                [21, 0, 100.0, 0.0, 0.0, 1, 20],
+                [22, 1, 50.0, 0.0, 0.0, 2, 5],
+            ],
+            comets=[
+                {
+                    "planet_ids": [10, 11, 12],
+                    "paths": [
+                        [[50.0, 50.0], [51.0, 50.0]],
+                        [[60.0, 50.0], [61.0, 50.0]],
+                        [[70.0, 50.0], [71.0, 50.0]],
+                    ],
+                    "path_index": 0,
+                }
+            ],
+        ),
+        obs_spec=spec,
+        action_spec=ActionPureConfig(min_fleet_size=1),
+    )
+
+    assert encoded.player_features is not None
+    assert encoded.planets.shape == (1, MAX_PLANETS, PLANET_CHANNELS)
+    assert encoded.fleets.shape == (1, spec.max_fleets, FLEET_CHANNELS)
+    np.testing.assert_allclose(
+        encoded.player_features[0, 0].numpy(),
+        [0.06, 0.01, 0.05, 0.41, 0.05, 0.30, 0.06, 0.05, 0.25, 0.02],
+        rtol=1e-6,
+    )
+    np.testing.assert_allclose(
+        encoded.player_features[0, 1].numpy(),
+        [0.05, 0.01, 0.04, 0.12, 0.03, 0.08, 0.01, 0.025, 0.25, 0.01],
+        rtol=1e-6,
+    )
+    np.testing.assert_allclose(
+        encoded.global_features[0, GLOBAL_CHANNELS:].numpy(),
+        [0.06, 0.01, 0.05, 0.10, 0.04, 0.06, 0.25, 0.025],
+        rtol=1e-6,
+    )
+
+
+def test_entity_based_ext_v2_rejects_ship_count_one_hot_hybrid() -> None:
+    with pytest.raises(
+        ValueError,
+        match="entity_based_ext_v2 requires ship_count_one_hot_max=0",
+    ):
+        encode_entity_based_with_player_features(
+            np.zeros((0, 7), dtype=np.float64),
+            np.zeros((0, 7), dtype=np.float64),
+            np.zeros((0, 7), dtype=np.float64),
+            np.full((0, MAX_COMETS), -1.0, dtype=np.float64),
+            np.zeros(0, dtype=np.float64),
+            np.zeros((0, MAX_COMETS), dtype=np.float64),
+            np.zeros((0, MAX_COMETS, MAX_COMET_PATH_LENGTH, 2), dtype=np.float64),
+            0.025,
+            ship_count_one_hot_max=3,
+            player_feature_channels=PLAYER_FEATURE_CHANNELS,
+        )
+
+
 def test_vectorized_env_accepts_entity_based_ext_v1_shapes() -> None:
     spec = EntityBasedExtV1Config(ship_count_one_hot_max=5)
     env = VectorizedEnv(
@@ -225,6 +309,106 @@ def test_vectorized_env_accepts_entity_based_ext_v1_shapes() -> None:
     assert obs.planets.shape == (2, MAX_PLANETS, spec.planet_channels)
     assert obs.fleets.shape == (2, spec.max_fleets, spec.fleet_channels)
     assert obs.comets.shape == (2, MAX_COMETS, COMET_CHANNELS)
+
+
+def test_vectorized_env_accepts_entity_based_ext_v2_shapes() -> None:
+    spec = EntityBasedExtV2Config()
+    env = VectorizedEnv(
+        n_envs=2,
+        obs_spec=spec,
+        action_spec=ActionPureConfig(),
+        pin_memory=False,
+    )
+
+    obs = env.reset()
+
+    assert obs.planets.shape == (2, MAX_PLANETS, PLANET_CHANNELS)
+    assert obs.fleets.shape == (2, spec.max_fleets, FLEET_CHANNELS)
+    assert obs.global_features.shape == (2, spec.global_channels)
+    assert obs.player_features is not None
+    assert obs.player_features.shape == (2, 4, PLAYER_FEATURE_CHANNELS)
+
+
+def test_rust_vec_env_keeps_legacy_entity_based_observation_contract() -> None:
+    max_entities = MAX_PLANETS + MAX_COMETS + 2
+    env = RustRlVecEnv(
+        1,
+        obs_spec="entity_based",
+        action_spec="pure",
+        max_entities=max_entities,
+    )
+    shapes = env.obs_shapes()
+
+    assert len(shapes) == 9
+    planet_obs = np.zeros(shapes[0], dtype=np.float32)
+    orbiting_planet_obs = np.zeros(shapes[1], dtype=np.bool_)
+    fleet_obs = np.zeros(shapes[2], dtype=np.float32)
+    comet_obs = np.zeros(shapes[3], dtype=np.float32)
+    entity_mask = np.zeros(shapes[4], dtype=np.bool_)
+    still_playing = np.zeros(shapes[5], dtype=np.bool_)
+    global_obs = np.zeros(shapes[6], dtype=np.float32)
+    can_act = np.zeros(shapes[7], dtype=np.bool_)
+    max_launch = np.zeros(shapes[8], dtype=np.int64)
+
+    env.reset(
+        planet_obs,
+        orbiting_planet_obs,
+        fleet_obs,
+        comet_obs,
+        entity_mask,
+        still_playing,
+        global_obs,
+        can_act,
+        max_launch,
+    )
+    env.write_observation(
+        "entity_based",
+        "pure",
+        max_entities,
+        0,
+        1,
+        0,
+        "full_mask",
+        planet_obs,
+        orbiting_planet_obs,
+        fleet_obs,
+        comet_obs,
+        entity_mask,
+        still_playing,
+        global_obs,
+        can_act,
+        max_launch,
+    )
+
+
+def test_rust_vec_env_accepts_ext_v2_player_features_as_extra_argument() -> None:
+    env = RustRlVecEnv(1, obs_spec="entity_based_ext_v2", action_spec="pure")
+    shapes = env.obs_shapes()
+
+    assert len(shapes) == 10
+    planet_obs = np.zeros(shapes[0], dtype=np.float32)
+    orbiting_planet_obs = np.zeros(shapes[1], dtype=np.bool_)
+    fleet_obs = np.zeros(shapes[2], dtype=np.float32)
+    comet_obs = np.zeros(shapes[3], dtype=np.float32)
+    entity_mask = np.zeros(shapes[4], dtype=np.bool_)
+    still_playing = np.zeros(shapes[5], dtype=np.bool_)
+    global_obs = np.zeros(shapes[6], dtype=np.float32)
+    player_features = np.zeros(shapes[7], dtype=np.float32)
+    can_act = np.zeros(shapes[8], dtype=np.bool_)
+    max_launch = np.zeros(shapes[9], dtype=np.int64)
+
+    env.reset(
+        planet_obs,
+        orbiting_planet_obs,
+        fleet_obs,
+        comet_obs,
+        entity_mask,
+        still_playing,
+        global_obs,
+        can_act,
+        max_launch,
+        player_features,
+    )
 
 
 @pytest.mark.parametrize(

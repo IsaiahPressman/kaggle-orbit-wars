@@ -476,6 +476,12 @@ class RecurrentTransformerV1(StatelessTransformerV1):
             batch_size,
             dtype=global_token.dtype,
         )
+        if self.player_feature_proj is not None:
+            if obs.player_features is None:
+                raise ValueError("player_features are required by this obs_spec")
+            player_tokens = player_tokens + self.player_feature_proj(
+                obs.player_features
+            )
         board_tokens = _expand_tokens(
             self.board_tokens,
             batch_size,
@@ -844,6 +850,11 @@ def _flatten_obs_if_sequence(obs: ObsBatch) -> tuple[ObsBatch, tuple[int, int] |
             action_mask=DiscreteTargetActionMask(
                 can_act=_flatten_time_tensor(obs.action_mask.can_act),
                 max_launch=_flatten_time_tensor(obs.action_mask.max_launch),
+            ),
+            player_features=(
+                None
+                if obs.player_features is None
+                else _flatten_time_tensor(obs.player_features)
             ),
         ),
         (batch_size, time_steps),

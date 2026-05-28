@@ -27,6 +27,8 @@ env = VectorizedEnv(
 - `DEFAULT_MAX_ENTITIES = 256`
 - `ACTION_ENTITY_SLOTS = MAX_PLANETS + MAX_COMETS = 44`
 - `OUTER_PLAYER_SLOTS = 4`
+- `GLOBAL_EXT_V2_CHANNELS = 8`
+- `PLAYER_FEATURE_CHANNELS = 10`
 
 `max_entities` controls total non-global entity capacity. Fleet capacity is:
 
@@ -270,6 +272,60 @@ Shape per env: `(3,)`.
 | `0` | `step / episode_steps` |
 | `1` | `steps_until_next_comet_spawn / 100` |
 | `2` | normalized angular velocity |
+
+## EntityBasedExtV2
+
+Config:
+
+```python
+{"obs_spec": "entity_based_ext_v2", "max_entities": 256}
+```
+
+`EntityBasedExtV2` extends the base `EntityBased` observation directly. It does
+not include the `EntityBasedExtV1` ship-count one-hot appendices, so planet and
+fleet row widths remain `107` and `79`.
+
+The spec adds:
+
+| Tensor | dtype | Shape |
+| --- | --- | --- |
+| `global_features` | `float32` | `(n_envs, 11)` |
+| `player_features` | `float32` | `(n_envs, 4, 10)` |
+
+For non-v2 specs, `ObsBatch.player_features` is `None`.
+
+V2 appends eight neutral-resource channels after the three base global channels:
+
+| Channel | Feature |
+| --- | --- |
+| `3` | neutral total production, including comet planets, divided by `100` |
+| `4` | neutral comet-planet production divided by `100` |
+| `5` | neutral non-comet planet production divided by `100` |
+| `6` | neutral total ships, including comet planets, divided by `500` |
+| `7` | neutral comet-planet ships divided by `500` |
+| `8` | neutral non-comet planet ships divided by `500` |
+| `9` | neutral comet count divided by `MAX_COMETS` |
+| `10` | neutral non-comet planet count divided by `MAX_PLANETS` |
+
+Each outer player slot receives ten absolute summary channels:
+
+| Channel | Feature |
+| --- | --- |
+| `0` | total production, including owned comet planets, divided by `100` |
+| `1` | comet-planet production divided by `100` |
+| `2` | non-comet planet production divided by `100` |
+| `3` | total ships, including planets, comet planets, and fleets, divided by `500` |
+| `4` | comet-planet ships divided by `500` |
+| `5` | non-comet planet ships divided by `500` |
+| `6` | fleet ships divided by `500` |
+| `7` | non-comet planet count divided by `MAX_PLANETS` |
+| `8` | comet count divided by `MAX_COMETS` |
+| `9` | fleet count divided by `100` |
+
+Component production and ship channels use the same normalizer as their total,
+so comet plus non-comet production equals total production, and comet plus
+non-comet planet plus fleet ships equals total ships. Inactive outer player
+slots are zero-filled.
 
 Standalone observation encoding uses strict application-boundary parsing:
 required observation keys are read directly, `step` and `episode_steps` must be

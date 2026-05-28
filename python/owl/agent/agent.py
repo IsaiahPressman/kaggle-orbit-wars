@@ -271,9 +271,14 @@ class Agent:
             **{
                 field: getattr(obs, field).to(device=self.device)
                 for field in ObsBatch.model_fields
-                if field != "action_mask"
+                if field not in {"action_mask", "player_features"}
             },
             action_mask=_action_mask_to_device(obs.action_mask, self.device),
+            player_features=(
+                None
+                if obs.player_features is None
+                else obs.player_features.to(device=self.device)
+            ),
         )
 
     def _synchronize_device(self) -> None:
@@ -441,6 +446,7 @@ def compact_entities(
         still_playing=obs.still_playing,
         global_features=obs.global_features,
         action_mask=_compact_action_mask(obs.action_mask, action_entity_indices),
+        player_features=obs.player_features,
     )
     return CompactedObservation(
         obs=compacted,

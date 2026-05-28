@@ -378,9 +378,17 @@ def _obs_to_device(obs: ObsBatch, device: torch.device) -> ObsBatch:
                 non_blocking=device.type == "cuda",
             )
             for field in ObsBatch.model_fields
-            if field != "action_mask"
+            if field not in {"action_mask", "player_features"}
         },
         action_mask=_action_mask_to_device(obs, device),
+        player_features=(
+            None
+            if obs.player_features is None
+            else obs.player_features.to(
+                device=device,
+                non_blocking=device.type == "cuda",
+            )
+        ),
     )
 
 

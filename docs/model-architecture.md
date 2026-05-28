@@ -95,6 +95,8 @@ Each observation tensor receives a small MLP stem from raw channels to
 - fleets: `(batch, max_fleets, 79) -> (batch, max_fleets, embed_dim)`
 - comets: `(batch, MAX_COMETS, 330) -> (batch, MAX_COMETS, embed_dim)`
 - globals: `(batch, 3) -> (batch, embed_dim)`
+- v2 player features, when present:
+  `(batch, OUTER_PLAYER_SLOTS, 10) -> (batch, OUTER_PLAYER_SLOTS, embed_dim)`
 
 For `EntityBasedExtV1`, planet input widths append
 `ship_count_one_hot_max + 1` channels and fleet input widths append
@@ -102,12 +104,22 @@ For `EntityBasedExtV1`, planet input widths append
 the planet width is `158` and the fleet width is `129`; comet and global widths
 are unchanged.
 
+For `EntityBasedExtV2`, planet, fleet, and comet widths stay at the base
+`EntityBased` sizes. The global input width increases from `3` to `11`, and
+`ObsBatch.player_features` supplies a ten-channel per-outer-player summary. The
+model creates a player-feature projection only when
+`obs_spec.player_feature_channels > 0`; old `entity_based` and
+`entity_based_ext_v1` stateless checkpoints therefore do not gain
+`player_feature_proj` parameters.
+
 The boolean `orbiting_planets` mask selects the orbiting-planet projection for
 orbiting rows and the static-planet projection for all other planet rows.
 Planet, comet, and fleet tokens are concatenated on the entity axis in that
 order. This keeps the action-origin hidden states contiguous as the first
 `ACTION_ENTITY_SLOTS` tokens. The global projection is appended as its own
-global-feature token. The full trunk sequence is:
+global-feature token. For v2 observations, the projected per-player summary is
+added directly to the learned player token for the matching outer player slot
+before the transformer trunk. The full trunk sequence is:
 
 ```text
 [planet tokens]
