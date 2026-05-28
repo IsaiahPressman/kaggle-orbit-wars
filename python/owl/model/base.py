@@ -110,7 +110,6 @@ class BaseModelAPI(nn.Module, ABC):
         actions: ModelActions,
         *,
         hidden_state: ModelHiddenState | None = None,
-        teacher_hidden_state: ModelHiddenState | None = None,
         dones: torch.Tensor | None = None,
     ) -> ModelActionKLDivergences:
         raise NotImplementedError(

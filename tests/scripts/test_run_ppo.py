@@ -145,7 +145,7 @@ class _FakeTrainer:
         self.iterations = 0
         self.model = torch.nn.Linear(1, 1)
         self.device = torch.device("cpu")
-        self.teacher_updates: list[tuple[torch.nn.Module | None, bool, bool]] = []
+        self.teacher_updates: list[tuple[torch.nn.Module | None, bool]] = []
 
     def train_iteration(self) -> dict[str, float]:
         self.iterations += 1
@@ -167,9 +167,8 @@ class _FakeTrainer:
         teacher_model: torch.nn.Module | None,
         *,
         active: bool,
-        match_student_hidden_state: bool = False,
     ) -> None:
-        self.teacher_updates.append((teacher_model, active, match_student_hidden_state))
+        self.teacher_updates.append((teacher_model, active))
 
 
 def test_next_periodic_checkpoint_step_handles_crossed_cadence() -> None:
@@ -393,7 +392,7 @@ def test_fresh_launch_from_checkpoint_uses_starting_checkpoint_as_teacher(
     class FakeTrainer:
         def __init__(self, **kwargs: object) -> None:
             self.model = kwargs["model"]
-            self.teacher_updates: list[tuple[torch.nn.Module, bool, bool]] = []
+            self.teacher_updates: list[tuple[torch.nn.Module, bool]] = []
             trainer_ref["trainer"] = self
 
         def load_model_weights(self, path: Path) -> run_ppo.PPOCheckpointMetadata:
@@ -409,12 +408,9 @@ def test_fresh_launch_from_checkpoint_uses_starting_checkpoint_as_teacher(
             teacher_model: torch.nn.Module | None,
             *,
             active: bool,
-            match_student_hidden_state: bool = False,
         ) -> None:
             assert teacher_model is not None
-            self.teacher_updates.append(
-                (teacher_model, active, match_student_hidden_state)
-            )
+            self.teacher_updates.append((teacher_model, active))
 
     def fake_create_run_dir(output: Path) -> Path:
         assert output == output_dir
@@ -462,9 +458,8 @@ def test_fresh_launch_from_checkpoint_uses_starting_checkpoint_as_teacher(
     trainer = trainer_ref["trainer"]
     assert isinstance(trainer, FakeTrainer)
     assert len(trainer.teacher_updates) == 1
-    teacher_model, active, match_student_hidden_state = trainer.teacher_updates[0]
+    teacher_model, active = trainer.teacher_updates[0]
     assert active
-    assert not match_student_hidden_state
     assert teacher_model is not model
     assert teacher_model.weight.item() == pytest.approx(7.0)
     assert session_ref["start_env_steps"] == 123
@@ -1363,10 +1358,9 @@ def test_run_training_loop_activates_last_best_teacher_after_replacement(
     )
 
     assert len(trainer.teacher_updates) == 1
-    teacher_model, active, match_student_hidden_state = trainer.teacher_updates[0]
+    teacher_model, active = trainer.teacher_updates[0]
     assert teacher_model is not None
     assert active
-    assert match_student_hidden_state
 
 
 def test_run_training_session_sets_trainable_parameter_summary(

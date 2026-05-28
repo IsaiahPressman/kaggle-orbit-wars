@@ -177,7 +177,6 @@ class _DistributedModelDispatch(nn.Module):
         hidden_state: object | None = None,
         dones: object | None = None,
         teacher: object | None = None,
-        teacher_hidden_state: object | None = None,
     ) -> object:
         if mode == "forward":
             if hidden_state is None:
@@ -218,7 +217,6 @@ class _DistributedModelDispatch(nn.Module):
                 cast(BaseModelAPI, teacher),
                 cast(ModelActions, actions),
                 hidden_state=hidden_state,
-                teacher_hidden_state=teacher_hidden_state,
                 dones=cast(torch.Tensor | None, dones),
             )
         raise ValueError(f"unknown distributed model mode: {mode}")
@@ -290,7 +288,6 @@ class DistributedModelAdapter(BaseModelAPI):
         actions: ModelActions,
         *,
         hidden_state: ModelHiddenState | None = None,
-        teacher_hidden_state: ModelHiddenState | None = None,
         dones: torch.Tensor | None = None,
     ) -> ModelActionKLDivergences:
         return cast(
@@ -303,7 +300,6 @@ class DistributedModelAdapter(BaseModelAPI):
                 hidden_state,
                 dones,
                 teacher,
-                teacher_hidden_state,
             ),
         )
 

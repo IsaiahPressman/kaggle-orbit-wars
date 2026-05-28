@@ -169,7 +169,6 @@ class _PPORolloutSegments:
     dones: torch.Tensor
     entity_logp: torch.Tensor | None = None
     initial_hidden_state: ModelHiddenState | None = None
-    teacher_initial_hidden_state: ModelHiddenState | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -351,7 +350,6 @@ class _PPORolloutBuffer:
             device=device,
         )
         self.initial_hidden_state: ModelHiddenState | None = None
-        self.teacher_initial_hidden_state: ModelHiddenState | None = None
 
     def write_step(
         self,
@@ -389,7 +387,6 @@ class _PPORolloutBuffer:
             rewards=self.rewards.transpose(0, 1).contiguous(),
             dones=self.dones.transpose(0, 1).contiguous(),
             initial_hidden_state=self.initial_hidden_state,
-            teacher_initial_hidden_state=self.teacher_initial_hidden_state,
         )
 
 
@@ -443,7 +440,6 @@ class PPOTrainer:
         self._hidden_state = model.initial_hidden_state(env.n_envs, device=device)
         self.teacher_model: BaseModelAPI | None = None
         self.teacher_active = False
-        self._teacher_hidden_state: ModelHiddenState | None = None
         self.rollout = _PPORolloutBuffer(
             horizon=config.horizon,
             n_envs=env.n_envs,
@@ -463,31 +459,26 @@ class PPOTrainer:
         teacher_model: BaseModelAPI | None,
         *,
         active: bool,
-        match_student_hidden_state: bool = False,
     ) -> None:
         if (
             teacher_model is not None
             and teacher_model.action_spec != self.env.action_spec
         ):
             raise ValueError("teacher model and env action_spec must match")
-        self.teacher_model = teacher_model
-        self.teacher_active = teacher_model is not None and active
-        if self.teacher_active:
+        teacher_active = teacher_model is not None and active
+        if teacher_active:
             if teacher_model is None:
                 raise RuntimeError("teacher_active requires a teacher model")
+            _require_stateless_teacher(
+                teacher_model,
+                batch_size=self.n_envs,
+                device=self.device,
+            )
             teacher_model.eval()
             for parameter in teacher_model.parameters():
                 parameter.requires_grad_(False)
-            self._teacher_hidden_state = (
-                teacher_model.detach_hidden_state(self._hidden_state)
-                if match_student_hidden_state
-                else teacher_model.initial_hidden_state(
-                    self.n_envs,
-                    device=self.device,
-                )
-            )
-        else:
-            self._teacher_hidden_state = None
+        self.teacher_model = teacher_model
+        self.teacher_active = teacher_active
 
     def train_iteration(self) -> dict[str, float]:
         start = perf_counter()
@@ -645,12 +636,6 @@ class PPOTrainer:
         self.rollout.initial_hidden_state = self.model.detach_hidden_state(
             self._hidden_state
         )
-        teacher_model = self.teacher_model if self.teacher_active else None
-        self.rollout.teacher_initial_hidden_state = (
-            None
-            if teacher_model is None
-            else teacher_model.detach_hidden_state(self._teacher_hidden_state)
-        )
         env_metrics: dict[str, list[float]] = {}
         with torch.no_grad():
             for step in range(self.config.horizon):
@@ -660,17 +645,7 @@ class PPOTrainer:
                         self._obs,
                         hidden_state=self._hidden_state,
                     )
-                    if teacher_model is None:
-                        teacher_output = None
-                    else:
-                        teacher_output = _model_forward(
-                            teacher_model,
-                            self._obs,
-                            hidden_state=self._teacher_hidden_state,
-                        )
                 self._hidden_state = output.next_hidden_state
-                if teacher_output is not None:
-                    self._teacher_hidden_state = teacher_output.next_hidden_state
                 actions = _output_actions(output)
                 next_obs, rewards, dones, step_env_metrics = _step_env(
                     self.env, actions
@@ -698,11 +673,6 @@ class PPOTrainer:
                     self._hidden_state,
                     dones,
                 )
-                if teacher_model is not None:
-                    self._teacher_hidden_state = teacher_model.reset_hidden_state(
-                        self._teacher_hidden_state,
-                        dones,
-                    )
                 _copy_obs_to_device_(
                     self._obs,
                     next_obs,
@@ -805,14 +775,6 @@ class PPOTrainer:
             idx,
         )
         teacher_model = self.teacher_model if self.teacher_active else None
-        batch_teacher_hidden_state = (
-            None
-            if teacher_model is None
-            else teacher_model.index_hidden_state(
-                segments.teacher_initial_hidden_state,
-                idx,
-            )
-        )
         if batch_hidden_state is None:
             batch_actions = _flatten_actions_time(batch_segment_actions)
             batch_obs = _flatten_obs_time(batch_segment_obs)
@@ -864,7 +826,6 @@ class PPOTrainer:
                     teacher_model,
                     batch_segment_actions,
                     hidden_state=batch_hidden_state,
-                    teacher_hidden_state=batch_teacher_hidden_state,
                     dones=segments.dones[idx],
                 )
         new_logp = _output_logp_for_clip_mode(
@@ -901,7 +862,6 @@ class PPOTrainer:
                     teacher_model,
                     batch_segment_obs,
                     batch_segment_actions,
-                    hidden_state=batch_teacher_hidden_state,
                     dones=segments.dones[idx],
                 )
             teacher_value_loss_values = _teacher_value_cross_entropy(
@@ -1931,6 +1891,17 @@ def _checkpoint_optional_str(value: object, *, name: str) -> str | None:
     return value
 
 
+def _require_stateless_teacher(
+    teacher: BaseModelAPI,
+    *,
+    batch_size: int,
+    device: torch.device,
+) -> None:
+    hidden_state = teacher.initial_hidden_state(batch_size, device=device)
+    if hidden_state is not None:
+        raise ValueError("teacher models with recurrent hidden state are not supported")
+
+
 def _model_forward(
     model: BaseModelAPI,
     obs: ObsBatch,
@@ -1973,7 +1944,6 @@ def _model_evaluate_action_kl(
     actions: ModelActions,
     *,
     hidden_state: ModelHiddenState | None,
-    teacher_hidden_state: ModelHiddenState | None,
     dones: torch.Tensor,
 ) -> ModelActionKLDivergences:
     return model.evaluate_action_kl(
@@ -1981,7 +1951,6 @@ def _model_evaluate_action_kl(
         teacher,
         actions,
         hidden_state=hidden_state,
-        teacher_hidden_state=teacher_hidden_state,
         dones=dones,
     )
 
@@ -1991,31 +1960,21 @@ def _teacher_winner_probabilities(
     obs: ObsBatch,
     actions: ModelActions,
     *,
-    hidden_state: ModelHiddenState | None,
     dones: torch.Tensor,
 ) -> torch.Tensor:
-    if hidden_state is None:
-        sequence_shape = obs.planets.shape[:2]
-        output = _model_evaluate_actions(
-            teacher,
-            _flatten_obs_time(obs),
-            _flatten_actions_time(actions),
-            hidden_state=None,
-            dones=dones,
-        )
-        return output.winner_probabilities.reshape(
-            sequence_shape[0],
-            sequence_shape[1],
-            *output.winner_probabilities.shape[1:],
-        )
+    sequence_shape = obs.planets.shape[:2]
     output = _model_evaluate_actions(
         teacher,
-        obs,
-        actions,
-        hidden_state=hidden_state,
+        _flatten_obs_time(obs),
+        _flatten_actions_time(actions),
+        hidden_state=None,
         dones=dones,
     )
-    return output.winner_probabilities
+    return output.winner_probabilities.reshape(
+        sequence_shape[0],
+        sequence_shape[1],
+        *output.winner_probabilities.shape[1:],
+    )
 
 
 def _teacher_value_cross_entropy(

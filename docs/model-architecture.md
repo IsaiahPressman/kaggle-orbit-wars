@@ -532,7 +532,9 @@ action-head divergences back to the player-step before applying
 `rl.teacher_kl_coef`. The value term uses cross-entropy from the teacher winner
 distribution to the student winner distribution over active player slots, then
 averages that per-state value over active states before applying
-`rl.teacher_value_coef`.
+`rl.teacher_value_coef`. Teacher inference is performed only during PPO update
+minibatches from stored rollout segments. Teacher models must be stateless;
+trainers reject teachers that require recurrent hidden state.
 
 `evaluate_action_kl(obs, teacher, actions)` re-encodes the replay segment with
 both models and compares the policy distributions using the same masks and

@@ -401,7 +401,6 @@ def _run_training_loop(
                         trainer.set_teacher_model(
                             last_best_model,
                             active=True,
-                            match_student_hidden_state=True,
                         )
                     if dist_ctx.is_main_process:
                         trainer.write_checkpoint(

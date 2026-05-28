@@ -707,7 +707,6 @@ class StatelessTransformerV1(BaseModelAPI):
         actions: ModelActions,
         *,
         hidden_state: ModelHiddenState | None = None,
-        teacher_hidden_state: ModelHiddenState | None = None,
         dones: torch.Tensor | None = None,
     ) -> ModelActionKLDivergences:
         if not isinstance(teacher, StatelessTransformerV1):
@@ -716,6 +715,19 @@ class StatelessTransformerV1(BaseModelAPI):
             )
         flat_obs, sequence_shape = _flatten_obs_time_if_sequence(obs)
         flat_actions = _flatten_actions_time_if_sequence(actions, sequence_shape)
+        teacher_batch_size = (
+            flat_obs.planets.shape[0] if sequence_shape is None else sequence_shape[0]
+        )
+        if (
+            teacher.initial_hidden_state(
+                teacher_batch_size,
+                device=flat_obs.planets.device,
+            )
+            is not None
+        ):
+            raise ValueError(
+                "teacher models with recurrent hidden state are not supported"
+            )
         student_encoded, _student_next_state = self._encode_distillation_observations(
             flat_obs,
             sequence_shape=sequence_shape,
@@ -726,7 +738,7 @@ class StatelessTransformerV1(BaseModelAPI):
             teacher._encode_distillation_observations(
                 flat_obs,
                 sequence_shape=sequence_shape,
-                hidden_state=teacher_hidden_state,
+                hidden_state=None,
                 dones=dones,
             )
         )
