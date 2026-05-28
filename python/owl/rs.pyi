@@ -217,6 +217,7 @@ def encode_entity_based(
     max_entities: int = ...,
     min_fleet_size: int = ...,
     ship_count_one_hot_max: int = ...,
+    fleet_filter_min_size: int = ...,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -227,6 +228,7 @@ def encode_entity_based(
     np.ndarray,
     np.ndarray,
     np.ndarray,
+    int,
 ]: ...
 def pure_actions_to_kaggle(
     planets: np.ndarray,

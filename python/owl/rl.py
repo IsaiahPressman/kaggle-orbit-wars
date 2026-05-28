@@ -229,6 +229,12 @@ class ObsBatch(BaseModel):
     action_mask: ActionMask
 
 
+@dataclass(frozen=True)
+class EncodedPythonObservation:
+    obs: ObsBatch
+    filtered_fleets: int
+
+
 class VectorizedEnv:
     def __init__(
         self,
@@ -800,7 +806,24 @@ def encode_python_observation(
     obs: dict[str, Any],
     obs_spec: EntityBasedBaseConfig,
     action_spec: ActionConfig,
+    *,
+    fleet_filter_min_size: int | None = None,
 ) -> ObsBatch:
+    return encode_python_observation_with_metrics(
+        obs,
+        obs_spec,
+        action_spec,
+        fleet_filter_min_size=fleet_filter_min_size,
+    ).obs
+
+
+def encode_python_observation_with_metrics(
+    obs: dict[str, Any],
+    obs_spec: EntityBasedBaseConfig,
+    action_spec: ActionConfig,
+    *,
+    fleet_filter_min_size: int | None = None,
+) -> EncodedPythonObservation:
     (
         planets_in,
         initial_planets_in,
@@ -832,6 +855,9 @@ def encode_python_observation(
         obs_spec.max_entities,
         action_spec.min_fleet_size,
         obs_spec.ship_count_one_hot_encoder_max,
+        action_spec.min_fleet_size
+        if fleet_filter_min_size is None
+        else fleet_filter_min_size,
     )
     (
         planets,
@@ -843,27 +869,58 @@ def encode_python_observation(
         source_can_act,
         source_target_can_act,
         max_launch,
+        filtered_fleets,
     ) = encoded
     if isinstance(action_spec, ActionPureConfig):
-        return _encoded_observation_to_batch(
-            (
-                planets,
-                orbiting_planets,
-                fleets,
-                comets,
-                entity_mask,
-                global_features,
-                source_can_act,
-                max_launch,
+        return EncodedPythonObservation(
+            obs=_encoded_observation_to_batch(
+                (
+                    planets,
+                    orbiting_planets,
+                    fleets,
+                    comets,
+                    entity_mask,
+                    global_features,
+                    source_can_act,
+                    max_launch,
+                ),
+                still_playing=still_playing,
             ),
-            still_playing=still_playing,
+            filtered_fleets=int(filtered_fleets),
         )
     if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
         if action_spec.targeting_mode == "full_mask":
             target_can_act = source_target_can_act
         else:
             target_can_act = _loose_target_can_act(source_can_act, entity_mask)
-        return _encoded_observation_to_batch(
+        return EncodedPythonObservation(
+            obs=_encoded_observation_to_batch(
+                (
+                    planets,
+                    orbiting_planets,
+                    fleets,
+                    comets,
+                    entity_mask,
+                    global_features,
+                    _target_bin_can_act(
+                        target_can_act,
+                        max_launch,
+                        min_fleet_size=action_spec.min_fleet_size,
+                        n_bins=action_spec.n_bins,
+                    ),
+                    None,
+                ),
+                still_playing=still_playing,
+            ),
+            filtered_fleets=int(filtered_fleets),
+        )
+    if action_spec.targeting_mode == "full_mask":
+        target_can_act = source_target_can_act
+    else:
+        target_can_act = _loose_target_can_act(source_can_act, entity_mask)
+    target_max_launch = np.where(target_can_act.any(axis=-1), max_launch, 0)
+    return EncodedPythonObservation(
+        obs=_encoded_observation_to_batch(
             (
                 planets,
                 orbiting_planets,
@@ -871,33 +928,12 @@ def encode_python_observation(
                 comets,
                 entity_mask,
                 global_features,
-                _target_bin_can_act(
-                    target_can_act,
-                    max_launch,
-                    min_fleet_size=action_spec.min_fleet_size,
-                    n_bins=action_spec.n_bins,
-                ),
-                None,
+                target_can_act,
+                target_max_launch,
             ),
             still_playing=still_playing,
-        )
-    if action_spec.targeting_mode == "full_mask":
-        target_can_act = source_target_can_act
-    else:
-        target_can_act = _loose_target_can_act(source_can_act, entity_mask)
-    target_max_launch = np.where(target_can_act.any(axis=-1), max_launch, 0)
-    return _encoded_observation_to_batch(
-        (
-            planets,
-            orbiting_planets,
-            fleets,
-            comets,
-            entity_mask,
-            global_features,
-            target_can_act,
-            target_max_launch,
         ),
-        still_playing=still_playing,
+        filtered_fleets=int(filtered_fleets),
     )
 
 

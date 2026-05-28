@@ -11,7 +11,6 @@ from owl.agent.agent import (
     AGENT_CONFIG_PATH,
     AgentCheckpointConfig,
     AgentConfig,
-    _filter_fleets_by_min_size,
     apply_max_entities_override,
     apply_targeting_mode_override,
     compact_entities,
@@ -57,6 +56,7 @@ from owl.rl import (
     DiscreteTargetActions,
     DiscreteTargetBinActionMask,
     DiscreteTargetBinActions,
+    EncodedPythonObservation,
     EntityBasedConfig,
     EnvConfig,
     ObsBatch,
@@ -569,47 +569,16 @@ def _raw_observation(*, remaining_overage_time: float = 60.0) -> dict[str, objec
     }
 
 
-def test_filter_fleets_keeps_largest_small_fleet_for_stranded_players() -> None:
-    obs = _raw_observation()
-    obs["planets"] = [
-        [0, 0, 25.0, 50.0, 2.0, 10, 3],
-        [1, 2, 75.0, 50.0, 2.0, 10, 3],
-    ]
-    obs["fleets"] = [
-        [10, 0, 10.0, 10.0, 0.0, 9, 5],
-        [11, 1, 20.0, 20.0, 0.0, 8, 4],
-        [12, 1, 30.0, 30.0, 0.0, 7, 5],
-        [13, 2, 40.0, 40.0, 0.0, 9, 3],
-        [14, 3, 50.0, 50.0, 0.0, 0, 5],
-    ]
-
-    filtered = _filter_fleets_by_min_size(obs, 6)
-
-    assert [fleet[FLEET_ID_INDEX] for fleet in filtered["fleets"]] == [12, 14]
-
-
-def test_filter_fleets_uses_ship_count_not_from_planet_id() -> None:
-    obs = _raw_observation()
-    obs["fleets"] = [
-        [10, 0, 10.0, 10.0, 0.0, 0, 20],
-        [11, 0, 20.0, 20.0, 0.0, 20, 1],
-    ]
-
-    filtered = _filter_fleets_by_min_size(obs, 6)
-
-    assert [fleet[FLEET_ID_INDEX] for fleet in filtered["fleets"]] == [10]
-
-
 @pytest.mark.parametrize(
-    ("agent_min_fleet_size", "expected_fleet_ids", "expected_filtered_fleets"),
+    ("agent_min_fleet_size", "expected_filter_min_size", "expected_filtered_fleets"),
     [
-        ("match", [11, 12], 1),
-        (8, [12], 2),
+        ("match", 6, 1),
+        (8, 8, 2),
     ],
 )
-def test_agent_act_filters_fleets_below_configured_min_before_encoding(
+def test_agent_act_logs_rust_filtered_fleet_count(
     agent_min_fleet_size: object,
-    expected_fleet_ids: list[int],
+    expected_filter_min_size: int,
     expected_filtered_fleets: int,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -634,18 +603,23 @@ def test_agent_act_filters_fleets_below_configured_min_before_encoding(
     agent._peak_total_ms = 0
     agent._peak_entities = 0
 
-    def fake_encode_python_observation(
+    def fake_encode_python_observation_with_metrics(
         obs: dict[str, object],
         *,
         obs_spec: EntityBasedConfig,
         action_spec: ActionPureConfig,
-    ) -> ObsBatch:
+        fleet_filter_min_size: int,
+    ) -> EncodedPythonObservation:
         assert obs_spec == agent.checkpoint_config.env.obs_spec
         assert action_spec == agent.checkpoint_config.env.action_spec
-        assert [fleet[FLEET_ID_INDEX] for fleet in obs["fleets"]] == expected_fleet_ids
+        assert fleet_filter_min_size == expected_filter_min_size
+        assert [fleet[FLEET_ID_INDEX] for fleet in obs["fleets"]] == [10, 11, 12]
         batch = _obs_batch(max_fleets=0)
         batch.entity_mask[0, 0] = True
-        return batch
+        return EncodedPythonObservation(
+            obs=batch,
+            filtered_fleets=expected_filtered_fleets,
+        )
 
     class FakeModel:
         def initial_hidden_state(
@@ -688,7 +662,7 @@ def test_agent_act_filters_fleets_below_configured_min_before_encoding(
         *,
         action_spec: ActionPureConfig,
     ) -> list[list[float]]:
-        assert [fleet[FLEET_ID_INDEX] for fleet in obs["fleets"]] == expected_fleet_ids
+        assert [fleet[FLEET_ID_INDEX] for fleet in obs["fleets"]] == [10, 11, 12]
         assert player == 0
         assert actions.launch.shape == (
             1,
@@ -700,8 +674,8 @@ def test_agent_act_filters_fleets_below_configured_min_before_encoding(
 
     agent.model = FakeModel()
     monkeypatch.setattr(
-        "owl.agent.agent.encode_python_observation",
-        fake_encode_python_observation,
+        "owl.agent.agent.encode_python_observation_with_metrics",
+        fake_encode_python_observation_with_metrics,
     )
     monkeypatch.setattr("owl.agent.agent.actions_to_kaggle", fake_actions_to_kaggle)
     raw_observation = _raw_observation()

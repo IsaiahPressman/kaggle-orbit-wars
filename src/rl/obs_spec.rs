@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use numpy::ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView4};
 use numpy::{
@@ -35,6 +35,7 @@ type EncodedEntityBased<'py> = (
     Bound<'py, PyArray2<bool>>,
     Bound<'py, PyArray3<bool>>,
     Bound<'py, PyArray2<i64>>,
+    usize,
 );
 
 const OWNER_CHANNELS_WITH_NEUTRAL: usize = 5;
@@ -901,7 +902,8 @@ fn require_shape_suffix(name: &str, actual: &[usize], expected_last_dim: usize) 
     episode_steps=500,
     max_entities=DEFAULT_MAX_ENTITIES,
     min_fleet_size=1,
-    ship_count_one_hot_max=0
+    ship_count_one_hot_max=0,
+    fleet_filter_min_size=0
 ))]
 pub fn encode_entity_based<'py>(
     py: Python<'py>,
@@ -918,6 +920,7 @@ pub fn encode_entity_based<'py>(
     max_entities: usize,
     min_fleet_size: i64,
     ship_count_one_hot_max: usize,
+    fleet_filter_min_size: i64,
 ) -> PyResult<EncodedEntityBased<'py>> {
     if max_entities <= MAX_PLANETS + MAX_COMETS {
         return Err(PyValueError::new_err(format!(
@@ -930,6 +933,16 @@ pub fn encode_entity_based<'py>(
             "min_fleet_size must be between 1 and i32::MAX",
         ));
     }
+    if fleet_filter_min_size < 0 || fleet_filter_min_size > i64::from(i32::MAX) {
+        return Err(PyValueError::new_err(
+            "fleet_filter_min_size must be 0 or fit in i32::MAX",
+        ));
+    }
+    let fleet_filter_min_size = if fleet_filter_min_size == 0 {
+        min_fleet_size
+    } else {
+        fleet_filter_min_size
+    };
     let ship_count_one_hot_max = if ship_count_one_hot_max == 0 {
         None
     } else {
@@ -963,7 +976,7 @@ pub fn encode_entity_based<'py>(
         &[comet_group_count, MAX_COMETS, MAX_COMET_PATH_LENGTH, 2],
     )?;
 
-    let state = state_from_arrays_with_initial_planets(
+    let mut state = state_from_arrays_with_initial_planets(
         planets,
         initial_planets,
         fleets,
@@ -975,6 +988,7 @@ pub fn encode_entity_based<'py>(
         step,
         episode_steps,
     )?;
+    let filtered_fleets = filter_fleets_by_min_size(&mut state, fleet_filter_min_size);
     let max_fleets = max_entities - (MAX_PLANETS + MAX_COMETS);
     let planet_extra_ship_count_channels = ship_count_one_hot_max.map_or(0, |max| max as usize + 1);
     let fleet_extra_ship_count_channels = ship_count_one_hot_max.map_or(0, |max| max as usize);
@@ -1060,7 +1074,57 @@ pub fn encode_entity_based<'py>(
         can_act.into_pyarray(py),
         target_can_act.into_pyarray(py),
         max_launch.into_pyarray(py),
+        filtered_fleets,
     ))
+}
+
+fn filter_fleets_by_min_size(state: &mut State, min_fleet_size: i64) -> usize {
+    let original_fleet_count = state.fleets.len();
+    let planet_owners = state
+        .planets
+        .iter()
+        .filter(|planet| planet.owner >= 0)
+        .map(|planet| planet.owner)
+        .collect::<HashSet<_>>();
+    let mut kept_fleet_ids = state
+        .fleets
+        .iter()
+        .filter(|fleet| i64::from(fleet.ships) >= min_fleet_size)
+        .map(|fleet| fleet.id)
+        .collect::<HashSet<_>>();
+    let kept_fleet_owners = state
+        .fleets
+        .iter()
+        .filter(|fleet| kept_fleet_ids.contains(&fleet.id) && fleet.owner >= 0)
+        .map(|fleet| fleet.owner)
+        .collect::<HashSet<_>>();
+    let mut stranded_fleet_by_owner = HashMap::<i32, (i32, u32)>::new();
+    for fleet in &state.fleets {
+        if fleet.owner < 0
+            || planet_owners.contains(&fleet.owner)
+            || kept_fleet_owners.contains(&fleet.owner)
+            || i64::from(fleet.ships) >= min_fleet_size
+        {
+            continue;
+        }
+
+        let should_replace = match stranded_fleet_by_owner.get(&fleet.owner) {
+            Some((ships, id)) => fleet.ships > *ships || fleet.ships == *ships && fleet.id < *id,
+            None => true,
+        };
+        if should_replace {
+            stranded_fleet_by_owner.insert(fleet.owner, (fleet.ships, fleet.id));
+        }
+    }
+    kept_fleet_ids.extend(
+        stranded_fleet_by_owner
+            .values()
+            .map(|(_ships, fleet_id)| *fleet_id),
+    );
+    state
+        .fleets
+        .retain(|fleet| kept_fleet_ids.contains(&fleet.id));
+    original_fleet_count - state.fleets.len()
 }
 
 #[pyfunction]

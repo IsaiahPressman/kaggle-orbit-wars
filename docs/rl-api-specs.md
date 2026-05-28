@@ -175,10 +175,20 @@ row is orbiting, else `False`. Inactive rows are `False`.
 
 Shape per env: `(max_fleets, 79)`.
 
-When all active fleets fit in `max_fleets`, fleets are emitted in simulator
-fleet order. If there are more active fleets than `max_fleets`, fleets are
-sorted by descending ship count, with fleet id as the tie-breaker, so the
-largest fleets are kept and the rest are ignored. Each overflow logs to stderr:
+The low-level `encode_entity_based` Rust API filters fleets smaller than its
+fleet-filter threshold before writing fleet rows. The default threshold is
+`min_fleet_size`; callers that need agent-only filtering without changing action
+masks can pass a separate `fleet_filter_min_size`. Fleets at or above the
+threshold are kept. If a player owns no current planet and none of their fleets
+meet the threshold, the encoder keeps that player's largest below-threshold
+fleet, using the lower fleet id as the tie-breaker. The API also returns the
+number of fleets dropped by this filter.
+
+When all remaining active fleets fit in `max_fleets`, fleets are emitted in
+simulator fleet order. If there are more remaining active fleets than
+`max_fleets`, fleets are sorted by descending ship count, with fleet id as the
+tie-breaker, so the largest fleets are kept and the rest are ignored. Each
+overflow logs to stderr:
 
 ```text
 max_entities exceeded: N fleets ignored
