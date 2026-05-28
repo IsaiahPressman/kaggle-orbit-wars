@@ -28,6 +28,7 @@ from owl.rl import (
     actions_to_kaggle,
     encode_entity_based,
     encode_python_observation,
+    encode_python_observation_with_metrics,
 )
 
 
@@ -199,7 +200,7 @@ def test_entity_based_ext_v1_adds_ship_count_one_hot_channels() -> None:
             ],
         ),
         obs_spec=spec,
-        action_spec=ActionPureConfig(),
+        action_spec=ActionPureConfig(min_fleet_size=1),
     )
 
     np.testing.assert_array_equal(encoded.planets[0, 0, PLANET_CHANNELS:], [1, 0, 0, 0])
@@ -1223,6 +1224,90 @@ def test_python_observation_encoder_marks_only_present_players_still_playing() -
     assert encoded.still_playing.tolist() == [[True, True, False, False]]
 
 
+def test_encode_python_observation_returns_rust_filtered_fleet_count() -> None:
+    encoded = encode_python_observation_with_metrics(
+        _python_obs(
+            planets=[
+                [0, 0, 25.0, 50.0, 2.0, 10, 3],
+                [1, 1, 75.0, 50.0, 2.0, 10, 3],
+            ],
+            fleets=[
+                [10, 0, 10.0, 10.0, 0.0, 0, 1],
+                [11, 1, 20.0, 20.0, 0.0, 0, 6],
+                [12, 2, 30.0, 30.0, 0.0, 0, 8],
+            ],
+        ),
+        obs_spec=EntityBasedConfig(),
+        action_spec=ActionPureConfig(min_fleet_size=6),
+        fleet_filter_min_size=8,
+    )
+
+    assert encoded.filtered_fleets == 2
+
+
+def test_encode_entity_based_filters_small_fleets_and_keeps_stranded_players() -> None:
+    planets_in = np.array(
+        [
+            [0, 0, 25.0, 50.0, 2.0, 10, 3],
+            [1, 2, 75.0, 50.0, 2.0, 10, 3],
+        ],
+        dtype=np.float64,
+    )
+    fleets_in = np.array(
+        [
+            [10, 0, 10.0, 10.0, 0.0, 9, 5],
+            [11, 1, 20.0, 20.0, 0.0, 8, 4],
+            [12, 1, 30.0, 30.0, 0.0, 7, 5],
+            [13, 2, 40.0, 40.0, 0.0, 9, 3],
+            [14, 3, 50.0, 50.0, 0.0, 0, 5],
+        ],
+        dtype=np.float64,
+    )
+    comet_planet_ids = np.full((0, MAX_COMETS), -1.0, dtype=np.float64)
+    comet_path_indices = np.zeros(0, dtype=np.float64)
+    comet_path_lengths = np.zeros((0, MAX_COMETS), dtype=np.float64)
+    comet_paths = np.zeros(
+        (0, MAX_COMETS, MAX_COMET_PATH_LENGTH, 2),
+        dtype=np.float64,
+    )
+
+    (
+        _planets,
+        _orbiting_planets,
+        fleets,
+        _comets,
+        entity_mask,
+        _global_features,
+        _can_act,
+        _target_can_act,
+        _max_launch,
+        filtered_fleets,
+    ) = encode_entity_based(
+        planets_in,
+        planets_in,
+        fleets_in,
+        comet_planet_ids,
+        comet_path_indices,
+        comet_path_lengths,
+        comet_paths,
+        0.025,
+        min_fleet_size=6,
+        max_entities=MAX_PLANETS + MAX_COMETS + 5,
+    )
+
+    fleet_mask = entity_mask[ACTION_ENTITY_SLOTS:]
+    assert filtered_fleets == 3
+    np.testing.assert_array_equal(
+        fleet_mask,
+        np.array([True, True, False, False, False]),
+    )
+    np.testing.assert_allclose(
+        fleets[fleet_mask, 4],
+        np.array([-0.4, 0.0], dtype=np.float32),
+        atol=1e-6,
+    )
+
+
 def test_encode_entity_based_matches_expected_masks_and_masked_values() -> None:
     spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 5)
     min_fleet_size = 12
@@ -1276,6 +1361,7 @@ def test_encode_entity_based_matches_expected_masks_and_masked_values() -> None:
         can_act,
         target_can_act,
         max_launch,
+        filtered_fleets,
     ) = encode_entity_based(
         planets_in,
         planets_in,
@@ -1294,7 +1380,7 @@ def test_encode_entity_based_matches_expected_masks_and_masked_values() -> None:
     expected_planet_mask = np.zeros(MAX_PLANETS, dtype=np.bool_)
     expected_planet_mask[:3] = True
     expected_fleet_mask = np.zeros(spec.max_fleets, dtype=np.bool_)
-    expected_fleet_mask[:4] = True
+    expected_fleet_mask[:3] = True
     expected_comet_mask = np.array([True, True, False, False])
     planet_mask = entity_mask[:MAX_PLANETS]
     comet_mask = entity_mask[MAX_PLANETS:ACTION_ENTITY_SLOTS]
@@ -1302,6 +1388,7 @@ def test_encode_entity_based_matches_expected_masks_and_masked_values() -> None:
     np.testing.assert_array_equal(planet_mask, expected_planet_mask)
     np.testing.assert_array_equal(fleet_mask, expected_fleet_mask)
     np.testing.assert_array_equal(comet_mask, expected_comet_mask)
+    assert filtered_fleets == 1
     assert orbiting_planets.shape == (MAX_PLANETS,)
 
     def normalized_position(value: float) -> float:
@@ -1597,24 +1684,11 @@ def test_encode_entity_based_matches_expected_masks_and_masked_values() -> None:
         expected_orbiting_planets,
     )
 
-    speed_8 = normalized_fleet_speed(8)
     speed_27 = normalized_fleet_speed(27)
     speed_64 = normalized_fleet_speed(64)
     speed_125 = normalized_fleet_speed(125)
     base_expected_fleets = np.array(
         [
-            [
-                0.0,
-                1.0,
-                0.0,
-                0.0,
-                normalized_position(0.0),
-                normalized_position(100.0),
-                speed_8,
-                0.0,
-                8.0 / 500.0,
-                normalized_log_ships(8),
-            ],
             [
                 0.0,
                 0.0,
@@ -1664,7 +1738,7 @@ def test_encode_entity_based_matches_expected_masks_and_masked_values() -> None:
                     fleet_motion_features(row[4], row[5], row[6], row[7]),
                 ]
             )
-            for row, ships in zip(base_expected_fleets, [8, 27, 64, 125], strict=True)
+            for row, ships in zip(base_expected_fleets, [27, 64, 125], strict=True)
         ],
         dtype=np.float32,
     )

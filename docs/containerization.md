@@ -121,13 +121,13 @@ routing even when the fallback model is packaged. The image build validates
 Kaggle-targeted Rust compilation directly before artifact generation runs with
 the mounted checkpoint directory.
 
-The packaged agent filters fleets smaller than the configured `min_fleet_size`
-before encoding Kaggle observations. The tradeoff is deliberate: tiny fleets are
-usually low-impact, but enough of them can materially increase inference time
-and trigger fallback routing. The filter keeps one safeguard for player liveness:
-when a player has no current planets and all of their fleets are below the
-threshold, the agent keeps that player's largest fleet instead of dropping that
-player from the encoded state entirely.
+The packaged agent's Rust observation encoder filters fleets smaller than the
+configured `min_fleet_size` while encoding Kaggle observations. The tradeoff is
+deliberate: tiny fleets are usually low-impact, but enough of them can
+materially increase inference time and trigger fallback routing. The filter
+keeps one safeguard for player liveness: when a player has no current planets
+and all of their fleets are below the threshold, the encoder keeps that player's
+largest fleet instead of dropping that player from the encoded state entirely.
 Use `just kaggle-image` only when you want to rebuild or validate the Kaggle
 image without creating a submission tarball.
 

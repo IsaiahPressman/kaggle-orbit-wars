@@ -34,17 +34,11 @@ from owl.rl import (
     PureActions,
     TargetingMode,
     actions_to_kaggle,
-    encode_python_observation,
+    encode_python_observation_with_metrics,
 )
 
 from .checkpoint_quantization import dequantize_model_state_dict
-from .kaggle_observation import (
-    FLEET_ID_INDEX,
-    FLEET_OWNER_INDEX,
-    FLEET_SHIPS_INDEX,
-    PLANET_OWNER_INDEX,
-    KaggleObservation,
-)
+from .kaggle_observation import KaggleObservation
 
 AGENT_CONFIG_PATH = Path(__file__).with_name("agent_config.yaml")
 
@@ -188,17 +182,14 @@ class Agent:
             self.config,
             checkpoint_config.env.action_spec,
         )
-        raw_obs_dict = observation.to_rl_observation()
-        obs_dict = _filter_fleets_by_min_size(
-            raw_obs_dict,
-            min_fleet_size,
-        )
-        filtered_fleets = len(raw_obs_dict["fleets"]) - len(obs_dict["fleets"])
-        obs = encode_python_observation(
+        obs_dict = observation.to_rl_observation()
+        encoded = encode_python_observation_with_metrics(
             obs_dict,
             obs_spec=checkpoint_config.env.obs_spec,
             action_spec=checkpoint_config.env.action_spec,
+            fleet_filter_min_size=min_fleet_size,
         )
+        obs = encoded.obs
         compacted = compact_entities(
             obs,
             compact_planets=_should_compact_planets(checkpoint_config.model),
@@ -261,7 +252,7 @@ class Agent:
             player_values=[float(value) for value in values.tolist()],
             entity_count=entity_count,
             peak_entities=peak_entities,
-            filtered_fleets=filtered_fleets,
+            filtered_fleets=encoded.filtered_fleets,
             remaining_overage_time=observation.remaining_overage_time,
             fallback_triggered=use_fallback,
         )
@@ -352,57 +343,6 @@ def _resolve_min_fleet_size(config: AgentConfig, action_spec: ActionConfig) -> i
     if config.min_fleet_size == "match":
         return action_spec.min_fleet_size
     return config.min_fleet_size
-
-
-def _filter_fleets_by_min_size(
-    obs: dict[str, Any],
-    min_fleet_size: int,
-) -> dict[str, Any]:
-    planet_owners = {
-        planet[PLANET_OWNER_INDEX]
-        for planet in obs["planets"]
-        if planet[PLANET_OWNER_INDEX] >= 0
-    }
-    fleets = obs["fleets"]
-    kept_fleet_ids = {
-        fleet[FLEET_ID_INDEX]
-        for fleet in fleets
-        if fleet[FLEET_SHIPS_INDEX] >= min_fleet_size
-    }
-    kept_fleet_owners = {
-        fleet[FLEET_OWNER_INDEX]
-        for fleet in fleets
-        if fleet[FLEET_ID_INDEX] in kept_fleet_ids and fleet[FLEET_OWNER_INDEX] >= 0
-    }
-    stranded_fleets_by_owner: dict[int, Any] = {}
-    for fleet in fleets:
-        owner = fleet[FLEET_OWNER_INDEX]
-        if (
-            owner < 0
-            or owner in planet_owners
-            or owner in kept_fleet_owners
-            or fleet[FLEET_SHIPS_INDEX] >= min_fleet_size
-        ):
-            continue
-        previous = stranded_fleets_by_owner.get(owner)
-        if previous is None or (
-            fleet[FLEET_SHIPS_INDEX],
-            -fleet[FLEET_ID_INDEX],
-        ) > (
-            previous[FLEET_SHIPS_INDEX],
-            -previous[FLEET_ID_INDEX],
-        ):
-            stranded_fleets_by_owner[owner] = fleet
-
-    kept_fleet_ids.update(
-        fleet[FLEET_ID_INDEX] for fleet in stranded_fleets_by_owner.values()
-    )
-    return {
-        **obs,
-        "fleets": [
-            fleet for fleet in fleets if fleet[FLEET_ID_INDEX] in kept_fleet_ids
-        ],
-    }
 
 
 def _observation_player_count(observation: KaggleObservation) -> int:
