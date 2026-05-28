@@ -53,6 +53,7 @@ from owl.model.base import (
     ModelHiddenState,
     ModelOutput,
     ModelServingOutput,
+    ModelTeacherEvaluation,
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
@@ -700,6 +701,92 @@ class StatelessTransformerV1(BaseModelAPI):
             winner_probabilities=winner_probabilities,
         )
 
+    def evaluate_actions_with_teacher(
+        self,
+        obs: ObsBatch,
+        actions: ModelActions,
+        teacher: BaseModelAPI,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+        dones: torch.Tensor | None = None,
+    ) -> ModelTeacherEvaluation:
+        if not isinstance(teacher, StatelessTransformerV1):
+            raise ValueError(
+                "teacher must be a StatelessTransformerV1-compatible model"
+            )
+        flat_obs, sequence_shape = _flatten_obs_time_if_sequence(obs)
+        flat_actions = _flatten_actions_time_if_sequence(actions, sequence_shape)
+        teacher_batch_size = (
+            flat_obs.planets.shape[0] if sequence_shape is None else sequence_shape[0]
+        )
+        if (
+            teacher.initial_hidden_state(
+                teacher_batch_size,
+                device=flat_obs.planets.device,
+            )
+            is not None
+        ):
+            raise ValueError(
+                "teacher models with recurrent hidden state are not supported"
+            )
+
+        student_encoded, student_next_state = self._encode_distillation_observations(
+            flat_obs,
+            sequence_shape=sequence_shape,
+            hidden_state=hidden_state,
+            dones=dones,
+        )
+        student_values, student_winner_probabilities = self._value_from_encoded(
+            student_encoded,
+            flat_obs,
+        )
+        student_log_probs, student_entropies = self._actor_log_prob(
+            student_encoded,
+            flat_obs,
+            flat_obs.action_mask,
+            flat_actions,
+        )
+        with torch.no_grad():
+            teacher_encoded, _teacher_next_state = (
+                teacher._encode_distillation_observations(
+                    flat_obs,
+                    sequence_shape=sequence_shape,
+                    hidden_state=None,
+                    dones=dones,
+                )
+            )
+            _teacher_values, teacher_winner_probabilities = teacher._value_from_encoded(
+                teacher_encoded,
+                flat_obs,
+            )
+        action_kl = self._actor_kl_divergence(
+            teacher,
+            student_encoded,
+            teacher_encoded,
+            flat_obs,
+            flat_obs.action_mask,
+            flat_actions,
+        )
+        student = ModelEvaluation(
+            log_probs=student_log_probs,
+            entropies=student_entropies,
+            values=student_values,
+            winner_probabilities=student_winner_probabilities,
+            next_hidden_state=student_next_state,
+        )
+        if sequence_shape is not None:
+            student = _unflatten_evaluation(student, sequence_shape)
+            teacher_winner_probabilities = _unflatten_time_tensor(
+                teacher_winner_probabilities,
+                sequence_shape,
+            )
+            action_kl = _unflatten_kl_divergences(action_kl, sequence_shape)
+        return ModelTeacherEvaluation(
+            student=student,
+            action_kl=action_kl,
+            teacher_winner_probabilities=teacher_winner_probabilities,
+        )
+
     def evaluate_action_kl(
         self,
         obs: ObsBatch,
@@ -734,14 +821,15 @@ class StatelessTransformerV1(BaseModelAPI):
             hidden_state=hidden_state,
             dones=dones,
         )
-        teacher_encoded, _teacher_next_state = (
-            teacher._encode_distillation_observations(
-                flat_obs,
-                sequence_shape=sequence_shape,
-                hidden_state=None,
-                dones=dones,
+        with torch.no_grad():
+            teacher_encoded, _teacher_next_state = (
+                teacher._encode_distillation_observations(
+                    flat_obs,
+                    sequence_shape=sequence_shape,
+                    hidden_state=None,
+                    dones=dones,
+                )
             )
-        )
         kl = self._actor_kl_divergence(
             teacher,
             student_encoded,
@@ -1206,16 +1294,21 @@ class StatelessTransformerV1(BaseModelAPI):
                 raise ValueError(
                     "discrete_target_bins actor requires DiscreteTargetBinActions"
                 )
-            return student_actor.kl_divergence(
-                self._discrete_actor_inputs(
-                    student_encoded, obs, adapter=student_adapter
-                ),
-                teacher_actor,
-                teacher._discrete_actor_inputs(
+            student_inputs = self._discrete_actor_inputs(
+                student_encoded,
+                obs,
+                adapter=student_adapter,
+            )
+            with torch.no_grad():
+                teacher_inputs = teacher._discrete_actor_inputs(
                     teacher_encoded,
                     obs,
                     adapter=teacher_adapter,
-                ),
+                )
+            return student_actor.kl_divergence(
+                student_inputs,
+                teacher_actor,
+                teacher_inputs,
                 action_mask.can_act,
                 actions,
             )
@@ -1230,16 +1323,21 @@ class StatelessTransformerV1(BaseModelAPI):
                 raise ValueError(
                     "discrete_targets actor requires DiscreteTargetActions"
                 )
-            return student_actor.kl_divergence(
-                self._discrete_actor_inputs(
-                    student_encoded, obs, adapter=student_adapter
-                ),
-                teacher_actor,
-                teacher._discrete_actor_inputs(
+            student_inputs = self._discrete_actor_inputs(
+                student_encoded,
+                obs,
+                adapter=student_adapter,
+            )
+            with torch.no_grad():
+                teacher_inputs = teacher._discrete_actor_inputs(
                     teacher_encoded,
                     obs,
                     adapter=teacher_adapter,
-                ),
+                )
+            return student_actor.kl_divergence(
+                student_inputs,
+                teacher_actor,
+                teacher_inputs,
                 action_mask.can_act,
                 action_mask.max_launch,
                 actions,
@@ -1251,10 +1349,19 @@ class StatelessTransformerV1(BaseModelAPI):
             raise RuntimeError("pure actor requires a pure action mask")
         if not isinstance(actions, PureActions):
             raise ValueError("pure actor requires PureActions")
+        student_pure_inputs = self._pure_actor_inputs(
+            student_encoded,
+            adapter=student_adapter,
+        )
+        with torch.no_grad():
+            teacher_pure_inputs = teacher._pure_actor_inputs(
+                teacher_encoded,
+                adapter=teacher_adapter,
+            )
         return student_actor.kl_divergence(
-            self._pure_actor_inputs(student_encoded, adapter=student_adapter),
+            student_pure_inputs,
             teacher_actor,
-            teacher._pure_actor_inputs(teacher_encoded, adapter=teacher_adapter),
+            teacher_pure_inputs,
             action_mask.can_act,
             action_mask.max_launch,
             actions,
@@ -1731,6 +1838,64 @@ def _unflatten_kl_divergences(
         components={
             name: _unflatten_time_tensor(component, sequence_shape)
             for name, component in kl.components.items()
+        },
+    )
+
+
+def _unflatten_evaluation(
+    evaluation: ModelEvaluation,
+    sequence_shape: tuple[int, int],
+) -> ModelEvaluation:
+    return ModelEvaluation(
+        log_probs=_unflatten_log_probs(evaluation.log_probs, sequence_shape),
+        entropies=_unflatten_entropies(evaluation.entropies, sequence_shape),
+        values=_unflatten_time_tensor(evaluation.values, sequence_shape),
+        winner_probabilities=_unflatten_time_tensor(
+            evaluation.winner_probabilities,
+            sequence_shape,
+        ),
+        next_hidden_state=evaluation.next_hidden_state,
+    )
+
+
+def _unflatten_log_probs(
+    log_probs: ModelActionLogProbs,
+    sequence_shape: tuple[int, int],
+) -> ModelActionLogProbs:
+    return ModelActionLogProbs(
+        launch=_unflatten_time_tensor(log_probs.launch, sequence_shape),
+        target=(
+            None
+            if log_probs.target is None
+            else _unflatten_time_tensor(log_probs.target, sequence_shape)
+        ),
+        event=_unflatten_time_tensor(log_probs.event, sequence_shape),
+        per_player_entity=_unflatten_time_tensor(
+            log_probs.per_player_entity,
+            sequence_shape,
+        ),
+    )
+
+
+def _unflatten_entropies(
+    entropies: ModelActionEntropies,
+    sequence_shape: tuple[int, int],
+) -> ModelActionEntropies:
+    return ModelActionEntropies(
+        launch=_unflatten_time_tensor(entropies.launch, sequence_shape),
+        target=(
+            None
+            if entropies.target is None
+            else _unflatten_time_tensor(entropies.target, sequence_shape)
+        ),
+        event=_unflatten_time_tensor(entropies.event, sequence_shape),
+        per_player_entity=_unflatten_time_tensor(
+            entropies.per_player_entity,
+            sequence_shape,
+        ),
+        components={
+            name: _unflatten_time_tensor(component, sequence_shape)
+            for name, component in entropies.components.items()
         },
     )
 

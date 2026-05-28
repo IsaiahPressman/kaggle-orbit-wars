@@ -397,7 +397,8 @@ class PureActor(nn.Module):
         safe_angle = torch.where(event_mask, angle, torch.zeros_like(angle))
 
         student_angle_params = self._angle_params(actor_inputs)
-        teacher_angle_params = teacher_actor._angle_params(teacher_inputs)
+        with torch.no_grad():
+            teacher_angle_params = teacher_actor._angle_params(teacher_inputs)
         student_params = self._policy_params_for_angle(
             student_angle_params,
             actor_inputs,
@@ -405,13 +406,14 @@ class PureActor(nn.Module):
             safe_angle,
             min_fleet_size=min_fleet_size,
         )
-        teacher_params = teacher_actor._policy_params_for_angle(
-            teacher_angle_params,
-            teacher_inputs,
-            max_launch,
-            safe_angle,
-            min_fleet_size=min_fleet_size,
-        )
+        with torch.no_grad():
+            teacher_params = teacher_actor._policy_params_for_angle(
+                teacher_angle_params,
+                teacher_inputs,
+                max_launch,
+                safe_angle,
+                min_fleet_size=min_fleet_size,
+            )
         launch_kl = binary_kl_from_logits(
             teacher_params.continue_logits,
             student_params.continue_logits,

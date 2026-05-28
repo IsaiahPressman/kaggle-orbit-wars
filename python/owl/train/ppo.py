@@ -18,6 +18,7 @@ from owl.model import (
     ModelEvaluation,
     ModelHiddenState,
     ModelOutput,
+    ModelTeacherEvaluation,
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
@@ -810,23 +811,29 @@ class PPOTrainer:
         )
 
         with _autocast_context(self.config, self.device):
-            output = _model_evaluate_actions(
-                self.model,
-                batch_obs,
-                batch_actions,
-                hidden_state=batch_hidden_state,
-                dones=segments.dones[idx],
-            )
             if teacher_model is None:
-                teacher_action_kl = None
-            else:
-                teacher_action_kl = _model_evaluate_action_kl(
+                output = _model_evaluate_actions(
                     self.model,
-                    batch_segment_obs,
-                    teacher_model,
-                    batch_segment_actions,
+                    batch_obs,
+                    batch_actions,
                     hidden_state=batch_hidden_state,
                     dones=segments.dones[idx],
+                )
+                teacher_action_kl = None
+                teacher_winner_probabilities = None
+            else:
+                teacher_evaluation = _model_evaluate_actions_with_teacher(
+                    self.model,
+                    batch_segment_obs,
+                    batch_segment_actions,
+                    teacher_model,
+                    hidden_state=batch_hidden_state,
+                    dones=segments.dones[idx],
+                )
+                output = teacher_evaluation.student
+                teacher_action_kl = teacher_evaluation.action_kl
+                teacher_winner_probabilities = (
+                    teacher_evaluation.teacher_winner_probabilities
                 )
         new_logp = _output_logp_for_clip_mode(
             output,
@@ -849,6 +856,8 @@ class PPOTrainer:
         else:
             if teacher_action_kl is None:
                 raise RuntimeError("teacher action KL was not computed")
+            if teacher_winner_probabilities is None:
+                raise RuntimeError("teacher winner probabilities were not computed")
             teacher_kl = _output_action_kl(
                 teacher_action_kl,
                 batch_policy_weight,
@@ -857,13 +866,6 @@ class PPOTrainer:
                 teacher_action_kl,
                 segments.logp[idx],
             )
-            with torch.no_grad(), _autocast_context(self.config, self.device):
-                teacher_winner_probabilities = _teacher_winner_probabilities(
-                    teacher_model,
-                    batch_segment_obs,
-                    batch_segment_actions,
-                    dones=segments.dones[idx],
-                )
             teacher_value_loss_values = _teacher_value_cross_entropy(
                 student_winner_probabilities,
                 teacher_winner_probabilities.view_as(batch_old_values),
@@ -1937,43 +1939,21 @@ def _model_evaluate_actions(
     return model.evaluate_actions(obs, actions, hidden_state=hidden_state, dones=dones)
 
 
-def _model_evaluate_action_kl(
+def _model_evaluate_actions_with_teacher(
     model: BaseModelAPI,
     obs: ObsBatch,
-    teacher: BaseModelAPI,
     actions: ModelActions,
+    teacher: BaseModelAPI,
     *,
     hidden_state: ModelHiddenState | None,
     dones: torch.Tensor,
-) -> ModelActionKLDivergences:
-    return model.evaluate_action_kl(
+) -> ModelTeacherEvaluation:
+    return model.evaluate_actions_with_teacher(
         obs,
-        teacher,
         actions,
+        teacher,
         hidden_state=hidden_state,
         dones=dones,
-    )
-
-
-def _teacher_winner_probabilities(
-    teacher: BaseModelAPI,
-    obs: ObsBatch,
-    actions: ModelActions,
-    *,
-    dones: torch.Tensor,
-) -> torch.Tensor:
-    sequence_shape = obs.planets.shape[:2]
-    output = _model_evaluate_actions(
-        teacher,
-        _flatten_obs_time(obs),
-        _flatten_actions_time(actions),
-        hidden_state=None,
-        dones=dones,
-    )
-    return output.winner_probabilities.reshape(
-        sequence_shape[0],
-        sequence_shape[1],
-        *output.winner_probabilities.shape[1:],
     )
 
 

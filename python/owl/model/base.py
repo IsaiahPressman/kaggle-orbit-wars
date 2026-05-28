@@ -60,6 +60,13 @@ class ModelEvaluation:
 
 
 @dataclass
+class ModelTeacherEvaluation:
+    student: ModelEvaluation
+    action_kl: ModelActionKLDivergences
+    teacher_winner_probabilities: torch.Tensor
+
+
+@dataclass
 class ModelServingOutput:
     actions: ModelActions
     values: torch.Tensor
@@ -114,6 +121,19 @@ class BaseModelAPI(nn.Module, ABC):
     ) -> ModelActionKLDivergences:
         raise NotImplementedError(
             f"{type(self).__name__} does not implement action KL evaluation"
+        )
+
+    def evaluate_actions_with_teacher(
+        self,
+        obs: ObsBatch,
+        actions: ModelActions,
+        teacher: BaseModelAPI,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+        dones: torch.Tensor | None = None,
+    ) -> ModelTeacherEvaluation:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement teacher evaluation"
         )
 
     def serve(

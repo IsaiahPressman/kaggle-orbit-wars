@@ -376,7 +376,11 @@ class DiscreteTargetsActor(nn.Module):
         launch = actions.launch[..., 0]
         target = actions.target[..., 0]
         student_selection = self._selection_params(actor_inputs, can_act)
-        teacher_selection = teacher_actor._selection_params(teacher_inputs, can_act)
+        with torch.no_grad():
+            teacher_selection = teacher_actor._selection_params(
+                teacher_inputs,
+                can_act,
+            )
         source_active = can_act.any(dim=-1) & (max_launch >= min_fleet_size)
         selected_target = target.clamp(0, student_selection.target_values.shape[2] - 1)
         student_params = self._policy_params_for_selected_target(
@@ -386,13 +390,14 @@ class DiscreteTargetsActor(nn.Module):
             selected_target,
             min_fleet_size=min_fleet_size,
         )
-        teacher_params = teacher_actor._policy_params_for_selected_target(
-            teacher_selection,
-            teacher_inputs.source,
-            max_launch,
-            selected_target.clamp(0, teacher_selection.target_values.shape[2] - 1),
-            min_fleet_size=min_fleet_size,
-        )
+        with torch.no_grad():
+            teacher_params = teacher_actor._policy_params_for_selected_target(
+                teacher_selection,
+                teacher_inputs.source,
+                max_launch,
+                selected_target.clamp(0, teacher_selection.target_values.shape[2] - 1),
+                min_fleet_size=min_fleet_size,
+            )
 
         launch_kl = discrete_launch_kl(
             teacher_params,

@@ -9,6 +9,7 @@ from owl.model.base import (
     ModelHiddenState,
     ModelOutput,
     ModelServingOutput,
+    ModelTeacherEvaluation,
 )
 from owl.model.config import ModelConfig
 from owl.model.factory import create_model
@@ -48,6 +49,7 @@ __all__ = [
     "ModelHiddenState",
     "ModelOutput",
     "ModelServingOutput",
+    "ModelTeacherEvaluation",
     "PureActions",
     "RecurrentTransformerV1",
     "RecurrentTransformerV1Config",

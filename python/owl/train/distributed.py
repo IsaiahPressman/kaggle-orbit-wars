@@ -19,6 +19,7 @@ from owl.model import (
     ModelEvaluation,
     ModelHiddenState,
     ModelOutput,
+    ModelTeacherEvaluation,
     StatelessTransformerV1,
 )
 from owl.rl import ObsBatch
@@ -219,6 +220,22 @@ class _DistributedModelDispatch(nn.Module):
                 hidden_state=hidden_state,
                 dones=cast(torch.Tensor | None, dones),
             )
+        if mode == "evaluate_actions_with_teacher":
+            if actions is None:
+                raise ValueError(
+                    "actions are required for evaluate_actions_with_teacher"
+                )
+            if teacher is None:
+                raise ValueError(
+                    "teacher is required for evaluate_actions_with_teacher"
+                )
+            return self.model.evaluate_actions_with_teacher(
+                cast(ObsBatch, obs),
+                cast(ModelActions, actions),
+                cast(BaseModelAPI, teacher),
+                hidden_state=hidden_state,
+                dones=cast(torch.Tensor | None, dones),
+            )
         raise ValueError(f"unknown distributed model mode: {mode}")
 
 
@@ -294,6 +311,28 @@ class DistributedModelAdapter(BaseModelAPI):
             ModelActionKLDivergences,
             self._ddp(
                 "evaluate_action_kl",
+                obs,
+                actions,
+                False,
+                hidden_state,
+                dones,
+                teacher,
+            ),
+        )
+
+    def evaluate_actions_with_teacher(
+        self,
+        obs: ObsBatch,
+        actions: ModelActions,
+        teacher: BaseModelAPI,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+        dones: torch.Tensor | None = None,
+    ) -> ModelTeacherEvaluation:
+        return cast(
+            ModelTeacherEvaluation,
+            self._ddp(
+                "evaluate_actions_with_teacher",
                 obs,
                 actions,
                 False,

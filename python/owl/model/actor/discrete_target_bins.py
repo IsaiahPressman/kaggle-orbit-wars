@@ -220,7 +220,11 @@ class DiscreteTargetBinsActor(nn.Module):
             ),
         )
         student_selection = self._selection_params(actor_inputs, can_act)
-        teacher_selection = teacher_actor._selection_params(teacher_inputs, can_act)
+        with torch.no_grad():
+            teacher_selection = teacher_actor._selection_params(
+                teacher_inputs,
+                can_act,
+            )
         source_active = can_act.flatten(start_dim=-2).any(dim=-1)
         target_valid = can_act.any(dim=-1)
         target_kl = categorical_kl_from_logits(
@@ -242,12 +246,13 @@ class DiscreteTargetBinsActor(nn.Module):
             can_act,
             target_index,
         )
-        teacher_params = teacher_actor._policy_params_for_selected_target(
-            teacher_selection,
-            teacher_inputs.source,
-            can_act,
-            target_index.clamp(0, teacher_selection.target_values.shape[2] - 1),
-        )
+        with torch.no_grad():
+            teacher_params = teacher_actor._policy_params_for_selected_target(
+                teacher_selection,
+                teacher_inputs.source,
+                can_act,
+                target_index.clamp(0, teacher_selection.target_values.shape[2] - 1),
+            )
         selected_bin_mask = gather_selected_bin_mask(can_act, target_index)
         fleet_bin_kl = categorical_kl_from_logits(
             teacher_params.fleet_bin_logits,

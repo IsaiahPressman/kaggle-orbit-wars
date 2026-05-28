@@ -536,15 +536,19 @@ averages that per-state value over active states before applying
 minibatches from stored rollout segments. Teacher models must be stateless;
 trainers reject teachers that require recurrent hidden state.
 
-`evaluate_action_kl(obs, teacher, actions)` re-encodes the replay segment with
-both models and compares the policy distributions using the same masks and
-factorization gates used by PPO replay. Non-acting source rows contribute zero
-KL. For binary discrete-target launch mode, no-launch replay rows include only
-the Bernoulli launch KL; target and fleet-size KL are computed only for rows
-where the replayed action launched. Discrete target-bin KL compares the target
-categorical and the selected target's fleet-bin categorical. Pure-action KL
-compares launch, angle, and selected fleet-size distributions for launched
-rows.
+When a teacher is active, PPO calls `evaluate_actions_with_teacher(...)` instead
+of separate student replay and KL passes. The method encodes the student once,
+returns the normal PPO replay log-probs, entropy, and values from that encoding,
+and encodes the teacher once under `torch.no_grad()` to produce teacher value
+targets and KL reference distributions. `evaluate_action_kl(...)` remains as a
+compatibility path, but PPO updates do not use it. The KL comparison uses the
+same masks and factorization gates used by PPO replay. Non-acting source rows
+contribute zero KL. For binary discrete-target launch mode, no-launch replay
+rows include only the Bernoulli launch KL; target and fleet-size KL are computed
+only for rows where the replayed action launched. Discrete target-bin KL
+compares the target categorical and the selected target's fleet-bin categorical.
+Pure-action KL compares launch, angle, and selected fleet-size distributions for
+launched rows.
 
 Fleet-size KL is computed on the selected truncated logistic mixture. Matching
 mixture counts use aligned component terms; incompatible mixture counts fall

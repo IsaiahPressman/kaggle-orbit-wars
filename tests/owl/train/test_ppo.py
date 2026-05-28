@@ -1839,6 +1839,97 @@ def test_stateless_transformer_train_iteration_runs_with_teacher() -> None:
     assert metrics["teacher/value_cross_entropy"] >= 0.0
 
 
+def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(0)
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model_config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(
+            n_action_mixtures=2,
+            entropy_ship_quantiles=8,
+        ),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    model = StatelessTransformerV1(
+        model_config,
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    teacher_model = StatelessTransformerV1(
+        model_config,
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    model.reset_parameters()
+    teacher_model.reset_parameters()
+    combined_calls = 0
+    teacher_encode_grad_enabled: list[bool] = []
+    teacher_actor_input_grad_enabled: list[bool] = []
+    original_combined = model.evaluate_actions_with_teacher
+    original_teacher_encode = teacher_model.encode_observations
+    original_teacher_actor_inputs = teacher_model._discrete_actor_inputs
+
+    def combined_wrapper(*args: object, **kwargs: object) -> object:
+        nonlocal combined_calls
+        combined_calls += 1
+        return original_combined(*args, **kwargs)
+
+    def fail_evaluate_actions(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("student evaluate_actions should not be called")
+
+    def fail_evaluate_action_kl(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("student evaluate_action_kl should not be called")
+
+    def fail_teacher_evaluate_actions(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("teacher evaluate_actions should not be called")
+
+    def teacher_encode_wrapper(*args: object, **kwargs: object) -> object:
+        teacher_encode_grad_enabled.append(torch.is_grad_enabled())
+        return original_teacher_encode(*args, **kwargs)
+
+    def teacher_actor_inputs_wrapper(*args: object, **kwargs: object) -> object:
+        teacher_actor_input_grad_enabled.append(torch.is_grad_enabled())
+        return original_teacher_actor_inputs(*args, **kwargs)
+
+    monkeypatch.setattr(model, "evaluate_actions_with_teacher", combined_wrapper)
+    monkeypatch.setattr(model, "evaluate_actions", fail_evaluate_actions)
+    monkeypatch.setattr(model, "evaluate_action_kl", fail_evaluate_action_kl)
+    monkeypatch.setattr(
+        teacher_model,
+        "evaluate_actions",
+        fail_teacher_evaluate_actions,
+    )
+    monkeypatch.setattr(teacher_model, "encode_observations", teacher_encode_wrapper)
+    monkeypatch.setattr(
+        teacher_model,
+        "_discrete_actor_inputs",
+        teacher_actor_inputs_wrapper,
+    )
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segments_per_minibatch=1,
+        ),
+        device=torch.device("cpu"),
+        teacher_model=teacher_model,
+        teacher_active=True,
+    )
+
+    trainer.train_iteration()
+
+    assert combined_calls > 0
+    assert teacher_encode_grad_enabled
+    assert not any(teacher_encode_grad_enabled)
+    assert teacher_actor_input_grad_enabled
+    assert not any(teacher_actor_input_grad_enabled)
+
+
 def test_trainer_rejects_recurrent_teacher() -> None:
     torch.manual_seed(0)
     env = TinyDiscreteTargetEnv(n_envs=2)
