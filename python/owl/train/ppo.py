@@ -1262,29 +1262,57 @@ def _distributed_ppo_loss_metrics(
     ent_coef: float,
     context: DistributedContext,
 ) -> tuple[_PPOLossMetrics, torch.Tensor]:
-    policy_loss = _distributed_weighted_mean(
-        policy_loss_values.detach(),
-        policy_weight,
-        context,
-    )
-    value_loss = _distributed_weighted_mean(
-        value_loss_values.detach(),
+    teacher_value_weight = _teacher_value_state_weight(
         value_weight,
+        dtype=teacher_value_loss_values.dtype,
+    )
+    if teacher_value_loss_values.shape != teacher_value_weight.shape:
+        raise ValueError(
+            "teacher value loss values must have shape "
+            f"{tuple(teacher_value_weight.shape)}, "
+            f"got {tuple(teacher_value_loss_values.shape)}"
+        )
+    policy_denominator_local = policy_weight.sum().to(dtype=policy_loss_values.dtype)
+    value_denominator_local = value_weight.sum().to(dtype=value_loss_values.dtype)
+    teacher_value_denominator_local = teacher_value_weight.sum()
+    reduced_sums = all_reduce_sum(
+        torch.stack(
+            [
+                (policy_loss_values.detach() * policy_weight).sum(),
+                (value_loss_values.detach() * value_weight).sum(),
+                (entropy_values.detach() * policy_weight).sum(),
+                (teacher_kl_values.detach() * policy_weight).sum(),
+                (teacher_value_loss_values.detach() * teacher_value_weight).sum(),
+                (approx_kl_values.detach() * policy_weight).sum(),
+                (clipfrac_values.detach() * policy_weight).sum(),
+                (ratio.detach() * policy_weight).sum(),
+                (logratio.detach() * policy_weight).sum(),
+                policy_denominator_local,
+                value_denominator_local,
+                teacher_value_denominator_local,
+            ]
+        ),
         context,
     )
-    entropy_mean = _distributed_weighted_mean(
-        entropy_values.detach(),
-        policy_weight,
-        context,
-    )
-    teacher_kl = _distributed_weighted_mean(
-        teacher_kl_values.detach(),
-        policy_weight,
-        context,
-    )
-    teacher_value_cross_entropy = _distributed_teacher_value_weighted_mean(
-        teacher_value_loss_values.detach(),
-        value_weight,
+    policy_denominator = reduced_sums[9].clamp_min(1e-8)
+    value_denominator = reduced_sums[10].clamp_min(1e-8)
+    teacher_value_denominator = reduced_sums[11].clamp_min(1e-8)
+    policy_loss = reduced_sums[0] / policy_denominator
+    value_loss = reduced_sums[1] / value_denominator
+    entropy_mean = reduced_sums[2] / policy_denominator
+    teacher_kl = reduced_sums[3] / policy_denominator
+    teacher_value_cross_entropy = reduced_sums[4] / teacher_value_denominator
+    approx_kl = reduced_sums[5] / policy_denominator
+    clipfrac = reduced_sums[6] / policy_denominator
+    ratio_mean = reduced_sums[7] / policy_denominator
+    logratio_mean = reduced_sums[8] / policy_denominator
+    reduced_maxes = all_reduce_max(
+        torch.stack(
+            [
+                _masked_max_or_zero(ratio.detach(), policy_weight > 0),
+                _masked_max_or_zero(logratio.detach().abs(), policy_weight > 0),
+            ]
+        ),
         context,
     )
     teacher_kl_loss = teacher_kl_coef * teacher_kl
@@ -1296,30 +1324,28 @@ def _distributed_ppo_loss_metrics(
         + teacher_kl_loss
         + teacher_value_loss
     )
-    backward_policy_loss = _distributed_backward_weighted_mean(
-        policy_loss_values,
-        policy_weight,
-        context,
+    backward_policy_loss = (
+        (policy_loss_values * policy_weight).sum()
+        * context.world_size
+        / policy_denominator
     )
-    backward_value_loss = _distributed_backward_weighted_mean(
-        value_loss_values,
-        value_weight,
-        context,
+    backward_value_loss = (
+        (value_loss_values * value_weight).sum()
+        * context.world_size
+        / value_denominator
     )
-    backward_entropy = _distributed_backward_weighted_mean(
-        entropy_values,
-        policy_weight,
-        context,
+    backward_entropy = (
+        (entropy_values * policy_weight).sum() * context.world_size / policy_denominator
     )
-    backward_teacher_kl = _distributed_backward_weighted_mean(
-        teacher_kl_values,
-        policy_weight,
-        context,
+    backward_teacher_kl = (
+        (teacher_kl_values * policy_weight).sum()
+        * context.world_size
+        / policy_denominator
     )
-    backward_teacher_value = _distributed_backward_teacher_value_weighted_mean(
-        teacher_value_loss_values,
-        value_weight,
-        context,
+    backward_teacher_value = (
+        (teacher_value_loss_values * teacher_value_weight).sum()
+        * context.world_size
+        / teacher_value_denominator
     )
     backward_loss = (
         backward_policy_loss
@@ -1340,36 +1366,12 @@ def _distributed_ppo_loss_metrics(
             entropy=entropy_mean,
             teacher_kl=teacher_kl,
             teacher_value_cross_entropy=teacher_value_cross_entropy,
-            approx_kl=_distributed_weighted_mean(
-                approx_kl_values.detach(),
-                policy_weight,
-                context,
-            ),
-            clipfrac=_distributed_weighted_mean(
-                clipfrac_values,
-                policy_weight,
-                context,
-            ),
-            ratio_mean=_distributed_weighted_mean(
-                ratio.detach(),
-                policy_weight,
-                context,
-            ),
-            ratio_max=_distributed_masked_max_or_zero(
-                ratio.detach(),
-                policy_weight > 0,
-                context,
-            ),
-            logratio_mean=_distributed_weighted_mean(
-                logratio.detach(),
-                policy_weight,
-                context,
-            ),
-            logratio_abs_max=_distributed_masked_max_or_zero(
-                logratio.detach().abs(),
-                policy_weight > 0,
-                context,
-            ),
+            approx_kl=approx_kl,
+            clipfrac=clipfrac,
+            ratio_mean=ratio_mean,
+            ratio_max=reduced_maxes[0],
+            logratio_mean=logratio_mean,
+            logratio_abs_max=reduced_maxes[1],
         ),
         backward_loss,
     )
