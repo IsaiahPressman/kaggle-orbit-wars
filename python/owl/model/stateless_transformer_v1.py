@@ -198,6 +198,13 @@ class EncodedObservations:
     critic_value_hidden: torch.Tensor
 
 
+@dataclass(frozen=True)
+class _ValueDistillationOutput:
+    values: torch.Tensor
+    winner_probabilities: torch.Tensor
+    winner_log_probabilities: torch.Tensor
+
+
 class StatelessTransformerV1(BaseModelAPI):
     def __init__(
         self,
@@ -740,10 +747,22 @@ class StatelessTransformerV1(BaseModelAPI):
             hidden_state=hidden_state,
             dones=dones,
         )
-        student_values, student_winner_probabilities = self._value_from_encoded(
-            student_encoded,
-            flat_obs,
-        )
+        student_winner_log_probabilities: torch.Tensor | None = None
+        if compute_teacher_value:
+            student_value_output = self._value_distillation_from_encoded(
+                student_encoded,
+                flat_obs,
+            )
+            student_values = student_value_output.values
+            student_winner_probabilities = student_value_output.winner_probabilities
+            student_winner_log_probabilities = (
+                student_value_output.winner_log_probabilities
+            )
+        else:
+            student_values, student_winner_probabilities = self._value_from_encoded(
+                student_encoded,
+                flat_obs,
+            )
         student_actor_inputs = (
             self._actor_inputs_for_encoded(student_encoded, flat_obs)
             if compute_teacher_action_kl and not self.player_count_adapters
@@ -799,12 +818,18 @@ class StatelessTransformerV1(BaseModelAPI):
                     teacher_winner_probabilities,
                     sequence_shape,
                 )
+            if student_winner_log_probabilities is not None:
+                student_winner_log_probabilities = _unflatten_time_tensor(
+                    student_winner_log_probabilities,
+                    sequence_shape,
+                )
             if action_kl is not None:
                 action_kl = _unflatten_kl_divergences(action_kl, sequence_shape)
         return ModelTeacherEvaluation(
             student=student,
             action_kl=action_kl,
             teacher_winner_probabilities=teacher_winner_probabilities,
+            student_winner_log_probabilities=student_winner_log_probabilities,
         )
 
     def evaluate_action_kl(
@@ -904,6 +929,18 @@ class StatelessTransformerV1(BaseModelAPI):
             return self._value_by_player_count(encoded, obs)
         return self._critic(encoded.critic_value_hidden, obs.still_playing)
 
+    def _value_distillation_from_encoded(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+    ) -> _ValueDistillationOutput:
+        if self.player_count_adapters:
+            return self._value_distillation_by_player_count(encoded, obs)
+        return self._critic_distillation(
+            encoded.critic_value_hidden,
+            obs.still_playing,
+        )
+
     def _value_by_player_count(
         self,
         encoded: EncodedObservations,
@@ -928,6 +965,42 @@ class StatelessTransformerV1(BaseModelAPI):
         probabilities = _merge_tensors_by_batch(batch_size, probability_parts)
         return values, probabilities
 
+    def _value_distillation_by_player_count(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+    ) -> _ValueDistillationOutput:
+        value_parts: list[tuple[torch.Tensor, torch.Tensor]] = []
+        probability_parts: list[tuple[torch.Tensor, torch.Tensor]] = []
+        log_probability_parts: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for player_count, batch_indices in self._player_count_index_groups(
+            obs.still_playing
+        ):
+            adapter = self._player_count_adapter(player_count)
+            output = self._critic_distillation(
+                _batch_select(encoded.critic_value_hidden, batch_indices),
+                _batch_select(obs.still_playing, batch_indices),
+                adapter=adapter,
+            )
+            value_parts.append((batch_indices, output.values))
+            probability_parts.append((batch_indices, output.winner_probabilities))
+            log_probability_parts.append(
+                (batch_indices, output.winner_log_probabilities)
+            )
+
+        batch_size = obs.still_playing.shape[0]
+        return _ValueDistillationOutput(
+            values=_merge_tensors_by_batch(batch_size, value_parts),
+            winner_probabilities=_merge_tensors_by_batch(
+                batch_size,
+                probability_parts,
+            ),
+            winner_log_probabilities=_merge_tensors_by_batch(
+                batch_size,
+                log_probability_parts,
+            ),
+        )
+
     def _critic(
         self,
         player_hidden: torch.Tensor,
@@ -935,6 +1008,38 @@ class StatelessTransformerV1(BaseModelAPI):
         *,
         adapter: PlayerCountAdapter | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        logits = self._critic_logits(player_hidden, still_playing, adapter=adapter)
+        probabilities = masked_softmax(logits, still_playing, dim=-1)
+        values = 2.0 * probabilities - 1.0
+        return values, probabilities
+
+    def _critic_distillation(
+        self,
+        player_hidden: torch.Tensor,
+        still_playing: torch.Tensor,
+        *,
+        adapter: PlayerCountAdapter | None = None,
+    ) -> _ValueDistillationOutput:
+        logits = self._critic_logits(player_hidden, still_playing, adapter=adapter)
+        masked_logits = logits.masked_fill(
+            ~still_playing,
+            torch.finfo(logits.dtype).min,
+        )
+        winner_log_probabilities = F.log_softmax(masked_logits, dim=-1)
+        winner_probabilities = winner_log_probabilities.exp()
+        return _ValueDistillationOutput(
+            values=2.0 * winner_probabilities - 1.0,
+            winner_probabilities=winner_probabilities,
+            winner_log_probabilities=winner_log_probabilities,
+        )
+
+    def _critic_logits(
+        self,
+        player_hidden: torch.Tensor,
+        still_playing: torch.Tensor,
+        *,
+        adapter: PlayerCountAdapter | None = None,
+    ) -> torch.Tensor:
         if still_playing.shape != player_hidden.shape[:2]:
             raise ValueError(
                 "still_playing must have shape "
@@ -945,10 +1050,7 @@ class StatelessTransformerV1(BaseModelAPI):
                 "still_playing must include at least one player per batch row"
             )
 
-        logits = self._critic_head(adapter)(player_hidden).squeeze(-1)
-        probabilities = masked_softmax(logits, still_playing, dim=-1)
-        values = 2.0 * probabilities - 1.0
-        return values, probabilities
+        return self._critic_head(adapter)(player_hidden).squeeze(-1)
 
     def _pure_actor_inputs(
         self,

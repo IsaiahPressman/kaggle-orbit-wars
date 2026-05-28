@@ -831,6 +831,7 @@ class PPOTrainer:
                 )
                 teacher_action_kl = None
                 teacher_winner_probabilities = None
+                student_winner_log_probabilities = None
             else:
                 teacher_evaluation = _model_evaluate_actions_with_teacher(
                     self.model,
@@ -847,6 +848,9 @@ class PPOTrainer:
                 teacher_winner_probabilities = (
                     teacher_evaluation.teacher_winner_probabilities
                 )
+                student_winner_log_probabilities = (
+                    teacher_evaluation.student_winner_log_probabilities
+                )
         new_logp = _output_logp_for_clip_mode(
             output,
             self.config.ppo_clip_mode,
@@ -858,9 +862,6 @@ class PPOTrainer:
         )
         entropy_components = _output_entropy_components(output, segments.logp[idx])
         new_values = _output_values(output).view_as(batch_old_values)
-        student_winner_probabilities = output.winner_probabilities.view_as(
-            batch_old_values
-        )
         if teacher_model is None:
             teacher_kl = torch.zeros_like(entropy)
             teacher_kl_components: dict[str, torch.Tensor] = {}
@@ -884,9 +885,11 @@ class PPOTrainer:
                 teacher_value_loss_values = torch.zeros_like(batch_old_values[..., 0])
             elif teacher_winner_probabilities is None:
                 raise RuntimeError("teacher winner probabilities were not computed")
+            elif student_winner_log_probabilities is None:
+                raise RuntimeError("student winner log probabilities were not computed")
             else:
                 teacher_value_loss_values = _teacher_value_cross_entropy(
-                    student_winner_probabilities,
+                    student_winner_log_probabilities.view_as(batch_old_values),
                     teacher_winner_probabilities.view_as(batch_old_values),
                 )
 
@@ -1984,12 +1987,11 @@ def _model_evaluate_actions_with_teacher(
 
 
 def _teacher_value_cross_entropy(
-    student_winner_probabilities: torch.Tensor,
+    student_winner_log_probabilities: torch.Tensor,
     teacher_winner_probabilities: torch.Tensor,
 ) -> torch.Tensor:
     return (
-        -teacher_winner_probabilities.detach()
-        * student_winner_probabilities.clamp_min(1e-8).log()
+        -teacher_winner_probabilities.detach() * student_winner_log_probabilities
     ).sum(dim=-1)
 
 

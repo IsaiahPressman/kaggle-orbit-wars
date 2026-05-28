@@ -64,6 +64,7 @@ class ModelTeacherEvaluation:
     student: ModelEvaluation
     action_kl: ModelActionKLDivergences | None
     teacher_winner_probabilities: torch.Tensor | None
+    student_winner_log_probabilities: torch.Tensor | None
 
 
 @dataclass
