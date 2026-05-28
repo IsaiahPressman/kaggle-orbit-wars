@@ -163,13 +163,15 @@ Both discrete target specs default to `targeting_mode: full_mask`; set
 controlling whether sun-crossing decoded launches are replaced with no-ops.
 Set `rl.teacher_mode` to `fixed` or `last_best` to add student-teacher
 stabilization losses. `fixed` requires `rl.teacher_init`, while `last_best`
-uses the current last-best snapshot; when no `teacher_init` is provided, the
-last-best teacher losses stay disabled until the current model first replaces
-`checkpoint_last_best.pt`. `rl.teacher_init` points at a training checkpoint
-whose adjacent `config.yaml` is used to construct the teacher model before
-loading weights. The teacher architecture may differ from the student, but the
-observation and action specs must match exactly, and actor factorization details
-such as discrete-target launch mode or target-bin count must be compatible.
+uses the current last-best snapshot. On randomly initialized fresh launches
+with no `teacher_init`, the last-best teacher losses stay disabled until the
+current model first replaces `checkpoint_last_best.pt`; fresh launches from
+`--load-model-weights` use that starting checkpoint as the initial last-best
+teacher. `rl.teacher_init` points at a training checkpoint whose adjacent
+`config.yaml` is used to construct the teacher model before loading weights.
+The teacher architecture may differ from the student, but the observation and
+action specs must match exactly, and actor factorization details such as
+discrete-target launch mode or target-bin count must be compatible.
 `rl.teacher_kl_coef` and `rl.teacher_value_coef` weight the action KL and
 per-state winner-distribution cross-entropy stabilization losses; both default
 to `0.005`.

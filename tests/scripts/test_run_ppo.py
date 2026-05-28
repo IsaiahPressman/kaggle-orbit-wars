@@ -4,6 +4,7 @@ import importlib.util
 import sys
 import time
 from argparse import Namespace
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -352,6 +353,124 @@ def test_resolve_teacher_init_path_uses_config_directory(tmp_path: Path) -> None
     resolved = run_ppo._resolve_teacher_init_path(cfg, tmp_path / "config.yaml")
 
     assert resolved.rl.teacher_init == (tmp_path / "teachers/checkpoint.pt").resolve()
+
+
+def test_fresh_launch_from_checkpoint_uses_starting_checkpoint_as_teacher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _full_config()
+    cfg = cfg.model_copy(
+        update={"rl": cfg.rl.model_copy(update={"teacher_mode": "last_best"})}
+    )
+    config_path = tmp_path / "config.yaml"
+    cfg.to_file(config_path)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.touch()
+    output_dir = tmp_path / "runs"
+    run_dir = output_dir / "run"
+    model = torch.nn.Linear(1, 1)
+    model.weight.data.fill_(1.0)
+    model.bias.data.fill_(1.0)
+    trainer_ref: dict[str, object] = {}
+    session_ref: dict[str, object] = {}
+
+    class FakeEnv:
+        def __init__(
+            self,
+            *,
+            n_envs: int,
+            obs_spec: object,
+            action_spec: object,
+            two_player_weight: float,
+            pin_memory: bool,
+        ) -> None:
+            del two_player_weight, pin_memory
+            self.n_envs = n_envs
+            self.obs_spec = obs_spec
+            self.action_spec = action_spec
+
+    class FakeTrainer:
+        def __init__(self, **kwargs: object) -> None:
+            self.model = kwargs["model"]
+            self.teacher_updates: list[tuple[torch.nn.Module, bool, bool]] = []
+            trainer_ref["trainer"] = self
+
+        def load_model_weights(self, path: Path) -> run_ppo.PPOCheckpointMetadata:
+            assert path == checkpoint_path
+            loaded_model = self.model
+            assert isinstance(loaded_model, torch.nn.Linear)
+            loaded_model.weight.data.fill_(7.0)
+            loaded_model.bias.data.fill_(7.0)
+            return run_ppo.PPOCheckpointMetadata(env_steps=123)
+
+        def set_teacher_model(
+            self,
+            teacher_model: torch.nn.Module | None,
+            *,
+            active: bool,
+            match_student_hidden_state: bool = False,
+        ) -> None:
+            assert teacher_model is not None
+            self.teacher_updates.append(
+                (teacher_model, active, match_student_hidden_state)
+            )
+
+    def fake_create_run_dir(output: Path) -> Path:
+        assert output == output_dir
+        run_dir.mkdir(parents=True)
+        return run_dir
+
+    def fake_run_training_session(**kwargs: object) -> None:
+        session_ref.update(kwargs)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_ppo.py",
+            str(config_path),
+            str(output_dir),
+            "--load-model-weights",
+            str(checkpoint_path),
+            "--log-mode",
+            "debug",
+        ],
+    )
+    monkeypatch.setattr(run_ppo, "assert_release_build", lambda: None)
+    monkeypatch.setattr(run_ppo, "configure_torch", lambda: None)
+    monkeypatch.setattr(
+        run_ppo,
+        "distributed_session",
+        lambda: nullcontext(DistributedContext.single_process_cpu()),
+    )
+    monkeypatch.setattr(run_ppo, "_create_run_dir", fake_create_run_dir)
+    monkeypatch.setattr(run_ppo, "VectorizedEnv", FakeEnv)
+    monkeypatch.setattr(run_ppo, "_create_model", lambda *_args, **_kwargs: model)
+    monkeypatch.setattr(run_ppo, "configure_model_compile", lambda *_args: 0)
+    monkeypatch.setattr(
+        run_ppo,
+        "create_optimizer",
+        lambda trainer_model, _cfg: torch.optim.SGD(trainer_model.parameters(), lr=0.1),
+    )
+    monkeypatch.setattr(run_ppo, "create_lr_scheduler", lambda *_args: None)
+    monkeypatch.setattr(run_ppo, "PPOTrainer", FakeTrainer)
+    monkeypatch.setattr(run_ppo, "_run_training_session", fake_run_training_session)
+
+    run_ppo.main()
+
+    trainer = trainer_ref["trainer"]
+    assert isinstance(trainer, FakeTrainer)
+    assert len(trainer.teacher_updates) == 1
+    teacher_model, active, match_student_hidden_state = trainer.teacher_updates[0]
+    assert active
+    assert not match_student_hidden_state
+    assert teacher_model is not model
+    assert teacher_model.weight.item() == pytest.approx(7.0)
+    assert session_ref["start_env_steps"] == 123
+    last_best_model = session_ref["last_best_model"]
+    assert isinstance(last_best_model, torch.nn.Linear)
+    assert last_best_model.weight.item() == pytest.approx(7.0)
 
 
 def test_resolve_resume_launch_prefers_final_checkpoint(tmp_path: Path) -> None:

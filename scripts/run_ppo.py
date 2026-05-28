@@ -206,6 +206,8 @@ def main() -> None:
                 launch.load_model_weights_path
             )
             start_env_steps = checkpoint_metadata.env_steps
+            if cfg.rl.teacher_mode == "last_best":
+                last_best_model = _clone_eval_model(unwrap_model(model))
         if (
             isinstance(launch, FreshLaunch)
             and cfg.rl.teacher_mode == "last_best"
