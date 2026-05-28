@@ -45,6 +45,7 @@ from owl.train.distributed import (
     all_gather_object,
     all_reduce_max,
     all_reduce_sum,
+    model_no_sync_context,
     unwrap_model,
 )
 from owl.train.metrics import (
@@ -712,17 +713,19 @@ class PPOTrainer:
             if sample_index % accumulation_steps == 0:
                 self.optimizer.zero_grad(set_to_none=True)
             sampled_segments += int(sample_indices.numel())
-            update = self._update_minibatch(
-                segments,
-                advantages,
-                returns,
-                policy_mask,
-                value_mask,
-                sample_indices,
-                value_clip_anchor=current_values,
-                loss_scale=1.0 / accumulation_steps,
-                step_optimizer=False,
-            )
+            sync_gradients = (sample_index + 1) % accumulation_steps == 0
+            with model_no_sync_context(self.model, enabled=not sync_gradients):
+                update = self._update_minibatch(
+                    segments,
+                    advantages,
+                    returns,
+                    policy_mask,
+                    value_mask,
+                    sample_indices,
+                    value_clip_anchor=current_values,
+                    loss_scale=1.0 / accumulation_steps,
+                    step_optimizer=False,
+                )
             loss_metrics.append(update.metrics)
             current_values[update.indices] = update.new_values
             target_kl_exceeded = target_kl_exceeded or update.target_kl_exceeded

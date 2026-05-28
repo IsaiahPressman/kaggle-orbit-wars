@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Self, TypeVar, cast
 
@@ -262,6 +262,9 @@ class DistributedModelAdapter(BaseModelAPI):
     def wrapped_model(self) -> BaseModelAPI:
         return self._ddp.module.model
 
+    def no_sync(self) -> AbstractContextManager[None]:
+        return self._ddp.no_sync()
+
     def forward(
         self,
         obs: ObsBatch,
@@ -387,6 +390,18 @@ def wrap_model_for_distributed(
     if not context.initialized:
         return model
     return DistributedModelAdapter(model, context)
+
+
+def model_no_sync_context(
+    model: BaseModelAPI,
+    *,
+    enabled: bool,
+) -> AbstractContextManager[None]:
+    if not enabled:
+        return nullcontext()
+    if isinstance(model, DistributedModelAdapter):
+        return model.no_sync()
+    return nullcontext()
 
 
 def _requires_unused_parameter_detection(model: BaseModelAPI) -> bool:

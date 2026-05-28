@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import Any, Literal
 
@@ -1402,6 +1403,84 @@ def test_ppo_epoch_one_uses_shuffled_single_pass_minibatches(
     assert "sampling/minibatch_exposure" not in metrics
     assert sampled_segments == 6
     assert metrics["policy/target_kl_exceeded"] == pytest.approx(0.0)
+
+
+def test_update_uses_no_sync_for_gradient_accumulation_microbatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(11)
+    env = TinyOrbitEnv(n_envs=4)
+    model = TinyOrbitModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segments_per_minibatch=1,
+            gradient_accumulation_steps=2,
+        ),
+        device=torch.device("cpu"),
+    )
+    trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+    policy_mask = ppo._policy_mask(segments.obs)
+    value_mask = segments.obs.still_playing
+    advantages = torch.ones_like(segments.rewards)
+    returns = advantages + segments.values
+    context_enabled: list[bool] = []
+    minibatch_context_enabled: list[bool] = []
+    active_contexts: list[bool] = []
+
+    @contextmanager
+    def fake_model_no_sync_context(
+        model_arg: BaseModelAPI,
+        *,
+        enabled: bool,
+    ) -> object:
+        assert model_arg is model
+        context_enabled.append(enabled)
+        active_contexts.append(enabled)
+        try:
+            yield
+        finally:
+            active_contexts.pop()
+
+    def fake_update_minibatch(
+        segments: ppo._PPORolloutSegments,
+        advantages: torch.Tensor,  # noqa: ARG001
+        returns: torch.Tensor,  # noqa: ARG001
+        policy_mask: torch.Tensor,  # noqa: ARG001
+        value_mask: torch.Tensor,  # noqa: ARG001
+        indices: torch.Tensor,
+        *,
+        value_clip_anchor: torch.Tensor,  # noqa: ARG001
+        loss_scale: float = 1.0,  # noqa: ARG001
+        step_optimizer: bool = True,  # noqa: ARG001
+    ) -> ppo._PPOUpdateResult:
+        assert len(active_contexts) == 1
+        minibatch_context_enabled.append(active_contexts[-1])
+        zero = segments.logp.new_zeros(())
+        return ppo._PPOUpdateResult(
+            metrics=_zero_loss_metrics(zero),
+            indices=indices,
+            new_values=segments.values[indices],
+            grad_norm=zero,
+        )
+
+    monkeypatch.setattr(ppo, "model_no_sync_context", fake_model_no_sync_context)
+    monkeypatch.setattr(trainer, "_update_minibatch", fake_update_minibatch)
+
+    trainer._update(
+        segments,
+        advantages,
+        returns,
+        policy_mask,
+        value_mask,
+    )
+
+    assert context_enabled == [True, False, True, False]
+    assert minibatch_context_enabled == [True, False, True, False]
 
 
 def test_update_reports_target_kl_guard_when_exceeded(

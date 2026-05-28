@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import pytest
 import torch
 from owl.model import (
@@ -30,6 +32,7 @@ from owl.train.distributed import (
     all_reduce_sum,
     broadcast_object,
     distributed_session,
+    model_no_sync_context,
     unwrap_model,
     wrap_model_for_distributed,
 )
@@ -102,9 +105,20 @@ class _FakeDDP(torch.nn.Module):
         self.device_ids = device_ids
         self.output_device = output_device
         self.find_unused_parameters = find_unused_parameters
+        self.no_sync_entries = 0
+        self.no_sync_active = False
 
     def forward(self, *args: object) -> object:
         return self.module(*args)
+
+    @contextmanager
+    def no_sync(self) -> object:
+        self.no_sync_entries += 1
+        self.no_sync_active = True
+        try:
+            yield
+        finally:
+            self.no_sync_active = False
 
 
 def _actions(n_envs: int) -> PureActions:
@@ -384,6 +398,40 @@ def test_wrap_model_for_distributed_uses_ddp_adapter(
     assert wrapped._ddp.device_ids == [3]
     assert wrapped._ddp.output_device == 3
     assert not wrapped._ddp.find_unused_parameters
+
+
+def test_model_no_sync_context_delegates_for_distributed_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(distributed_module, "DistributedDataParallel", _FakeDDP)
+    model = _TinyModel()
+    wrapped = wrap_model_for_distributed(
+        model,
+        DistributedContext(
+            device=torch.device("cuda", 0),
+            rank=0,
+            local_rank=0,
+            world_size=2,
+            initialized=True,
+        ),
+    )
+    assert isinstance(wrapped, DistributedModelAdapter)
+    assert isinstance(wrapped._ddp, _FakeDDP)
+
+    with model_no_sync_context(wrapped, enabled=True):
+        assert wrapped._ddp.no_sync_active
+
+    assert wrapped._ddp.no_sync_entries == 1
+    assert not wrapped._ddp.no_sync_active
+
+
+def test_model_no_sync_context_is_noop_when_disabled_or_not_distributed() -> None:
+    model = _TinyModel()
+
+    with model_no_sync_context(model, enabled=True):
+        pass
+    with model_no_sync_context(model, enabled=False):
+        pass
 
 
 def test_wrap_model_for_distributed_finds_unused_player_count_adapters(
