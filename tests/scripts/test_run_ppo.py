@@ -1064,6 +1064,21 @@ def test_create_eval_model_from_weights_builds_fresh_compiled_model(
     assert teacher_param.data_ptr() != source_param.data_ptr()
 
 
+def test_refresh_eval_model_from_weights_updates_existing_model() -> None:
+    source_model = torch.nn.Linear(1, 1)
+    target_model = torch.nn.Linear(1, 1)
+    source_model.weight.data.fill_(5.0)
+    source_model.bias.data.fill_(7.0)
+    target_model.train()
+
+    run_ppo._refresh_eval_model_from_weights(target_model, source_model)
+
+    assert target_model is not source_model
+    assert target_model.weight.item() == pytest.approx(5.0)
+    assert target_model.bias.item() == pytest.approx(7.0)
+    assert not target_model.training
+
+
 def test_trainable_parameter_count_ignores_frozen_parameters() -> None:
     model = torch.nn.Sequential(torch.nn.Linear(2, 3), torch.nn.Linear(3, 1))
     model[1].weight.requires_grad = False
@@ -1426,7 +1441,7 @@ def test_run_training_loop_activates_last_best_teacher_after_replacement(
     )
     trainer = _FakeTrainer()
     logger = _FakeLogger()
-    _patch_eval_model_from_weights(monkeypatch)
+    created_models = _patch_eval_model_from_weights(monkeypatch)
 
     def fake_evaluate_against_last_best(**_kwargs: object) -> dict[str, float]:
         return {"eval/win_rate_against_last_best": 0.7}
@@ -1451,6 +1466,8 @@ def test_run_training_loop_activates_last_best_teacher_after_replacement(
     assert len(trainer.teacher_updates) == 1
     teacher_model, active = trainer.teacher_updates[0]
     assert teacher_model is not None
+    assert teacher_model is created_models[0]
+    assert len(created_models) == 1
     assert active
 
 

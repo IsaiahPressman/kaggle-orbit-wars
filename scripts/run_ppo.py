@@ -402,10 +402,9 @@ def _run_training_loop(
                     >= LAST_BEST_WIN_RATE_THRESHOLD
                 )
                 if replace_last_best:
-                    last_best_model = _create_eval_model_from_weights(
+                    _refresh_eval_model_from_weights(
+                        last_best_model,
                         unwrap_model(trainer.model),
-                        cfg,
-                        device=trainer.device,
                     )
                     if cfg.rl.teacher_mode == "last_best":
                         trainer.set_teacher_model(
@@ -860,6 +859,14 @@ def _create_eval_model_from_weights(
     _compile_eval_model(model, cfg)
     model.eval()
     return model
+
+
+def _refresh_eval_model_from_weights(
+    target_model: BaseModelAPI,
+    source_model: BaseModelAPI,
+) -> None:
+    target_model.load_state_dict(source_model.state_dict())
+    target_model.eval()
 
 
 def _compile_eval_model(model: BaseModelAPI, cfg: FullConfig) -> None:
