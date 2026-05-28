@@ -17,9 +17,11 @@ from owl.rs import (
 from owl.rs import (
     discrete_target_bin_actions_to_kaggle as _discrete_target_bin_actions_to_kaggle,
 )
+from owl.rs import encode_entity_based as encode_entity_based
 from owl.rs import (
-    encode_entity_based,
+    encode_entity_based_with_player_features,
     rl_obs_constants,
+    rl_obs_ext_v2_constants,
 )
 from owl.rs import (
     pure_actions_to_kaggle as _pure_actions_to_kaggle,
@@ -36,6 +38,7 @@ from owl.rs import (
     COMET_CHANNELS,
     GLOBAL_CHANNELS,
 ) = rl_obs_constants()
+(GLOBAL_EXT_V2_CHANNELS, PLAYER_FEATURE_CHANNELS) = rl_obs_ext_v2_constants()
 
 
 class EntityBasedBaseConfig(BaseConfig):
@@ -70,6 +73,10 @@ class EntityBasedBaseConfig(BaseConfig):
         return GLOBAL_CHANNELS
 
     @property
+    def player_feature_channels(self) -> int:
+        return 0
+
+    @property
     def ship_count_one_hot_encoder_max(self) -> int:
         return 0
 
@@ -95,6 +102,18 @@ class EntityBasedExtV1Config(EntityBasedBaseConfig):
     @property
     def ship_count_one_hot_encoder_max(self) -> int:
         return self.ship_count_one_hot_max
+
+
+class EntityBasedExtV2Config(EntityBasedBaseConfig):
+    obs_spec: Literal["entity_based_ext_v2"] = "entity_based_ext_v2"
+
+    @property
+    def global_channels(self) -> int:
+        return GLOBAL_CHANNELS + GLOBAL_EXT_V2_CHANNELS
+
+    @property
+    def player_feature_channels(self) -> int:
+        return PLAYER_FEATURE_CHANNELS
 
 
 class ActionPureConfig(BaseConfig):
@@ -137,7 +156,7 @@ class ActionDiscreteTargetBinsConfig(BaseConfig):
 
 
 ObsConfig: TypeAlias = Annotated[
-    EntityBasedConfig | EntityBasedExtV1Config,
+    EntityBasedConfig | EntityBasedExtV1Config | EntityBasedExtV2Config,
     Field(discriminator="obs_spec"),
 ]
 ActionConfig: TypeAlias = Annotated[
@@ -227,6 +246,7 @@ class ObsBatch(BaseModel):
     still_playing: torch.Tensor
     global_features: torch.Tensor
     action_mask: ActionMask
+    player_features: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -284,6 +304,11 @@ class VectorizedEnv:
         self._entity_mask_np = self.observations.entity_mask.numpy()
         self._still_playing_np = self.observations.still_playing.numpy()
         self._global_obs_np = self.observations.global_features.numpy()
+        self._player_features_np = (
+            None
+            if self.observations.player_features is None
+            else self.observations.player_features.numpy()
+        )
         action_mask = self.observations.action_mask
         self._can_act_np = action_mask.can_act.numpy()
         self._max_launch_np = (
@@ -305,6 +330,7 @@ class VectorizedEnv:
                 self._still_playing_np,
                 self._global_obs_np,
                 self._can_act_np,
+                self._player_features_np,
             )
         else:
             assert self._max_launch_np is not None
@@ -318,6 +344,7 @@ class VectorizedEnv:
                 self._global_obs_np,
                 self._can_act_np,
                 self._max_launch_np,
+                self._player_features_np,
             )
         return self.observations
 
@@ -371,6 +398,7 @@ class VectorizedEnv:
             entity_mask=self.observations.entity_mask,
             still_playing=self.observations.still_playing,
             global_features=self.observations.global_features,
+            player_features=self.observations.player_features,
             action_mask=self.action_mask_for_spec(action_spec),
         )
 
@@ -407,6 +435,7 @@ class VectorizedEnv:
             None
             if isinstance(action_mask, DiscreteTargetBinActionMask)
             else action_mask.max_launch.numpy(),
+            None if obs.player_features is None else obs.player_features.numpy(),
         )
         return obs
 
@@ -560,6 +589,7 @@ class VectorizedEnv:
                 self._can_act_np,
                 self._rewards_np,
                 self._dones_np,
+                self._player_features_np,
             )
             return self.observations, self.rewards, self.dones, episode_metrics
 
@@ -614,6 +644,7 @@ class VectorizedEnv:
                 self._max_launch_np,
                 self._rewards_np,
                 self._dones_np,
+                self._player_features_np,
             )
         elif isinstance(self.action_spec, ActionDiscreteTargetsConfig):
             discrete_actions = cast(DiscreteTargetActions, launch_actions)
@@ -640,6 +671,7 @@ class VectorizedEnv:
                 self._max_launch_np,
                 self._rewards_np,
                 self._dones_np,
+                self._player_features_np,
             )
         else:
             raise TypeError(
@@ -694,6 +726,7 @@ class VectorizedEnv:
             self._max_launch_np,
             self._rewards_np,
             self._dones_np,
+            self._player_features_np,
         )
         return self.observations, self.rewards, self.dones, episode_metrics
 
@@ -782,6 +815,19 @@ class VectorizedEnv:
                 pin_memory=pin_memory,
             ),
             action_mask=action_mask,
+            player_features=(
+                None
+                if obs_spec.player_feature_channels == 0
+                else torch.zeros(
+                    (
+                        self.n_envs,
+                        self.n_players,
+                        obs_spec.player_feature_channels,
+                    ),
+                    dtype=torch.float32,
+                    pin_memory=pin_memory,
+                )
+            ),
         )
 
     def _allocate_decoded_actions(self, *, max_actions: int) -> DecodedLaunchActions:
@@ -841,7 +887,7 @@ def encode_python_observation_with_metrics(
         fleets_in,
         player=obs["player"],
     )
-    encoded = encode_entity_based(
+    encoded = encode_entity_based_with_player_features(
         planets_in,
         initial_planets_in,
         fleets_in,
@@ -858,6 +904,7 @@ def encode_python_observation_with_metrics(
         action_spec.min_fleet_size
         if fleet_filter_min_size is None
         else fleet_filter_min_size,
+        obs_spec.player_feature_channels,
     )
     (
         planets,
@@ -866,6 +913,7 @@ def encode_python_observation_with_metrics(
         comets,
         entity_mask,
         global_features,
+        player_features,
         source_can_act,
         source_target_can_act,
         max_launch,
@@ -881,6 +929,7 @@ def encode_python_observation_with_metrics(
                     comets,
                     entity_mask,
                     global_features,
+                    None if obs_spec.player_feature_channels == 0 else player_features,
                     source_can_act,
                     max_launch,
                 ),
@@ -902,6 +951,7 @@ def encode_python_observation_with_metrics(
                     comets,
                     entity_mask,
                     global_features,
+                    None if obs_spec.player_feature_channels == 0 else player_features,
                     _target_bin_can_act(
                         target_can_act,
                         max_launch,
@@ -928,6 +978,7 @@ def encode_python_observation_with_metrics(
                 comets,
                 entity_mask,
                 global_features,
+                None if obs_spec.player_feature_channels == 0 else player_features,
                 target_can_act,
                 target_max_launch,
             ),
@@ -1084,6 +1135,7 @@ def _encoded_observation_to_batch(
         np.ndarray,
         np.ndarray,
         np.ndarray,
+        np.ndarray | None,
         np.ndarray,
         np.ndarray | None,
     ],
@@ -1097,6 +1149,7 @@ def _encoded_observation_to_batch(
         comets,
         entity_mask,
         global_features,
+        player_features,
         can_act,
         max_launch,
     ) = encoded
@@ -1131,6 +1184,11 @@ def _encoded_observation_to_batch(
             0
         ),
         action_mask=action_mask,
+        player_features=(
+            None
+            if player_features is None
+            else torch.as_tensor(player_features, dtype=torch.float32).unsqueeze(0)
+        ),
     )
 
 

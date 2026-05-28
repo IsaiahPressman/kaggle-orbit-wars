@@ -21,8 +21,9 @@ use super::action_spec::{
 };
 use super::{
     log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
-    DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, MAX_COMETS, MAX_COMET_PATH_LENGTH,
-    MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS,
+    DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, GLOBAL_EXT_V2_CHANNELS, MAX_COMETS,
+    MAX_COMET_PATH_LENGTH, MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS,
+    PLAYER_FEATURE_CHANNELS,
 };
 
 type EncodedEntityBased<'py> = (
@@ -32,6 +33,20 @@ type EncodedEntityBased<'py> = (
     Bound<'py, PyArray2<f32>>,
     Bound<'py, PyArray1<bool>>,
     Bound<'py, PyArray1<f32>>,
+    Bound<'py, PyArray2<bool>>,
+    Bound<'py, PyArray3<bool>>,
+    Bound<'py, PyArray2<i64>>,
+    usize,
+);
+
+type EncodedEntityBasedWithPlayerFeatures<'py> = (
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray1<bool>>,
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray1<bool>>,
+    Bound<'py, PyArray1<f32>>,
+    Bound<'py, PyArray2<f32>>,
     Bound<'py, PyArray2<bool>>,
     Bound<'py, PyArray3<bool>>,
     Bound<'py, PyArray2<i64>>,
@@ -83,6 +98,7 @@ pub(super) fn encode_state(
     fleet_mask: &mut [bool],
     comet_mask: &mut [bool],
     global_obs: &mut [f32],
+    player_features: Option<&mut [f32]>,
     can_act: &mut [bool],
     max_launch: Option<&mut [i64]>,
     min_fleet_size: i64,
@@ -104,6 +120,7 @@ pub(super) fn encode_state(
         fleet_mask,
         comet_mask,
         global_obs,
+        player_features,
         can_act,
         max_launch,
         &mut action_slots,
@@ -128,6 +145,7 @@ pub(super) fn encode_state_with_action_slots(
     fleet_mask: &mut [bool],
     comet_mask: &mut [bool],
     global_obs: &mut [f32],
+    mut player_features: Option<&mut [f32]>,
     can_act: &mut [bool],
     mut max_launch: Option<&mut [i64]>,
     action_slots: &mut ActionEntitySlots,
@@ -157,6 +175,9 @@ pub(super) fn encode_state_with_action_slots(
     fleet_mask.fill(false);
     comet_mask.fill(false);
     global_obs.fill(0.0);
+    if let Some(player_features) = player_features.as_deref_mut() {
+        player_features.fill(0.0);
+    }
     can_act.fill(false);
     if let Some(max_launch) = max_launch.as_deref_mut() {
         max_launch.fill(0);
@@ -280,7 +301,8 @@ pub(super) fn encode_state_with_action_slots(
     }
 
     encode_comets(state, player_map, comet_obs, comet_mask);
-    encode_global(state, global_obs);
+    encode_global(state, &comet_ids, global_obs);
+    encode_player_features(state, player_map, &comet_ids, player_features);
     *action_slots = action_entity_slots(state);
     encode_action_spec(
         action_spec,
@@ -517,10 +539,97 @@ fn normalized_point(point: &Point) -> (f32, f32) {
     (normalize_position(point.x), normalize_position(point.y))
 }
 
-fn encode_global(state: &State, global_obs: &mut [f32]) {
+fn encode_global(state: &State, comet_ids: &HashSet<u32>, global_obs: &mut [f32]) {
+    assert!(
+        global_obs.len() == GLOBAL_CHANNELS
+            || global_obs.len() == GLOBAL_CHANNELS + GLOBAL_EXT_V2_CHANNELS,
+        "global_obs must have {GLOBAL_CHANNELS} or {} channels, got {}",
+        GLOBAL_CHANNELS + GLOBAL_EXT_V2_CHANNELS,
+        global_obs.len()
+    );
     global_obs[0] = state.step as f32 / state.config.episode_steps as f32;
     global_obs[1] = steps_until_next_comet_spawn(state.step) as f32 / 100.0;
     global_obs[2] = normalize_angular_velocity(state.angular_velocity);
+    if global_obs.len() == GLOBAL_CHANNELS {
+        return;
+    }
+
+    let mut neutral_comet_production = 0;
+    let mut neutral_planet_production = 0;
+    let mut neutral_comet_ships = 0_i64;
+    let mut neutral_planet_ships = 0_i64;
+    let mut neutral_comet_count = 0_usize;
+    let mut neutral_planet_count = 0_usize;
+    for planet in state.planets.iter().filter(|planet| planet.owner == -1) {
+        if comet_ids.contains(&planet.id) {
+            neutral_comet_production += planet.production;
+            neutral_comet_ships += i64::from(planet.ships);
+            neutral_comet_count += 1;
+        } else {
+            neutral_planet_production += planet.production;
+            neutral_planet_ships += i64::from(planet.ships);
+            neutral_planet_count += 1;
+        }
+    }
+
+    let offset = GLOBAL_CHANNELS;
+    global_obs[offset] =
+        normalize_aggregate_production(neutral_comet_production + neutral_planet_production);
+    global_obs[offset + 1] = normalize_aggregate_production(neutral_comet_production);
+    global_obs[offset + 2] = normalize_aggregate_production(neutral_planet_production);
+    global_obs[offset + 3] = normalize_aggregate_ships(neutral_comet_ships + neutral_planet_ships);
+    global_obs[offset + 4] = normalize_aggregate_ships(neutral_comet_ships);
+    global_obs[offset + 5] = normalize_aggregate_ships(neutral_planet_ships);
+    global_obs[offset + 6] = normalize_comet_count(neutral_comet_count);
+    global_obs[offset + 7] = normalize_planet_count(neutral_planet_count);
+}
+
+fn encode_player_features(
+    state: &State,
+    player_map: &PlayerMap,
+    comet_ids: &HashSet<u32>,
+    player_features: Option<&mut [f32]>,
+) {
+    let Some(player_features) = player_features else {
+        return;
+    };
+    assert_eq!(
+        player_features.len(),
+        OUTER_PLAYER_SLOTS * PLAYER_FEATURE_CHANNELS
+    );
+
+    for planet in state.planets.iter().filter(|planet| planet.owner >= 0) {
+        let outer_player = player_map.owner_channel(planet.owner);
+        let row = &mut player_features
+            [outer_player * PLAYER_FEATURE_CHANNELS..(outer_player + 1) * PLAYER_FEATURE_CHANNELS];
+        if comet_ids.contains(&planet.id) {
+            row[1] += normalize_aggregate_production(planet.production);
+            row[4] += normalize_aggregate_ships(i64::from(planet.ships));
+            row[8] += normalize_comet_count(1);
+        } else {
+            row[2] += normalize_aggregate_production(planet.production);
+            row[5] += normalize_aggregate_ships(i64::from(planet.ships));
+            row[7] += normalize_planet_count(1);
+        }
+    }
+
+    for fleet in &state.fleets {
+        if fleet.owner < 0 {
+            continue;
+        }
+        let outer_player = player_map.owner_channel(fleet.owner);
+        let row = &mut player_features
+            [outer_player * PLAYER_FEATURE_CHANNELS..(outer_player + 1) * PLAYER_FEATURE_CHANNELS];
+        row[6] += normalize_aggregate_ships(i64::from(fleet.ships));
+        row[9] += normalize_fleet_count(1);
+    }
+
+    for outer_player in 0..OUTER_PLAYER_SLOTS {
+        let row = &mut player_features
+            [outer_player * PLAYER_FEATURE_CHANNELS..(outer_player + 1) * PLAYER_FEATURE_CHANNELS];
+        row[0] = row[1] + row[2];
+        row[3] = row[4] + row[5] + row[6];
+    }
 }
 
 fn steps_until_next_comet_spawn(step: u32) -> u32 {
@@ -537,6 +646,26 @@ fn normalize_neutral_ships(ships: i32) -> f32 {
 
 fn normalize_ships(ships: i32) -> f32 {
     ships as f32 / SHIP_NORMALIZER
+}
+
+fn normalize_aggregate_ships(ships: i64) -> f32 {
+    ships as f32 / SHIP_NORMALIZER
+}
+
+fn normalize_aggregate_production(production: i32) -> f32 {
+    production as f32 / 100.0
+}
+
+fn normalize_planet_count(count: usize) -> f32 {
+    count as f32 / MAX_PLANETS as f32
+}
+
+fn normalize_comet_count(count: usize) -> f32 {
+    count as f32 / MAX_COMETS as f32
+}
+
+fn normalize_fleet_count(count: usize) -> f32 {
+    count as f32 / 100.0
 }
 
 fn normalize_log_ships(ships: i32) -> f32 {
@@ -922,6 +1051,87 @@ pub fn encode_entity_based<'py>(
     ship_count_one_hot_max: usize,
     fleet_filter_min_size: i64,
 ) -> PyResult<EncodedEntityBased<'py>> {
+    let (
+        planet_obs,
+        orbiting_planet_obs,
+        fleet_obs,
+        comet_obs,
+        entity_mask,
+        global_obs,
+        _player_features,
+        can_act,
+        target_can_act,
+        max_launch,
+        filtered_fleets,
+    ) = encode_entity_based_with_player_features(
+        py,
+        planets,
+        initial_planets,
+        fleets,
+        comet_planet_ids,
+        comet_path_indices,
+        comet_path_lengths,
+        comet_paths,
+        angular_velocity,
+        step,
+        episode_steps,
+        max_entities,
+        min_fleet_size,
+        ship_count_one_hot_max,
+        fleet_filter_min_size,
+        0,
+    )?;
+    Ok((
+        planet_obs,
+        orbiting_planet_obs,
+        fleet_obs,
+        comet_obs,
+        entity_mask,
+        global_obs,
+        can_act,
+        target_can_act,
+        max_launch,
+        filtered_fleets,
+    ))
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (
+    planets,
+    initial_planets,
+    fleets,
+    comet_planet_ids,
+    comet_path_indices,
+    comet_path_lengths,
+    comet_paths,
+    angular_velocity,
+    step=0,
+    episode_steps=500,
+    max_entities=DEFAULT_MAX_ENTITIES,
+    min_fleet_size=1,
+    ship_count_one_hot_max=0,
+    fleet_filter_min_size=0,
+    player_feature_channels=0
+))]
+pub fn encode_entity_based_with_player_features<'py>(
+    py: Python<'py>,
+    planets: PyReadonlyArray2<'py, f64>,
+    initial_planets: PyReadonlyArray2<'py, f64>,
+    fleets: PyReadonlyArray2<'py, f64>,
+    comet_planet_ids: PyReadonlyArray2<'py, f64>,
+    comet_path_indices: PyReadonlyArray1<'py, f64>,
+    comet_path_lengths: PyReadonlyArray2<'py, f64>,
+    comet_paths: PyReadonlyArray4<'py, f64>,
+    angular_velocity: f64,
+    step: u32,
+    episode_steps: u32,
+    max_entities: usize,
+    min_fleet_size: i64,
+    ship_count_one_hot_max: usize,
+    fleet_filter_min_size: i64,
+    player_feature_channels: usize,
+) -> PyResult<EncodedEntityBasedWithPlayerFeatures<'py>> {
     if max_entities <= MAX_PLANETS + MAX_COMETS {
         return Err(PyValueError::new_err(format!(
             "max_entities must be greater than MAX_PLANETS + MAX_COMETS ({})",
@@ -936,6 +1146,16 @@ pub fn encode_entity_based<'py>(
     if fleet_filter_min_size < 0 || fleet_filter_min_size > i64::from(i32::MAX) {
         return Err(PyValueError::new_err(
             "fleet_filter_min_size must be 0 or fit in i32::MAX",
+        ));
+    }
+    if player_feature_channels != 0 && player_feature_channels != PLAYER_FEATURE_CHANNELS {
+        return Err(PyValueError::new_err(format!(
+            "player_feature_channels must be 0 or {PLAYER_FEATURE_CHANNELS}"
+        )));
+    }
+    if player_feature_channels != 0 && ship_count_one_hot_max != 0 {
+        return Err(PyValueError::new_err(
+            "entity_based_ext_v2 requires ship_count_one_hot_max=0",
         ));
     }
     let fleet_filter_min_size = if fleet_filter_min_size == 0 {
@@ -999,7 +1219,13 @@ pub fn encode_entity_based<'py>(
     let mut fleet_obs = Array2::<f32>::zeros((max_fleets, fleet_channels));
     let mut comet_obs = Array2::<f32>::zeros((MAX_COMETS, COMET_CHANNELS));
     let mut entity_mask = Array1::<bool>::from_elem(max_entities, false);
-    let mut global_obs = Array1::<f32>::zeros(GLOBAL_CHANNELS);
+    let global_channels = if player_feature_channels == 0 {
+        GLOBAL_CHANNELS
+    } else {
+        GLOBAL_CHANNELS + GLOBAL_EXT_V2_CHANNELS
+    };
+    let mut global_obs = Array1::<f32>::zeros(global_channels);
+    let mut player_features = Array2::<f32>::zeros((OUTER_PLAYER_SLOTS, player_feature_channels));
     let mut can_act = Array2::<bool>::from_elem((OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS), false);
     let mut target_can_act = Array3::<bool>::from_elem(
         (OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
@@ -1038,6 +1264,15 @@ pub fn encode_entity_based<'py>(
         global_obs
             .as_slice_mut()
             .expect("newly allocated global array is contiguous"),
+        if player_feature_channels == 0 {
+            None
+        } else {
+            Some(
+                player_features
+                    .as_slice_mut()
+                    .expect("newly allocated player features array is contiguous"),
+            )
+        },
         can_act
             .as_slice_mut()
             .expect("newly allocated can_act array is contiguous"),
@@ -1071,6 +1306,7 @@ pub fn encode_entity_based<'py>(
         comet_obs.into_pyarray(py),
         entity_mask.into_pyarray(py),
         global_obs.into_pyarray(py),
+        player_features.into_pyarray(py),
         can_act.into_pyarray(py),
         target_can_act.into_pyarray(py),
         max_launch.into_pyarray(py),
@@ -1680,6 +1916,7 @@ mod tests {
             &mut fleet_mask,
             &mut comet_mask,
             &mut global_obs,
+            None,
             &mut can_act,
             Some(&mut max_launch),
             1,
@@ -1748,6 +1985,7 @@ mod tests {
             &mut fleet_mask,
             &mut comet_mask,
             &mut global_obs,
+            None,
             &mut can_act,
             Some(&mut max_launch),
             1,
@@ -1812,6 +2050,7 @@ mod tests {
             &mut fleet_mask,
             &mut comet_mask,
             &mut global_obs,
+            None,
             &mut can_act,
             Some(&mut max_launch),
             3,

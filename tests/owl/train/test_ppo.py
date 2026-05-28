@@ -38,12 +38,16 @@ from owl.train import ppo
 from torch import nn
 
 _OBS_COPY_FIELDS = tuple(
-    field for field in ObsBatch.model_fields if field != "action_mask"
+    field
+    for field in ObsBatch.model_fields
+    if field not in {"action_mask", "player_features"}
 )
 
 
 def _obs_buffer_ptrs(obs: ObsBatch) -> dict[str, int]:
     ptrs = {field: getattr(obs, field).data_ptr() for field in _OBS_COPY_FIELDS}
+    if obs.player_features is not None:
+        ptrs["player_features"] = obs.player_features.data_ptr()
     ptrs["action_mask.can_act"] = obs.action_mask.can_act.data_ptr()
     if isinstance(obs.action_mask, PureActionMask | DiscreteTargetActionMask):
         ptrs["action_mask.max_launch"] = obs.action_mask.max_launch.data_ptr()
@@ -77,6 +81,11 @@ def _obs_batch(*, n_envs: int, obs_spec: EntityBasedConfig) -> ObsBatch:
         action_mask=PureActionMask(
             can_act=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.bool),
             max_launch=torch.zeros((n_envs, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64),
+        ),
+        player_features=(
+            None
+            if obs_spec.player_feature_channels == 0
+            else torch.zeros((n_envs, 4, obs_spec.player_feature_channels))
         ),
     )
 

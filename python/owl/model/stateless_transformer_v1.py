@@ -260,6 +260,14 @@ class StatelessTransformerV1(BaseModelAPI):
             self.obs_spec.global_channels,
             self.config,
         )
+        self.player_feature_proj = (
+            None
+            if self.obs_spec.player_feature_channels == 0
+            else ObservationInputStem(
+                self.obs_spec.player_feature_channels,
+                self.config,
+            )
+        )
         self.player_tokens = nn.Parameter(torch.empty(OUTER_PLAYER_SLOTS, dim))
         self.board_tokens = nn.Parameter(torch.empty(self.config.n_scratch_tokens, dim))
         self.actor_plan_tokens = nn.Parameter(torch.empty(OUTER_PLAYER_SLOTS, dim))
@@ -364,6 +372,11 @@ class StatelessTransformerV1(BaseModelAPI):
             self.fleet_proj.input,
             self.comet_proj.input,
             self.global_proj.input,
+            *(
+                ()
+                if self.player_feature_proj is None
+                else (self.player_feature_proj.input,)
+            ),
             self.player_tokens,
             self.board_tokens,
             self.actor_plan_tokens,
@@ -413,6 +426,12 @@ class StatelessTransformerV1(BaseModelAPI):
             batch_size,
             dtype=global_token.dtype,
         )
+        if self.player_feature_proj is not None:
+            if obs.player_features is None:
+                raise ValueError("player_features are required by this obs_spec")
+            player_tokens = player_tokens + self.player_feature_proj(
+                obs.player_features
+            )
         board_tokens = _expand_tokens(
             self.board_tokens,
             batch_size,
@@ -1711,6 +1730,11 @@ def _index_obs_batch(obs: ObsBatch, indices: torch.Tensor) -> ObsBatch:
             obs.action_mask,
             _batch_selector(indices),
         ),
+        player_features=(
+            None
+            if obs.player_features is None
+            else _batch_select(obs.player_features, indices)
+        ),
     )
 
 
@@ -1777,6 +1801,11 @@ def _flatten_obs_time_if_sequence(
             still_playing=_flatten_time_tensor(obs.still_playing),
             global_features=_flatten_time_tensor(obs.global_features),
             action_mask=_map_action_mask(obs.action_mask, _flatten_time_tensor),
+            player_features=(
+                None
+                if obs.player_features is None
+                else _flatten_time_tensor(obs.player_features)
+            ),
         ),
         (batch_size, time_steps),
     )
