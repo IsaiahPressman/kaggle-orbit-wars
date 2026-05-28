@@ -178,6 +178,8 @@ class _DistributedModelDispatch(nn.Module):
         hidden_state: object | None = None,
         dones: object | None = None,
         teacher: object | None = None,
+        compute_teacher_action_kl: bool = True,
+        compute_teacher_value: bool = True,
     ) -> object:
         if mode == "forward":
             if hidden_state is None:
@@ -235,6 +237,8 @@ class _DistributedModelDispatch(nn.Module):
                 cast(BaseModelAPI, teacher),
                 hidden_state=hidden_state,
                 dones=cast(torch.Tensor | None, dones),
+                compute_teacher_action_kl=compute_teacher_action_kl,
+                compute_teacher_value=compute_teacher_value,
             )
         raise ValueError(f"unknown distributed model mode: {mode}")
 
@@ -331,6 +335,8 @@ class DistributedModelAdapter(BaseModelAPI):
         *,
         hidden_state: ModelHiddenState | None = None,
         dones: torch.Tensor | None = None,
+        compute_teacher_action_kl: bool = True,
+        compute_teacher_value: bool = True,
     ) -> ModelTeacherEvaluation:
         return cast(
             ModelTeacherEvaluation,
@@ -342,6 +348,8 @@ class DistributedModelAdapter(BaseModelAPI):
                 hidden_state,
                 dones,
                 teacher,
+                compute_teacher_action_kl,
+                compute_teacher_value,
             ),
         )
 

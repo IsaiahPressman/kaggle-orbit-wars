@@ -812,9 +812,16 @@ class PPOTrainer:
             if batch_entity_policy_mask is None
             else batch_entity_policy_mask.to(dtype=batch_advantages.dtype)
         )
+        compute_teacher_action_kl = (
+            teacher_model is not None and self.config.teacher_kl_coef > 0.0
+        )
+        compute_teacher_value = (
+            teacher_model is not None and self.config.teacher_value_coef > 0.0
+        )
+        use_teacher_model = compute_teacher_action_kl or compute_teacher_value
 
         with _autocast_context(self.config, self.device):
-            if teacher_model is None:
+            if teacher_model is None or not use_teacher_model:
                 output = _model_evaluate_actions(
                     self.model,
                     batch_obs,
@@ -832,6 +839,8 @@ class PPOTrainer:
                     teacher_model,
                     hidden_state=batch_hidden_state,
                     dones=segments.dones[idx],
+                    compute_teacher_action_kl=compute_teacher_action_kl,
+                    compute_teacher_value=compute_teacher_value,
                 )
                 output = teacher_evaluation.student
                 teacher_action_kl = teacher_evaluation.action_kl
@@ -855,24 +864,31 @@ class PPOTrainer:
         if teacher_model is None:
             teacher_kl = torch.zeros_like(entropy)
             teacher_kl_components: dict[str, torch.Tensor] = {}
-            teacher_value_loss_values = torch.zeros_like(batch_old_values)
+            teacher_value_loss_values = torch.zeros_like(batch_old_values[..., 0])
         else:
-            if teacher_action_kl is None:
+            if not compute_teacher_action_kl:
+                teacher_kl = torch.zeros_like(entropy)
+                teacher_kl_components = {}
+            elif teacher_action_kl is None:
                 raise RuntimeError("teacher action KL was not computed")
-            if teacher_winner_probabilities is None:
+            else:
+                teacher_kl = _output_action_kl(
+                    teacher_action_kl,
+                    batch_policy_weight,
+                )
+                teacher_kl_components = _output_action_kl_components(
+                    teacher_action_kl,
+                    segments.logp[idx],
+                )
+            if not compute_teacher_value:
+                teacher_value_loss_values = torch.zeros_like(batch_old_values[..., 0])
+            elif teacher_winner_probabilities is None:
                 raise RuntimeError("teacher winner probabilities were not computed")
-            teacher_kl = _output_action_kl(
-                teacher_action_kl,
-                batch_policy_weight,
-            )
-            teacher_kl_components = _output_action_kl_components(
-                teacher_action_kl,
-                segments.logp[idx],
-            )
-            teacher_value_loss_values = _teacher_value_cross_entropy(
-                student_winner_probabilities,
-                teacher_winner_probabilities.view_as(batch_old_values),
-            )
+            else:
+                teacher_value_loss_values = _teacher_value_cross_entropy(
+                    student_winner_probabilities,
+                    teacher_winner_probabilities.view_as(batch_old_values),
+                )
 
         loss_kwargs = {
             "new_logp": new_logp,
@@ -908,6 +924,7 @@ class PPOTrainer:
                 for name, component in teacher_kl_components.items()
             },
         )
+        metrics = _detach_loss_metrics(metrics)
         if step_optimizer:
             self.optimizer.zero_grad(set_to_none=True)
         (backward_loss * loss_scale).backward()
@@ -1950,6 +1967,8 @@ def _model_evaluate_actions_with_teacher(
     *,
     hidden_state: ModelHiddenState | None,
     dones: torch.Tensor,
+    compute_teacher_action_kl: bool,
+    compute_teacher_value: bool,
 ) -> ModelTeacherEvaluation:
     return model.evaluate_actions_with_teacher(
         obs,
@@ -1957,6 +1976,8 @@ def _model_evaluate_actions_with_teacher(
         teacher,
         hidden_state=hidden_state,
         dones=dones,
+        compute_teacher_action_kl=compute_teacher_action_kl,
+        compute_teacher_value=compute_teacher_value,
     )
 
 
@@ -2305,6 +2326,34 @@ def _mean_loss_metrics(metrics: list[_PPOLossMetrics]) -> dict[str, float]:
             .item()
         )
     return logged
+
+
+def _detach_loss_metrics(metrics: _PPOLossMetrics) -> _PPOLossMetrics:
+    return replace(
+        metrics,
+        loss=metrics.loss.detach(),
+        policy_loss=metrics.policy_loss.detach(),
+        value_loss=metrics.value_loss.detach(),
+        entropy_loss=metrics.entropy_loss.detach(),
+        teacher_kl_loss=metrics.teacher_kl_loss.detach(),
+        teacher_value_loss=metrics.teacher_value_loss.detach(),
+        entropy=metrics.entropy.detach(),
+        teacher_kl=metrics.teacher_kl.detach(),
+        teacher_value_cross_entropy=metrics.teacher_value_cross_entropy.detach(),
+        approx_kl=metrics.approx_kl.detach(),
+        clipfrac=metrics.clipfrac.detach(),
+        ratio_mean=metrics.ratio_mean.detach(),
+        ratio_max=metrics.ratio_max.detach(),
+        logratio_mean=metrics.logratio_mean.detach(),
+        logratio_abs_max=metrics.logratio_abs_max.detach(),
+        entropy_components={
+            name: value.detach() for name, value in metrics.entropy_components.items()
+        },
+        teacher_kl_components={
+            name: value.detach()
+            for name, value in metrics.teacher_kl_components.items()
+        },
+    )
 
 
 def _entropy_component_names(metrics: list[_PPOLossMetrics]) -> tuple[str, ...]:

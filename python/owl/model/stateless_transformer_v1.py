@@ -709,6 +709,8 @@ class StatelessTransformerV1(BaseModelAPI):
         *,
         hidden_state: ModelHiddenState | None = None,
         dones: torch.Tensor | None = None,
+        compute_teacher_action_kl: bool = True,
+        compute_teacher_value: bool = True,
     ) -> ModelTeacherEvaluation:
         if not isinstance(teacher, StatelessTransformerV1):
             raise ValueError(
@@ -746,27 +748,34 @@ class StatelessTransformerV1(BaseModelAPI):
             flat_obs.action_mask,
             flat_actions,
         )
-        with torch.no_grad():
-            teacher_encoded, _teacher_next_state = (
-                teacher._encode_distillation_observations(
-                    flat_obs,
-                    sequence_shape=sequence_shape,
-                    hidden_state=None,
-                    dones=dones,
+        action_kl: ModelActionKLDivergences | None = None
+        teacher_winner_probabilities: torch.Tensor | None = None
+        if compute_teacher_action_kl or compute_teacher_value:
+            with torch.no_grad():
+                teacher_encoded, _teacher_next_state = (
+                    teacher._encode_distillation_observations(
+                        flat_obs,
+                        sequence_shape=sequence_shape,
+                        hidden_state=None,
+                        dones=dones,
+                    )
                 )
-            )
-            _teacher_values, teacher_winner_probabilities = teacher._value_from_encoded(
-                teacher_encoded,
-                flat_obs,
-            )
-        action_kl = self._actor_kl_divergence(
-            teacher,
-            student_encoded,
-            teacher_encoded,
-            flat_obs,
-            flat_obs.action_mask,
-            flat_actions,
-        )
+                if compute_teacher_value:
+                    _teacher_values, teacher_winner_probabilities = (
+                        teacher._value_from_encoded(
+                            teacher_encoded,
+                            flat_obs,
+                        )
+                    )
+            if compute_teacher_action_kl:
+                action_kl = self._actor_kl_divergence(
+                    teacher,
+                    student_encoded,
+                    teacher_encoded,
+                    flat_obs,
+                    flat_obs.action_mask,
+                    flat_actions,
+                )
         student = ModelEvaluation(
             log_probs=student_log_probs,
             entropies=student_entropies,
@@ -776,11 +785,13 @@ class StatelessTransformerV1(BaseModelAPI):
         )
         if sequence_shape is not None:
             student = _unflatten_evaluation(student, sequence_shape)
-            teacher_winner_probabilities = _unflatten_time_tensor(
-                teacher_winner_probabilities,
-                sequence_shape,
-            )
-            action_kl = _unflatten_kl_divergences(action_kl, sequence_shape)
+            if teacher_winner_probabilities is not None:
+                teacher_winner_probabilities = _unflatten_time_tensor(
+                    teacher_winner_probabilities,
+                    sequence_shape,
+                )
+            if action_kl is not None:
+                action_kl = _unflatten_kl_divergences(action_kl, sequence_shape)
         return ModelTeacherEvaluation(
             student=student,
             action_kl=action_kl,

@@ -2009,6 +2009,85 @@ def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
     assert not any(teacher_actor_input_grad_enabled)
 
 
+def test_teacher_update_skips_teacher_when_coefficients_are_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(0)
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model = TinyDiscreteTargetModel()
+    teacher_model = TinyDiscreteTargetModel()
+    evaluate_calls = 0
+
+    original_evaluate_actions = model.evaluate_actions
+
+    def evaluate_actions_wrapper(*args: object, **kwargs: object) -> object:
+        nonlocal evaluate_calls
+        evaluate_calls += 1
+        return original_evaluate_actions(*args, **kwargs)
+
+    def fail_combined_teacher_eval(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("teacher evaluation should be skipped")
+
+    monkeypatch.setattr(model, "evaluate_actions", evaluate_actions_wrapper)
+    monkeypatch.setattr(
+        model,
+        "evaluate_actions_with_teacher",
+        fail_combined_teacher_eval,
+    )
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segments_per_minibatch=1,
+            teacher_kl_coef=0.0,
+            teacher_value_coef=0.0,
+        ),
+        device=torch.device("cpu"),
+        teacher_model=teacher_model,
+        teacher_active=True,
+    )
+
+    metrics = trainer.train_iteration()
+
+    assert evaluate_calls > 0
+    assert metrics["loss/teacher_kl_loss"] == pytest.approx(0.0)
+    assert metrics["loss/teacher_value_loss"] == pytest.approx(0.0)
+
+
+def test_detach_loss_metrics_drops_metric_graphs() -> None:
+    value = torch.tensor(1.0, requires_grad=True)
+    metrics = replace(
+        _zero_loss_metrics(value * 2.0),
+        entropy_components={"launch": value * 3.0},
+        teacher_kl_components={"launch": value * 4.0},
+    )
+
+    detached = ppo._detach_loss_metrics(metrics)
+
+    metric_values = (
+        detached.loss,
+        detached.policy_loss,
+        detached.value_loss,
+        detached.entropy_loss,
+        detached.teacher_kl_loss,
+        detached.teacher_value_loss,
+        detached.entropy,
+        detached.teacher_kl,
+        detached.teacher_value_cross_entropy,
+        detached.approx_kl,
+        detached.clipfrac,
+        detached.ratio_mean,
+        detached.ratio_max,
+        detached.logratio_mean,
+        detached.logratio_abs_max,
+        detached.entropy_components["launch"],
+        detached.teacher_kl_components["launch"],
+    )
+    assert not any(metric.requires_grad for metric in metric_values)
+
+
 def test_trainer_rejects_recurrent_teacher() -> None:
     torch.manual_seed(0)
     env = TinyDiscreteTargetEnv(n_envs=2)
