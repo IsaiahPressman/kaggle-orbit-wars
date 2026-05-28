@@ -1945,9 +1945,11 @@ def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
     model.reset_parameters()
     teacher_model.reset_parameters()
     combined_calls = 0
+    student_actor_input_grad_enabled: list[bool] = []
     teacher_encode_grad_enabled: list[bool] = []
     teacher_actor_input_grad_enabled: list[bool] = []
     original_combined = model.evaluate_actions_with_teacher
+    original_student_actor_inputs = model._discrete_actor_inputs
     original_teacher_encode = teacher_model.encode_observations
     original_teacher_actor_inputs = teacher_model._discrete_actor_inputs
 
@@ -1965,6 +1967,10 @@ def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
     def fail_teacher_evaluate_actions(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("teacher evaluate_actions should not be called")
 
+    def student_actor_inputs_wrapper(*args: object, **kwargs: object) -> object:
+        student_actor_input_grad_enabled.append(torch.is_grad_enabled())
+        return original_student_actor_inputs(*args, **kwargs)
+
     def teacher_encode_wrapper(*args: object, **kwargs: object) -> object:
         teacher_encode_grad_enabled.append(torch.is_grad_enabled())
         return original_teacher_encode(*args, **kwargs)
@@ -1976,6 +1982,11 @@ def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
     monkeypatch.setattr(model, "evaluate_actions_with_teacher", combined_wrapper)
     monkeypatch.setattr(model, "evaluate_actions", fail_evaluate_actions)
     monkeypatch.setattr(model, "evaluate_action_kl", fail_evaluate_action_kl)
+    monkeypatch.setattr(
+        model,
+        "_discrete_actor_inputs",
+        student_actor_inputs_wrapper,
+    )
     monkeypatch.setattr(
         teacher_model,
         "evaluate_actions",
@@ -2003,6 +2014,7 @@ def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
     trainer.train_iteration()
 
     assert combined_calls > 0
+    assert sum(student_actor_input_grad_enabled) == combined_calls
     assert teacher_encode_grad_enabled
     assert not any(teacher_encode_grad_enabled)
     assert teacher_actor_input_grad_enabled

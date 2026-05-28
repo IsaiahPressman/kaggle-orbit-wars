@@ -131,6 +131,8 @@ _COMET_Y = 53
 _NEUTRAL_SHIP_NORMALIZER = 100.0
 _SHIP_NORMALIZER = 500.0
 _PLAYER_COUNT_ADAPTER_COUNTS = tuple(range(2, OUTER_PLAYER_SLOTS + 1))
+
+_ActorInputs = DiscreteActorInputs | PureActorInputs
 _MIN_PLAYER_COUNT_ADAPTER_COUNT = _PLAYER_COUNT_ADAPTER_COUNTS[0]
 _T = TypeVar("_T")
 
@@ -742,11 +744,17 @@ class StatelessTransformerV1(BaseModelAPI):
             student_encoded,
             flat_obs,
         )
+        student_actor_inputs = (
+            self._actor_inputs_for_encoded(student_encoded, flat_obs)
+            if compute_teacher_action_kl and not self.player_count_adapters
+            else None
+        )
         student_log_probs, student_entropies = self._actor_log_prob(
             student_encoded,
             flat_obs,
             flat_obs.action_mask,
             flat_actions,
+            actor_inputs=student_actor_inputs,
         )
         action_kl: ModelActionKLDivergences | None = None
         teacher_winner_probabilities: torch.Tensor | None = None
@@ -775,6 +783,7 @@ class StatelessTransformerV1(BaseModelAPI):
                     flat_obs,
                     flat_obs.action_mask,
                     flat_actions,
+                    student_actor_inputs=student_actor_inputs,
                 )
         student = ModelEvaluation(
             log_probs=student_log_probs,
@@ -1187,6 +1196,7 @@ class StatelessTransformerV1(BaseModelAPI):
         actions: ActionBundle,
         *,
         adapter: PlayerCountAdapter | None = None,
+        actor_inputs: _ActorInputs | None = None,
     ) -> tuple[ModelActionLogProbs, ModelActionEntropies]:
         if adapter is None and self.player_count_adapters:
             return self._actor_log_prob_by_player_count(encoded, obs, actions)
@@ -1201,8 +1211,12 @@ class StatelessTransformerV1(BaseModelAPI):
                 raise ValueError(
                     "discrete_target_bins actor requires DiscreteTargetBinActions"
                 )
+            discrete_inputs = _require_discrete_actor_inputs(
+                actor_inputs,
+                lambda: self._discrete_actor_inputs(encoded, obs, adapter=adapter),
+            )
             return actor.log_prob(
-                self._discrete_actor_inputs(encoded, obs, adapter=adapter),
+                discrete_inputs,
                 action_mask.can_act,
                 actions,
             )
@@ -1215,8 +1229,12 @@ class StatelessTransformerV1(BaseModelAPI):
                 raise ValueError(
                     "discrete_targets actor requires DiscreteTargetActions"
                 )
+            discrete_inputs = _require_discrete_actor_inputs(
+                actor_inputs,
+                lambda: self._discrete_actor_inputs(encoded, obs, adapter=adapter),
+            )
             return actor.log_prob(
-                self._discrete_actor_inputs(encoded, obs, adapter=adapter),
+                discrete_inputs,
                 action_mask.can_act,
                 action_mask.max_launch,
                 actions,
@@ -1226,13 +1244,29 @@ class StatelessTransformerV1(BaseModelAPI):
             raise RuntimeError("pure actor requires a pure action mask")
         if not isinstance(actions, PureActions):
             raise ValueError("pure actor requires PureActions")
+        pure_inputs = _require_pure_actor_inputs(
+            actor_inputs,
+            lambda: self._pure_actor_inputs(encoded, adapter=adapter),
+        )
         return actor.log_prob(
-            self._pure_actor_inputs(encoded, adapter=adapter),
+            pure_inputs,
             action_mask.can_act,
             action_mask.max_launch,
             actions,
             min_fleet_size=self.action_spec.min_fleet_size,
         )
+
+    def _actor_inputs_for_encoded(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+        *,
+        adapter: PlayerCountAdapter | None = None,
+    ) -> _ActorInputs:
+        actor = self._actor_module(adapter)
+        if isinstance(actor, DiscreteTargetBinsActor | DiscreteTargetsActor):
+            return self._discrete_actor_inputs(encoded, obs, adapter=adapter)
+        return self._pure_actor_inputs(encoded, adapter=adapter)
 
     def _actor_log_prob_by_player_count(
         self,
@@ -1278,6 +1312,7 @@ class StatelessTransformerV1(BaseModelAPI):
         *,
         student_adapter: PlayerCountAdapter | None = None,
         teacher_adapter: PlayerCountAdapter | None = None,
+        student_actor_inputs: _ActorInputs | None = None,
     ) -> ModelActionKLDivergences:
         if (
             student_adapter is None
@@ -1305,10 +1340,13 @@ class StatelessTransformerV1(BaseModelAPI):
                 raise ValueError(
                     "discrete_target_bins actor requires DiscreteTargetBinActions"
                 )
-            student_inputs = self._discrete_actor_inputs(
-                student_encoded,
-                obs,
-                adapter=student_adapter,
+            student_inputs = _require_discrete_actor_inputs(
+                student_actor_inputs,
+                lambda: self._discrete_actor_inputs(
+                    student_encoded,
+                    obs,
+                    adapter=student_adapter,
+                ),
             )
             with torch.no_grad():
                 teacher_inputs = teacher._discrete_actor_inputs(
@@ -1334,10 +1372,13 @@ class StatelessTransformerV1(BaseModelAPI):
                 raise ValueError(
                     "discrete_targets actor requires DiscreteTargetActions"
                 )
-            student_inputs = self._discrete_actor_inputs(
-                student_encoded,
-                obs,
-                adapter=student_adapter,
+            student_inputs = _require_discrete_actor_inputs(
+                student_actor_inputs,
+                lambda: self._discrete_actor_inputs(
+                    student_encoded,
+                    obs,
+                    adapter=student_adapter,
+                ),
             )
             with torch.no_grad():
                 teacher_inputs = teacher._discrete_actor_inputs(
@@ -1360,9 +1401,12 @@ class StatelessTransformerV1(BaseModelAPI):
             raise RuntimeError("pure actor requires a pure action mask")
         if not isinstance(actions, PureActions):
             raise ValueError("pure actor requires PureActions")
-        student_pure_inputs = self._pure_actor_inputs(
-            student_encoded,
-            adapter=student_adapter,
+        student_pure_inputs = _require_pure_actor_inputs(
+            student_actor_inputs,
+            lambda: self._pure_actor_inputs(
+                student_encoded,
+                adapter=student_adapter,
+            ),
         )
         with torch.no_grad():
             teacher_pure_inputs = teacher._pure_actor_inputs(
@@ -1418,6 +1462,28 @@ class StatelessTransformerV1(BaseModelAPI):
             )
             kl_parts.append((batch_indices, kl))
         return _merge_kl_divergences_by_batch(obs.still_playing.shape[0], kl_parts)
+
+
+def _require_discrete_actor_inputs(
+    actor_inputs: _ActorInputs | None,
+    fallback: Callable[[], DiscreteActorInputs],
+) -> DiscreteActorInputs:
+    if actor_inputs is None:
+        return fallback()
+    if not isinstance(actor_inputs, DiscreteActorInputs):
+        raise TypeError("expected discrete actor inputs")
+    return actor_inputs
+
+
+def _require_pure_actor_inputs(
+    actor_inputs: _ActorInputs | None,
+    fallback: Callable[[], PureActorInputs],
+) -> PureActorInputs:
+    if actor_inputs is None:
+        return fallback()
+    if not isinstance(actor_inputs, PureActorInputs):
+        raise TypeError("expected pure actor inputs")
+    return actor_inputs
 
 
 class PlayerCountAdapter(nn.Module):
