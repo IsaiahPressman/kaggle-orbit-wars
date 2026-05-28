@@ -309,6 +309,9 @@ def logistic_mixture_kl_components(
     *,
     min_fleet_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if residual_budget.numel() == 0:
+        empty = residual_budget.to(dtype=torch.float32)
+        return empty, empty
     safe_residual = residual_budget.clamp_min(min_fleet_size)
     support = ship_support(
         safe_residual,
