@@ -173,8 +173,11 @@ uses the current last-best snapshot. On randomly initialized fresh launches
 with no `teacher_init`, the last-best teacher losses stay disabled until the
 current model first replaces `checkpoint_last_best.pt`; fresh launches from
 `--load-model-weights` use that starting checkpoint as the initial last-best
-teacher. `rl.teacher_init` points at a training checkpoint whose adjacent
-`config.yaml` is used to construct the teacher model before loading weights.
+teacher. Fixed teachers do not seed `checkpoint_last_best.pt`; win-rate
+evaluation against last-best follows the same checkpoint lifecycle as a run
+without a teacher. `rl.teacher_init` points at a training checkpoint whose
+adjacent `config.yaml` is used to construct the teacher model before loading
+weights.
 The teacher architecture may differ from the student, but the observation and
 action specs must match exactly, and actor factorization details such as
 discrete-target launch mode or target-bin count must be compatible. Teacher

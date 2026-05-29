@@ -692,9 +692,7 @@ def _initial_last_best_model(
     *,
     device: torch.device,
 ) -> BaseModelAPI | None:
-    if cfg.rl.teacher_init is None:
-        return None
-    if cfg.rl.checkpoint_freq is None and cfg.rl.teacher_mode != "last_best":
+    if cfg.rl.teacher_mode != "last_best" or cfg.rl.teacher_init is None:
         return None
     return _load_teacher_init_model(
         cfg.rl.teacher_init,
