@@ -10,7 +10,8 @@ use crate::rules_engine::state::MAX_PLAYERS;
 
 use obs_spec::{
     discrete_target_actions_to_kaggle, discrete_target_bin_actions_to_kaggle, encode_entity_based,
-    encode_entity_based_with_player_features, pure_actions_to_kaggle,
+    encode_entity_based_cross_attn, encode_entity_based_with_player_features,
+    pure_actions_to_kaggle,
 };
 use vec_env::PyRlVecEnv;
 
@@ -56,10 +57,16 @@ pub const COMET_CHANNELS: usize =
 pub const GLOBAL_CHANNELS: usize = 3;
 pub const GLOBAL_EXT_V2_CHANNELS: usize = 14;
 pub const PLAYER_FEATURE_CHANNELS: usize = 14;
+const ETA_BUCKET_CHANNELS: usize = 16;
+const CROSS_FLEET_SHIP_CHANNELS: usize = 2 + FLEET_SHIP_COUNT_CHANNELS;
+pub const CROSS_ATTENTION_FLEET_CHANNELS: usize =
+    OWNER_CHANNELS + CROSS_FLEET_SHIP_CHANNELS + ETA_BUCKET_CHANNELS + 2;
+pub const TARGET_INCOMING_CHANNELS: usize = ETA_BUCKET_CHANNELS * 3;
 pub const OUTER_PLAYER_SLOTS: usize = MAX_PLAYERS;
 pub const ACTION_ENTITY_SLOTS: usize = MAX_PLANETS + MAX_COMETS;
 
 const OWNER_CHANNELS_WITH_NEUTRAL: usize = 5;
+const OWNER_CHANNELS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PlayerMap {
@@ -168,15 +175,22 @@ pub fn rl_obs_ext_v2_constants() -> (usize, usize) {
     (GLOBAL_EXT_V2_CHANNELS, PLAYER_FEATURE_CHANNELS)
 }
 
+#[pyfunction]
+pub fn rl_obs_cross_attn_constants() -> (usize, usize) {
+    (CROSS_ATTENTION_FLEET_CHANNELS, TARGET_INCOMING_CHANNELS)
+}
+
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRlVecEnv>()?;
     m.add_function(wrap_pyfunction!(rl_obs_constants, m)?)?;
     m.add_function(wrap_pyfunction!(rl_obs_ext_v2_constants, m)?)?;
+    m.add_function(wrap_pyfunction!(rl_obs_cross_attn_constants, m)?)?;
     m.add_function(wrap_pyfunction!(encode_entity_based, m)?)?;
     m.add_function(wrap_pyfunction!(
         encode_entity_based_with_player_features,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(encode_entity_based_cross_attn, m)?)?;
     m.add_function(wrap_pyfunction!(pure_actions_to_kaggle, m)?)?;
     m.add_function(wrap_pyfunction!(discrete_target_actions_to_kaggle, m)?)?;
     m.add_function(wrap_pyfunction!(discrete_target_bin_actions_to_kaggle, m)?)?;

@@ -152,6 +152,45 @@ pub fn step_with_rng(
     step_with_injections(state, actions, rng, StepInjections::default())
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FleetArrival {
+    pub(crate) fleet: Fleet,
+    pub(crate) target_planet_id: u32,
+    pub(crate) eta: u32,
+}
+
+pub(crate) fn route_current_fleet_arrivals(state: &State) -> Vec<FleetArrival> {
+    let mut simulated = state.clone();
+    let start_step = state.step;
+    let mut arrivals = Vec::new();
+
+    while simulated.step < simulated.config.episode_steps && !simulated.fleets.is_empty() {
+        remove_expired_comets(&mut simulated);
+        let (planet_paths, expired_comet_planet_ids) = compute_planet_paths(&mut simulated);
+        let (_combat_lists, _fleet_losses, hits) =
+            move_fleets_with_hits(&mut simulated, &planet_paths);
+        for hit in hits {
+            if expired_comet_planet_ids.contains(&hit.planet_id) {
+                continue;
+            }
+            arrivals.push(FleetArrival {
+                fleet: hit.fleet,
+                target_planet_id: hit.planet_id,
+                eta: simulated.step - start_step + 1,
+            });
+        }
+        apply_planet_paths(&mut simulated, &planet_paths);
+        if !expired_comet_planet_ids.is_empty() {
+            remove_comet_planets(&mut simulated, |planet_id| {
+                expired_comet_planet_ids.contains(&planet_id)
+            });
+        }
+        simulated.step += 1;
+    }
+
+    arrivals
+}
+
 pub fn step_with_injections(
     state: &mut State,
     actions: &[PlayerAction],
@@ -439,10 +478,25 @@ fn compute_planet_paths(state: &mut State) -> (PlanetPaths, Vec<u32>) {
     (planet_paths, expired_comet_planet_ids)
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct FleetHit {
+    planet_id: u32,
+    fleet: Fleet,
+}
+
 fn move_fleets(state: &mut State, planet_paths: &PlanetPaths) -> (CombatLists, FleetLossStats) {
+    let (combat_lists, losses, _hits) = move_fleets_with_hits(state, planet_paths);
+    (combat_lists, losses)
+}
+
+fn move_fleets_with_hits(
+    state: &mut State,
+    planet_paths: &PlanetPaths,
+) -> (CombatLists, FleetLossStats, Vec<FleetHit>) {
     let mut combat_lists = CombatLists::for_planets(&state.planets);
     let mut fleets_to_remove = Vec::new();
     let mut losses = FleetLossStats::default();
+    let mut hits = Vec::new();
 
     for fleet in &mut state.fleets {
         let old_pos = fleet.position();
@@ -459,6 +513,10 @@ fn move_fleets(state: &mut State, planet_paths: &PlanetPaths) -> (CombatLists, F
             if path.check_collision && fleet_hits_planet_path(old_pos, new_pos, path, planet.radius)
             {
                 combat_lists.push(planet.id, fleet.clone());
+                hits.push(FleetHit {
+                    planet_id: planet.id,
+                    fleet: fleet.clone(),
+                });
                 fleets_to_remove.push(fleet.id);
                 hit_planet = true;
                 break;
@@ -486,7 +544,7 @@ fn move_fleets(state: &mut State, planet_paths: &PlanetPaths) -> (CombatLists, F
     state
         .fleets
         .retain(|fleet| !fleets_to_remove.contains(&fleet.id));
-    (combat_lists, losses)
+    (combat_lists, losses, hits)
 }
 
 fn apply_planet_paths(state: &mut State, planet_paths: &PlanetPaths) {
