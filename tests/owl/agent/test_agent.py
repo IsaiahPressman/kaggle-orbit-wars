@@ -380,6 +380,32 @@ def test_compact_runtime_entities_keeps_active_action_slots_and_fleets() -> None
     ]
 
 
+def test_compact_runtime_entities_remaps_cross_attention_fleet_targets() -> None:
+    obs = _obs_batch(max_fleets=3)
+    obs.fleet_target = torch.full((1, 3), -1, dtype=torch.int64)
+    obs.target_incoming_features = torch.zeros((1, ACTION_ENTITY_SLOTS, 2))
+    obs.target_incoming_features[0, 3, 0] = 7.0
+    obs.target_incoming_features[0, MAX_PLANETS + 1, 1] = 9.0
+    obs.entity_mask[0, 0] = True
+    obs.entity_mask[0, 3] = True
+    obs.entity_mask[0, MAX_PLANETS + 1] = True
+    obs.entity_mask[0, ACTION_ENTITY_SLOTS] = True
+    obs.entity_mask[0, ACTION_ENTITY_SLOTS + 2] = True
+    obs.fleet_target[0, 0] = MAX_PLANETS + 1
+    obs.fleet_target[0, 2] = 3
+
+    compacted = compact_entities(obs).obs
+
+    assert compacted.fleet_target is not None
+    assert compacted.fleet_target.tolist() == [[2, 1]]
+    assert compacted.target_incoming_features is not None
+    assert compacted.target_incoming_features[0, :, :].tolist() == [
+        [0.0, 0.0],
+        [7.0, 0.0],
+        [0.0, 9.0],
+    ]
+
+
 def test_compact_runtime_entities_can_preserve_planet_slots() -> None:
     obs = _obs_batch(max_fleets=5)
     action_mask = obs.action_mask

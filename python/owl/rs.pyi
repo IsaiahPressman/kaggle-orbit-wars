@@ -34,6 +34,8 @@ class RlVecEnv:
         can_act: np.ndarray,
         max_launch: np.ndarray,
         player_features: np.ndarray | None = ...,
+        fleet_target: np.ndarray | None = ...,
+        target_incoming_features: np.ndarray | None = ...,
     ) -> None: ...
     def reset_discrete_target_bins(
         self,
@@ -46,6 +48,8 @@ class RlVecEnv:
         global_obs: np.ndarray,
         can_act: np.ndarray,
         player_features: np.ndarray | None = ...,
+        fleet_target: np.ndarray | None = ...,
+        target_incoming_features: np.ndarray | None = ...,
     ) -> None: ...
     def step(
         self,
@@ -64,6 +68,8 @@ class RlVecEnv:
         rewards: np.ndarray,
         dones: np.ndarray,
         player_features: np.ndarray | None = ...,
+        fleet_target: np.ndarray | None = ...,
+        target_incoming_features: np.ndarray | None = ...,
     ) -> dict[str, list[float]]: ...
     def step_discrete_target_bins(
         self,
@@ -80,6 +86,8 @@ class RlVecEnv:
         rewards: np.ndarray,
         dones: np.ndarray,
         player_features: np.ndarray | None = ...,
+        fleet_target: np.ndarray | None = ...,
+        target_incoming_features: np.ndarray | None = ...,
     ) -> dict[str, list[float]]: ...
     def step_discrete_targets(
         self,
@@ -98,6 +106,8 @@ class RlVecEnv:
         rewards: np.ndarray,
         dones: np.ndarray,
         player_features: np.ndarray | None = ...,
+        fleet_target: np.ndarray | None = ...,
+        target_incoming_features: np.ndarray | None = ...,
     ) -> dict[str, list[float]]: ...
     def obs_shapes(
         self,
@@ -114,6 +124,20 @@ class RlVecEnv:
             tuple[int, int, int],
         ]
         | tuple[
+            tuple[int, int, int],
+            tuple[int, int],
+            tuple[int, int, int],
+            tuple[int, int, int],
+            tuple[int, int],
+            tuple[int, int],
+            tuple[int, int],
+            tuple[int, int, int],
+            tuple[int, ...],
+            tuple[int, int, int],
+        ]
+        | tuple[
+            tuple[int, int, int],
+            tuple[int, int],
             tuple[int, int, int],
             tuple[int, int],
             tuple[int, int, int],
@@ -164,6 +188,8 @@ class RlVecEnv:
         can_act: np.ndarray,
         max_launch: np.ndarray | None,
         player_features: np.ndarray | None = ...,
+        fleet_target: np.ndarray | None = ...,
+        target_incoming_features: np.ndarray | None = ...,
     ) -> None: ...
     def decode_pure_actions(
         self,
@@ -220,11 +246,14 @@ class RlVecEnv:
         rewards: np.ndarray,
         dones: np.ndarray,
         player_features: np.ndarray | None = ...,
+        fleet_target: np.ndarray | None = ...,
+        target_incoming_features: np.ndarray | None = ...,
     ) -> dict[str, list[float]]: ...
 
 def assert_release_build() -> None: ...
 def rl_obs_constants() -> tuple[int, int, int, int, int, int, int, int, int]: ...
 def rl_obs_ext_v2_constants() -> tuple[int, int]: ...
+def rl_obs_cross_attn_constants() -> tuple[int, int]: ...
 def encode_entity_based(
     planets: np.ndarray,
     initial_planets: np.ndarray,
@@ -269,6 +298,35 @@ def encode_entity_based_with_player_features(
     fleet_filter_min_size: int = ...,
     player_feature_channels: int = ...,
 ) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+]: ...
+def encode_entity_based_cross_attn(
+    planets: np.ndarray,
+    initial_planets: np.ndarray,
+    fleets: np.ndarray,
+    comet_planet_ids: np.ndarray,
+    comet_path_indices: np.ndarray,
+    comet_path_lengths: np.ndarray,
+    comet_paths: np.ndarray,
+    angular_velocity: float,
+    step: int = ...,
+    episode_steps: int = ...,
+    max_entities: int = ...,
+    min_fleet_size: int = ...,
+    fleet_filter_min_size: int = ...,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,

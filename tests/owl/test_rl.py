@@ -6,6 +6,7 @@ import torch
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     COMET_CHANNELS,
+    CROSS_ATTENTION_FLEET_CHANNELS,
     FLEET_CHANNELS,
     GLOBAL_CHANNELS,
     GLOBAL_EXT_V2_CHANNELS,
@@ -14,6 +15,7 @@ from owl.rl import (
     MAX_PLANETS,
     PLANET_CHANNELS,
     PLAYER_FEATURE_CHANNELS,
+    TARGET_INCOMING_CHANNELS,
     ActionDiscreteTargetBinsConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
@@ -22,6 +24,7 @@ from owl.rl import (
     DiscreteTargetBinActionMask,
     DiscreteTargetBinActions,
     EntityBasedConfig,
+    EntityBasedCrossAttnV1Config,
     EntityBasedExtV1Config,
     EntityBasedExtV2Config,
     EnvConfig,
@@ -404,6 +407,32 @@ def test_vectorized_env_accepts_entity_based_ext_v2_shapes() -> None:
 
     assert obs.planets.shape == (2, MAX_PLANETS, PLANET_CHANNELS)
     assert obs.fleets.shape == (2, spec.max_fleets, FLEET_CHANNELS)
+    assert obs.global_features.shape == (2, spec.global_channels)
+    assert obs.player_features is not None
+    assert obs.player_features.shape == (2, 4, PLAYER_FEATURE_CHANNELS)
+
+
+def test_vectorized_env_accepts_entity_based_cross_attn_shapes() -> None:
+    spec = EntityBasedCrossAttnV1Config()
+    env = VectorizedEnv(
+        n_envs=2,
+        obs_spec=spec,
+        action_spec=ActionPureConfig(),
+        pin_memory=False,
+    )
+
+    obs = env.reset()
+
+    assert obs.planets.shape == (2, MAX_PLANETS, PLANET_CHANNELS)
+    assert obs.fleets.shape == (2, spec.max_fleets, CROSS_ATTENTION_FLEET_CHANNELS)
+    assert obs.fleet_target is not None
+    assert obs.fleet_target.shape == (2, spec.max_fleets)
+    assert obs.target_incoming_features is not None
+    assert obs.target_incoming_features.shape == (
+        2,
+        ACTION_ENTITY_SLOTS,
+        TARGET_INCOMING_CHANNELS,
+    )
     assert obs.global_features.shape == (2, spec.global_channels)
     assert obs.player_features is not None
     assert obs.player_features.shape == (2, 4, PLAYER_FEATURE_CHANNELS)
@@ -1507,6 +1536,34 @@ def test_encode_python_observation_returns_rust_filtered_fleet_count() -> None:
     )
 
     assert encoded.filtered_fleets == 2
+
+
+def test_encode_python_observation_cross_attn_routes_fleet_arrivals() -> None:
+    encoded = encode_python_observation(
+        _python_obs(
+            planets=[
+                [0, 0, 10.0, 70.0, 2.0, 10, 3],
+                [1, 1, 50.0, 70.0, 2.0, 10, 3],
+            ],
+            fleets=[
+                [10, 0, 30.0, 70.0, 0.0, 0, 1000],
+                [11, 1, 99.0, 10.0, 0.0, 1, 1000],
+            ],
+        ),
+        obs_spec=EntityBasedCrossAttnV1Config(),
+        action_spec=ActionPureConfig(min_fleet_size=1),
+    )
+
+    assert encoded.fleet_target is not None
+    assert encoded.target_incoming_features is not None
+    assert encoded.fleet_target[0, 0].item() == 1
+    assert encoded.fleet_target[0, 1].item() == -1
+    assert encoded.entity_mask[0, ACTION_ENTITY_SLOTS].item()
+    assert not encoded.entity_mask[0, ACTION_ENTITY_SLOTS + 1].item()
+    eta_start = 4 + 2 + 22
+    assert encoded.fleets[0, 0, eta_start + 2].item() == pytest.approx(1.0)
+    assert encoded.target_incoming_features[0, 1, 2].item() == pytest.approx(0.01)
+    assert encoded.target_incoming_features[0, 1, 16 + 2].item() == pytest.approx(0.2)
 
 
 def test_encode_entity_based_filters_small_fleets_and_keeps_stranded_players() -> None:

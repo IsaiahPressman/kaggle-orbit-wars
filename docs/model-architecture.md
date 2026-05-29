@@ -63,6 +63,8 @@ can inline an actor config to override preset fields such as mixture count.
 
 `force_flash_attn=True` is ignored for CPU tensors; CPU execution always uses
 the regular SDPA fallback path.
+`EntityBasedCrossAttnV1` currently uses padded SDPA for its interleaved
+cross-attention and rejects `force_flash_attn=True`.
 
 `FullConfig` validates that `env.action_spec.action_spec` matches
 `model.actor.action_spec`. Direct model construction performs the same check
@@ -112,6 +114,14 @@ model creates a player-feature projection only when
 `entity_based_ext_v1` stateless checkpoints therefore do not gain
 `player_feature_proj` parameters.
 
+For `EntityBasedCrossAttnV1`, planet, comet, global, and player feature widths
+match `EntityBasedExtV2`, but fleet rows have width `46`. The model also
+requires `ObsBatch.fleet_target` and `ObsBatch.target_incoming_features`.
+`target_incoming_features` is projected and added to the matching planet/comet
+action-entity hidden states before the trunk. Fleet rows are projected once into
+a separate fleet residual stream instead of being concatenated into the
+self-attention entity sequence.
+
 The boolean `orbiting_planets` mask selects the orbiting-planet projection for
 orbiting rows and the static-planet projection for all other planet rows.
 Planet, comet, and fleet tokens are concatenated on the entity axis in that
@@ -141,6 +151,28 @@ excluded from attention keys and are zeroed in the returned hidden states.
 Downstream code must consume the named `EncodedObservations` fields rather than
 assuming output meaning from positional slices.
 
+For `EntityBasedCrossAttnV1`, the self-attention trunk omits fleet tokens. Its
+sequence is:
+
+```text
+[planet and comet action-entity tokens]
+[player tokens]
+[global-feature token]
+[board scratch tokens]
+[actor plan tokens]
+[critic value tokens]
+```
+
+After each trunk self-attention operation, these query tokens run padded
+planet-to-fleet cross-attention before the trunk MLP. Planet and comet tokens
+attend only to fleet rows whose `fleet_target` matches that action-entity slot;
+player, actor-plan, and critic-value tokens attend to routed fleets owned by
+that outer player; the global-feature and board scratch tokens attend to all
+routed fleets. The fleet residual stream is updated once per shared block by a
+separate fleet MLP and remains outside self-attention. Player-count adapter
+blocks are rejected for this observation spec because they would otherwise add
+trunk MLPs without the matching interleaved fleet cross-attention.
+
 Kaggle serving may compact inactive planet, comet, and fleet rows before model
 inference. Recurrent checkpoints with `recurrence_mode="include_planets"` keep
 the fixed planet prefix and compact only comets/fleets, because their recurrent
@@ -149,7 +181,9 @@ actor-visible action slot count is the runtime
 `ObsBatch.action_mask.can_act.shape[2]` instead of the fixed
 `ACTION_ENTITY_SLOTS` API width. The compacted action slots still appear first
 in planet-then-comet order, and `Agent` expands sampled actions back to the full
-44-slot Rust/Kaggle contract before conversion.
+44-slot Rust/Kaggle contract before conversion. For `EntityBasedCrossAttnV1`,
+serving compaction also slices `target_incoming_features` to the compacted
+action-entity axis and remaps `fleet_target` to those compacted indices.
 
 ## Transformer Trunk
 
@@ -208,6 +242,10 @@ behavior. Its trunk replaces each stateless transformer block with:
 transformer block over all current observation tokens
 minGRU block over the configured recurrent token set
 ```
+
+`EntityBasedCrossAttnV1` is stateless-only for now. Recurrent model
+construction rejects that observation spec until a recurrent cross-attention
+layout is defined.
 
 `recurrence_mode` controls the recurrent token set:
 

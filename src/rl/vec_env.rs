@@ -19,10 +19,10 @@ use super::action_spec::{
 };
 use super::obs_spec::{encode_state, encode_state_with_action_slots};
 use super::{
-    require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
-    CROSS_ATTENTION_FLEET_CHANNELS, DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS,
-    GLOBAL_EXT_V2_CHANNELS, MAX_COMETS, MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS,
-    PLAYER_FEATURE_CHANNELS, TARGET_INCOMING_CHANNELS,
+    require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS, CROSS_ATTENTION_FLEET_CHANNELS,
+    DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, GLOBAL_EXT_V2_CHANNELS, MAX_COMETS,
+    MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS, PLAYER_FEATURE_CHANNELS,
+    TARGET_INCOMING_CHANNELS,
 };
 
 #[derive(Clone, Copy)]
@@ -2651,13 +2651,13 @@ fn parse_obs_spec_for_buffers(
     let fleet_extra_ship_count_channels = ship_count_one_hot_max.map_or(0, |max| max as usize);
     let (global_channels, player_feature_channels) =
         if obs_spec == "entity_based_ext_v2" || obs_spec == "entity_based_cross_attn_v1" {
-        (
-            GLOBAL_CHANNELS + GLOBAL_EXT_V2_CHANNELS,
-            PLAYER_FEATURE_CHANNELS,
-        )
-    } else {
-        (GLOBAL_CHANNELS, 0)
-    };
+            (
+                GLOBAL_CHANNELS + GLOBAL_EXT_V2_CHANNELS,
+                PLAYER_FEATURE_CHANNELS,
+            )
+        } else {
+            (GLOBAL_CHANNELS, 0)
+        };
     let fleet_channels = if obs_spec == "entity_based_cross_attn_v1" {
         CROSS_ATTENTION_FLEET_CHANNELS
     } else {
@@ -2770,9 +2770,9 @@ fn require_player_features_shape(
         return Ok(());
     }
     let Some(player_features) = player_features else {
-            return Err(PyValueError::new_err(
-                "player_features is required for obs_specs with player features",
-            ));
+        return Err(PyValueError::new_err(
+            "player_features is required for obs_specs with player features",
+        ));
     };
     require_shape(
         "player_features",
@@ -2813,7 +2813,11 @@ fn require_cross_attention_shapes(
     require_shape(
         "target_incoming_features",
         target_incoming_features.shape(),
-        &[n_envs, ACTION_ENTITY_SLOTS, obs_spec.target_incoming_channels],
+        &[
+            n_envs,
+            ACTION_ENTITY_SLOTS,
+            obs_spec.target_incoming_channels,
+        ],
     )
 }
 

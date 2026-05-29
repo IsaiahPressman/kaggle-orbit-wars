@@ -19,8 +19,10 @@ from owl.rs import (
 )
 from owl.rs import encode_entity_based as encode_entity_based
 from owl.rs import (
+    encode_entity_based_cross_attn,
     encode_entity_based_with_player_features,
     rl_obs_constants,
+    rl_obs_cross_attn_constants,
     rl_obs_ext_v2_constants,
 )
 from owl.rs import (
@@ -39,6 +41,9 @@ from owl.rs import (
     GLOBAL_CHANNELS,
 ) = rl_obs_constants()
 (GLOBAL_EXT_V2_CHANNELS, PLAYER_FEATURE_CHANNELS) = rl_obs_ext_v2_constants()
+(CROSS_ATTENTION_FLEET_CHANNELS, TARGET_INCOMING_CHANNELS) = (
+    rl_obs_cross_attn_constants()
+)
 
 
 class EntityBasedBaseConfig(BaseConfig):
@@ -75,6 +80,14 @@ class EntityBasedBaseConfig(BaseConfig):
     @property
     def player_feature_channels(self) -> int:
         return 0
+
+    @property
+    def target_incoming_channels(self) -> int:
+        return 0
+
+    @property
+    def uses_cross_attention(self) -> bool:
+        return False
 
     @property
     def ship_count_one_hot_encoder_max(self) -> int:
@@ -114,6 +127,30 @@ class EntityBasedExtV2Config(EntityBasedBaseConfig):
     @property
     def player_feature_channels(self) -> int:
         return PLAYER_FEATURE_CHANNELS
+
+
+class EntityBasedCrossAttnV1Config(EntityBasedBaseConfig):
+    obs_spec: Literal["entity_based_cross_attn_v1"] = "entity_based_cross_attn_v1"
+
+    @property
+    def fleet_channels(self) -> int:
+        return CROSS_ATTENTION_FLEET_CHANNELS
+
+    @property
+    def global_channels(self) -> int:
+        return GLOBAL_CHANNELS + GLOBAL_EXT_V2_CHANNELS
+
+    @property
+    def player_feature_channels(self) -> int:
+        return PLAYER_FEATURE_CHANNELS
+
+    @property
+    def target_incoming_channels(self) -> int:
+        return TARGET_INCOMING_CHANNELS
+
+    @property
+    def uses_cross_attention(self) -> bool:
+        return True
 
 
 class ActionPureConfig(BaseConfig):
@@ -156,7 +193,10 @@ class ActionDiscreteTargetBinsConfig(BaseConfig):
 
 
 ObsConfig: TypeAlias = Annotated[
-    EntityBasedConfig | EntityBasedExtV1Config | EntityBasedExtV2Config,
+    EntityBasedConfig
+    | EntityBasedExtV1Config
+    | EntityBasedExtV2Config
+    | EntityBasedCrossAttnV1Config,
     Field(discriminator="obs_spec"),
 ]
 ActionConfig: TypeAlias = Annotated[
@@ -241,6 +281,8 @@ class ObsBatch(BaseModel):
     planets: torch.Tensor
     orbiting_planets: torch.Tensor
     fleets: torch.Tensor
+    fleet_target: torch.Tensor | None = None
+    target_incoming_features: torch.Tensor | None = None
     comets: torch.Tensor
     entity_mask: torch.Tensor
     still_playing: torch.Tensor
@@ -300,6 +342,16 @@ class VectorizedEnv:
         self._planet_obs_np = self.observations.planets.numpy()
         self._orbiting_planet_obs_np = self.observations.orbiting_planets.numpy()
         self._fleet_obs_np = self.observations.fleets.numpy()
+        self._fleet_target_np = (
+            None
+            if self.observations.fleet_target is None
+            else self.observations.fleet_target.numpy()
+        )
+        self._target_incoming_features_np = (
+            None
+            if self.observations.target_incoming_features is None
+            else self.observations.target_incoming_features.numpy()
+        )
         self._comet_obs_np = self.observations.comets.numpy()
         self._entity_mask_np = self.observations.entity_mask.numpy()
         self._still_playing_np = self.observations.still_playing.numpy()
@@ -331,6 +383,8 @@ class VectorizedEnv:
                 self._global_obs_np,
                 self._can_act_np,
                 self._player_features_np,
+                self._fleet_target_np,
+                self._target_incoming_features_np,
             )
         else:
             assert self._max_launch_np is not None
@@ -345,6 +399,8 @@ class VectorizedEnv:
                 self._can_act_np,
                 self._max_launch_np,
                 self._player_features_np,
+                self._fleet_target_np,
+                self._target_incoming_features_np,
             )
         return self.observations
 
@@ -394,6 +450,8 @@ class VectorizedEnv:
             planets=self.observations.planets,
             orbiting_planets=self.observations.orbiting_planets,
             fleets=self.observations.fleets,
+            fleet_target=self.observations.fleet_target,
+            target_incoming_features=self.observations.target_incoming_features,
             comets=self.observations.comets,
             entity_mask=self.observations.entity_mask,
             still_playing=self.observations.still_playing,
@@ -436,6 +494,10 @@ class VectorizedEnv:
             if isinstance(action_mask, DiscreteTargetBinActionMask)
             else action_mask.max_launch.numpy(),
             None if obs.player_features is None else obs.player_features.numpy(),
+            None if obs.fleet_target is None else obs.fleet_target.numpy(),
+            None
+            if obs.target_incoming_features is None
+            else obs.target_incoming_features.numpy(),
         )
         return obs
 
@@ -590,6 +652,8 @@ class VectorizedEnv:
                 self._rewards_np,
                 self._dones_np,
                 self._player_features_np,
+                self._fleet_target_np,
+                self._target_incoming_features_np,
             )
             return self.observations, self.rewards, self.dones, episode_metrics
 
@@ -645,6 +709,8 @@ class VectorizedEnv:
                 self._rewards_np,
                 self._dones_np,
                 self._player_features_np,
+                self._fleet_target_np,
+                self._target_incoming_features_np,
             )
         elif isinstance(self.action_spec, ActionDiscreteTargetsConfig):
             discrete_actions = cast(DiscreteTargetActions, launch_actions)
@@ -672,6 +738,8 @@ class VectorizedEnv:
                 self._rewards_np,
                 self._dones_np,
                 self._player_features_np,
+                self._fleet_target_np,
+                self._target_incoming_features_np,
             )
         else:
             raise TypeError(
@@ -727,6 +795,8 @@ class VectorizedEnv:
             self._rewards_np,
             self._dones_np,
             self._player_features_np,
+            self._fleet_target_np,
+            self._target_incoming_features_np,
         )
         return self.observations, self.rewards, self.dones, episode_metrics
 
@@ -789,6 +859,29 @@ class VectorizedEnv:
                 ),
                 dtype=torch.float32,
                 pin_memory=pin_memory,
+            ),
+            fleet_target=(
+                None
+                if not obs_spec.uses_cross_attention
+                else torch.full(
+                    (self.n_envs, obs_spec.max_fleets),
+                    -1,
+                    dtype=torch.int64,
+                    pin_memory=pin_memory,
+                )
+            ),
+            target_incoming_features=(
+                None
+                if not obs_spec.uses_cross_attention
+                else torch.zeros(
+                    (
+                        self.n_envs,
+                        ACTION_ENTITY_SLOTS,
+                        obs_spec.target_incoming_channels,
+                    ),
+                    dtype=torch.float32,
+                    pin_memory=pin_memory,
+                )
             ),
             comets=torch.zeros(
                 (
@@ -887,38 +980,74 @@ def encode_python_observation_with_metrics(
         fleets_in,
         player=obs["player"],
     )
-    encoded = encode_entity_based_with_player_features(
-        planets_in,
-        initial_planets_in,
-        fleets_in,
-        comet_planet_ids,
-        comet_path_indices,
-        comet_path_lengths,
-        comet_paths,
-        angular_velocity,
-        step,
-        episode_steps,
-        obs_spec.max_entities,
-        action_spec.min_fleet_size,
-        obs_spec.ship_count_one_hot_encoder_max,
-        action_spec.min_fleet_size
-        if fleet_filter_min_size is None
-        else fleet_filter_min_size,
-        obs_spec.player_feature_channels,
-    )
-    (
-        planets,
-        orbiting_planets,
-        fleets,
-        comets,
-        entity_mask,
-        global_features,
-        player_features,
-        source_can_act,
-        source_target_can_act,
-        max_launch,
-        filtered_fleets,
-    ) = encoded
+    if obs_spec.uses_cross_attention:
+        cross_encoded = encode_entity_based_cross_attn(
+            planets_in,
+            initial_planets_in,
+            fleets_in,
+            comet_planet_ids,
+            comet_path_indices,
+            comet_path_lengths,
+            comet_paths,
+            angular_velocity,
+            step,
+            episode_steps,
+            obs_spec.max_entities,
+            action_spec.min_fleet_size,
+            action_spec.min_fleet_size
+            if fleet_filter_min_size is None
+            else fleet_filter_min_size,
+        )
+        (
+            planets,
+            orbiting_planets,
+            fleets,
+            fleet_target,
+            target_incoming_features,
+            comets,
+            entity_mask,
+            global_features,
+            player_features,
+            source_can_act,
+            source_target_can_act,
+            max_launch,
+            filtered_fleets,
+        ) = cross_encoded
+    else:
+        entity_encoded = encode_entity_based_with_player_features(
+            planets_in,
+            initial_planets_in,
+            fleets_in,
+            comet_planet_ids,
+            comet_path_indices,
+            comet_path_lengths,
+            comet_paths,
+            angular_velocity,
+            step,
+            episode_steps,
+            obs_spec.max_entities,
+            action_spec.min_fleet_size,
+            obs_spec.ship_count_one_hot_encoder_max,
+            action_spec.min_fleet_size
+            if fleet_filter_min_size is None
+            else fleet_filter_min_size,
+            obs_spec.player_feature_channels,
+        )
+        (
+            planets,
+            orbiting_planets,
+            fleets,
+            comets,
+            entity_mask,
+            global_features,
+            player_features,
+            source_can_act,
+            source_target_can_act,
+            max_launch,
+            filtered_fleets,
+        ) = entity_encoded
+        fleet_target = None
+        target_incoming_features = None
     if isinstance(action_spec, ActionPureConfig):
         return EncodedPythonObservation(
             obs=_encoded_observation_to_batch(
@@ -926,6 +1055,8 @@ def encode_python_observation_with_metrics(
                     planets,
                     orbiting_planets,
                     fleets,
+                    fleet_target,
+                    target_incoming_features,
                     comets,
                     entity_mask,
                     global_features,
@@ -948,6 +1079,8 @@ def encode_python_observation_with_metrics(
                     planets,
                     orbiting_planets,
                     fleets,
+                    fleet_target,
+                    target_incoming_features,
                     comets,
                     entity_mask,
                     global_features,
@@ -975,6 +1108,8 @@ def encode_python_observation_with_metrics(
                 planets,
                 orbiting_planets,
                 fleets,
+                fleet_target,
+                target_incoming_features,
                 comets,
                 entity_mask,
                 global_features,
@@ -1132,6 +1267,8 @@ def _encoded_observation_to_batch(
         np.ndarray,
         np.ndarray,
         np.ndarray,
+        np.ndarray | None,
+        np.ndarray | None,
         np.ndarray,
         np.ndarray,
         np.ndarray,
@@ -1146,6 +1283,8 @@ def _encoded_observation_to_batch(
         planets,
         orbiting_planets,
         fleets,
+        fleet_target,
+        target_incoming_features,
         comets,
         entity_mask,
         global_features,
@@ -1177,6 +1316,19 @@ def _encoded_observation_to_batch(
             0
         ),
         fleets=torch.as_tensor(fleets, dtype=torch.float32).unsqueeze(0),
+        fleet_target=(
+            None
+            if fleet_target is None
+            else torch.as_tensor(fleet_target, dtype=torch.int64).unsqueeze(0)
+        ),
+        target_incoming_features=(
+            None
+            if target_incoming_features is None
+            else torch.as_tensor(
+                target_incoming_features,
+                dtype=torch.float32,
+            ).unsqueeze(0)
+        ),
         comets=torch.as_tensor(comets, dtype=torch.float32).unsqueeze(0),
         entity_mask=torch.as_tensor(entity_mask, dtype=torch.bool).unsqueeze(0),
         still_playing=torch.as_tensor(still_playing, dtype=torch.bool).unsqueeze(0),

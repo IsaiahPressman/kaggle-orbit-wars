@@ -29,6 +29,8 @@ env = VectorizedEnv(
 - `OUTER_PLAYER_SLOTS = 4`
 - `GLOBAL_EXT_V2_CHANNELS = 14`
 - `PLAYER_FEATURE_CHANNELS = 14`
+- `CROSS_ATTENTION_FLEET_CHANNELS = 46`
+- `TARGET_INCOMING_CHANNELS = 48`
 
 `max_entities` controls total non-global entity capacity. Fleet capacity is:
 
@@ -336,6 +338,68 @@ Component production and linear ship channels use the same normalizer as their
 total, so comet plus non-comet production equals total production, and comet
 plus non-comet planet plus fleet linear ships equals total linear ships.
 Inactive outer player slots are zero-filled.
+
+## EntityBasedCrossAttnV1
+
+Config:
+
+```python
+{"obs_spec": "entity_based_cross_attn_v1", "max_entities": 256}
+```
+
+`EntityBasedCrossAttnV1` keeps the same planet, comet, global, and
+per-player features as `EntityBasedExtV2`, but fleet rows are no longer
+self-attention entity tokens. The vectorized environment and standalone encoder
+add two tensors:
+
+| Tensor | dtype | Shape |
+| --- | --- | --- |
+| `fleets` | `float32` | `(n_envs, max_fleets, 46)` |
+| `fleet_target` | `int64` | `(n_envs, max_fleets)` |
+| `target_incoming_features` | `float32` | `(n_envs, ACTION_ENTITY_SLOTS, 48)` |
+| `global_features` | `float32` | `(n_envs, 17)` |
+| `player_features` | `float32` | `(n_envs, 4, 14)` |
+
+Rust routes current fleets by forward-simulating them until they collide with a
+current planet or comet planet, leave the board, hit the sun, or the episode
+ends. Fleets that leave the board, hit the sun, or collide only with an
+expiring comet planet are omitted. Existing comet paths are simulated; future
+comet spawns are intentionally ignored. Routed fleet rows are sorted by
+descending ship count only when there are more routed fleets than `max_fleets`.
+
+`entity_mask` keeps the same planet, comet, fleet-tail order. For this spec,
+the model treats only the first `ACTION_ENTITY_SLOTS` mask entries as trunk
+entity tokens and uses the fleet tail as the cross-attention memory mask.
+`fleet_target[i]` is the action-entity slot that fleet row `i` will collide
+with, or `-1` for inactive rows. Kaggle serving may compact inactive action
+entities before inference; in that runtime path `target_incoming_features` is
+sliced to the compacted action-entity axis and `fleet_target` is remapped to the
+same compacted indices.
+
+Fleet channels:
+
+| Channels | Feature |
+| --- | --- |
+| `0..3` | owner one-hot for players `0..3` |
+| `4` | normalized ships |
+| `5` | normalized log ships |
+| `6..27` | fleet ship-count basis |
+| `28..43` | ETA one-hot buckets for turns `1..15` and `16+` |
+| `44` | ETA overflow `(eta - 15) / 10` for `eta >= 16`, else `0` |
+| `45` | post-comet flag; `1` when arrival is at or after the next scheduled comet spawn |
+
+`target_incoming_features` has three 16-bucket groups over ETA buckets
+`1..15` and `16+`:
+
+| Channels | Feature |
+| --- | --- |
+| `0..15` | incoming fleet count divided by `100` |
+| `16..31` | incoming ships divided by `5000` |
+| `32..47` | `log1p` incoming ships divided by `ln(1000)` |
+
+These per-target aggregates include all routed fleets before fleet-memory
+truncation, so counts remain accurate even when more than `max_fleets` fleets
+are inbound.
 
 Standalone observation encoding uses strict application-boundary parsing:
 required observation keys are read directly, `step` and `episode_steps` must be

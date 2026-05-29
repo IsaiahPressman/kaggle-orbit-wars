@@ -238,6 +238,16 @@ class StatelessTransformerV1(BaseModelAPI):
             actor_config = cast(ActorDiscreteTargetBinsConfig, config.actor)
             if actor_config.n_bins != action_spec.n_bins:
                 raise ValueError("model actor n_bins must match env action_spec n_bins")
+        if obs_spec.uses_cross_attention and config.force_flash_attn:
+            raise ValueError(
+                "entity_based_cross_attn_v1 uses padded SDPA and does not support "
+                "force_flash_attn=True"
+            )
+        if obs_spec.uses_cross_attention and config.player_count_adapter_blocks != 0:
+            raise ValueError(
+                "entity_based_cross_attn_v1 does not support "
+                "player_count_adapter_blocks"
+            )
         self.config = config
         self.obs_spec = obs_spec
         self.action_spec = action_spec
@@ -268,6 +278,14 @@ class StatelessTransformerV1(BaseModelAPI):
                 self.config,
             )
         )
+        self.target_incoming_proj = (
+            None
+            if not self.obs_spec.uses_cross_attention
+            else ObservationInputStem(
+                self.obs_spec.target_incoming_channels,
+                self.config,
+            )
+        )
         self.player_tokens = nn.Parameter(torch.empty(OUTER_PLAYER_SLOTS, dim))
         self.board_tokens = nn.Parameter(torch.empty(self.config.n_scratch_tokens, dim))
         self.actor_plan_tokens = nn.Parameter(torch.empty(OUTER_PLAYER_SLOTS, dim))
@@ -280,6 +298,18 @@ class StatelessTransformerV1(BaseModelAPI):
         )
         self.blocks = nn.ModuleList(
             TransformerBlock(self.config) for _ in range(shared_depth)
+        )
+        self.fleet_cross_attn = nn.ModuleList(
+            PlanetFleetCrossAttention(self.config)
+            for _ in range(shared_depth if self.obs_spec.uses_cross_attention else 0)
+        )
+        self.fleet_residual_mlps = nn.ModuleList(
+            FeedForward(self.config)
+            for _ in range(shared_depth if self.obs_spec.uses_cross_attention else 0)
+        )
+        self.fleet_residual_norms = nn.ModuleList(
+            nn.LayerNorm(dim)
+            for _ in range(shared_depth if self.obs_spec.uses_cross_attention else 0)
         )
         self.final_norm = nn.LayerNorm(dim)
         self.player_count_adapters = nn.ModuleDict()
@@ -325,6 +355,12 @@ class StatelessTransformerV1(BaseModelAPI):
             block = cast(TransformerBlock, module)
             _init_linear(block.attn.out, gain=residual_gain)
             _init_linear(block.mlp.down, gain=residual_gain)
+        for module in self.fleet_cross_attn:
+            cross_attn = cast(PlanetFleetCrossAttention, module)
+            _init_linear(cross_attn.attn.out, gain=residual_gain)
+        for module in self.fleet_residual_mlps:
+            mlp = cast(FeedForward, module)
+            _init_linear(mlp.down, gain=residual_gain)
         for adapter in self.player_count_adapters.values():
             adapter = cast(PlayerCountAdapter, adapter)
             for module in adapter.blocks:
@@ -377,6 +413,11 @@ class StatelessTransformerV1(BaseModelAPI):
                 if self.player_feature_proj is None
                 else (self.player_feature_proj.input,)
             ),
+            *(
+                ()
+                if self.target_incoming_proj is None
+                else (self.target_incoming_proj.input,)
+            ),
             self.player_tokens,
             self.board_tokens,
             self.actor_plan_tokens,
@@ -420,6 +461,35 @@ class StatelessTransformerV1(BaseModelAPI):
         )
         fleet_x = self.fleet_proj(obs.fleets)
         comet_x = self.comet_proj(obs.comets)
+        action_entity_x = torch.cat((planet_x, comet_x), dim=1)
+        cross_attention = self.obs_spec.uses_cross_attention
+        if cross_attention:
+            fleet_target, target_incoming_features = (
+                _require_cross_attention_observation_tensors(
+                    obs,
+                    action_entity_slots=action_entity_slots,
+                )
+            )
+            if self.target_incoming_proj is None:
+                raise RuntimeError("target incoming projection is not initialized")
+            action_entity_x = action_entity_x + self.target_incoming_proj(
+                target_incoming_features
+            )
+            fleet_mask = obs.entity_mask[:, action_entity_slots:]
+            if fleet_mask.shape[1] != fleet_x.shape[1]:
+                raise ValueError(
+                    "cross-attention fleet mask length must match fleets; got "
+                    f"{fleet_mask.shape[1]} and {fleet_x.shape[1]}"
+                )
+            fleet_x = fleet_x.masked_fill(~fleet_mask.unsqueeze(-1), 0.0)
+        else:
+            if obs.fleet_target is not None or obs.target_incoming_features is not None:
+                raise ValueError(
+                    "fleet_target and target_incoming_features require "
+                    "entity_based_cross_attn_v1"
+                )
+            fleet_target = None
+            fleet_mask = None
         batch_size = obs.planets.shape[0]
         player_tokens = _expand_tokens(
             self.player_tokens,
@@ -453,31 +523,63 @@ class StatelessTransformerV1(BaseModelAPI):
             dtype=torch.bool,
             device=obs.entity_mask.device,
         )
-        token_mask = torch.cat(
-            (
-                obs.entity_mask,
-                obs.still_playing,
-                always_on_mask,
-                obs.still_playing,
-                obs.still_playing,
-            ),
-            dim=1,
-        )
-        x = torch.cat(
-            (
-                planet_x,
-                comet_x,
-                fleet_x,
-                player_tokens,
-                global_token,
-                board_tokens,
-                actor_plan_tokens,
-                critic_value_tokens,
-            ),
-            dim=1,
-        )
+        if cross_attention:
+            action_entity_mask = obs.entity_mask[:, :action_entity_slots]
+            token_mask = torch.cat(
+                (
+                    action_entity_mask,
+                    obs.still_playing,
+                    always_on_mask,
+                    obs.still_playing,
+                    obs.still_playing,
+                ),
+                dim=1,
+            )
+            x = torch.cat(
+                (
+                    action_entity_x,
+                    player_tokens,
+                    global_token,
+                    board_tokens,
+                    actor_plan_tokens,
+                    critic_value_tokens,
+                ),
+                dim=1,
+            )
+            cross_attn_mask = _build_planet_fleet_cross_attention_mask(
+                obs,
+                fleet_target=cast(torch.Tensor, fleet_target),
+                fleet_mask=cast(torch.Tensor, fleet_mask),
+                action_entity_slots=action_entity_slots,
+                query_token_count=x.shape[1],
+                n_scratch_tokens=self.config.n_scratch_tokens,
+            )
+        else:
+            token_mask = torch.cat(
+                (
+                    obs.entity_mask,
+                    obs.still_playing,
+                    always_on_mask,
+                    obs.still_playing,
+                    obs.still_playing,
+                ),
+                dim=1,
+            )
+            x = torch.cat(
+                (
+                    action_entity_x,
+                    fleet_x,
+                    player_tokens,
+                    global_token,
+                    board_tokens,
+                    actor_plan_tokens,
+                    critic_value_tokens,
+                ),
+                dim=1,
+            )
+            cross_attn_mask = None
         packed: PackedSequence | None
-        should_use_flash = use_flash_attn(x)
+        should_use_flash = use_flash_attn(x) and not cross_attention
         if (
             _requires_flash_attn(x, force_flash_attn=self.config.force_flash_attn)
             and not should_use_flash
@@ -492,8 +594,33 @@ class StatelessTransformerV1(BaseModelAPI):
         else:
             packed = None
             block_token_mask = token_mask
-        for block in self.blocks:
-            x = block(x, block_token_mask, packed)
+        if cross_attention:
+            if block_token_mask is None or packed is not None:
+                raise RuntimeError("cross-attention observations require padded masks")
+            for block, cross_attn, fleet_norm, fleet_mlp in zip(
+                self.blocks,
+                self.fleet_cross_attn,
+                self.fleet_residual_norms,
+                self.fleet_residual_mlps,
+                strict=True,
+            ):
+                block = cast(TransformerBlock, block)
+                x = x + block.attn(block.norm1(x), block_token_mask, None)
+                x = x + cross_attn(
+                    x,
+                    fleet_x,
+                    cast(torch.Tensor, cross_attn_mask),
+                    cast(torch.Tensor, fleet_mask),
+                )
+                x = x + block.mlp(block.norm2(x))
+                fleet_x = fleet_x + fleet_mlp(fleet_norm(fleet_x))
+                fleet_x = fleet_x.masked_fill(
+                    ~cast(torch.Tensor, fleet_mask).unsqueeze(-1),
+                    0.0,
+                )
+        else:
+            for block in self.blocks:
+                x = block(x, block_token_mask, packed)
         x = self._apply_player_count_adapter_blocks(
             x,
             token_mask,
@@ -504,7 +631,9 @@ class StatelessTransformerV1(BaseModelAPI):
         if packed is not None:
             x = unpack_sequence(x, packed)
         x = x.masked_fill(~token_mask.unsqueeze(-1), 0.0)
-        entity_count = obs.entity_mask.shape[1]
+        entity_count = (
+            action_entity_slots if cross_attention else obs.entity_mask.shape[1]
+        )
         player_start = entity_count
         global_start = player_start + OUTER_PLAYER_SLOTS
         board_start = global_start + 1
@@ -1722,6 +1851,16 @@ def _index_obs_batch(obs: ObsBatch, indices: torch.Tensor) -> ObsBatch:
         planets=_batch_select(obs.planets, indices),
         orbiting_planets=_batch_select(obs.orbiting_planets, indices),
         fleets=_batch_select(obs.fleets, indices),
+        fleet_target=(
+            None
+            if obs.fleet_target is None
+            else _batch_select(obs.fleet_target, indices)
+        ),
+        target_incoming_features=(
+            None
+            if obs.target_incoming_features is None
+            else _batch_select(obs.target_incoming_features, indices)
+        ),
         comets=_batch_select(obs.comets, indices),
         entity_mask=_batch_select(obs.entity_mask, indices),
         still_playing=_batch_select(obs.still_playing, indices),
@@ -1796,6 +1935,16 @@ def _flatten_obs_time_if_sequence(
             planets=_flatten_time_tensor(obs.planets),
             orbiting_planets=_flatten_time_tensor(obs.orbiting_planets),
             fleets=_flatten_time_tensor(obs.fleets),
+            fleet_target=(
+                None
+                if obs.fleet_target is None
+                else _flatten_time_tensor(obs.fleet_target)
+            ),
+            target_incoming_features=(
+                None
+                if obs.target_incoming_features is None
+                else _flatten_time_tensor(obs.target_incoming_features)
+            ),
             comets=_flatten_time_tensor(obs.comets),
             entity_mask=_flatten_time_tensor(obs.entity_mask),
             still_playing=_flatten_time_tensor(obs.still_playing),
@@ -2257,6 +2406,83 @@ def _expand_tokens(
     return tokens.to(dtype=dtype).unsqueeze(0).expand(batch_size, -1, -1)
 
 
+def _require_cross_attention_observation_tensors(
+    obs: ObsBatch,
+    *,
+    action_entity_slots: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if obs.fleet_target is None:
+        raise ValueError("fleet_target is required by entity_based_cross_attn_v1")
+    if obs.target_incoming_features is None:
+        raise ValueError(
+            "target_incoming_features is required by entity_based_cross_attn_v1"
+        )
+    if obs.target_incoming_features.shape[:2] != (
+        obs.planets.shape[0],
+        action_entity_slots,
+    ):
+        raise ValueError(
+            "target_incoming_features must have shape "
+            f"(batch, {action_entity_slots}, channels), got "
+            f"{tuple(obs.target_incoming_features.shape)}"
+        )
+    if obs.fleet_target.shape != obs.entity_mask[:, action_entity_slots:].shape:
+        raise ValueError(
+            "fleet_target must have shape matching the fleet mask tail, got "
+            f"{tuple(obs.fleet_target.shape)} and "
+            f"{tuple(obs.entity_mask[:, action_entity_slots:].shape)}"
+        )
+    return obs.fleet_target, obs.target_incoming_features
+
+
+def _build_planet_fleet_cross_attention_mask(
+    obs: ObsBatch,
+    *,
+    fleet_target: torch.Tensor,
+    fleet_mask: torch.Tensor,
+    action_entity_slots: int,
+    query_token_count: int,
+    n_scratch_tokens: int,
+) -> torch.Tensor:
+    invalid_targets = (
+        (fleet_target < 0) | (fleet_target >= action_entity_slots)
+    ) & fleet_mask
+    if bool(invalid_targets.any().item()):
+        raise ValueError(
+            "fleet_target contains target indices outside the action entity axis"
+        )
+
+    target_slots = torch.arange(
+        action_entity_slots,
+        device=fleet_target.device,
+        dtype=fleet_target.dtype,
+    )
+    action_entity_mask = (
+        fleet_target[:, None, :] == target_slots[None, :, None]
+    ) & fleet_mask[:, None, :]
+
+    owner_mask = (obs.fleets[..., :OUTER_PLAYER_SLOTS] > 0.5).transpose(1, 2)
+    owner_mask = owner_mask & fleet_mask[:, None, :]
+    global_mask = fleet_mask[:, None, :]
+    scratch_mask = global_mask.expand(-1, n_scratch_tokens, -1)
+    cross_mask = torch.cat(
+        (
+            action_entity_mask,
+            owner_mask,
+            global_mask,
+            scratch_mask,
+            owner_mask,
+            owner_mask,
+        ),
+        dim=1,
+    )
+    if cross_mask.shape[1] != query_token_count:
+        raise RuntimeError(
+            "cross-attention query mask shape does not match transformer tokens"
+        )
+    return cross_mask
+
+
 class TransformerBlock(nn.Module):
     def __init__(self, config: StatelessTransformerV1Config) -> None:
         super().__init__()
@@ -2273,6 +2499,75 @@ class TransformerBlock(nn.Module):
     ) -> torch.Tensor:
         x = x + self.attn(self.norm1(x), token_mask, packed)
         return x + self.mlp(self.norm2(x))
+
+
+class PlanetFleetCrossAttention(nn.Module):
+    def __init__(self, config: StatelessTransformerV1Config) -> None:
+        super().__init__()
+        self.query_norm = nn.LayerNorm(config.embed_dim)
+        self.fleet_norm = nn.LayerNorm(config.embed_dim)
+        self.attn = MultiHeadCrossAttention(config)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        fleet: torch.Tensor,
+        attn_mask: torch.Tensor,
+        fleet_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if not bool(fleet_mask.any().item()):
+            return torch.zeros_like(query)
+        return self.attn(
+            self.query_norm(query),
+            self.fleet_norm(fleet),
+            attn_mask,
+            fleet_mask,
+        )
+
+
+class MultiHeadCrossAttention(nn.Module):
+    def __init__(self, config: StatelessTransformerV1Config) -> None:
+        super().__init__()
+        self.n_heads = config.n_heads
+        self.head_dim = config.embed_dim // config.n_heads
+        self.q = nn.Linear(config.embed_dim, config.embed_dim)
+        self.k = nn.Linear(config.embed_dim, config.embed_dim)
+        self.v = nn.Linear(config.embed_dim, config.embed_dim)
+        self.out = nn.Linear(config.embed_dim, config.embed_dim)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key_value: torch.Tensor,
+        attn_mask: torch.Tensor,
+        fleet_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, query_len, _ = query.shape
+        fleet_len = key_value.shape[1]
+        q = self.q(query).view(batch_size, query_len, self.n_heads, self.head_dim)
+        k = self.k(key_value).view(batch_size, fleet_len, self.n_heads, self.head_dim)
+        v = self.v(key_value).view(batch_size, fleet_len, self.n_heads, self.head_dim)
+        valid_query = attn_mask.any(dim=-1)
+        fallback_mask = fleet_mask[:, None, :]
+        no_fleet = ~fleet_mask.any(dim=-1)
+        if bool(no_fleet.any().item()):
+            fallback_mask = fallback_mask.expand(-1, query_len, -1).clone()
+            fallback_mask[no_fleet, :, 0] = True
+        safe_mask = torch.where(
+            valid_query.unsqueeze(-1),
+            attn_mask,
+            fallback_mask,
+        )
+        attn = F.scaled_dot_product_attention(
+            q.transpose(1, 2),
+            k.transpose(1, 2),
+            v.transpose(1, 2),
+            attn_mask=safe_mask[:, None, :, :],
+            dropout_p=0.0,
+        )
+        attn = attn.transpose(1, 2).reshape(batch_size, query_len, -1)
+        attn = self.out(attn)
+        return attn.masked_fill(~valid_query.unsqueeze(-1), 0.0)
 
 
 class MultiHeadSelfAttention(nn.Module):

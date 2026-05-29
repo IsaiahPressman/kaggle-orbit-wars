@@ -23,10 +23,10 @@ use super::action_spec::{
     RlActionSpec,
 };
 use super::{
-    require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
-    CROSS_ATTENTION_FLEET_CHANNELS, DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS,
-    GLOBAL_EXT_V2_CHANNELS, MAX_COMETS, MAX_COMET_PATH_LENGTH, MAX_PLANETS, OUTER_PLAYER_SLOTS,
-    PLANET_CHANNELS, PLAYER_FEATURE_CHANNELS, TARGET_INCOMING_CHANNELS,
+    require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS, CROSS_ATTENTION_FLEET_CHANNELS,
+    DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, GLOBAL_EXT_V2_CHANNELS, MAX_COMETS,
+    MAX_COMET_PATH_LENGTH, MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS,
+    PLAYER_FEATURE_CHANNELS, TARGET_INCOMING_CHANNELS,
 };
 
 type EncodedEntityBased<'py> = (
@@ -206,8 +206,7 @@ pub(super) fn encode_state_with_action_slots(
     }
 
     *action_slots = action_entity_slots(state);
-    let cross_attention_fleets =
-        fleet_target.is_some() || target_incoming_features.is_some();
+    let cross_attention_fleets = fleet_target.is_some() || target_incoming_features.is_some();
     let mut fleets = state.fleets.iter().collect::<Vec<_>>();
     if !cross_attention_fleets && fleets.len() > max_fleets {
         fleets.sort_by(|left, right| right.ships.cmp(&left.ships).then(left.id.cmp(&right.id)));
@@ -286,8 +285,8 @@ pub(super) fn encode_state_with_action_slots(
             fleet_channels,
             fleet_obs,
             fleet_mask,
-            fleet_target.as_deref_mut(),
-            target_incoming_features.as_deref_mut(),
+            fleet_target,
+            target_incoming_features,
             action_slots,
             min_fleet_size,
         );
@@ -363,7 +362,7 @@ fn encode_cross_attention_fleets(
     fleet_obs: &mut [f32],
     fleet_mask: &mut [bool],
     mut fleet_target: Option<&mut [i64]>,
-    mut target_incoming_features: Option<&mut [f32]>,
+    target_incoming_features: Option<&mut [f32]>,
     action_slots: &ActionEntitySlots,
     min_fleet_size: i64,
 ) {
@@ -378,9 +377,25 @@ fn encode_cross_attention_fleets(
         );
     }
 
-    let mut arrivals = route_current_fleet_arrivals(state);
+    let mut arrivals = route_current_fleet_arrivals(state)
+        .into_iter()
+        .filter_map(|arrival| {
+            action_slot_for_planet(action_slots, arrival.target_planet_id)
+                .map(|target_slot| (arrival, target_slot))
+        })
+        .collect::<Vec<_>>();
+    if let Some(target_incoming_features) = target_incoming_features {
+        for (arrival, target_slot) in &arrivals {
+            add_incoming_summary(
+                &mut target_incoming_features[target_slot * TARGET_INCOMING_CHANNELS
+                    ..(target_slot + 1) * TARGET_INCOMING_CHANNELS],
+                arrival.eta,
+                arrival.fleet.ships,
+            );
+        }
+    }
     if arrivals.len() > max_fleets {
-        arrivals.sort_by(|left, right| {
+        arrivals.sort_by(|(left, _), (right, _)| {
             right
                 .fleet
                 .ships
@@ -390,19 +405,11 @@ fn encode_cross_attention_fleets(
     }
     let next_comet_spawn = steps_until_next_comet_spawn(state.step);
 
-    let mut output_index = 0;
-    for arrival in &arrivals {
-        if output_index >= max_fleets {
-            break;
-        }
-        let Some(target_slot) = action_slot_for_planet(action_slots, arrival.target_planet_id)
-        else {
-            continue;
-        };
+    for (output_index, (arrival, target_slot)) in arrivals.iter().take(max_fleets).enumerate() {
         fleet_mask[output_index] = true;
-        if let Some(fleet_target) = fleet_target.as_deref_mut() {
+        if let Some(fleet_target) = &mut fleet_target {
             fleet_target[output_index] =
-                i64::try_from(target_slot).expect("action entity slot fits in i64");
+                i64::try_from(*target_slot).expect("action entity slot fits in i64");
         }
 
         let row_start = output_index * fleet_channels;
@@ -415,16 +422,6 @@ fn encode_cross_attention_fleets(
             next_comet_spawn != 0 && arrival.eta >= next_comet_spawn,
             min_fleet_size,
         );
-        if let Some(target_incoming_features) = target_incoming_features.as_deref_mut() {
-            add_incoming_summary(
-                &mut target_incoming_features
-                    [target_slot * TARGET_INCOMING_CHANNELS..(target_slot + 1)
-                        * TARGET_INCOMING_CHANNELS],
-                arrival.eta,
-                arrival.fleet.ships,
-            );
-        }
-        output_index += 1;
     }
 }
 
@@ -2592,9 +2589,8 @@ mod tests {
         assert_close(fleet_obs[0], 1.0);
         assert_close(fleet_obs[OWNER_CHANNELS], normalize_ships(1000));
 
-        let eta_start = OWNER_CHANNELS
-            + 2
-            + ship_count_feature_count(FLEET_SHIP_COUNT_BUCKET_CAPACITY);
+        let eta_start =
+            OWNER_CHANNELS + 2 + ship_count_feature_count(FLEET_SHIP_COUNT_BUCKET_CAPACITY);
         assert_close(fleet_obs[eta_start + 2], 1.0);
         assert_close(fleet_obs[eta_start + ETA_BUCKETS], 0.0);
         assert_close(fleet_obs[eta_start + ETA_BUCKETS + 1], 0.0);
@@ -2633,12 +2629,95 @@ mod tests {
             1,
         );
 
-        let eta_start = OWNER_CHANNELS
-            + 2
-            + ship_count_feature_count(FLEET_SHIP_COUNT_BUCKET_CAPACITY);
+        let eta_start =
+            OWNER_CHANNELS + 2 + ship_count_feature_count(FLEET_SHIP_COUNT_BUCKET_CAPACITY);
         assert_close(row[1], 1.0);
         assert_close(row[eta_start + ETA_BUCKETS - 1], 1.0);
         assert_close(row[eta_start + ETA_BUCKETS], 0.4);
         assert_close(row[eta_start + ETA_BUCKETS + 1], 1.0);
+    }
+
+    #[test]
+    fn cross_attention_incoming_summaries_include_truncated_routed_fleets() {
+        let state = State {
+            config: SimConfig::new(2),
+            step: 0,
+            angular_velocity: 0.025,
+            initial_planets: Vec::new().into(),
+            planets: vec![
+                Planet {
+                    id: 0,
+                    owner: 0,
+                    x: 10.0,
+                    y: 70.0,
+                    radius: 2.0,
+                    ships: 10,
+                    production: 1,
+                },
+                Planet {
+                    id: 1,
+                    owner: 1,
+                    x: 50.0,
+                    y: 70.0,
+                    radius: 2.0,
+                    ships: 10,
+                    production: 1,
+                },
+            ]
+            .into(),
+            fleets: vec![
+                Fleet {
+                    id: 0,
+                    owner: 0,
+                    x: 30.0,
+                    y: 70.0,
+                    angle: 0.0,
+                    from_planet_id: 0,
+                    ships: 1000,
+                },
+                Fleet {
+                    id: 1,
+                    owner: 1,
+                    x: 30.0,
+                    y: 70.0,
+                    angle: 0.0,
+                    from_planet_id: 1,
+                    ships: 1000,
+                },
+            ],
+            next_fleet_id: 2,
+            comets: Vec::new(),
+            comet_planet_ids: Vec::new(),
+            orbit_paths: Vec::new(),
+            static_planet_ids: Vec::new(),
+            static_planet_mask: Vec::new(),
+            static_target_cache: StaticTargetCache::empty(),
+        };
+        let action_slots = action_entity_slots(&state);
+        let mut fleet_obs = vec![0.0; CROSS_ATTENTION_FLEET_CHANNELS];
+        let mut fleet_mask = vec![false; 1];
+        let mut fleet_target = vec![-1; 1];
+        let mut incoming = vec![0.0; ACTION_ENTITY_SLOTS * TARGET_INCOMING_CHANNELS];
+
+        encode_cross_attention_fleets(
+            &state,
+            &PlayerMap::identity(),
+            1,
+            CROSS_ATTENTION_FLEET_CHANNELS,
+            &mut fleet_obs,
+            &mut fleet_mask,
+            Some(&mut fleet_target),
+            Some(&mut incoming),
+            &action_slots,
+            1,
+        );
+
+        let target_start = TARGET_INCOMING_CHANNELS;
+        assert_eq!(fleet_mask, [true]);
+        assert_close(incoming[target_start + 2], normalize_fleet_count(2));
+        assert_close(
+            incoming[target_start + ETA_BUCKETS + 2],
+            normalize_aggregate_ships(2000),
+        );
     }
 }
