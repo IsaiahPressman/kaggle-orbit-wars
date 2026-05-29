@@ -30,7 +30,7 @@ rl:
   horizon: 128
   checkpoint_freq: 20_000_000
   ppo_epochs: 1
-  segments_per_minibatch: 16
+  segments_per_minibatch: 32
   gradient_accumulation_steps: 1
   # gamma=1.0 keeps the critic softmax well-defined
   gamma: 1.0
@@ -38,13 +38,14 @@ rl:
   clip_coef: 0.2
   vf_clip_coef: null
   vf_coef: 2.0
-  ent_coef: 1e-5
-  max_grad_norm: 5.0
+  ent_coef: 1e-6
+  max_grad_norm: 10.0
   target_kl: null
   ppo_clip_mode: per_player
   normalize_advantages: true
   eval_replay_games: 8
-  teacher_kl_coef: 0.001
-  teacher_value_coef: 0.001
+  teacher_mode: last_best
+  teacher_kl_coef: 0.005
+  teacher_value_coef: 0.005
   compile_mode: default
   dtype: bfloat16

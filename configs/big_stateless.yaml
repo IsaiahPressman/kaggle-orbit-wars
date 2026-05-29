@@ -22,8 +22,8 @@ optimizer:
   muon_momentum: 0.95
   lr_schedule:
     schedule: linear_warmup_cosine_decay
-    warmup_steps: 200
-    decay_steps: 150_000
+    warmup_steps: 500
+    decay_steps: 300_000
     lr_min_ratio: 0.01
 
 rl:
@@ -38,13 +38,14 @@ rl:
   clip_coef: 0.2
   vf_clip_coef: null
   vf_coef: 2.0
-  ent_coef: 1e-5
-  max_grad_norm: 5.0
+  ent_coef: 1e-6
+  max_grad_norm: 10.0
   target_kl: null
   ppo_clip_mode: per_player
   normalize_advantages: true
   eval_replay_games: 8
-  teacher_kl_coef: 0.001
-  teacher_value_coef: 0.001
+  teacher_mode: last_best
+  teacher_kl_coef: 0.005
+  teacher_value_coef: 0.005
   compile_mode: default
   dtype: bfloat16
