@@ -1,7 +1,7 @@
 env:
-  n_envs: 256
+  n_envs: 512
   obs_spec:
-    obs_spec: entity_based
+    obs_spec: entity_based_ext_v2
     max_entities: 256
   action_spec:
     action_spec: discrete_targets
