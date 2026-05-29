@@ -585,6 +585,7 @@ fn encode_global(state: &State, comet_ids: &HashSet<u32>, global_obs: &mut [f32]
     global_obs[offset + 8] = normalize_aggregate_log_ships(neutral_planet_ships);
     global_obs[offset + 9] = normalize_comet_count(neutral_comet_count);
     global_obs[offset + 10] = normalize_planet_count(neutral_planet_count);
+    encode_alive_player_count_one_hot(state, &mut global_obs[offset + 11..offset + 14]);
 }
 
 fn encode_player_features(
@@ -690,6 +691,45 @@ fn normalize_log_ships(ships: i32) -> f32 {
 
 fn normalize_aggregate_log_ships(ships: i64) -> f32 {
     ((ships.max(0) as f32) + 1.0).ln() / LOG_AGGREGATE_SHIP_NORMALIZER
+}
+
+fn encode_alive_player_count_one_hot(state: &State, row: &mut [f32]) {
+    assert_eq!(row.len(), 3);
+    row.fill(0.0);
+
+    let mut alive_players = [false; OUTER_PLAYER_SLOTS];
+    for planet in state.planets.iter() {
+        if planet.owner < 0 {
+            continue;
+        }
+        let owner = usize::try_from(planet.owner).expect("planet owner is non-negative");
+        assert!(
+            owner < state.config.player_count,
+            "planet owner {owner} must be less than player_count {}",
+            state.config.player_count
+        );
+        alive_players[owner] = true;
+    }
+    for fleet in &state.fleets {
+        if fleet.owner < 0 {
+            continue;
+        }
+        let owner = usize::try_from(fleet.owner).expect("fleet owner is non-negative");
+        assert!(
+            owner < state.config.player_count,
+            "fleet owner {owner} must be less than player_count {}",
+            state.config.player_count
+        );
+        alive_players[owner] = true;
+    }
+
+    let alive_count = alive_players[..state.config.player_count]
+        .iter()
+        .filter(|alive| **alive)
+        .count();
+    if (2..=4).contains(&alive_count) {
+        row[alive_count - 2] = 1.0;
+    }
 }
 
 const fn ship_count_feature_count(bucket_count: usize) -> usize {

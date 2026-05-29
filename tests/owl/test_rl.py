@@ -317,8 +317,42 @@ def test_entity_based_ext_v2_adds_global_and_player_summary_features() -> None:
             normalized_aggregate_log_ships(30),
             0.25,
             0.025,
+            1.0,
+            0.0,
+            0.0,
         ],
         rtol=1e-6,
+    )
+
+
+@pytest.mark.parametrize("alive_count", [2, 3, 4])
+def test_entity_based_ext_v2_adds_alive_player_count_global_one_hot(
+    alive_count: int,
+) -> None:
+    encoded = encode_python_observation(
+        _python_obs(
+            planets=[
+                [
+                    player,
+                    player,
+                    20.0 + 10.0 * player,
+                    20.0,
+                    2.0,
+                    10,
+                    1,
+                ]
+                for player in range(alive_count)
+            ],
+        ),
+        obs_spec=EntityBasedExtV2Config(),
+        action_spec=ActionPureConfig(),
+    )
+
+    expected = np.zeros(3, dtype=np.float32)
+    expected[alive_count - 2] = 1.0
+    np.testing.assert_array_equal(
+        encoded.global_features[0, GLOBAL_CHANNELS + 11 : GLOBAL_CHANNELS + 14],
+        expected,
     )
 
 

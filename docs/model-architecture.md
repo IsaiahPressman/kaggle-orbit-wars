@@ -105,7 +105,7 @@ the planet width is `158` and the fleet width is `129`; comet and global widths
 are unchanged.
 
 For `EntityBasedExtV2`, planet, fleet, and comet widths stay at the base
-`EntityBased` sizes. The global input width increases from `3` to `14`, and
+`EntityBased` sizes. The global input width increases from `3` to `17`, and
 `ObsBatch.player_features` supplies a fourteen-channel per-outer-player summary. The
 model creates a player-feature projection only when
 `obs_spec.player_feature_channels > 0`; old `entity_based` and

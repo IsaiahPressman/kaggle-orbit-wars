@@ -27,7 +27,7 @@ env = VectorizedEnv(
 - `DEFAULT_MAX_ENTITIES = 256`
 - `ACTION_ENTITY_SLOTS = MAX_PLANETS + MAX_COMETS = 44`
 - `OUTER_PLAYER_SLOTS = 4`
-- `GLOBAL_EXT_V2_CHANNELS = 11`
+- `GLOBAL_EXT_V2_CHANNELS = 14`
 - `PLAYER_FEATURE_CHANNELS = 14`
 
 `max_entities` controls total non-global entity capacity. Fleet capacity is:
@@ -286,15 +286,15 @@ The spec adds:
 
 | Tensor | dtype | Shape |
 | --- | --- | --- |
-| `global_features` | `float32` | `(n_envs, 14)` |
+| `global_features` | `float32` | `(n_envs, 17)` |
 | `player_features` | `float32` | `(n_envs, 4, 14)` |
 
 For non-v2 specs, `ObsBatch.player_features` is `None`.
 
-V2 appends eleven neutral-resource channels after the three base global
-channels. These neutral features are for planets that are still neutral in the
-current observation; if every planet has been colonized, all neutral production,
-ship, and count channels are `0`.
+V2 appends fourteen channels after the three base global channels. The
+neutral features are for planets that are still neutral in the current
+observation; if every planet has been colonized, all neutral production, ship,
+and count channels are `0`.
 
 | Channel | Feature |
 | --- | --- |
@@ -309,6 +309,9 @@ ship, and count channels are `0`.
 | `11` | `log1p` of neutral non-comet planet ships, divided by `ln(1000)` |
 | `12` | neutral comet count divided by `MAX_COMETS` |
 | `13` | neutral non-comet planet count divided by `MAX_PLANETS` |
+| `14` | one-hot for exactly `2` alive players |
+| `15` | one-hot for exactly `3` alive players |
+| `16` | one-hot for exactly `4` alive players |
 
 Each outer player slot receives fourteen absolute summary channels:
 
