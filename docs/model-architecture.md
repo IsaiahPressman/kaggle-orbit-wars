@@ -96,7 +96,7 @@ Each observation tensor receives a small MLP stem from raw channels to
 - comets: `(batch, MAX_COMETS, 330) -> (batch, MAX_COMETS, embed_dim)`
 - globals: `(batch, 3) -> (batch, embed_dim)`
 - v2 player features, when present:
-  `(batch, OUTER_PLAYER_SLOTS, 10) -> (batch, OUTER_PLAYER_SLOTS, embed_dim)`
+  `(batch, OUTER_PLAYER_SLOTS, 14) -> (batch, OUTER_PLAYER_SLOTS, embed_dim)`
 
 For `EntityBasedExtV1`, planet input widths append
 `ship_count_one_hot_max + 1` channels and fleet input widths append
@@ -105,8 +105,8 @@ the planet width is `158` and the fleet width is `129`; comet and global widths
 are unchanged.
 
 For `EntityBasedExtV2`, planet, fleet, and comet widths stay at the base
-`EntityBased` sizes. The global input width increases from `3` to `11`, and
-`ObsBatch.player_features` supplies a ten-channel per-outer-player summary. The
+`EntityBased` sizes. The global input width increases from `3` to `14`, and
+`ObsBatch.player_features` supplies a fourteen-channel per-outer-player summary. The
 model creates a player-feature projection only when
 `obs_spec.player_feature_channels > 0`; old `entity_based` and
 `entity_based_ext_v1` stateless checkpoints therefore do not gain

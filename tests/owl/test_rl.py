@@ -259,19 +259,65 @@ def test_entity_based_ext_v2_adds_global_and_player_summary_features() -> None:
     assert encoded.player_features is not None
     assert encoded.planets.shape == (1, MAX_PLANETS, PLANET_CHANNELS)
     assert encoded.fleets.shape == (1, spec.max_fleets, FLEET_CHANNELS)
+
+    def normalized_aggregate_log_ships(ships: int) -> float:
+        return np.log(np.float32(max(ships, 0) + 1)) / np.float32(6.9077554)
+
     np.testing.assert_allclose(
         encoded.player_features[0, 0].numpy(),
-        [0.06, 0.01, 0.05, 0.41, 0.05, 0.30, 0.06, 0.05, 0.25, 0.02],
+        [
+            0.06,
+            0.01,
+            0.05,
+            205.0 / 5000.0,
+            normalized_aggregate_log_ships(205),
+            25.0 / 5000.0,
+            normalized_aggregate_log_ships(25),
+            150.0 / 5000.0,
+            normalized_aggregate_log_ships(150),
+            30.0 / 5000.0,
+            normalized_aggregate_log_ships(30),
+            0.05,
+            0.25,
+            0.02,
+        ],
         rtol=1e-6,
     )
     np.testing.assert_allclose(
         encoded.player_features[0, 1].numpy(),
-        [0.05, 0.01, 0.04, 0.12, 0.03, 0.08, 0.01, 0.025, 0.25, 0.01],
+        [
+            0.05,
+            0.01,
+            0.04,
+            60.0 / 5000.0,
+            normalized_aggregate_log_ships(60),
+            15.0 / 5000.0,
+            normalized_aggregate_log_ships(15),
+            40.0 / 5000.0,
+            normalized_aggregate_log_ships(40),
+            5.0 / 5000.0,
+            normalized_aggregate_log_ships(5),
+            0.025,
+            0.25,
+            0.01,
+        ],
         rtol=1e-6,
     )
     np.testing.assert_allclose(
         encoded.global_features[0, GLOBAL_CHANNELS:].numpy(),
-        [0.06, 0.01, 0.05, 0.10, 0.04, 0.06, 0.25, 0.025],
+        [
+            0.06,
+            0.01,
+            0.05,
+            50.0 / 5000.0,
+            normalized_aggregate_log_ships(50),
+            20.0 / 5000.0,
+            normalized_aggregate_log_ships(20),
+            30.0 / 5000.0,
+            normalized_aggregate_log_ships(30),
+            0.25,
+            0.025,
+        ],
         rtol=1e-6,
     )
 

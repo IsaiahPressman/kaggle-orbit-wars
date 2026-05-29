@@ -57,8 +57,11 @@ const OWNER_CHANNELS: usize = 4;
 const PRODUCTION_CHANNELS: usize = 5;
 const NEUTRAL_SHIP_NORMALIZER: f32 = 100.0;
 const SHIP_NORMALIZER: f32 = 500.0;
+const AGGREGATE_SHIP_NORMALIZER: f32 = 5000.0;
 // ln(100) ~= 4.6051702
 const LOG_SHIP_NORMALIZER: f32 = 4.6051702;
+// ln(1000) ~= 6.9077554
+const LOG_AGGREGATE_SHIP_NORMALIZER: f32 = 6.9077554;
 const MIN_ANGULAR_VELOCITY: f32 = 0.025;
 const ANGULAR_VELOCITY_SPAN: f32 = 0.025;
 const INTEGER_TOLERANCE: f64 = 1e-9;
@@ -574,10 +577,14 @@ fn encode_global(state: &State, comet_ids: &HashSet<u32>, global_obs: &mut [f32]
     global_obs[offset + 1] = normalize_aggregate_production(neutral_comet_production);
     global_obs[offset + 2] = normalize_aggregate_production(neutral_planet_production);
     global_obs[offset + 3] = normalize_aggregate_ships(neutral_comet_ships + neutral_planet_ships);
-    global_obs[offset + 4] = normalize_aggregate_ships(neutral_comet_ships);
-    global_obs[offset + 5] = normalize_aggregate_ships(neutral_planet_ships);
-    global_obs[offset + 6] = normalize_comet_count(neutral_comet_count);
-    global_obs[offset + 7] = normalize_planet_count(neutral_planet_count);
+    global_obs[offset + 4] =
+        normalize_aggregate_log_ships(neutral_comet_ships + neutral_planet_ships);
+    global_obs[offset + 5] = normalize_aggregate_ships(neutral_comet_ships);
+    global_obs[offset + 6] = normalize_aggregate_log_ships(neutral_comet_ships);
+    global_obs[offset + 7] = normalize_aggregate_ships(neutral_planet_ships);
+    global_obs[offset + 8] = normalize_aggregate_log_ships(neutral_planet_ships);
+    global_obs[offset + 9] = normalize_comet_count(neutral_comet_count);
+    global_obs[offset + 10] = normalize_planet_count(neutral_planet_count);
 }
 
 fn encode_player_features(
@@ -594,18 +601,22 @@ fn encode_player_features(
         OUTER_PLAYER_SLOTS * PLAYER_FEATURE_CHANNELS
     );
 
+    let mut comet_ships = [0_i64; OUTER_PLAYER_SLOTS];
+    let mut planet_ships = [0_i64; OUTER_PLAYER_SLOTS];
+    let mut fleet_ships = [0_i64; OUTER_PLAYER_SLOTS];
+
     for planet in state.planets.iter().filter(|planet| planet.owner >= 0) {
         let outer_player = player_map.owner_channel(planet.owner);
         let row = &mut player_features
             [outer_player * PLAYER_FEATURE_CHANNELS..(outer_player + 1) * PLAYER_FEATURE_CHANNELS];
         if comet_ids.contains(&planet.id) {
             row[1] += normalize_aggregate_production(planet.production);
-            row[4] += normalize_aggregate_ships(i64::from(planet.ships));
-            row[8] += normalize_comet_count(1);
+            comet_ships[outer_player] += i64::from(planet.ships);
+            row[12] += normalize_comet_count(1);
         } else {
             row[2] += normalize_aggregate_production(planet.production);
-            row[5] += normalize_aggregate_ships(i64::from(planet.ships));
-            row[7] += normalize_planet_count(1);
+            planet_ships[outer_player] += i64::from(planet.ships);
+            row[11] += normalize_planet_count(1);
         }
     }
 
@@ -616,15 +627,24 @@ fn encode_player_features(
         let outer_player = player_map.owner_channel(fleet.owner);
         let row = &mut player_features
             [outer_player * PLAYER_FEATURE_CHANNELS..(outer_player + 1) * PLAYER_FEATURE_CHANNELS];
-        row[6] += normalize_aggregate_ships(i64::from(fleet.ships));
-        row[9] += normalize_fleet_count(1);
+        fleet_ships[outer_player] += i64::from(fleet.ships);
+        row[13] += normalize_fleet_count(1);
     }
 
     for outer_player in 0..OUTER_PLAYER_SLOTS {
         let row = &mut player_features
             [outer_player * PLAYER_FEATURE_CHANNELS..(outer_player + 1) * PLAYER_FEATURE_CHANNELS];
         row[0] = row[1] + row[2];
-        row[3] = row[4] + row[5] + row[6];
+        let total_ships =
+            comet_ships[outer_player] + planet_ships[outer_player] + fleet_ships[outer_player];
+        row[3] = normalize_aggregate_ships(total_ships);
+        row[4] = normalize_aggregate_log_ships(total_ships);
+        row[5] = normalize_aggregate_ships(comet_ships[outer_player]);
+        row[6] = normalize_aggregate_log_ships(comet_ships[outer_player]);
+        row[7] = normalize_aggregate_ships(planet_ships[outer_player]);
+        row[8] = normalize_aggregate_log_ships(planet_ships[outer_player]);
+        row[9] = normalize_aggregate_ships(fleet_ships[outer_player]);
+        row[10] = normalize_aggregate_log_ships(fleet_ships[outer_player]);
     }
 }
 
@@ -645,7 +665,7 @@ fn normalize_ships(ships: i32) -> f32 {
 }
 
 fn normalize_aggregate_ships(ships: i64) -> f32 {
-    ships as f32 / SHIP_NORMALIZER
+    ships as f32 / AGGREGATE_SHIP_NORMALIZER
 }
 
 fn normalize_aggregate_production(production: i32) -> f32 {
@@ -666,6 +686,10 @@ fn normalize_fleet_count(count: usize) -> f32 {
 
 fn normalize_log_ships(ships: i32) -> f32 {
     ((ships.max(0) as f32) + 1.0).ln() / LOG_SHIP_NORMALIZER
+}
+
+fn normalize_aggregate_log_ships(ships: i64) -> f32 {
+    ((ships.max(0) as f32) + 1.0).ln() / LOG_AGGREGATE_SHIP_NORMALIZER
 }
 
 const fn ship_count_feature_count(bucket_count: usize) -> usize {
