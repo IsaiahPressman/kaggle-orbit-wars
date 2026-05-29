@@ -20,10 +20,9 @@ use super::action_spec::{
     RlActionSpec,
 };
 use super::{
-    log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
-    DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, GLOBAL_EXT_V2_CHANNELS, MAX_COMETS,
-    MAX_COMET_PATH_LENGTH, MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS,
-    PLAYER_FEATURE_CHANNELS,
+    require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS, DEFAULT_MAX_ENTITIES,
+    FLEET_CHANNELS, GLOBAL_CHANNELS, GLOBAL_EXT_V2_CHANNELS, MAX_COMETS, MAX_COMET_PATH_LENGTH,
+    MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS, PLAYER_FEATURE_CHANNELS,
 };
 
 type EncodedEntityBased<'py> = (
@@ -102,7 +101,7 @@ pub(super) fn encode_state(
     can_act: &mut [bool],
     max_launch: Option<&mut [i64]>,
     min_fleet_size: i64,
-) -> usize {
+) {
     let mut action_slots = [None; ACTION_ENTITY_SLOTS];
     encode_state_with_action_slots(
         action_spec,
@@ -125,7 +124,7 @@ pub(super) fn encode_state(
         max_launch,
         &mut action_slots,
         min_fleet_size,
-    )
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -150,7 +149,7 @@ pub(super) fn encode_state_with_action_slots(
     mut max_launch: Option<&mut [i64]>,
     action_slots: &mut ActionEntitySlots,
     min_fleet_size: i64,
-) -> usize {
+) {
     let comet_ids = state
         .comet_planet_ids
         .iter()
@@ -184,8 +183,7 @@ pub(super) fn encode_state_with_action_slots(
     }
 
     let mut fleets = state.fleets.iter().collect::<Vec<_>>();
-    let ignored_fleets = fleets.len().saturating_sub(max_fleets);
-    if ignored_fleets > 0 {
+    if fleets.len() > max_fleets {
         fleets.sort_by(|left, right| right.ships.cmp(&left.ships).then(left.id.cmp(&right.id)));
     }
 
@@ -313,8 +311,6 @@ pub(super) fn encode_state_with_action_slots(
         max_launch,
         min_fleet_size,
     );
-
-    ignored_fleets
 }
 
 fn normalize_angular_velocity(angular_velocity: f64) -> f32 {
@@ -1238,7 +1234,7 @@ pub fn encode_entity_based_with_player_features<'py>(
         .split_at_mut(MAX_PLANETS);
     let (comet_mask, fleet_mask) = tail_mask.split_at_mut(MAX_COMETS);
 
-    let ignored_fleets = encode_state(
+    encode_state(
         RlActionSpec::Pure,
         &state,
         &PlayerMap::identity(),
@@ -1297,7 +1293,6 @@ pub fn encode_entity_based_with_player_features<'py>(
         Some(&mut target_max_launch),
         min_fleet_size,
     );
-    log_ignored_fleets(ignored_fleets);
 
     Ok((
         planet_obs.into_pyarray(py),

@@ -2018,9 +2018,7 @@ def test_python_observation_encoder_rejects_invalid_planet_production(
         )
 
 
-def test_python_observation_encoder_keeps_largest_fleets_first(
-    capfd: pytest.CaptureFixture[str],
-) -> None:
+def test_python_observation_encoder_keeps_largest_fleets_first() -> None:
     spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 1)
 
     _, _, fleets, _, entity_mask, _, _, _ = _encoded_python_observation(
@@ -2038,7 +2036,6 @@ def test_python_observation_encoder_keeps_largest_fleets_first(
     assert fleet_mask.tolist() == [True]
     assert fleets[0, 1] == 1
     assert fleets[0, 8] == pytest.approx(20 / 500.0)
-    assert "max_entities exceeded: 1 fleets ignored" in capfd.readouterr().err
 
 
 def test_python_observation_encoder_writes_comet_future_paths() -> None:

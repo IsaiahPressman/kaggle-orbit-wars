@@ -19,9 +19,9 @@ use super::action_spec::{
 };
 use super::obs_spec::{encode_state, encode_state_with_action_slots};
 use super::{
-    log_ignored_fleets, require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS,
-    DEFAULT_MAX_ENTITIES, FLEET_CHANNELS, GLOBAL_CHANNELS, GLOBAL_EXT_V2_CHANNELS, MAX_COMETS,
-    MAX_PLANETS, OUTER_PLAYER_SLOTS, PLANET_CHANNELS, PLAYER_FEATURE_CHANNELS,
+    require_shape, PlayerMap, ACTION_ENTITY_SLOTS, COMET_CHANNELS, DEFAULT_MAX_ENTITIES,
+    FLEET_CHANNELS, GLOBAL_CHANNELS, GLOBAL_EXT_V2_CHANNELS, MAX_COMETS, MAX_PLANETS,
+    OUTER_PLAYER_SLOTS, PLANET_CHANNELS, PLAYER_FEATURE_CHANNELS,
 };
 
 #[derive(Clone, Copy)]
@@ -232,8 +232,7 @@ impl PyRlVecEnv {
         let action_spec = self.action_spec;
         let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
 
-        let ignored_fleets: usize = self
-            .states
+        self.states
             .par_iter_mut()
             .zip_eq(self.player_maps.par_iter_mut())
             .zip_eq(self.action_slots.par_iter_mut())
@@ -265,7 +264,7 @@ impl PyRlVecEnv {
                     .as_slice_mut()?
                     .par_chunks_mut(max_launch_per_env),
             )
-            .map(|item| {
+            .for_each(|item| {
                 let (item, max_launch) = item;
                 let (item, can_act) = item;
                 let (item, player_features) = item;
@@ -307,12 +306,10 @@ impl PyRlVecEnv {
                         Some(max_launch),
                     )
                 }
-            })
-            .sum();
+            });
 
         self.last_terminal_metrics.fill(None);
         self.last_terminal_snapshots.fill(None);
-        log_ignored_fleets(ignored_fleets);
         Ok(())
     }
 
@@ -387,8 +384,7 @@ impl PyRlVecEnv {
         let min_fleet_size = self.min_fleet_size;
         let action_spec = self.action_spec;
 
-        let ignored_fleets: usize = self
-            .states
+        self.states
             .par_iter_mut()
             .zip_eq(self.player_maps.par_iter_mut())
             .zip_eq(self.action_slots.par_iter_mut())
@@ -415,7 +411,7 @@ impl PyRlVecEnv {
             .zip_eq(global_obs.as_slice_mut()?.par_chunks_mut(global_channels))
             .zip_eq(player_feature_chunks.par_iter_mut())
             .zip_eq(can_act.as_slice_mut()?.par_chunks_mut(action_masks_per_env))
-            .map(|item| {
+            .for_each(|item| {
                 let (item, can_act) = item;
                 let (item, player_features) = item;
                 let (item, global_obs) = item;
@@ -454,12 +450,10 @@ impl PyRlVecEnv {
                     can_act,
                     None,
                 )
-            })
-            .sum();
+            });
 
         self.last_terminal_metrics.fill(None);
         self.last_terminal_snapshots.fill(None);
-        log_ignored_fleets(ignored_fleets);
         Ok(())
     }
 
@@ -673,7 +667,7 @@ impl PyRlVecEnv {
         let action_masks_per_env = action_spec.can_act_len();
         let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
 
-        let ignored_fleets: usize = if let Some(max_launch) = max_launch.as_mut() {
+        if let Some(max_launch) = max_launch.as_mut() {
             self.states
                 .par_iter()
                 .zip_eq(self.player_maps.par_iter())
@@ -708,7 +702,7 @@ impl PyRlVecEnv {
                         .as_slice_mut()?
                         .par_chunks_mut(max_launch_per_env),
                 )
-                .map(|item| {
+                .for_each(|item| {
                     let (item, max_launch) = item;
                     let (item, can_act) = item;
                     let (item, player_features) = item;
@@ -738,8 +732,7 @@ impl PyRlVecEnv {
                         can_act,
                         Some(max_launch),
                     )
-                })
-                .sum()
+                });
         } else {
             self.states
                 .par_iter()
@@ -770,7 +763,7 @@ impl PyRlVecEnv {
                 )
                 .zip_eq(player_feature_chunks.par_iter_mut())
                 .zip_eq(can_act.as_slice_mut()?.par_chunks_mut(action_masks_per_env))
-                .map(|item| {
+                .for_each(|item| {
                     let (item, can_act) = item;
                     let (item, player_features) = item;
                     let (item, global_obs) = item;
@@ -799,10 +792,8 @@ impl PyRlVecEnv {
                         can_act,
                         None,
                     )
-                })
-                .sum()
-        };
-        log_ignored_fleets(ignored_fleets);
+                });
+        }
         Ok(())
     }
 
@@ -1325,7 +1316,7 @@ impl PyRlVecEnv {
                         max_fleets,
                         two_player_weight,
                     );
-                    let ignored_fleets = write_one_obs(
+                    write_one_obs(
                         state,
                         player_map,
                         action_slots,
@@ -1350,23 +1341,18 @@ impl PyRlVecEnv {
                     Ok::<_, String>(StepOneOutput {
                         terminal_metrics: terminal.metrics,
                         terminal_snapshot: terminal.snapshot,
-                        ignored_fleets,
                     })
                 }
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(PyValueError::new_err)?;
         let mut terminal_metrics = Vec::with_capacity(env_results.len());
-        let mut ignored_fleets = 0;
         for (env_index, result) in env_results.into_iter().enumerate() {
             self.last_terminal_snapshots[env_index] = result.terminal_snapshot;
             self.last_terminal_metrics[env_index] = result.terminal_metrics.clone();
             terminal_metrics.push(result.terminal_metrics);
-            let ignored = result.ignored_fleets;
-            ignored_fleets += ignored;
         }
         let episode_metrics = collect_terminal_metrics(terminal_metrics);
-        log_ignored_fleets(ignored_fleets);
         Ok(episode_metrics)
     }
 
@@ -1564,7 +1550,7 @@ impl PyRlVecEnv {
                         max_fleets,
                         two_player_weight,
                     );
-                    let ignored_fleets = write_one_obs(
+                    write_one_obs(
                         state,
                         player_map,
                         action_slots,
@@ -1589,23 +1575,18 @@ impl PyRlVecEnv {
                     Ok::<_, String>(StepOneOutput {
                         terminal_metrics: terminal.metrics,
                         terminal_snapshot: terminal.snapshot,
-                        ignored_fleets,
                     })
                 }
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(PyValueError::new_err)?;
         let mut terminal_metrics = Vec::with_capacity(env_results.len());
-        let mut ignored_fleets = 0;
         for (env_index, result) in env_results.into_iter().enumerate() {
             self.last_terminal_snapshots[env_index] = result.terminal_snapshot;
             self.last_terminal_metrics[env_index] = result.terminal_metrics.clone();
             terminal_metrics.push(result.terminal_metrics);
-            let ignored = result.ignored_fleets;
-            ignored_fleets += ignored;
         }
         let episode_metrics = collect_terminal_metrics(terminal_metrics);
-        log_ignored_fleets(ignored_fleets);
         Ok(episode_metrics)
     }
 
@@ -1781,7 +1762,7 @@ impl PyRlVecEnv {
                     max_fleets,
                     two_player_weight,
                 );
-                let ignored_fleets = write_one_obs(
+                write_one_obs(
                     state,
                     player_map,
                     action_slots,
@@ -1806,21 +1787,17 @@ impl PyRlVecEnv {
                 Ok::<_, String>(StepOneOutput {
                     terminal_metrics: terminal.metrics,
                     terminal_snapshot: terminal.snapshot,
-                    ignored_fleets,
                 })
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(PyValueError::new_err)?;
         let mut terminal_metrics = Vec::with_capacity(env_results.len());
-        let mut ignored_fleets = 0;
         for (env_index, result) in env_results.into_iter().enumerate() {
             self.last_terminal_snapshots[env_index] = result.terminal_snapshot;
             self.last_terminal_metrics[env_index] = result.terminal_metrics.clone();
             terminal_metrics.push(result.terminal_metrics);
-            ignored_fleets += result.ignored_fleets;
         }
         let episode_metrics = collect_terminal_metrics(terminal_metrics);
-        log_ignored_fleets(ignored_fleets);
         Ok(episode_metrics)
     }
 
@@ -2138,15 +2115,12 @@ impl PyRlVecEnv {
                 .map_err(PyValueError::new_err)?
         };
         let mut terminal_metrics = Vec::with_capacity(env_results.len());
-        let mut ignored_fleets = 0;
         for (env_index, result) in env_results.into_iter().enumerate() {
             self.last_terminal_snapshots[env_index] = result.terminal_snapshot;
             self.last_terminal_metrics[env_index] = result.terminal_metrics.clone();
             terminal_metrics.push(result.terminal_metrics);
-            ignored_fleets += result.ignored_fleets;
         }
         let episode_metrics = collect_terminal_metrics(terminal_metrics);
-        log_ignored_fleets(ignored_fleets);
         Ok(episode_metrics)
     }
 
@@ -2835,7 +2809,7 @@ fn step_one_decoded_env(
         max_fleets,
         two_player_weight,
     );
-    let ignored_fleets = write_one_obs(
+    write_one_obs(
         state,
         player_map,
         action_slots,
@@ -2860,7 +2834,6 @@ fn step_one_decoded_env(
     Ok(StepOneOutput {
         terminal_metrics: terminal.metrics,
         terminal_snapshot: terminal.snapshot,
-        ignored_fleets,
     })
 }
 
@@ -3103,7 +3076,6 @@ fn outer_owner(owner: i32, player_map: &PlayerMap) -> i32 {
 struct StepOneOutput {
     terminal_metrics: Option<TerminalEpisodeMetrics>,
     terminal_snapshot: Option<StateSnapshot>,
-    ignored_fleets: usize,
 }
 
 struct TerminalStep {
@@ -3557,7 +3529,7 @@ fn write_one_obs(
     player_features: Option<&mut [f32]>,
     can_act: &mut [bool],
     max_launch: Option<&mut [i64]>,
-) -> usize {
+) {
     write_still_playing(state, player_map, player_finished, still_playing);
     let (planet_mask, tail_mask) = entity_mask.split_at_mut(MAX_PLANETS);
     let (comet_mask, fleet_mask) = tail_mask.split_at_mut(MAX_COMETS);
@@ -3582,7 +3554,7 @@ fn write_one_obs(
         max_launch,
         action_slots,
         min_fleet_size,
-    )
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3603,7 +3575,7 @@ fn write_one_current_obs(
     player_features: Option<&mut [f32]>,
     can_act: &mut [bool],
     max_launch: Option<&mut [i64]>,
-) -> usize {
+) {
     write_still_playing(state, player_map, player_finished, still_playing);
     let (planet_mask, tail_mask) = entity_mask.split_at_mut(MAX_PLANETS);
     let (comet_mask, fleet_mask) = tail_mask.split_at_mut(MAX_COMETS);
@@ -3627,7 +3599,7 @@ fn write_one_current_obs(
         can_act,
         max_launch,
         min_fleet_size,
-    )
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

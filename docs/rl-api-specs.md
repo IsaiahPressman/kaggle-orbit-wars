@@ -189,12 +189,9 @@ number of fleets dropped by this filter.
 When all remaining active fleets fit in `max_fleets`, fleets are emitted in
 simulator fleet order. If there are more remaining active fleets than
 `max_fleets`, fleets are sorted by descending ship count, with fleet id as the
-tie-breaker, so the largest fleets are kept and the rest are ignored. Each
-overflow logs to stderr:
-
-```text
-max_entities exceeded: N fleets ignored
-```
+tie-breaker, so the largest fleets are kept and the rest are ignored. Overflow
+is silent; vector-env training metrics report
+`max_entities_exceeded_per_game` for terminal episodes.
 
 | Channels | Feature |
 | --- | --- |

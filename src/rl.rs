@@ -138,13 +138,6 @@ pub(super) fn require_shape(name: &str, actual: &[usize], expected: &[usize]) ->
     )))
 }
 
-pub(super) fn log_ignored_fleets(ignored_fleets: usize) {
-    if ignored_fleets == 0 {
-        return;
-    }
-    eprintln!("max_entities exceeded: {ignored_fleets} fleets ignored");
-}
-
 #[pyfunction]
 pub fn rl_obs_constants() -> (
     usize,
