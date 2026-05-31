@@ -57,6 +57,8 @@ from owl.rl import (
     DiscreteTargetBinActions,
     EntityBasedBaseConfig,
     EntityBasedConfig,
+    EntityBasedCrossAttnV1Config,
+    EntityBasedExtV1Config,
     EntityBasedExtV2Config,
     ObsBatch,
     PureActionMask,
@@ -183,6 +185,23 @@ def _obs_batch(
         planets=planets,
         orbiting_planets=orbiting_planets,
         fleets=fleets,
+        fleet_target=(
+            None
+            if not obs_spec.uses_cross_attention
+            else torch.full((batch_size, obs_spec.max_fleets), -1, dtype=torch.int64)
+        ),
+        target_incoming_features=(
+            None
+            if not obs_spec.uses_cross_attention
+            else torch.zeros(
+                (
+                    batch_size,
+                    ACTION_ENTITY_SLOTS,
+                    obs_spec.target_incoming_channels,
+                ),
+                dtype=torch.float32,
+            )
+        ),
         comets=comets,
         entity_mask=entity_mask,
         still_playing=still_playing,
@@ -464,6 +483,66 @@ def test_model_config_rejects_env_owned_specs(field_name: str) -> None:
                 field_name: {},
             }
         )
+
+
+def test_cross_attention_observation_spec_runs_forward_pass() -> None:
+    torch.manual_seed(25)
+    obs_spec = EntityBasedCrossAttnV1Config(max_entities=ACTION_ENTITY_SLOTS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    model = _model(
+        StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    assert obs.fleet_target is not None
+    assert obs.target_incoming_features is not None
+    obs.entity_mask[:, ACTION_ENTITY_SLOTS] = True
+    obs.fleets[:, 0, 0] = 1.0
+    obs.fleet_target[:, 0] = 1
+    obs.target_incoming_features[:, 1, 2] = 0.01
+
+    output = model(obs)
+
+    assert output.values.shape == (2, OUTER_PLAYER_SLOTS)
+    assert isinstance(output.actions, PureActions)
+
+
+def test_cross_attention_observation_spec_ignores_force_flash_attn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(26)
+    obs_spec = EntityBasedCrossAttnV1Config(max_entities=ACTION_ENTITY_SLOTS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    model = _model(
+        StatelessTransformerV1Config(
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+            force_flash_attn=True,
+        ),
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    assert obs.fleet_target is not None
+    obs.entity_mask[:, ACTION_ENTITY_SLOTS] = True
+    obs.fleets[:, 0, 0] = 1.0
+    obs.fleet_target[:, 0] = 1
+
+    def fail_flash_check(_tensor: torch.Tensor) -> bool:
+        pytest.fail("cross-attention observation specs should not check flash-attn")
+
+    monkeypatch.setattr(model_impl, "use_flash_attn", fail_flash_check)
+    monkeypatch.setattr(
+        model_impl,
+        "_requires_flash_attn",
+        lambda _tensor, *, force_flash_attn: force_flash_attn,
+    )
+
+    output = model(obs)
+
+    assert output.values.shape == (2, OUTER_PLAYER_SLOTS)
 
 
 def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
@@ -1577,6 +1656,32 @@ def test_entity_based_models_keep_legacy_state_dict_shape() -> None:
 
     reloaded = _model(config, obs_spec=obs_spec, action_spec=action_spec)
     reloaded.load_state_dict(model.state_dict())
+
+
+def test_existing_observation_specs_do_not_gain_cross_attention_state() -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    config = StatelessTransformerV1Config(embed_dim=32, depth=1, n_heads=4)
+    for obs_spec in (
+        EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 3),
+        EntityBasedExtV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 3),
+        EntityBasedExtV2Config(max_entities=MAX_PLANETS + MAX_COMETS + 3),
+    ):
+        model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+        assert model.target_incoming_proj is None
+        assert not any(
+            key.startswith(
+                (
+                    "target_incoming_proj.",
+                    "fleet_cross_attn.",
+                    "fleet_residual_mlps.",
+                    "fleet_residual_norms.",
+                )
+            )
+            for key in model.state_dict()
+        )
+
+        reloaded = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+        reloaded.load_state_dict(model.state_dict())
 
 
 @pytest.mark.parametrize(

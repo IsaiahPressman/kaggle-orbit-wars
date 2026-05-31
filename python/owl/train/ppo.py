@@ -92,7 +92,18 @@ TeacherMode = Literal["last_best", "fixed"]
 _OBS_TENSOR_FIELDS = tuple(
     field
     for field in ObsBatch.model_fields
-    if field not in {"action_mask", "player_features"}
+    if field
+    not in {
+        "action_mask",
+        "player_features",
+        "fleet_target",
+        "target_incoming_features",
+    }
+)
+_OBS_OPTIONAL_TENSOR_FIELDS = (
+    "player_features",
+    "fleet_target",
+    "target_incoming_features",
 )
 
 
@@ -266,6 +277,30 @@ class _PPORolloutBuffer:
                 (horizon, n_envs, obs_spec.max_fleets, obs_spec.fleet_channels),
                 dtype=torch.float32,
                 device=device,
+            ),
+            fleet_target=(
+                None
+                if not obs_spec.uses_cross_attention
+                else torch.full(
+                    (horizon, n_envs, obs_spec.max_fleets),
+                    -1,
+                    dtype=torch.int64,
+                    device=device,
+                )
+            ),
+            target_incoming_features=(
+                None
+                if not obs_spec.uses_cross_attention
+                else torch.zeros(
+                    (
+                        horizon,
+                        n_envs,
+                        ACTION_ENTITY_SLOTS,
+                        obs_spec.target_incoming_channels,
+                    ),
+                    dtype=torch.float32,
+                    device=device,
+                )
             ),
             comets=torch.zeros(
                 (horizon, n_envs, obs_spec.max_comets, obs_spec.comet_channels),
@@ -1616,18 +1651,31 @@ def _map_action_bundle(
     )
 
 
+def _map_optional_obs_tensors(
+    obs: ObsBatch,
+    fn: Callable[[torch.Tensor], torch.Tensor],
+) -> dict[str, torch.Tensor | None]:
+    return {
+        field: None if (tensor := getattr(obs, field)) is None else fn(tensor)
+        for field in _OBS_OPTIONAL_TENSOR_FIELDS
+    }
+
+
 def _copy_obs_time_step(dst: ObsBatch, step: int, src: ObsBatch) -> None:
     for field in _OBS_TENSOR_FIELDS:
         dst_tensor = getattr(dst, field)
         src_tensor = getattr(src, field)
         dst_tensor[step].copy_(src_tensor)
-    if dst.player_features is None:
-        if src.player_features is not None:
-            raise ValueError("rollout obs has no player_features buffer")
-    elif src.player_features is None:
-        raise ValueError("source obs is missing player_features")
-    else:
-        dst.player_features[step].copy_(src.player_features)
+    for field in _OBS_OPTIONAL_TENSOR_FIELDS:
+        dst_tensor = getattr(dst, field)
+        src_tensor = getattr(src, field)
+        if dst_tensor is None:
+            if src_tensor is not None:
+                raise ValueError(f"rollout obs has no {field} buffer")
+        elif src_tensor is None:
+            raise ValueError(f"source obs is missing {field}")
+        else:
+            dst_tensor[step].copy_(src_tensor)
     _copy_action_mask_time_step(dst.action_mask, step, src.action_mask)
 
 
@@ -1647,12 +1695,11 @@ def _obs_segment_major(obs: ObsBatch) -> ObsBatch:
             field: getattr(obs, field).transpose(0, 1).contiguous()
             for field in _OBS_TENSOR_FIELDS
         },
-        action_mask=_action_mask_segment_major(obs.action_mask),
-        player_features=(
-            None
-            if obs.player_features is None
-            else obs.player_features.transpose(0, 1).contiguous()
+        **_map_optional_obs_tensors(
+            obs,
+            lambda tensor: tensor.transpose(0, 1).contiguous(),
         ),
+        action_mask=_action_mask_segment_major(obs.action_mask),
     )
 
 
@@ -1666,10 +1713,8 @@ def _actions_segment_major(actions: ActionBundle) -> ActionBundle:
 def _obs_index(obs: ObsBatch, idx: torch.Tensor) -> ObsBatch:
     return ObsBatch(
         **{field: getattr(obs, field)[idx] for field in _OBS_TENSOR_FIELDS},
+        **_map_optional_obs_tensors(obs, lambda tensor: tensor[idx]),
         action_mask=_action_mask_index(obs.action_mask, idx),
-        player_features=(
-            None if obs.player_features is None else obs.player_features[idx]
-        ),
     )
 
 
@@ -1689,16 +1734,15 @@ def _obs_to_device(
                 field: getattr(obs, field).to(device, non_blocking=non_blocking).clone()
                 for field in _OBS_TENSOR_FIELDS
             },
+            **_map_optional_obs_tensors(
+                obs,
+                lambda tensor: tensor.to(device, non_blocking=non_blocking).clone(),
+            ),
             action_mask=_action_mask_to_device(
                 obs.action_mask,
                 device,
                 non_blocking=non_blocking,
                 clone=True,
-            ),
-            player_features=(
-                None
-                if obs.player_features is None
-                else obs.player_features.to(device, non_blocking=non_blocking).clone()
             ),
         )
 
@@ -1707,16 +1751,15 @@ def _obs_to_device(
             field: getattr(obs, field).to(device, non_blocking=non_blocking)
             for field in _OBS_TENSOR_FIELDS
         },
+        **_map_optional_obs_tensors(
+            obs,
+            lambda tensor: tensor.to(device, non_blocking=non_blocking),
+        ),
         action_mask=_action_mask_to_device(
             obs.action_mask,
             device,
             non_blocking=non_blocking,
             clone=False,
-        ),
-        player_features=(
-            None
-            if obs.player_features is None
-            else obs.player_features.to(device, non_blocking=non_blocking)
         ),
     )
 
@@ -1731,13 +1774,16 @@ def _copy_obs_to_device_(
         dst_tensor = getattr(dst, field)
         src_tensor = getattr(src, field)
         dst_tensor.copy_(src_tensor, non_blocking=non_blocking)
-    if dst.player_features is None:
-        if src.player_features is not None:
-            raise ValueError("destination obs has no player_features buffer")
-    elif src.player_features is None:
-        raise ValueError("source obs is missing player_features")
-    else:
-        dst.player_features.copy_(src.player_features, non_blocking=non_blocking)
+    for field in _OBS_OPTIONAL_TENSOR_FIELDS:
+        dst_tensor = getattr(dst, field)
+        src_tensor = getattr(src, field)
+        if dst_tensor is None:
+            if src_tensor is not None:
+                raise ValueError(f"destination obs has no {field} buffer")
+        elif src_tensor is None:
+            raise ValueError(f"source obs is missing {field}")
+        else:
+            dst_tensor.copy_(src_tensor, non_blocking=non_blocking)
     _copy_action_mask_to_device_(
         dst.action_mask,
         src.action_mask,
@@ -1766,12 +1812,8 @@ def _flatten_obs_time(obs: ObsBatch) -> ObsBatch:
             field: _flatten_tensor_time(getattr(obs, field))
             for field in _OBS_TENSOR_FIELDS
         },
+        **_map_optional_obs_tensors(obs, _flatten_tensor_time),
         action_mask=_action_mask_flatten_time(obs.action_mask),
-        player_features=(
-            None
-            if obs.player_features is None
-            else _flatten_tensor_time(obs.player_features)
-        ),
     )
 
 

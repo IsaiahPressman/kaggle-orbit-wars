@@ -29,6 +29,7 @@ from owl.rl import (
     DiscreteTargetBinActionMask,
     DiscreteTargetBinActions,
     EntityBasedConfig,
+    EntityBasedCrossAttnV1Config,
     ObsBatch,
     PureActionMask,
     PureActions,
@@ -40,7 +41,13 @@ from torch import nn
 _OBS_COPY_FIELDS = tuple(
     field
     for field in ObsBatch.model_fields
-    if field not in {"action_mask", "player_features"}
+    if field
+    not in {
+        "action_mask",
+        "player_features",
+        "fleet_target",
+        "target_incoming_features",
+    }
 )
 
 
@@ -48,13 +55,21 @@ def _obs_buffer_ptrs(obs: ObsBatch) -> dict[str, int]:
     ptrs = {field: getattr(obs, field).data_ptr() for field in _OBS_COPY_FIELDS}
     if obs.player_features is not None:
         ptrs["player_features"] = obs.player_features.data_ptr()
+    if obs.fleet_target is not None:
+        ptrs["fleet_target"] = obs.fleet_target.data_ptr()
+    if obs.target_incoming_features is not None:
+        ptrs["target_incoming_features"] = obs.target_incoming_features.data_ptr()
     ptrs["action_mask.can_act"] = obs.action_mask.can_act.data_ptr()
     if isinstance(obs.action_mask, PureActionMask | DiscreteTargetActionMask):
         ptrs["action_mask.max_launch"] = obs.action_mask.max_launch.data_ptr()
     return ptrs
 
 
-def _obs_batch(*, n_envs: int, obs_spec: EntityBasedConfig) -> ObsBatch:
+def _obs_batch(
+    *,
+    n_envs: int,
+    obs_spec: EntityBasedConfig | EntityBasedCrossAttnV1Config,
+) -> ObsBatch:
     return ObsBatch(
         planets=torch.zeros(
             (n_envs, obs_spec.max_planets, obs_spec.planet_channels),
@@ -67,6 +82,18 @@ def _obs_batch(*, n_envs: int, obs_spec: EntityBasedConfig) -> ObsBatch:
         fleets=torch.zeros(
             (n_envs, obs_spec.max_fleets, obs_spec.fleet_channels),
             dtype=torch.float32,
+        ),
+        fleet_target=(
+            None
+            if not obs_spec.uses_cross_attention
+            else torch.full((n_envs, obs_spec.max_fleets), -1, dtype=torch.int64)
+        ),
+        target_incoming_features=(
+            None
+            if not obs_spec.uses_cross_attention
+            else torch.zeros(
+                (n_envs, ACTION_ENTITY_SLOTS, obs_spec.target_incoming_channels)
+            )
         ),
         comets=torch.zeros(
             (n_envs, obs_spec.max_comets, obs_spec.comet_channels),
@@ -601,6 +628,42 @@ def test_rollout_buffer_collects_time_major_and_returns_contiguous_segments() ->
         segments.obs.global_features[0, :, 0],
         torch.tensor([0.0, 1.0, 2.0]),
     )
+
+
+def test_rollout_buffer_preserves_cross_attention_observation_tensors() -> None:
+    obs_spec = EntityBasedCrossAttnV1Config(max_entities=ACTION_ENTITY_SLOTS + 2)
+    action_spec = ActionPureConfig()
+    buffer = ppo._PPORolloutBuffer(
+        horizon=2,
+        n_envs=1,
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+        device=torch.device("cpu"),
+    )
+    obs = _obs_batch(n_envs=1, obs_spec=obs_spec)
+    assert obs.fleet_target is not None
+    assert obs.target_incoming_features is not None
+    actions = _actions(1)
+
+    for step in range(2):
+        obs.fleet_target.fill_(step)
+        obs.target_incoming_features.fill_(float(step + 1))
+        buffer.write_step(
+            step,
+            obs=obs,
+            actions=actions,
+            logp=torch.zeros((1, 4)),
+            values=torch.zeros((1, 4)),
+            rewards=torch.zeros((1, 4)),
+            dones=torch.zeros((1, 4), dtype=torch.bool),
+        )
+
+    segments = buffer.segment_major()
+
+    assert segments.obs.fleet_target is not None
+    assert segments.obs.target_incoming_features is not None
+    assert segments.obs.fleet_target[0, :, 0].tolist() == [0, 1]
+    assert segments.obs.target_incoming_features[0, :, 0, 0].tolist() == [1.0, 2.0]
 
 
 def test_obs_to_device_clones_cpu_observation_buffers() -> None:

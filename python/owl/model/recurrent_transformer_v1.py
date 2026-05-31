@@ -121,6 +121,10 @@ class RecurrentTransformerV1(StatelessTransformerV1):
             raise ValueError("recurrent_transformer_v1 requires discrete_targets actor")
         if config.actor.launch_mode != "binary":
             raise ValueError("recurrent_transformer_v1 requires binary launch mode")
+        if obs_spec.uses_cross_attention:
+            raise ValueError(
+                "recurrent_transformer_v1 does not support entity_based_cross_attn_v1"
+            )
         super().__init__(cast(Any, config), obs_spec=obs_spec, action_spec=action_spec)
         self._recurrence_mode = config.recurrence_mode
         self.blocks = nn.ModuleList(
@@ -843,6 +847,16 @@ def _flatten_obs_if_sequence(obs: ObsBatch) -> tuple[ObsBatch, tuple[int, int] |
             planets=_flatten_time_tensor(obs.planets),
             orbiting_planets=_flatten_time_tensor(obs.orbiting_planets),
             fleets=_flatten_time_tensor(obs.fleets),
+            fleet_target=(
+                None
+                if obs.fleet_target is None
+                else _flatten_time_tensor(obs.fleet_target)
+            ),
+            target_incoming_features=(
+                None
+                if obs.target_incoming_features is None
+                else _flatten_time_tensor(obs.target_incoming_features)
+            ),
             comets=_flatten_time_tensor(obs.comets),
             entity_mask=_flatten_time_tensor(obs.entity_mask),
             still_playing=_flatten_time_tensor(obs.still_playing),

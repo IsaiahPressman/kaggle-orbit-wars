@@ -41,6 +41,17 @@ from .checkpoint_quantization import dequantize_model_state_dict
 from .kaggle_observation import KaggleObservation
 
 AGENT_CONFIG_PATH = Path(__file__).with_name("agent_config.yaml")
+_OBS_REQUIRED_TENSOR_FIELDS = tuple(
+    field
+    for field in ObsBatch.model_fields
+    if field
+    not in {
+        "action_mask",
+        "player_features",
+        "fleet_target",
+        "target_incoming_features",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -270,14 +281,23 @@ class Agent:
         return ObsBatch(
             **{
                 field: getattr(obs, field).to(device=self.device)
-                for field in ObsBatch.model_fields
-                if field not in {"action_mask", "player_features"}
+                for field in _OBS_REQUIRED_TENSOR_FIELDS
             },
             action_mask=_action_mask_to_device(obs.action_mask, self.device),
             player_features=(
                 None
                 if obs.player_features is None
                 else obs.player_features.to(device=self.device)
+            ),
+            fleet_target=(
+                None
+                if obs.fleet_target is None
+                else obs.fleet_target.to(device=self.device)
+            ),
+            target_incoming_features=(
+                None
+                if obs.target_incoming_features is None
+                else obs.target_incoming_features.to(device=self.device)
             ),
         )
 
@@ -427,11 +447,36 @@ def compact_entities(
         raise ValueError(
             "runtime entity compaction requires at least one action entity"
         )
+    compact_fleet_target = None
+    if obs.fleet_target is not None:
+        selected_targets = obs.fleet_target[:, active_fleet_indexes]
+        target_remap = torch.full(
+            (ACTION_ENTITY_SLOTS,),
+            -1,
+            dtype=obs.fleet_target.dtype,
+            device=obs.fleet_target.device,
+        )
+        target_remap[action_entity_indices] = torch.arange(
+            action_entity_indices.numel(),
+            dtype=obs.fleet_target.dtype,
+            device=obs.fleet_target.device,
+        )
+        compact_fleet_target = torch.full_like(selected_targets, -1)
+        valid_targets = selected_targets >= 0
+        compact_fleet_target[valid_targets] = target_remap[
+            selected_targets[valid_targets]
+        ]
 
     compacted = ObsBatch(
         planets=obs.planets[:, active_planet_indexes, :],
         orbiting_planets=obs.orbiting_planets[:, active_planet_indexes],
         fleets=obs.fleets[:, active_fleet_indexes, :],
+        fleet_target=compact_fleet_target,
+        target_incoming_features=(
+            None
+            if obs.target_incoming_features is None
+            else obs.target_incoming_features[:, action_entity_indices, :]
+        ),
         comets=obs.comets[:, active_comet_indexes, :],
         entity_mask=torch.cat(
             (
