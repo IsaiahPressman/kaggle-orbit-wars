@@ -15,6 +15,7 @@ from owl.rl import (
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
     EntityBasedConfig,
+    EntityBasedCrossAttnV1Config,
 )
 from pydantic import TypeAdapter
 
@@ -54,20 +55,26 @@ def test_actor_config_files_load(config_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("filename", "expected_params"),
+    ("filename", "obs_spec", "expected_params"),
     [
-        ("stateless_transformer_tiny.yaml", 1_207_182),
-        ("stateless_transformer_5m_gelu.yaml", 5_532_942),
-        ("stateless_transformer_5m_pure.yaml", 5_804_862),
-        ("stateless_transformer_20m_gelu.yaml", 20_093_402),
-        ("stateless_transformer_20m_swiglu.yaml", 20_914_202),
-        ("stateless_transformer_28m.yaml", 27_785_738),
-        ("stateless_transformer_152m.yaml", 151_666_970),
-        ("recurrent_transformer_5m_gelu.yaml", 5_270_286),
+        ("stateless_transformer_tiny.yaml", EntityBasedConfig(), 1_207_182),
+        ("stateless_transformer_5m_gelu.yaml", EntityBasedConfig(), 5_532_942),
+        (
+            "stateless_transformer_5m_cross_attn.yaml",
+            EntityBasedCrossAttnV1Config(),
+            5_968_014,
+        ),
+        ("stateless_transformer_5m_pure.yaml", EntityBasedConfig(), 5_804_862),
+        ("stateless_transformer_20m_gelu.yaml", EntityBasedConfig(), 20_093_402),
+        ("stateless_transformer_20m_swiglu.yaml", EntityBasedConfig(), 20_914_202),
+        ("stateless_transformer_28m.yaml", EntityBasedConfig(), 27_785_738),
+        ("stateless_transformer_152m.yaml", EntityBasedConfig(), 151_666_970),
+        ("recurrent_transformer_5m_gelu.yaml", EntityBasedConfig(), 5_270_286),
     ],
 )
 def test_model_config_file_parameter_count(
     filename: str,
+    obs_spec: EntityBasedConfig | EntityBasedCrossAttnV1Config,
     expected_params: int,
 ) -> None:
     config = _load_model_config_file(_REPO_ROOT / "configs" / "model" / filename)
@@ -78,7 +85,7 @@ def test_model_config_file_parameter_count(
         action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
     model = create_model(
         config,
-        obs_spec=EntityBasedConfig(),
+        obs_spec=obs_spec,
         action_spec=action_spec,
     )
 
