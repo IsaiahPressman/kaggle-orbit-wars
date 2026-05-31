@@ -508,6 +508,43 @@ def test_cross_attention_observation_spec_runs_forward_pass() -> None:
     assert isinstance(output.actions, PureActions)
 
 
+def test_cross_attention_observation_spec_ignores_force_flash_attn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.manual_seed(26)
+    obs_spec = EntityBasedCrossAttnV1Config(max_entities=ACTION_ENTITY_SLOTS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    model = _model(
+        StatelessTransformerV1Config(
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+            force_flash_attn=True,
+        ),
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    assert obs.fleet_target is not None
+    obs.entity_mask[:, ACTION_ENTITY_SLOTS] = True
+    obs.fleets[:, 0, 0] = 1.0
+    obs.fleet_target[:, 0] = 1
+
+    def fail_flash_check(_tensor: torch.Tensor) -> bool:
+        pytest.fail("cross-attention observation specs should not check flash-attn")
+
+    monkeypatch.setattr(model_impl, "use_flash_attn", fail_flash_check)
+    monkeypatch.setattr(
+        model_impl,
+        "_requires_flash_attn",
+        lambda _tensor, *, force_flash_attn: force_flash_attn,
+    )
+
+    output = model(obs)
+
+    assert output.values.shape == (2, OUTER_PLAYER_SLOTS)
+
+
 def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
     torch.manual_seed(148)
     action_spec = ActionPureConfig(max_per_planet_launches=1)

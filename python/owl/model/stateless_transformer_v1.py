@@ -238,11 +238,6 @@ class StatelessTransformerV1(BaseModelAPI):
             actor_config = cast(ActorDiscreteTargetBinsConfig, config.actor)
             if actor_config.n_bins != action_spec.n_bins:
                 raise ValueError("model actor n_bins must match env action_spec n_bins")
-        if obs_spec.uses_cross_attention and config.force_flash_attn:
-            raise ValueError(
-                "entity_based_cross_attn_v1 uses padded SDPA and does not support "
-                "force_flash_attn=True"
-            )
         if obs_spec.uses_cross_attention and config.player_count_adapter_blocks != 0:
             raise ValueError(
                 "entity_based_cross_attn_v1 does not support "
@@ -579,9 +574,12 @@ class StatelessTransformerV1(BaseModelAPI):
             )
             cross_attn_mask = None
         packed: PackedSequence | None
-        should_use_flash = use_flash_attn(x) and not cross_attention
+        effective_force_flash_attn = (
+            self.config.force_flash_attn and not cross_attention
+        )
+        should_use_flash = not cross_attention and use_flash_attn(x)
         if (
-            _requires_flash_attn(x, force_flash_attn=self.config.force_flash_attn)
+            _requires_flash_attn(x, force_flash_attn=effective_force_flash_attn)
             and not should_use_flash
         ):
             raise RuntimeError(
