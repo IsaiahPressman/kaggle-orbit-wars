@@ -23,6 +23,9 @@ from owl.rl import (
     DiscreteTargetActions,
     DiscreteTargetBinActions,
     EntityBasedConfig,
+    EntityBasedCrossAttnV1Config,
+    EntityBasedExtV1Config,
+    EntityBasedExtV2Config,
     PureActionMask,
     PureActions,
     VectorizedEnv,
@@ -31,6 +34,12 @@ from owl.rs import assert_release_build
 from tqdm import trange
 
 Target = Literal["both", "rust", "kaggle"]
+ObsSpecName = Literal[
+    "entity_based",
+    "entity_based_ext_v1",
+    "entity_based_ext_v2",
+    "entity_based_cross_attn_v1",
+]
 KAGGLE_N_ENVS = 8
 
 
@@ -118,6 +127,20 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--obs-spec",
+        choices=[
+            "entity_based",
+            "entity_based_ext_v1",
+            "entity_based_ext_v2",
+            "entity_based_cross_attn_v1",
+        ],
+        default="entity_based",
+        help=(
+            "Rust observation spec to benchmark. Kaggle always uses native "
+            "observations."
+        ),
+    )
+    parser.add_argument(
         "--max-per-planet-launches",
         type=int,
         default=1,
@@ -171,9 +194,7 @@ def parse_args() -> argparse.Namespace:
 
 def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
     assert_release_build()
-    obs_spec = EntityBasedConfig()
-    if args.max_entities is not None:
-        obs_spec = EntityBasedConfig(max_entities=args.max_entities)
+    obs_spec = build_obs_spec(args)
 
     action_spec: (
         ActionPureConfig | ActionDiscreteTargetsConfig | ActionDiscreteTargetBinsConfig
@@ -270,6 +291,25 @@ def benchmark_rust(args: argparse.Namespace) -> BenchmarkResult:
         total_elapsed_seconds=total_elapsed,
         launches=timed_launches,
     )
+
+
+def build_obs_spec(
+    args: argparse.Namespace,
+) -> (
+    EntityBasedConfig
+    | EntityBasedExtV1Config
+    | EntityBasedExtV2Config
+    | EntityBasedCrossAttnV1Config
+):
+    kwargs = {} if args.max_entities is None else {"max_entities": args.max_entities}
+    obs_spec = cast(ObsSpecName, args.obs_spec)
+    if obs_spec == "entity_based":
+        return EntityBasedConfig(**kwargs)
+    if obs_spec == "entity_based_ext_v1":
+        return EntityBasedExtV1Config(**kwargs)
+    if obs_spec == "entity_based_ext_v2":
+        return EntityBasedExtV2Config(**kwargs)
+    return EntityBasedCrossAttnV1Config(**kwargs)
 
 
 def sample_rust_actions(
