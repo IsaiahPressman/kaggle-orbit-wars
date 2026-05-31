@@ -58,6 +58,7 @@ from owl.rl import (
     EntityBasedBaseConfig,
     EntityBasedConfig,
     EntityBasedCrossAttnV1Config,
+    EntityBasedExtV1Config,
     EntityBasedExtV2Config,
     ObsBatch,
     PureActionMask,
@@ -1625,6 +1626,7 @@ def test_existing_observation_specs_do_not_gain_cross_attention_state() -> None:
     config = StatelessTransformerV1Config(embed_dim=32, depth=1, n_heads=4)
     for obs_spec in (
         EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 3),
+        EntityBasedExtV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 3),
         EntityBasedExtV2Config(max_entities=MAX_PLANETS + MAX_COMETS + 3),
     ):
         model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
