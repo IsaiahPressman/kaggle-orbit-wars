@@ -230,9 +230,9 @@ ORBIT_WARS_CONFIG=/path/to/experiment.yaml \
 
 The launch script mounts the config file's parent directory read-only at
 `/config` and runs training with `/config/experiment.yaml`. If the config uses
-subconfig references such as `model: stateless_transformer_5m_gelu`, keep the
+subconfig references such as `model: stateless_transformer_5m`, keep the
 referenced subconfig directories next to the mounted file, for example
-`/path/to/model/stateless_transformer_5m_gelu.yaml`.
+`/path/to/model/stateless_transformer_5m.yaml`.
 
 Override Slurm resources either by editing `scripts/slurm/launch-train.sbatch` or
 by passing normal `sbatch` flags, for example:

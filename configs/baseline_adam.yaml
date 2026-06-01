@@ -10,7 +10,7 @@ env:
   two_player_weight: 0.5
   pin_memory: true
 
-model: stateless_transformer_5m_gelu
+model: stateless_transformer_5m
 
 optimizer:
   optimizer: adam

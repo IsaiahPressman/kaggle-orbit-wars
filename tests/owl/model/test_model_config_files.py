@@ -57,8 +57,8 @@ def test_actor_config_files_load(config_path: Path) -> None:
 @pytest.mark.parametrize(
     ("filename", "obs_spec", "expected_params"),
     [
-        ("stateless_transformer_tiny.yaml", EntityBasedConfig(), 1_207_182),
-        ("stateless_transformer_5m_gelu.yaml", EntityBasedConfig(), 5_532_942),
+        ("stateless_transformer_2m.yaml", EntityBasedConfig(), 1_773_870),
+        ("stateless_transformer_5m.yaml", EntityBasedConfig(), 5_532_942),
         (
             "stateless_transformer_5m_cross_attn.yaml",
             EntityBasedCrossAttnV1Config(),
@@ -69,7 +69,7 @@ def test_actor_config_files_load(config_path: Path) -> None:
         ("stateless_transformer_20m_swiglu.yaml", EntityBasedConfig(), 20_914_202),
         ("stateless_transformer_28m.yaml", EntityBasedConfig(), 27_785_738),
         ("stateless_transformer_152m.yaml", EntityBasedConfig(), 151_666_970),
-        ("recurrent_transformer_5m_gelu.yaml", EntityBasedConfig(), 5_270_286),
+        ("recurrent_transformer_5m.yaml", EntityBasedConfig(), 5_270_286),
     ],
 )
 def test_model_config_file_parameter_count(
