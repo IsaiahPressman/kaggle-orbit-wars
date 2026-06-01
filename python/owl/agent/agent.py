@@ -1,3 +1,4 @@
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -172,6 +173,14 @@ class Agent:
 
     @torch.inference_mode()
     def act(self, observation: Any) -> list[list[float]]:
+        try:
+            return self._act(observation)
+        except Exception as e:
+            e_str = traceback.format_exc().rstrip()
+            print(f"{type(e).__name__} exception caught: {e_str}", flush=True)
+            return []
+
+    def _act(self, observation: Any) -> list[list[float]]:
         total_start = perf_counter()
         encode_start = total_start
         observation = KaggleObservation.model_validate(observation)

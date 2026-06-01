@@ -136,6 +136,26 @@ def test_agent_checkpoint_config_fields_exist_on_full_config() -> None:
     assert set(AgentCheckpointConfig.model_fields) <= set(FullConfig.model_fields)
 
 
+def test_agent_act_prints_exception_traceback_before_empty_fallback(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent.__new__(Agent)
+
+    def fail_act(_observation: object) -> list[list[float]]:
+        raise RuntimeError("agent failure")
+
+    monkeypatch.setattr(agent, "_act", fail_act)
+
+    assert agent.act(object()) == []
+    captured = capsys.readouterr()
+    assert "RuntimeError exception caught: Traceback (most recent call last):" in (
+        captured.out
+    )
+    assert "RuntimeError: agent failure" in captured.out
+    assert captured.err == ""
+
+
 def test_agent_init_loads_quantized_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
