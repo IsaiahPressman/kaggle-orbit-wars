@@ -1,9 +1,11 @@
 # Quantization Optimizations
 
 This is a standing log of checkpoint-compression experiments for Kaggle
-submission models. The goal is not low-bit inference kernels: submission
-checkpoints are compressed to stay under the file-size limit, then dequantized
-back to fp32 before model loading.
+submission models. Checkpoint quantization is separate from the configured
+serving-time inference path: submission checkpoints are compressed to stay under
+the file-size limit, then dequantized back to fp32 before model loading. The
+default Kaggle agent config currently applies PyTorch dynamic int8 CPU inference
+after loading by setting `inference_quantization: int8`.
 
 ## Ground Rules
 
@@ -31,7 +33,10 @@ Local CPU-only measurements in this log used:
 - Reference fp4 checkpoint:
   `artifacts/20260523-153151/checkpoint_04_060_020_736_fp4_e2m1fn_x2_scaled_block16.pt`
 - Agent serving overrides from `python/owl/agent/agent_config.yaml`:
-  `max_entities_override=96` and `targeting_mode_override=full_mask`.
+  `max_entities_override=96`, `targeting_mode_override=full_mask`, and
+  `inference_quantization=null`. These historical proxy measurements used fp32
+  inference after checkpoint dequantization; the current checked-in agent config
+  defaults to dynamic int8 CPU inference for Kaggle serving.
 - Replay source: sorted `replays/*.jsonl` benchmark replay files.
 - Calibration filter: keep compacted replay frames when any active player's
   fp32 teacher value is in `[-0.8, 0.8]`.

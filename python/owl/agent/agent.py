@@ -1,8 +1,9 @@
 import traceback
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeAlias, assert_never
 
 import torch
 from pydantic import ConfigDict, Field
@@ -42,6 +43,8 @@ from .checkpoint_quantization import dequantize_model_state_dict
 from .kaggle_observation import KaggleObservation
 
 AGENT_CONFIG_PATH = Path(__file__).with_name("agent_config.yaml")
+InferenceQuantization: TypeAlias = Literal["int8"]
+_QUANTIZED_ENGINE_PREFERENCE = ("x86", "fbgemm", "qnnpack", "onednn")
 _OBS_REQUIRED_TENSOR_FIELDS = tuple(
     field
     for field in ObsBatch.model_fields
@@ -67,6 +70,7 @@ class AgentConfig(BaseConfig):
     deterministic: bool
     max_entities_override: int | None = None
     targeting_mode_override: TargetingMode | None = None
+    inference_quantization: InferenceQuantization | None = None
     min_fleet_size: Literal["match"] | Annotated[int, Field(ge=1)] = "match"
     min_overage_time: float = Field(default=0.0, ge=0.0, le=60.0)
     fallback_min_overage_time: float | None = Field(default=None, ge=0.0, le=60.0)
@@ -101,7 +105,7 @@ class Agent:
         self._last_turn_value = float("nan")
         self._peak_total_ms = 0
         self._peak_entities = 0
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = _resolve_agent_device(self.config.inference_quantization)
         self.checkpoint_config, self.model = self._load_model(
             checkpoint_config_path=checkpoint_config_path,
             checkpoint_path=checkpoint_path,
@@ -168,6 +172,10 @@ class Agent:
             )
 
         model.load_state_dict(dequantize_model_state_dict(checkpoint["model"]))
+        model = _quantize_model_for_inference(
+            model,
+            self.config.inference_quantization,
+        )
         model.eval()
         return checkpoint_config, model
 
@@ -371,6 +379,73 @@ class Agent:
 
 def _elapsed_ms(start: float) -> int:
     return round((perf_counter() - start) * 1000)
+
+
+def _resolve_agent_device(
+    inference_quantization: InferenceQuantization | None,
+) -> torch.device:
+    if inference_quantization is None:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if inference_quantization == "int8":
+        return torch.device("cpu")
+    assert_never(inference_quantization)
+
+
+def _quantize_model_for_inference(
+    model: BaseModelAPI,
+    inference_quantization: InferenceQuantization | None,
+) -> BaseModelAPI:
+    if inference_quantization is None:
+        return model
+    if inference_quantization == "int8":
+        _ensure_dynamic_quantization_engine()
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="torch.ao.quantization is deprecated.*",
+                category=DeprecationWarning,
+            )
+            quantized_model = torch.quantization.quantize_dynamic(
+                model,
+                _dynamic_quantization_qconfig_spec(model),
+                dtype=torch.qint8,
+                inplace=False,
+            )
+        if not isinstance(quantized_model, BaseModelAPI):
+            raise RuntimeError(
+                "int8 inference quantization returned an unexpected model type: "
+                f"{type(quantized_model).__name__}"
+            )
+        return quantized_model
+    assert_never(inference_quantization)
+
+
+def _dynamic_quantization_qconfig_spec(model: BaseModelAPI) -> dict[Any, Any]:
+    output_layer_ids = {id(layer) for layer in model.get_output_layers()}
+    qconfig_spec: dict[Any, Any] = {
+        torch.nn.Linear: torch.quantization.default_dynamic_qconfig
+    }
+    for name, module in model.named_modules():
+        if id(module) in output_layer_ids:
+            qconfig_spec[name] = None
+    return qconfig_spec
+
+
+def _ensure_dynamic_quantization_engine() -> None:
+    if torch.backends.quantized.engine != "none":
+        return
+
+    supported_engines = tuple(torch.backends.quantized.supported_engines)
+    for engine in _QUANTIZED_ENGINE_PREFERENCE:
+        if engine in supported_engines:
+            torch.backends.quantized.engine = engine
+            return
+
+    supported = ", ".join(supported_engines) or "none"
+    raise RuntimeError(
+        "int8 inference quantization requires a supported torch quantized "
+        f"backend, but this runtime only reports: {supported}"
+    )
 
 
 def _resolve_min_fleet_size(config: AgentConfig, action_spec: ActionConfig) -> int:

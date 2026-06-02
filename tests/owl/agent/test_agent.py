@@ -108,6 +108,15 @@ def _rust_production_row_index(source: str) -> int:
     return int(match.group(1))
 
 
+def _dynamic_quantized_linear_count(model: torch.nn.Module) -> int:
+    return sum(
+        1
+        for module in model.modules()
+        if type(module).__module__.startswith("torch.ao.nn.quantized.dynamic")
+        and type(module).__name__ == "Linear"
+    )
+
+
 def test_agent_import_does_not_load_training_modules() -> None:
     # Import isolation has to be verified in a fresh interpreter
     result = subprocess.run(
@@ -130,6 +139,16 @@ def test_agent_config_path_valid() -> None:
 def test_agent_config_rejects_nonpositive_min_fleet_size() -> None:
     with pytest.raises(ValueError, match="greater than or equal to 1"):
         AgentConfig(deterministic=True, min_fleet_size=0)
+
+
+def test_agent_config_rejects_unknown_inference_quantization() -> None:
+    with pytest.raises(ValueError, match="Input should be 'int8'"):
+        AgentConfig.model_validate(
+            {
+                "deterministic": True,
+                "inference_quantization": "fp16",
+            }
+        )
 
 
 def test_agent_checkpoint_config_fields_exist_on_full_config() -> None:
@@ -219,6 +238,63 @@ def test_agent_init_loads_quantized_checkpoint(
     assert all(parameter.isfinite().all() for parameter in agent.model.parameters())
     assert agent.fallback_model is not None
     assert set(agent.fallback_model.state_dict()) == set(model.state_dict())
+
+
+def test_agent_init_quantizes_linear_layers_for_int8_inference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    agent_config_path = tmp_path / "agent_config.yaml"
+    agent_config_path.write_text(
+        "\n".join(
+            (
+                "deterministic: true",
+                "inference_quantization: int8",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("owl.agent.agent.AGENT_CONFIG_PATH", agent_config_path)
+
+    model_config = StatelessTransformerV1Config(embed_dim=8, depth=1, n_heads=1)
+    env_config = EnvConfig(
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(),
+    )
+    checkpoint_config_path = tmp_path / "config.yaml"
+    AgentCheckpointConfig(env=env_config, model=model_config).to_file(
+        checkpoint_config_path
+    )
+
+    model = create_model(
+        model_config,
+        obs_spec=env_config.obs_spec,
+        action_spec=env_config.action_spec,
+    )
+    model.reset_parameters()
+    checkpoint_path = tmp_path / "checkpoint_last_best.pt"
+    torch.save({"model": model.state_dict()}, checkpoint_path)
+
+    agent = Agent(
+        checkpoint_config_path=checkpoint_config_path,
+        checkpoint_path=checkpoint_path,
+    )
+
+    assert agent.device == torch.device("cpu")
+    output_layer_ids = {id(layer) for layer in agent.model.get_output_layers()}
+    linear_layer_ids = {
+        id(module)
+        for module in agent.model.modules()
+        if isinstance(module, torch.nn.Linear)
+    }
+    assert linear_layer_ids == output_layer_ids
+    assert _dynamic_quantized_linear_count(agent.model) > 0
+    obs = _obs_batch(max_fleets=0)
+    obs.entity_mask[0, 0] = True
+    obs.still_playing[:] = True
+    output = agent.model.serve(obs, deterministic=True)
+    assert output.values.shape == (1, 4)
 
 
 def test_agent_init_rejects_recurrent_fallback_checkpoint(

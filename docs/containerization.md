@@ -115,7 +115,11 @@ formats include `fp8_e4m3fn`, `fp4_e2m1fn_x2_scaled_block16`, and
 `nf5_g128_lsq_policy_last_fp8`/`nf5_g128_lsq_policy_final4_fp8`; unique
 quantization prefixes such as `fp4` are accepted. The extraction step validates
 that fp32 model states contain only string keys and tensor values, and custom
-quantized checkpoint payloads are checked before packaging. Set
+quantized checkpoint payloads are checked before packaging. The checked-in
+`python/owl/agent/agent_config.yaml` configures `inference_quantization: int8`,
+which converts loaded `nn.Linear` layers to PyTorch dynamic int8 CPU inference
+while keeping final actor/critic output heads in fp32; `null` disables
+serving-time quantization and uses fp32 inference. Set
 `fallback_min_overage_time` in
 `python/owl/agent/agent_config.yaml` to switch to the fallback model when
 remaining overage time drops below that threshold; `null` disables fallback
