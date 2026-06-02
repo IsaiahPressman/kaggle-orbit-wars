@@ -7,6 +7,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
 from owl.model import BaseModelAPI, ModelHiddenState, ModelOutput, create_model
@@ -39,7 +40,7 @@ class LoadedCheckpoint:
     path: Path
     config: FullConfig
     model: BaseModelAPI
-    env_steps: int
+    env_steps: int | None
 
 
 @dataclass(frozen=True)
@@ -293,7 +294,7 @@ def _load_checkpoint(path: Path, *, device: torch.device) -> LoadedCheckpoint:
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
-    env_steps = _checkpoint_env_steps(checkpoint["env_steps"], path=path)
+    env_steps = _checkpoint_env_steps(checkpoint.get("env_steps"), path=path)
     return LoadedCheckpoint(path=path, config=config, model=model, env_steps=env_steps)
 
 
@@ -595,14 +596,19 @@ def _print_results(
 
 
 def _env_steps_label(checkpoint: LoadedCheckpoint) -> str:
+    if checkpoint.env_steps is None:
+        return "Unknown env steps"
+
     return f"{checkpoint.env_steps:,} env steps"
 
 
-def _checkpoint_env_steps(value: object, *, path: Path) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
+def _checkpoint_env_steps(value: Any, *, path: Path) -> int | None:
+    if value is None:
+        return None
+
+    if not isinstance(value, int):
         raise ValueError(f"checkpoint env_steps must be an integer: {path}")
-    if value < 0:
-        raise ValueError(f"checkpoint env_steps must be non-negative: {path}")
+
     return value
 
 
