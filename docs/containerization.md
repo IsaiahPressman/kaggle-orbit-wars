@@ -112,10 +112,12 @@ same directory to `models/primary/config.yaml`. If `--fallback-checkpoint` is
 provided, the fallback checkpoint and adjacent config are packaged under
 `models/fallback/` using the same fixed filenames. Supported quantization
 formats include `fp8_e4m3fn`, `fp4_e2m1fn_x2_scaled_block16`, and
-`nf5_g128_lsq_policy_last_fp8`/`nf5_g128_lsq_policy_final4_fp8`; unique
-quantization prefixes such as `fp4` are accepted. The extraction step validates
-that fp32 model states contain only string keys and tensor values, and custom
-quantized checkpoint payloads are checked before packaging. The checked-in
+`nf5_g128_lsq_policy_last_fp8`/`nf5_g128_lsq_policy_final4_fp8`. Lower-bit
+normal-float formats `nf4_g128_lsq`, `nf3_nf4_structured_3p5`, and
+`nf3_g128_lsq` are also supported; unique quantization prefixes such as `fp4`
+are accepted. The extraction step validates that fp32 model states contain only
+string keys and tensor values, and custom quantized checkpoint payloads are
+checked before packaging. The checked-in
 `python/owl/agent/agent_config.yaml` configures `inference_quantization: int8`,
 which converts loaded `nn.Linear` layers to PyTorch dynamic int8 CPU inference
 while keeping final actor/critic output heads in fp32; `null` disables
@@ -234,9 +236,9 @@ ORBIT_WARS_CONFIG=/path/to/experiment.yaml \
 
 The launch script mounts the config file's parent directory read-only at
 `/config` and runs training with `/config/experiment.yaml`. If the config uses
-subconfig references such as `model: stateless_transformer_5m`, keep the
+subconfig references such as `model: stateless_transformer_6m`, keep the
 referenced subconfig directories next to the mounted file, for example
-`/path/to/model/stateless_transformer_5m.yaml`.
+`/path/to/model/stateless_transformer_6m.yaml`.
 
 Override Slurm resources either by editing `scripts/slurm/launch-train.sbatch` or
 by passing normal `sbatch` flags, for example:

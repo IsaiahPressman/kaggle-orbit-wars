@@ -14,8 +14,8 @@ from owl.rl import (
     ActionConfig,
     ActionDiscreteTargetsConfig,
     ActionPureConfig,
-    EntityBasedConfig,
     EntityBasedCrossAttnV1Config,
+    EntityBasedExtV2Config,
 )
 from pydantic import TypeAdapter
 
@@ -57,24 +57,29 @@ def test_actor_config_files_load(config_path: Path) -> None:
 @pytest.mark.parametrize(
     ("filename", "obs_spec", "expected_params"),
     [
-        ("stateless_transformer_2m.yaml", EntityBasedConfig(), 1_773_870),
-        ("stateless_transformer_5m.yaml", EntityBasedConfig(), 5_532_942),
+        ("stateless_transformer_2m.yaml", EntityBasedExtV2Config(), 1_810_318),
+        ("stateless_transformer_6m.yaml", EntityBasedExtV2Config(), 5_679_118),
         (
-            "stateless_transformer_5m_cross_attn.yaml",
+            "stateless_transformer_6m_cross_attn.yaml",
             EntityBasedCrossAttnV1Config(),
             5_968_014,
         ),
-        ("stateless_transformer_5m_pure.yaml", EntityBasedConfig(), 5_804_862),
-        ("stateless_transformer_20m_gelu.yaml", EntityBasedConfig(), 20_093_402),
-        ("stateless_transformer_20m_swiglu.yaml", EntityBasedConfig(), 20_914_202),
-        ("stateless_transformer_28m.yaml", EntityBasedConfig(), 27_785_738),
-        ("stateless_transformer_152m.yaml", EntityBasedConfig(), 151_666_970),
-        ("recurrent_transformer_5m.yaml", EntityBasedConfig(), 5_270_286),
+        ("stateless_transformer_6m_pure.yaml", EntityBasedExtV2Config(), 5_951_038),
+        ("stateless_transformer_21m_gelu.yaml", EntityBasedExtV2Config(), 20_529_914),
+        (
+            "stateless_transformer_21m_swiglu.yaml",
+            EntityBasedExtV2Config(),
+            21_231_770,
+        ),
+        ("stateless_transformer_28m.yaml", EntityBasedExtV2Config(), 28_123_130),
+        ("stateless_transformer_153m.yaml", EntityBasedExtV2Config(), 152_891_930),
+        ("stateless_transformer_210m.yaml", EntityBasedExtV2Config(), 209_616_410),
+        ("recurrent_transformer_5m.yaml", EntityBasedExtV2Config(), 5_416_462),
     ],
 )
 def test_model_config_file_parameter_count(
     filename: str,
-    obs_spec: EntityBasedConfig | EntityBasedCrossAttnV1Config,
+    obs_spec: EntityBasedExtV2Config | EntityBasedCrossAttnV1Config,
     expected_params: int,
 ) -> None:
     config = _load_model_config_file(_REPO_ROOT / "configs" / "model" / filename)

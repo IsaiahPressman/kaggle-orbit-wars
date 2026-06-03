@@ -72,10 +72,12 @@ the Kaggle agent; malformed model entries fail during packaging rather than at
 agent startup. To store packaged models below fp32 precision, pass a
 quantization format such as
 `fp8_e4m3fn`, `fp4_e2m1fn_x2_scaled_block16`, or
-`nf5_g128_lsq_policy_last_fp8`/`nf5_g128_lsq_policy_final4_fp8`; unique prefixes
-such as `fp4` are accepted. The default `fp32` leaves checkpoint weights
-unchanged. The Kaggle agent dequantizes quantized slim checkpoints back to fp32
-before loading the model. The checked-in `python/owl/agent/agent_config.yaml`
+`nf5_g128_lsq_policy_last_fp8`/`nf5_g128_lsq_policy_final4_fp8`. Lower-bit
+normal-float formats `nf4_g128_lsq`, `nf3_nf4_structured_3p5`, and
+`nf3_g128_lsq` are also supported; unique prefixes such as `fp4` are accepted.
+The default `fp32` leaves checkpoint weights unchanged. The Kaggle agent
+dequantizes quantized slim checkpoints back to fp32 before loading the model.
+The checked-in `python/owl/agent/agent_config.yaml`
 sets `inference_quantization: int8`, which converts loaded `nn.Linear` layers
 to PyTorch dynamic int8 CPU inference while keeping final actor/critic output
 heads in fp32; `null` disables serving-time quantization and uses fp32
@@ -116,11 +118,11 @@ Training presets live in `configs/`:
   epsilon, no weight decay, and the same warmup/cosine scheduler shape.
 - `baseline_adamw.yaml`: AdamW optimizer variant matching `baseline_adam.yaml`
   except for decoupled `0.01` weight decay.
-- `model/stateless_transformer_20m_swiglu.yaml`: larger stateless transformer
+- `model/stateless_transformer_21m_swiglu.yaml`: larger stateless transformer
   model config used by `baseline.yaml`, with an inline discrete-target actor
   override using eight action mixtures.
-- `model/stateless_transformer_5m.yaml` and
-  `model/stateless_transformer_20m_gelu.yaml`: GELU variants of the stateless
+- `model/stateless_transformer_6m.yaml` and
+  `model/stateless_transformer_21m_gelu.yaml`: GELU variants of the stateless
   transformer presets.
 - `model/stateless_transformer_28m.yaml`: larger SwiGLU stateless transformer
   preset with a discrete-target actor.

@@ -437,7 +437,7 @@ def test_model_config_has_discriminator_tag() -> None:
 
 def test_model_config_loads_actor_subconfig_reference() -> None:
     config = StatelessTransformerV1Config.from_file(
-        _REPO_ROOT / "configs" / "model" / "stateless_transformer_5m.yaml"
+        _REPO_ROOT / "configs" / "model" / "stateless_transformer_6m.yaml"
     )
 
     assert config.actor == ActorDiscreteTargetsConfig()

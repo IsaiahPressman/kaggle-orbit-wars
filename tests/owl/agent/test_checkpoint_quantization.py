@@ -6,6 +6,9 @@ from owl.agent.agent import Agent, AgentCheckpointConfig, AgentConfig
 from owl.agent.checkpoint_quantization import (
     FP4_E2M1FN_X2_SCALED_BLOCK16,
     FP8_E4M3FN,
+    NF3_G128_LSQ,
+    NF3_NF4_STRUCTURED_3P5,
+    NF4_G128_LSQ,
     NF5_G128_LSQ_POLICY_FINAL4_FP8,
     NF5_G128_LSQ_POLICY_LAST_FP8,
     dequantize_model_state_dict,
@@ -36,7 +39,14 @@ _FP4_E2M1FN_VALUES = torch.tensor(
     dtype=torch.float32,
 )
 _FP4_BLOCK_SIZE = 16
-_NF5_GROUP_SIZE = 128
+_NORMALFLOAT_GROUP_SIZE = 128
+_LOWBIT_QUANTIZATION_FORMATS = (
+    NF5_G128_LSQ_POLICY_LAST_FP8,
+    NF5_G128_LSQ_POLICY_FINAL4_FP8,
+    NF4_G128_LSQ,
+    NF3_NF4_STRUCTURED_3P5,
+    NF3_G128_LSQ,
+)
 
 
 def test_fp8_quantization_matches_torch_cast_bits() -> None:
@@ -172,9 +182,9 @@ def test_fp4_dequantization_unpacks_low_nibble_then_high_nibble() -> None:
 
 @pytest.mark.parametrize(
     "quantization",
-    [NF5_G128_LSQ_POLICY_LAST_FP8, NF5_G128_LSQ_POLICY_FINAL4_FP8],
+    _LOWBIT_QUANTIZATION_FORMATS,
 )
-def test_nf5_quantized_payload_uses_packed_5bit_codes_and_fp16_group_scales(
+def test_normalfloat_quantized_payload_uses_packed_codes_and_fp16_group_scales(
     quantization: str,
 ) -> None:
     values = torch.linspace(-2.5, 2.5, steps=258, dtype=torch.float32).reshape(2, 129)
@@ -187,12 +197,14 @@ def test_nf5_quantized_payload_uses_packed_5bit_codes_and_fp16_group_scales(
     payload = quantized["tensors"]["linear.weight"]
     data = payload["data"]
     scale = payload["scale"]
+    bits = payload["bits"]
     expected_group_count = values.shape[0] * (
-        (values.shape[1] + _NF5_GROUP_SIZE - 1) // _NF5_GROUP_SIZE
+        (values.shape[1] + _NORMALFLOAT_GROUP_SIZE - 1) // _NORMALFLOAT_GROUP_SIZE
     )
-    expected_packed_bytes = expected_group_count * _NF5_GROUP_SIZE * 5 // 8
+    expected_packed_bytes = expected_group_count * _NORMALFLOAT_GROUP_SIZE * bits // 8
     assert payload["format"] == quantization
     assert payload["cols"] == values.shape[1]
+    assert payload["codebook"] == "nf"
     assert data.dtype == torch.uint8
     assert data.numel() == expected_packed_bytes
     assert _tensor_storage_nbytes(data) == expected_packed_bytes
@@ -203,6 +215,21 @@ def test_nf5_quantized_payload_uses_packed_5bit_codes_and_fp16_group_scales(
     dequantized = dequantize_model_state_dict(quantized)["linear.weight"]
     assert dequantized.dtype == torch.float32
     assert dequantized.shape == values.shape
+
+
+def test_structured_normalfloat_quantization_upgrades_sensitive_tensors() -> None:
+    values = torch.linspace(-2.5, 2.5, steps=256, dtype=torch.float32).reshape(2, 128)
+
+    quantized = quantize_model_state_dict(
+        {
+            "blocks.0.mlp.up.weight": values,
+            "blocks.39.mlp.down.weight": values,
+        },
+        NF3_NF4_STRUCTURED_3P5,
+    )
+
+    assert quantized["tensors"]["blocks.0.mlp.up.weight"]["bits"] == 3
+    assert quantized["tensors"]["blocks.39.mlp.down.weight"]["bits"] == 4
 
 
 def test_nf5_quantization_uses_fp8_for_targeted_policy_tensors() -> None:
@@ -270,6 +297,9 @@ def test_nf5_quantization_stores_non_2d_floating_tensors_as_fp16() -> None:
         FP4_E2M1FN_X2_SCALED_BLOCK16,
         NF5_G128_LSQ_POLICY_LAST_FP8,
         NF5_G128_LSQ_POLICY_FINAL4_FP8,
+        NF4_G128_LSQ,
+        NF3_NF4_STRUCTURED_3P5,
+        NF3_G128_LSQ,
     ],
 )
 def test_quantized_checkpoint_file_round_trips_to_expected_fp32(
@@ -296,9 +326,9 @@ def test_quantized_checkpoint_file_round_trips_to_expected_fp32(
 
 @pytest.mark.parametrize(
     "quantization",
-    [NF5_G128_LSQ_POLICY_LAST_FP8, NF5_G128_LSQ_POLICY_FINAL4_FP8],
+    _LOWBIT_QUANTIZATION_FORMATS,
 )
-def test_nf5_dequantization_rejects_trailing_payload_bytes(
+def test_normalfloat_dequantization_rejects_trailing_payload_bytes(
     quantization: str,
 ) -> None:
     values = torch.arange(130, dtype=torch.float32).reshape(1, 130)
@@ -308,8 +338,47 @@ def test_nf5_dequantization_rejects_trailing_payload_bytes(
         (payload["data"], torch.zeros(1, dtype=torch.uint8)),
     )
 
-    with pytest.raises(ValueError, match=r"5-bit payload has .* bytes"):
+    with pytest.raises(
+        ValueError, match=rf"{payload['bits']}-bit payload has .* bytes"
+    ):
         dequantize_model_state_dict(quantized)
+
+
+@pytest.mark.parametrize(
+    ("quantization", "bad_bits", "expected_error"),
+    [
+        (NF5_G128_LSQ_POLICY_LAST_FP8, 3, "bits must be 5"),
+        (NF5_G128_LSQ_POLICY_FINAL4_FP8, 4, "bits must be 5"),
+        (NF4_G128_LSQ, 3, "bits must be 4"),
+        (NF3_G128_LSQ, 4, "bits must be 3"),
+        (NF3_NF4_STRUCTURED_3P5, 5, "bits must be 3 or 4"),
+    ],
+)
+def test_normalfloat_dequantization_rejects_bits_mismatched_to_format(
+    quantization: str,
+    bad_bits: int,
+    expected_error: str,
+) -> None:
+    values = torch.arange(130, dtype=torch.float32).reshape(1, 130)
+    quantized = quantize_model_state_dict({"weight": values}, quantization)
+    quantized["tensors"]["weight"]["bits"] = bad_bits
+
+    with pytest.raises(ValueError, match=expected_error):
+        dequantize_model_state_dict(quantized)
+
+
+def test_nf5_dequantization_defaults_missing_bits_to_5_for_legacy_payloads() -> None:
+    values = torch.arange(130, dtype=torch.float32).reshape(1, 130)
+    quantized = quantize_model_state_dict(
+        {"weight": values},
+        NF5_G128_LSQ_POLICY_LAST_FP8,
+    )
+    expected = dequantize_model_state_dict(quantized)["weight"]
+    del quantized["tensors"]["weight"]["bits"]
+
+    dequantized = dequantize_model_state_dict(quantized)
+
+    _assert_float32_bits_equal(dequantized["weight"], expected)
 
 
 def test_unquantized_model_state_still_loads_unchanged() -> None:
@@ -382,6 +451,9 @@ def _expected_dequantized(values: torch.Tensor, quantization: str) -> torch.Tens
     if quantization in (
         NF5_G128_LSQ_POLICY_LAST_FP8,
         NF5_G128_LSQ_POLICY_FINAL4_FP8,
+        NF4_G128_LSQ,
+        NF3_NF4_STRUCTURED_3P5,
+        NF3_G128_LSQ,
     ):
         return dequantize_model_state_dict(
             quantize_model_state_dict({"weight": values}, quantization)
