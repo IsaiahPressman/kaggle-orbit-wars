@@ -7,21 +7,17 @@ import pytest
 import torch
 from owl import int8_emulation
 
-_QUANTIZED_ENGINE_PREFERENCE = ("x86", "fbgemm", "qnnpack", "onednn")
 
-
-def _ensure_quantized_engine_for_test() -> None:
-    if torch.backends.quantized.engine != "none":
-        return
-
+def _ensure_x86_quantized_engine_for_test() -> None:
     supported_engines = tuple(torch.backends.quantized.supported_engines)
-    for engine in _QUANTIZED_ENGINE_PREFERENCE:
-        if engine in supported_engines:
-            torch.backends.quantized.engine = engine
-            return
+    if "x86" not in supported_engines:
+        supported = ", ".join(supported_engines) or "none"
+        pytest.skip(f"x86 torch quantized backend is unavailable: {supported}")
 
-    supported = ", ".join(supported_engines) or "none"
-    pytest.skip(f"no supported torch quantized backend available: {supported}")
+    try:
+        torch.backends.quantized.engine = "x86"
+    except RuntimeError as exc:
+        pytest.skip(f"x86 torch quantized backend is unusable: {exc}")
 
 
 def test_int8_emulated_linear_fake_quantizes_weights_and_activations() -> None:
@@ -63,7 +59,24 @@ def test_int8_emulated_linear_restores_autocast_dtype() -> None:
     torch.testing.assert_close(actual, expected.to(dtype=torch.bfloat16))
 
 
-def test_int8_emulated_model_matches_torch_dynamic_quantization_except_output() -> None:
+def test_int8_emulation_uses_x86_activation_range() -> None:
+    x = torch.tensor([[-0.33, 0.10, 1.70], [2.40, -1.20, 0.60]])
+
+    actual = int8_emulation._fake_quantize_quint8_affine_per_tensor(x)
+    expected = int8_emulation._fake_quantize_quint8_affine_per_tensor(
+        x,
+        quant_max=127,
+    )
+    qnnpack_range = int8_emulation._fake_quantize_quint8_affine_per_tensor(
+        x,
+        quant_max=255,
+    )
+
+    torch.testing.assert_close(actual, expected)
+    assert not torch.equal(actual, qnnpack_range)
+
+
+def test_int8_emulated_model_matches_x86_dynamic_quantization_except_output() -> None:
     class FakeModel(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
@@ -76,7 +89,7 @@ def test_int8_emulated_model_matches_torch_dynamic_quantization_except_output() 
         def get_output_layers(self) -> tuple[torch.nn.Module, ...]:
             return (self.output,)
 
-    _ensure_quantized_engine_for_test()
+    _ensure_x86_quantized_engine_for_test()
     torch.manual_seed(99)
     base_model = FakeModel().eval()
     base_model.body.weight.data.uniform_(-0.9, 0.9)

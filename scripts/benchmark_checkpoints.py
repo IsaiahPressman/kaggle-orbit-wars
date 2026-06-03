@@ -720,9 +720,9 @@ def _parse_args() -> argparse.Namespace:
         const="both",
         default="none",
         help=(
-            "Emulate int8 inference numerics for checkpoint Linear layers while "
-            "staying on --device. Pass without a value for both checkpoints, or "
-            "pass 'a'/'b' for one checkpoint, or 'none' to disable explicitly. "
+            "Emulate x86 int8 inference numerics for checkpoint Linear layers "
+            "while staying on --device. Pass without a value for both checkpoints, "
+            "or pass 'a'/'b' for one checkpoint, or 'none' to disable explicitly. "
             "Final actor/critic output heads stay unquantized."
         ),
     )

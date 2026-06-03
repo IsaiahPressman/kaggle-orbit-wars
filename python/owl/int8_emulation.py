@@ -5,6 +5,8 @@ import torch.nn.functional as F
 
 from owl.model import BaseModelAPI
 
+_X86_DYNAMIC_ACTIVATION_QUANT_MAX = 127
+
 
 class Int8EmulatedLinear(torch.nn.Module):
     weight: torch.Tensor
@@ -31,7 +33,7 @@ class Int8EmulatedLinear(torch.nn.Module):
         )
         with torch.autocast(device_type=x.device.type, enabled=False):
             fake_quantized_x = _fake_quantize_quint8_affine_per_tensor(
-                x.to(dtype=torch.float32)
+                x.to(dtype=torch.float32),
             )
             weight = self.weight.to(dtype=torch.float32)
             bias = None if self.bias is None else self.bias.to(dtype=torch.float32)
@@ -75,7 +77,24 @@ def _fake_quantize_qint8_symmetric_per_tensor(tensor: torch.Tensor) -> torch.Ten
     return (quantized * scale).to(dtype=source_dtype)
 
 
-def _fake_quantize_quint8_affine_per_tensor(tensor: torch.Tensor) -> torch.Tensor:
+def _fake_quantize_quint8_affine_per_tensor(
+    tensor: torch.Tensor,
+    *,
+    quant_max: int | None = None,
+) -> torch.Tensor:
+    return _fake_quantize_quint8_affine_per_tensor_quant_max(
+        tensor,
+        quant_max=(
+            _X86_DYNAMIC_ACTIVATION_QUANT_MAX if quant_max is None else quant_max
+        ),
+    )
+
+
+def _fake_quantize_quint8_affine_per_tensor_quant_max(
+    tensor: torch.Tensor,
+    *,
+    quant_max: int,
+) -> torch.Tensor:
     if tensor.numel() == 0:
         return tensor.clone()
 
@@ -85,9 +104,9 @@ def _fake_quantize_quint8_affine_per_tensor(tensor: torch.Tensor) -> torch.Tenso
     min_value = torch.minimum(torch.amin(tensor_f), zero)
     max_value = torch.maximum(torch.amax(tensor_f), zero)
     scale = torch.clamp(
-        (max_value - min_value) / 255.0,
+        (max_value - min_value) / float(quant_max),
         min=torch.finfo(tensor_f.dtype).eps,
     )
-    zero_point = torch.round(-min_value / scale).clamp(0, 255)
-    quantized = torch.round(tensor_f / scale + zero_point).clamp(0, 255)
+    zero_point = torch.round(-min_value / scale).clamp(0, quant_max)
+    quantized = torch.round(tensor_f / scale + zero_point).clamp(0, quant_max)
     return ((quantized - zero_point) * scale).to(dtype=source_dtype)
