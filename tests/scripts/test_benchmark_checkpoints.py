@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from owl.int8_emulation import Int8EmulatedLinear
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     ActionBundle,
@@ -194,6 +195,89 @@ def test_parse_args_accepts_deterministic_before_checkpoints(
     assert (determinism.a, determinism.b) == expected
 
 
+@pytest.mark.parametrize(
+    ("extra_args", "expected"),
+    [
+        ([], (False, False)),
+        (["--int8-emulation", "none"], (False, False)),
+        (["--int8-emulation"], (True, True)),
+        (["--int8-emulation", "a"], (True, False)),
+        (["--int8-emulation", "b"], (False, True)),
+    ],
+)
+def test_parse_args_accepts_optional_int8_emulation_target(
+    monkeypatch: pytest.MonkeyPatch,
+    extra_args: list[str],
+    expected: tuple[bool, bool],
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_checkpoints.py",
+            "checkpoint_a.pt",
+            "checkpoint_b.pt",
+            *extra_args,
+        ],
+    )
+
+    args = benchmark_checkpoints._parse_args()
+    int8_emulation = benchmark_checkpoints._int8_emulation_flags(args.int8_emulation)
+
+    assert (int8_emulation.a, int8_emulation.b) == expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (
+            [
+                "benchmark_checkpoints.py",
+                "--int8-emulation",
+                "checkpoint_a.pt",
+                "checkpoint_b.pt",
+            ],
+            (True, True),
+        ),
+        (
+            [
+                "benchmark_checkpoints.py",
+                "--int8-emulation",
+                "none",
+                "checkpoint_a.pt",
+                "checkpoint_b.pt",
+            ],
+            (False, False),
+        ),
+        (
+            [
+                "benchmark_checkpoints.py",
+                "--int8-emulation",
+                "b",
+                "checkpoint_a.pt",
+                "checkpoint_b.pt",
+            ],
+            (False, True),
+        ),
+    ],
+)
+def test_parse_args_accepts_int8_emulation_before_checkpoints(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    expected: tuple[bool, bool],
+) -> None:
+    monkeypatch.setattr(sys, "argv", argv)
+
+    args = benchmark_checkpoints._parse_args()
+    int8_emulation = benchmark_checkpoints._int8_emulation_flags(args.int8_emulation)
+
+    assert (args.checkpoint_a, args.checkpoint_b) == (
+        Path("checkpoint_a.pt"),
+        Path("checkpoint_b.pt"),
+    )
+    assert (int8_emulation.a, int8_emulation.b) == expected
+
+
 def test_record_terminal_result_counts_model_winner_by_game() -> None:
     stats = benchmark_checkpoints.MatchupStats.empty()
     assignment = torch.tensor([0, 0, 1, 1])
@@ -244,6 +328,59 @@ def test_checkpoint_config_path_rejects_missing_config(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match=re.escape(expected)):
         benchmark_checkpoints._checkpoint_config_path(checkpoint_path)
+
+
+def test_load_checkpoint_int8_emulation_replaces_non_output_linears(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.body = torch.nn.Linear(2, 3)
+            self.output = torch.nn.Linear(3, 1)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.output(torch.relu(self.body(x)))
+
+        def get_output_layers(self) -> tuple[torch.nn.Module, ...]:
+            return (self.output,)
+
+    model = FakeModel()
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("unused\n")
+    torch.save({"model": model.state_dict(), "env_steps": 12}, checkpoint_path)
+    config = SimpleNamespace(
+        model=SimpleNamespace(),
+        env=SimpleNamespace(
+            obs_spec=EntityBasedConfig(), action_spec=ActionPureConfig()
+        ),
+        rl=Namespace(dtype="float32"),
+    )
+
+    monkeypatch.setattr(
+        benchmark_checkpoints.FullConfig,
+        "from_file",
+        classmethod(lambda _cls, _path: config),
+    )
+    monkeypatch.setattr(
+        benchmark_checkpoints,
+        "create_model",
+        lambda _model_cfg, **_kwargs: model,
+    )
+
+    loaded = benchmark_checkpoints._load_checkpoint(
+        checkpoint_path,
+        device=torch.device("cpu"),
+        int8_emulation=True,
+    )
+
+    assert loaded.int8_emulation is True
+    assert loaded.env_steps == 12
+    assert loaded.model.training is False
+    assert isinstance(model.body, Int8EmulatedLinear)
+    assert isinstance(model.output, torch.nn.Linear)
 
 
 def test_actions_for_checkpoints_uses_checkpoint_autocast_context(

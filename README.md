@@ -283,6 +283,11 @@ weighted loss terms, and per-action KL components such as
 according to `--two-player-weight`. Files are written under `--replay-dir`,
 defaulting to `replays/benchmark_checkpoints`.
 Each sampled benchmark game is written as its own JSONL file.
+For GPU-friendly int8 quality checks, pass `--int8-emulation [none|a|b|both]` to
+emulate int8 quantization of non-output `nn.Linear` weights and activations for
+one or both checkpoints while leaving final actor/critic output heads
+unquantized. This emulates int8 numeric degradation on `--device`; it does not
+measure real int8 kernel throughput.
 Open `tools/orbit_wars_replay_viewer.html` in a browser and choose
 a saved `.jsonl` file or Kaggle episode replay `.json` file to play back a
 game.

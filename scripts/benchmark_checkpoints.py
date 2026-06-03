@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from owl.int8_emulation import apply_int8_emulation
 from owl.model import BaseModelAPI, ModelHiddenState, ModelOutput, create_model
 from owl.replay import ReplayRecorder
 from owl.rl import (
@@ -41,10 +42,17 @@ class LoadedCheckpoint:
     config: FullConfig
     model: BaseModelAPI
     env_steps: int | None
+    int8_emulation: bool = False
 
 
 @dataclass(frozen=True)
 class CheckpointDeterminism:
+    a: bool
+    b: bool
+
+
+@dataclass(frozen=True)
+class CheckpointInt8Emulation:
     a: bool
     b: bool
 
@@ -91,12 +99,21 @@ class BenchmarkResult:
 def main() -> None:
     args = _parse_args()
     determinism = _deterministic_flags(args.deterministic)
+    int8_emulation = _int8_emulation_flags(args.int8_emulation)
 
     assert_release_build()
     configure_torch()
     device = torch.device(args.device)
-    checkpoint_a = _load_checkpoint(args.checkpoint_a, device=device)
-    checkpoint_b = _load_checkpoint(args.checkpoint_b, device=device)
+    checkpoint_a = _load_checkpoint(
+        args.checkpoint_a,
+        device=device,
+        int8_emulation=int8_emulation.a,
+    )
+    checkpoint_b = _load_checkpoint(
+        args.checkpoint_b,
+        device=device,
+        int8_emulation=int8_emulation.b,
+    )
 
     game_counts = _player_count_counts(args.n_games, args.two_player_weight)
     replay_counts = _player_count_counts(args.save_replay_games, args.two_player_weight)
@@ -160,6 +177,8 @@ def run_benchmark(
                 "checkpoint_b_env_steps": checkpoint_b.env_steps,
                 "deterministic_a": determinism.a,
                 "deterministic_b": determinism.b,
+                "int8_emulation_a": checkpoint_a.int8_emulation,
+                "int8_emulation_b": checkpoint_b.int8_emulation,
             },
             rng=replay_rng,
             split_files=True,
@@ -281,7 +300,12 @@ def _benchmark_replay_path(args: argparse.Namespace, player_count: int) -> Path 
     return args.replay_dir / f"{checkpoint_a}_vs_{checkpoint_b}_{player_count}p.jsonl"
 
 
-def _load_checkpoint(path: Path, *, device: torch.device) -> LoadedCheckpoint:
+def _load_checkpoint(
+    path: Path,
+    *,
+    device: torch.device,
+    int8_emulation: bool = False,
+) -> LoadedCheckpoint:
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     if not isinstance(checkpoint, dict):
         raise ValueError(f"{path} must contain a checkpoint mapping")
@@ -293,9 +317,17 @@ def _load_checkpoint(path: Path, *, device: torch.device) -> LoadedCheckpoint:
         action_spec=config.env.action_spec,
     ).to(device)
     model.load_state_dict(checkpoint["model"])
+    if int8_emulation:
+        apply_int8_emulation(model)
     model.eval()
     env_steps = _checkpoint_env_steps(checkpoint.get("env_steps"), path=path)
-    return LoadedCheckpoint(path=path, config=config, model=model, env_steps=env_steps)
+    return LoadedCheckpoint(
+        path=path,
+        config=config,
+        model=model,
+        env_steps=env_steps,
+        int8_emulation=int8_emulation,
+    )
 
 
 def _checkpoint_config_path(checkpoint_path: Path) -> Path:
@@ -682,6 +714,19 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--int8-emulation",
+        nargs="?",
+        choices=("none", "both", "a", "b"),
+        const="both",
+        default="none",
+        help=(
+            "Emulate int8 inference numerics for checkpoint Linear layers while "
+            "staying on --device. Pass without a value for both checkpoints, or "
+            "pass 'a'/'b' for one checkpoint, or 'none' to disable explicitly. "
+            "Final actor/critic output heads stay unquantized."
+        ),
+    )
+    parser.add_argument(
         "--no-progress",
         action="store_true",
         help="Disable progress bars.",
@@ -701,21 +746,30 @@ def _parse_args() -> argparse.Namespace:
         default=Path("replays/benchmark_checkpoints"),
         help="Directory for benchmark replay JSONL files.",
     )
-    args = parser.parse_args(_normalize_deterministic_args(sys.argv[1:]))
+    args = parser.parse_args(_normalize_optional_target_args(sys.argv[1:]))
     _validate_args(args)
     return args
 
 
 def _normalize_deterministic_args(argv: list[str]) -> list[str]:
+    return _normalize_optional_target_args(argv)
+
+
+def _normalize_optional_target_args(argv: list[str]) -> list[str]:
     normalized: list[str] = []
-    deterministic_modes = {"a", "b", "both"}
+    target_modes = {"none", "a", "b", "both"}
+    optional_target_flags = {
+        "-d": "--deterministic",
+        "--deterministic": "--deterministic",
+        "--int8-emulation": "--int8-emulation",
+    }
     index = 0
     while index < len(argv):
         arg = argv[index]
-        if arg in ("-d", "--deterministic") and (
-            index + 1 == len(argv) or argv[index + 1] not in deterministic_modes
+        if arg in optional_target_flags and (
+            index + 1 == len(argv) or argv[index + 1] not in target_modes
         ):
-            normalized.append("--deterministic=both")
+            normalized.append(f"{optional_target_flags[arg]}=both")
         else:
             normalized.append(arg)
         index += 1
@@ -732,6 +786,18 @@ def _deterministic_flags(mode: str) -> CheckpointDeterminism:
     if mode == "b":
         return CheckpointDeterminism(a=False, b=True)
     raise ValueError(f"unknown deterministic mode: {mode}")
+
+
+def _int8_emulation_flags(mode: str) -> CheckpointInt8Emulation:
+    if mode == "none":
+        return CheckpointInt8Emulation(a=False, b=False)
+    if mode == "both":
+        return CheckpointInt8Emulation(a=True, b=True)
+    if mode == "a":
+        return CheckpointInt8Emulation(a=True, b=False)
+    if mode == "b":
+        return CheckpointInt8Emulation(a=False, b=True)
+    raise ValueError(f"unknown int8 emulation mode: {mode}")
 
 
 def _validate_args(args: argparse.Namespace) -> None:
