@@ -9,7 +9,6 @@ QuantizationFormat: TypeAlias = Literal[
     "fp8_e4m3fn",
     "fp4_e2m1fn_x2_scaled_block16",
     "nf5_g128_lsq_policy_last_fp8",
-    "nf5_g128_lsq_policy_final4_fp8",
     "nf4_g128_lsq",
     "nf3_nf4_structured_3p5",
     "nf3_g128_lsq",
@@ -18,7 +17,6 @@ QuantizationFormat: TypeAlias = Literal[
 FP8_E4M3FN: QuantizationFormat = "fp8_e4m3fn"
 FP4_E2M1FN_X2_SCALED_BLOCK16: QuantizationFormat = "fp4_e2m1fn_x2_scaled_block16"
 NF5_G128_LSQ_POLICY_LAST_FP8: QuantizationFormat = "nf5_g128_lsq_policy_last_fp8"
-NF5_G128_LSQ_POLICY_FINAL4_FP8: QuantizationFormat = "nf5_g128_lsq_policy_final4_fp8"
 NF4_G128_LSQ: QuantizationFormat = "nf4_g128_lsq"
 NF3_NF4_STRUCTURED_3P5: QuantizationFormat = "nf3_nf4_structured_3p5"
 NF3_G128_LSQ: QuantizationFormat = "nf3_g128_lsq"
@@ -26,7 +24,6 @@ SUPPORTED_QUANTIZATION_FORMATS: tuple[QuantizationFormat, ...] = (
     FP8_E4M3FN,
     FP4_E2M1FN_X2_SCALED_BLOCK16,
     NF5_G128_LSQ_POLICY_LAST_FP8,
-    NF5_G128_LSQ_POLICY_FINAL4_FP8,
     NF4_G128_LSQ,
     NF3_NF4_STRUCTURED_3P5,
     NF3_G128_LSQ,
@@ -89,11 +86,10 @@ _NF5_NORMAL_VALUES = _normal_float_values(5)
 _NF3_NORMAL_THRESHOLDS = (_NF3_NORMAL_VALUES[:-1] + _NF3_NORMAL_VALUES[1:]) / 2.0
 _NF4_NORMAL_THRESHOLDS = (_NF4_NORMAL_VALUES[:-1] + _NF4_NORMAL_VALUES[1:]) / 2.0
 _NF5_NORMAL_THRESHOLDS = (_NF5_NORMAL_VALUES[:-1] + _NF5_NORMAL_VALUES[1:]) / 2.0
-_NF5_POLICY_FP8_TENSOR_NAMES = frozenset(
+_ACTOR_FP8_TENSOR_NAMES = frozenset(
     (
         "source_actor_input_proj.weight",
         "target_actor_input_proj.weight",
-        "critic_head.up.weight",
         "actor.continue_source_proj.weight",
         "actor.size_pair_proj.weight",
         "actor.mix_head.out.weight",
@@ -101,24 +97,7 @@ _NF5_POLICY_FP8_TENSOR_NAMES = frozenset(
         "actor.scale_head.out.weight",
     )
 )
-_NF5_POLICY_LAST_FP8_TENSOR_NAMES = _NF5_POLICY_FP8_TENSOR_NAMES | frozenset(
-    (
-        "blocks.27.attn.out.weight",
-        "blocks.27.mlp.down.weight",
-    )
-)
-_NF5_POLICY_FINAL4_FP8_TENSOR_NAMES = _NF5_POLICY_FP8_TENSOR_NAMES | frozenset(
-    (
-        "blocks.24.attn.out.weight",
-        "blocks.24.mlp.down.weight",
-        "blocks.25.attn.out.weight",
-        "blocks.25.mlp.down.weight",
-        "blocks.26.attn.out.weight",
-        "blocks.26.mlp.down.weight",
-        "blocks.27.attn.out.weight",
-        "blocks.27.mlp.down.weight",
-    )
-)
+_TRUNK_FP8_TENSOR_SUFFIXES = ("attn.out.weight", "mlp.down.weight")
 
 
 def _normalfloat_tensor_bits(
@@ -142,14 +121,19 @@ def _normalfloat_tensor_bits(
 
     candidates: list[tuple[float, str, int]] = []
     total_codes = 0
+    priority_names = _policy_fp8_tensor_names(model_state, NF5_G128_LSQ_POLICY_LAST_FP8)
     for name, tensor in model_state.items():
         if not isinstance(tensor, torch.Tensor):
             continue
         if not tensor.is_floating_point() or tensor.ndim != 2:
             continue
+        if _is_critic_tensor_name(name):
+            continue
         code_count = _padded_normalfloat_code_count(tensor)
         total_codes += code_count
-        candidates.append((_normalfloat_sensitivity_score(name), name, code_count))
+        candidates.append(
+            (_normalfloat_sensitivity_score(name, priority_names), name, code_count)
+        )
 
     high_code_budget = total_codes // 2
     selected: set[str] = set()
@@ -177,11 +161,14 @@ def _padded_normalfloat_code_count(tensor: torch.Tensor) -> int:
     return rows * group_count * _NORMALFLOAT_GROUP_SIZE
 
 
-def _normalfloat_sensitivity_score(name: str) -> float:
+def _normalfloat_sensitivity_score(
+    name: str,
+    priority_names: frozenset[str],
+) -> float:
     score = 0.0
-    if name in _NF5_POLICY_LAST_FP8_TENSOR_NAMES:
+    if name in priority_names:
         score += 1000.0
-    if name.startswith(("actor.", "critic_head.")):
+    if name.startswith("actor."):
         score += 500.0
     if "source_actor_input_proj" in name or "target_actor_input_proj" in name:
         score += 500.0
@@ -197,6 +184,40 @@ def _normalfloat_sensitivity_score(name: str) -> float:
     return score
 
 
+def _policy_fp8_tensor_names(
+    model_state: Mapping[str, torch.Tensor],
+    quantization: QuantizationFormat,
+) -> frozenset[str]:
+    if quantization != NF5_G128_LSQ_POLICY_LAST_FP8:
+        return frozenset()
+
+    names = set(_ACTOR_FP8_TENSOR_NAMES)
+    block_index = _last_transformer_block_index(model_state)
+    if block_index is not None:
+        for suffix in _TRUNK_FP8_TENSOR_SUFFIXES:
+            name = f"blocks.{block_index}.{suffix}"
+            if name in model_state:
+                names.add(name)
+    return frozenset(names)
+
+
+def _last_transformer_block_index(
+    model_state: Mapping[str, torch.Tensor],
+) -> int | None:
+    indices: set[int] = set()
+    for name in model_state:
+        if not name.startswith("blocks."):
+            continue
+        parts = name.split(".")
+        if len(parts) > 2 and parts[1].isdigit():
+            indices.add(int(parts[1]))
+    return max(indices) if indices else None
+
+
+def _is_critic_tensor_name(name: str) -> bool:
+    return name.startswith("critic_head.") or ".critic_head." in name
+
+
 def quantize_model_state_dict(
     model_state: Mapping[str, torch.Tensor],
     quantization: QuantizationFormat,
@@ -205,6 +226,7 @@ def quantize_model_state_dict(
         raise ValueError(f"unsupported quantization format: {quantization}")
 
     normalfloat_bits = _normalfloat_tensor_bits(model_state, quantization)
+    fp8_tensor_names = _policy_fp8_tensor_names(model_state, quantization)
     return {
         _QUANTIZED_STATE_MARKER: _QUANTIZED_STATE_VERSION,
         "format": quantization,
@@ -214,6 +236,7 @@ def quantize_model_state_dict(
                 tensor,
                 quantization,
                 normalfloat_bits.get(name),
+                fp8_tensor_names,
             )
             for name, tensor in model_state.items()
         },
@@ -245,6 +268,7 @@ def _quantize_state_tensor(
     tensor: torch.Tensor,
     quantization: QuantizationFormat,
     normalfloat_bits: int | None = None,
+    fp8_tensor_names: frozenset[str] | None = None,
 ) -> dict[str, object]:
     _validate_state_key(name)
     if not isinstance(tensor, torch.Tensor):
@@ -280,14 +304,7 @@ def _quantize_state_tensor(
             name,
             tensor,
             quantization,
-            _NF5_POLICY_LAST_FP8_TENSOR_NAMES,
-        )
-    if quantization == NF5_G128_LSQ_POLICY_FINAL4_FP8:
-        return _quantize_nf5_g128_policy_fp8_state_tensor(
-            name,
-            tensor,
-            quantization,
-            _NF5_POLICY_FINAL4_FP8_TENSOR_NAMES,
+            fp8_tensor_names or frozenset(),
         )
     if quantization in (
         NF4_G128_LSQ,
@@ -334,10 +351,7 @@ def _dequantize_state_tensor(name: object, payload: object) -> torch.Tensor:
         return _dequantize_fp4_e2m1fn_scaled_block16(data, scale, shape)
     if quantization == _FP16:
         return data.to(torch.float16).to(torch.float32).reshape(shape)
-    if quantization in (
-        NF5_G128_LSQ_POLICY_LAST_FP8,
-        NF5_G128_LSQ_POLICY_FINAL4_FP8,
-    ):
+    if quantization == NF5_G128_LSQ_POLICY_LAST_FP8:
         scale = payload.get(_TENSOR_SCALE_KEY)
         if not isinstance(scale, torch.Tensor):
             raise ValueError(
@@ -785,10 +799,7 @@ def _validate_normalfloat_format_bits(
     name: str,
     quantization: QuantizationFormat,
 ) -> int:
-    if quantization in (
-        NF5_G128_LSQ_POLICY_LAST_FP8,
-        NF5_G128_LSQ_POLICY_FINAL4_FP8,
-    ):
+    if quantization == NF5_G128_LSQ_POLICY_LAST_FP8:
         return _validate_exact_normalfloat_bits(bits, name, quantization, 5, 5)
     if quantization == NF4_G128_LSQ:
         return _validate_exact_normalfloat_bits(bits, name, quantization, 4, None)

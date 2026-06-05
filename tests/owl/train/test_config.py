@@ -52,6 +52,7 @@ def test_ppo_config_validates_with_pydantic() -> None:
 
     assert PPOConfig(dtype="bfloat16").dtype == "bfloat16"
     assert PPOConfig(model_compile="none").model_compile == "none"
+    assert PPOConfig(model_compile="trunk").model_compile == "trunk"
     assert PPOConfig(model_compile_mode="default").model_compile_mode == "default"
     assert PPOConfig(eval_replay_games=1).eval_replay_games == 1
     assert PPOConfig(teacher_mode="last_best").teacher_mode == "last_best"
@@ -76,7 +77,7 @@ def test_ppo_config_validates_with_pydantic() -> None:
         match="Input should be 'per_player' or 'per_entity'",
     ):
         PPOConfig(ppo_clip_mode="per_source")
-    with pytest.raises(ValueError, match="Input should be 'none' or 'mlp'"):
+    with pytest.raises(ValueError, match="Input should be 'none', 'mlp' or 'trunk'"):
         PPOConfig(model_compile="attention")
     with pytest.raises(
         ValueError,
@@ -392,6 +393,42 @@ def test_configure_model_compile_includes_player_count_adapter_mlps(
 
     assert compiled == len(expected_module_ids)
     assert {call[0] for call in calls} == expected_module_ids
+
+
+def test_configure_model_compile_compiles_stateless_transformer_trunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, str]] = []
+
+    def fake_compile_transformer_trunk(
+        self: StatelessTransformerV1,
+        *,
+        mode: str,
+    ) -> int:
+        calls.append((id(self), mode))
+        return 1
+
+    monkeypatch.setattr(
+        StatelessTransformerV1,
+        "compile_transformer_trunk",
+        fake_compile_transformer_trunk,
+        raising=False,
+    )
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=32, depth=2, n_heads=4, mlp_ratio=1.0),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    state_keys = set(model.state_dict())
+
+    compiled = configure_model_compile(
+        model,
+        PPOConfig(model_compile="trunk", model_compile_mode="default"),
+    )
+
+    assert compiled == 1
+    assert set(model.state_dict()) == state_keys
+    assert calls == [(id(model), "default")]
 
 
 def test_configure_model_compile_can_be_disabled(

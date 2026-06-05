@@ -12,7 +12,6 @@ from owl.agent.checkpoint_quantization import (
     NF3_G128_LSQ,
     NF3_NF4_STRUCTURED_3P5,
     NF4_G128_LSQ,
-    NF5_G128_LSQ_POLICY_FINAL4_FP8,
     NF5_G128_LSQ_POLICY_LAST_FP8,
     dequantize_model_state_dict,
 )
@@ -127,7 +126,6 @@ def test_extract_model_weights_can_quantize_model_state_to_fp4(tmp_path: Path) -
     "quantization",
     [
         NF5_G128_LSQ_POLICY_LAST_FP8,
-        NF5_G128_LSQ_POLICY_FINAL4_FP8,
         NF4_G128_LSQ,
         NF3_NF4_STRUCTURED_3P5,
         NF3_G128_LSQ,
@@ -230,7 +228,6 @@ def test_main_help_lists_quantization_choices(
     assert FP8_E4M3FN in captured.out
     assert FP4_E2M1FN_X2_SCALED_BLOCK16 in captured.out
     assert NF5_G128_LSQ_POLICY_LAST_FP8 in captured.out
-    assert NF5_G128_LSQ_POLICY_FINAL4_FP8 in captured.out
     assert NF4_G128_LSQ in captured.out
     assert NF3_NF4_STRUCTURED_3P5 in captured.out
     assert NF3_G128_LSQ in captured.out

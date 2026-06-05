@@ -9,7 +9,6 @@ from owl.agent.checkpoint_quantization import (
     NF3_G128_LSQ,
     NF3_NF4_STRUCTURED_3P5,
     NF4_G128_LSQ,
-    NF5_G128_LSQ_POLICY_FINAL4_FP8,
     NF5_G128_LSQ_POLICY_LAST_FP8,
     dequantize_model_state_dict,
     quantize_model_state_dict,
@@ -42,7 +41,6 @@ _FP4_BLOCK_SIZE = 16
 _NORMALFLOAT_GROUP_SIZE = 128
 _LOWBIT_QUANTIZATION_FORMATS = (
     NF5_G128_LSQ_POLICY_LAST_FP8,
-    NF5_G128_LSQ_POLICY_FINAL4_FP8,
     NF4_G128_LSQ,
     NF3_NF4_STRUCTURED_3P5,
     NF3_G128_LSQ,
@@ -224,12 +222,14 @@ def test_structured_normalfloat_quantization_upgrades_sensitive_tensors() -> Non
         {
             "blocks.0.mlp.up.weight": values,
             "blocks.39.mlp.down.weight": values,
+            "critic_head.up.weight": values,
         },
         NF3_NF4_STRUCTURED_3P5,
     )
 
     assert quantized["tensors"]["blocks.0.mlp.up.weight"]["bits"] == 3
     assert quantized["tensors"]["blocks.39.mlp.down.weight"]["bits"] == 4
+    assert quantized["tensors"]["critic_head.up.weight"]["bits"] == 3
 
 
 def test_nf5_quantization_uses_fp8_for_targeted_policy_tensors() -> None:
@@ -251,25 +251,37 @@ def test_nf5_quantization_uses_fp8_for_targeted_policy_tensors() -> None:
     _assert_float32_bits_equal(dequantized, expected_lowp.to(torch.float32))
 
 
-def test_nf5_final4_quantization_upgrades_final_four_output_tensors_to_fp8() -> None:
+def test_nf5_quantization_keeps_critic_tensors_in_nf5() -> None:
     values = torch.tensor([[0.375, 1.125, -2.25]], dtype=torch.float32)
 
-    last_quantized = quantize_model_state_dict(
-        {"blocks.24.attn.out.weight": values},
+    quantized = quantize_model_state_dict(
+        {"critic_head.up.weight": values},
         NF5_G128_LSQ_POLICY_LAST_FP8,
     )
-    final4_quantized = quantize_model_state_dict(
-        {"blocks.24.attn.out.weight": values},
-        NF5_G128_LSQ_POLICY_FINAL4_FP8,
+
+    assert quantized["tensors"]["critic_head.up.weight"]["format"] == (
+        NF5_G128_LSQ_POLICY_LAST_FP8
+    )
+
+
+def test_nf5_last_quantization_upgrades_dynamic_last_block_outputs_to_fp8() -> None:
+    values = torch.tensor([[0.375, 1.125, -2.25]], dtype=torch.float32)
+
+    quantized = quantize_model_state_dict(
+        {
+            "blocks.24.attn.out.weight": values,
+            "blocks.39.attn.out.weight": values,
+            "blocks.39.mlp.down.weight": values,
+        },
+        NF5_G128_LSQ_POLICY_LAST_FP8,
     )
 
     assert (
-        last_quantized["tensors"]["blocks.24.attn.out.weight"]["format"]
+        quantized["tensors"]["blocks.24.attn.out.weight"]["format"]
         == NF5_G128_LSQ_POLICY_LAST_FP8
     )
-    assert (
-        final4_quantized["tensors"]["blocks.24.attn.out.weight"]["format"] == FP8_E4M3FN
-    )
+    assert quantized["tensors"]["blocks.39.attn.out.weight"]["format"] == FP8_E4M3FN
+    assert quantized["tensors"]["blocks.39.mlp.down.weight"]["format"] == FP8_E4M3FN
 
 
 def test_nf5_quantization_stores_non_2d_floating_tensors_as_fp16() -> None:
@@ -296,7 +308,6 @@ def test_nf5_quantization_stores_non_2d_floating_tensors_as_fp16() -> None:
         FP8_E4M3FN,
         FP4_E2M1FN_X2_SCALED_BLOCK16,
         NF5_G128_LSQ_POLICY_LAST_FP8,
-        NF5_G128_LSQ_POLICY_FINAL4_FP8,
         NF4_G128_LSQ,
         NF3_NF4_STRUCTURED_3P5,
         NF3_G128_LSQ,
@@ -348,7 +359,6 @@ def test_normalfloat_dequantization_rejects_trailing_payload_bytes(
     ("quantization", "bad_bits", "expected_error"),
     [
         (NF5_G128_LSQ_POLICY_LAST_FP8, 3, "bits must be 5"),
-        (NF5_G128_LSQ_POLICY_FINAL4_FP8, 4, "bits must be 5"),
         (NF4_G128_LSQ, 3, "bits must be 4"),
         (NF3_G128_LSQ, 4, "bits must be 3"),
         (NF3_NF4_STRUCTURED_3P5, 5, "bits must be 3 or 4"),
@@ -450,7 +460,6 @@ def _expected_dequantized(values: torch.Tensor, quantization: str) -> torch.Tens
         return _reference_fp4_e2m1fn_scaled_block16(values)[2]
     if quantization in (
         NF5_G128_LSQ_POLICY_LAST_FP8,
-        NF5_G128_LSQ_POLICY_FINAL4_FP8,
         NF4_G128_LSQ,
         NF3_NF4_STRUCTURED_3P5,
         NF3_G128_LSQ,
