@@ -287,7 +287,7 @@ def _run_training_session(
             last_best_model=last_best_model,
         )
         trainer.write_checkpoint(
-            run_dir / "checkpoint_final.pt",
+            run_dir / CHECKPOINT_FINAL,
             env_steps=env_steps,
             wandb_run_id=logger.run_id,
         )

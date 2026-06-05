@@ -72,9 +72,9 @@ the Kaggle agent; malformed model entries fail during packaging rather than at
 agent startup. To store packaged models below fp32 precision, pass a
 quantization format such as
 `fp8_e4m3fn`, `fp4_e2m1fn_x2_scaled_block16`, or
-`nf5_g128_lsq_policy_last_fp8`/`nf5_g128_lsq_policy_final4_fp8`. Lower-bit
-normal-float formats `nf4_g128_lsq`, `nf3_nf4_structured_3p5`, and
-`nf3_g128_lsq` are also supported; unique prefixes such as `fp4` are accepted.
+`nf5_g128_lsq_policy_last_fp8`. Lower-bit normal-float formats `nf4_g128_lsq`,
+`nf3_nf4_structured_3p5`, and `nf3_g128_lsq` are also supported; unique prefixes
+such as `fp4` are accepted.
 The default `fp32` leaves checkpoint weights unchanged. The Kaggle agent
 dequantizes quantized slim checkpoints back to fp32 before loading the model.
 The checked-in `python/owl/agent/agent_config.yaml`
