@@ -186,6 +186,12 @@ class PackedSequence:
     padded_seq_len: int
 
 
+_TrunkForward = Callable[
+    [torch.Tensor, torch.Tensor | None, PackedSequence | None],
+    torch.Tensor,
+]
+
+
 @dataclass(frozen=True)
 class EncodedObservations:
     hidden: torch.Tensor
@@ -308,6 +314,7 @@ class StatelessTransformerV1(BaseModelAPI):
         )
         self.final_norm = nn.LayerNorm(dim)
         self.player_count_adapters = nn.ModuleDict()
+        self._compiled_transformer_trunk: _TrunkForward | None = None
 
         self.critic_head: OutputProjectionMLP | None = None
         self.pairwise_bias_mlp: PairwiseBiasMLP | None = None
@@ -587,7 +594,7 @@ class StatelessTransformerV1(BaseModelAPI):
                 "and the flash-attn package"
             )
         if should_use_flash:
-            x, packed = pack_sequence(x, token_mask)
+            x, packed = pack_sequence(x, token_mask, max_seqlen=x.shape[1])
             block_token_mask = None
         else:
             packed = None
@@ -616,16 +623,21 @@ class StatelessTransformerV1(BaseModelAPI):
                     ~cast(torch.Tensor, fleet_mask).unsqueeze(-1),
                     0.0,
                 )
+            x = self.final_norm(x)
+        elif self.config.player_count_adapter_blocks == 0:
+            if self._compiled_transformer_trunk is None:
+                x = self._forward_transformer_trunk(x, block_token_mask, packed)
+            else:
+                x = self._compiled_transformer_trunk(x, block_token_mask, packed)
         else:
-            for block in self.blocks:
-                x = block(x, block_token_mask, packed)
-        x = self._apply_player_count_adapter_blocks(
-            x,
-            token_mask,
-            packed,
-            obs.still_playing,
-        )
-        x = self.final_norm(x)
+            x = self._forward_shared_transformer_blocks(x, block_token_mask, packed)
+            x = self._apply_player_count_adapter_blocks(
+                x,
+                token_mask,
+                packed,
+                obs.still_playing,
+            )
+            x = self.final_norm(x)
         if packed is not None:
             x = unpack_sequence(x, packed)
         x = x.masked_fill(~token_mask.unsqueeze(-1), 0.0)
@@ -651,6 +663,41 @@ class StatelessTransformerV1(BaseModelAPI):
                 :,
             ],
         )
+
+    def compile_transformer_trunk(self, *, mode: str) -> int:
+        if self.obs_spec.uses_cross_attention:
+            raise RuntimeError(
+                "rl.model_compile='trunk' does not support cross-attention observations"
+            )
+        if self.config.player_count_adapter_blocks != 0:
+            raise RuntimeError(
+                "rl.model_compile='trunk' does not support player-count adapter blocks"
+            )
+        self._compiled_transformer_trunk = torch.compile(
+            self._forward_transformer_trunk,
+            mode=mode,
+            dynamic=True,
+        )
+        return 1
+
+    def _forward_transformer_trunk(
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor | None,
+        packed: PackedSequence | None,
+    ) -> torch.Tensor:
+        x = self._forward_shared_transformer_blocks(x, token_mask, packed)
+        return self.final_norm(x)
+
+    def _forward_shared_transformer_blocks(
+        self,
+        x: torch.Tensor,
+        token_mask: torch.Tensor | None,
+        packed: PackedSequence | None,
+    ) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x, token_mask, packed)
+        return x
 
     def _apply_player_count_adapter_blocks(
         self,
@@ -2657,18 +2704,37 @@ def _init_linear(module: nn.Linear, *, gain: float) -> None:
         nn.init.zeros_(module.bias)
 
 
-def build_packed_sequence(token_mask: torch.Tensor) -> PackedSequence:
+def build_packed_sequence(
+    token_mask: torch.Tensor,
+    *,
+    max_seqlen: int | None = None,
+) -> PackedSequence:
     batch_size, padded_seq_len = token_mask.shape
     flat_mask = token_mask.reshape(-1)
     indices = flat_mask.nonzero(as_tuple=False).flatten()
     seqlens = token_mask.sum(dim=1, dtype=torch.int32)
     if not seqlens.gt(0).all():
         raise ValueError("each batch row must have at least one unmasked token")
+    actual_max_seqlen = int(seqlens.max().item())
+    if max_seqlen is None:
+        packed_max_seqlen = actual_max_seqlen
+    else:
+        if max_seqlen < actual_max_seqlen:
+            raise ValueError(
+                "max_seqlen must cover the longest unmasked sequence; got "
+                f"{max_seqlen} for actual maximum {actual_max_seqlen}"
+            )
+        if max_seqlen > padded_seq_len:
+            raise ValueError(
+                "max_seqlen must not exceed the padded sequence length; got "
+                f"{max_seqlen} for padded length {padded_seq_len}"
+            )
+        packed_max_seqlen = max_seqlen
     return PackedSequence(
         indices=indices,
         cu_seqlens=F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)),
         seqlens=seqlens,
-        max_seqlen=int(seqlens.max().item()),
+        max_seqlen=packed_max_seqlen,
         batch_size=batch_size,
         padded_seq_len=padded_seq_len,
     )
@@ -2683,8 +2749,10 @@ def pack_tensor(x: torch.Tensor, packed: PackedSequence) -> torch.Tensor:
 def pack_sequence(
     x: torch.Tensor,
     token_mask: torch.Tensor,
+    *,
+    max_seqlen: int | None = None,
 ) -> tuple[torch.Tensor, PackedSequence]:
-    packed = build_packed_sequence(token_mask)
+    packed = build_packed_sequence(token_mask, max_seqlen=max_seqlen)
     return pack_tensor(x, packed), packed
 
 

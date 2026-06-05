@@ -207,7 +207,11 @@ per-player-count adapter transformer-block MLP in place with
 `rl.model_compile_mode: max-autotune-no-cudagraphs` and
 `dynamic=True`. This keeps attention packing and flash-attn calls eager while
 allowing Inductor to optimize the FFN path. Set `rl.model_compile=none` for
-short CPU smoke tests or compile-debugging runs.
+short CPU smoke tests or compile-debugging runs. Set `rl.model_compile=trunk`
+to compile the stateless self-attention transformer trunk as one dynamic-shape
+callable after FlashAttention packing and before unpacking. The trunk mode is an
+opt-in CUDA benchmark path and rejects cross-attention observations and
+player-count adapter trunk blocks.
 
 Fresh launches can also initialize the model from an existing full training
 checkpoint without resuming the optimizer, scheduler, config, or W&B run:

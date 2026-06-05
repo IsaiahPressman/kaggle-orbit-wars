@@ -779,6 +779,26 @@ def test_pack_sequence_removes_masked_tokens_and_unpack_restores_layout() -> Non
     assert torch.equal(unpacked[~mask], torch.zeros_like(unpacked[~mask]))
 
 
+def test_pack_sequence_accepts_fixed_max_seqlen_capacity() -> None:
+    x = torch.arange(2 * 4 * 3, dtype=torch.float32).view(2, 4, 3)
+    mask = torch.tensor(
+        [
+            [True, False, True, False],
+            [False, True, True, True],
+        ]
+    )
+
+    packed_x, packed = pack_sequence(x, mask, max_seqlen=4)
+
+    assert packed_x.shape == (5, 3)
+    assert packed.max_seqlen == 4
+    assert packed.seqlens.tolist() == [2, 3]
+    assert packed.padded_seq_len == 4
+
+    with pytest.raises(ValueError, match="max_seqlen must cover"):
+        pack_sequence(x, mask, max_seqlen=2)
+
+
 def test_pack_sequence_rejects_fully_masked_rows() -> None:
     x = torch.zeros((2, 3, 4))
     mask = torch.tensor([[True, False, False], [False, False, False]])
@@ -1205,6 +1225,7 @@ def test_flash_encoder_packs_once_before_trunk_and_unpacks_once_after(
     pack_calls = 0
     unpack_calls = 0
     varlen_calls = 0
+    varlen_max_seqlens: list[int] = []
 
     def enable_flash_attn(q: torch.Tensor) -> bool:
         return q.numel() > 0
@@ -1231,10 +1252,11 @@ def test_flash_encoder_packs_once_before_trunk_and_unpacks_once_after(
         v: torch.Tensor,  # noqa: ARG001
         *,
         cu_seqlens: torch.Tensor,  # noqa: ARG001
-        max_seqlen: int,  # noqa: ARG001
+        max_seqlen: int,
     ) -> torch.Tensor:
         nonlocal varlen_calls
         varlen_calls += 1
+        varlen_max_seqlens.append(max_seqlen)
         return torch.zeros_like(q)
 
     monkeypatch.setattr(model_impl, "use_flash_attn", enable_flash_attn)
@@ -1249,6 +1271,119 @@ def test_flash_encoder_packs_once_before_trunk_and_unpacks_once_after(
     assert pack_calls == 1
     assert unpack_calls == 1
     assert varlen_calls == config.depth
+    expected_padded_seq_len = (
+        obs_spec.max_entities
+        + OUTER_PLAYER_SLOTS
+        + 1
+        + config.n_scratch_tokens
+        + OUTER_PLAYER_SLOTS
+        + OUTER_PLAYER_SLOTS
+    )
+    assert varlen_max_seqlens == [expected_padded_seq_len] * config.depth
+
+
+def test_compile_transformer_trunk_uses_compiled_packed_trunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=2,
+        n_heads=4,
+        force_flash_attn=True,
+    )
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    expected_padded_seq_len = (
+        obs_spec.max_entities
+        + OUTER_PLAYER_SLOTS
+        + 1
+        + config.n_scratch_tokens
+        + OUTER_PLAYER_SLOTS
+        + OUTER_PLAYER_SLOTS
+    )
+    compile_calls: list[dict[str, object]] = []
+    run_calls = 0
+
+    def enable_flash_attn(q: torch.Tensor) -> bool:
+        return q.numel() > 0
+
+    def fake_varlen_attention(
+        q: torch.Tensor,
+        k: torch.Tensor,  # noqa: ARG001
+        v: torch.Tensor,  # noqa: ARG001
+        *,
+        cu_seqlens: torch.Tensor,  # noqa: ARG001
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        assert max_seqlen == expected_padded_seq_len
+        return torch.zeros_like(q)
+
+    def fake_compile(fn: Any, *args: object, **kwargs: object) -> Any:
+        assert args == ()
+        compile_calls.append(kwargs)
+
+        def wrapped(
+            x: torch.Tensor,
+            token_mask: torch.Tensor | None,
+            packed: model_impl.PackedSequence | None,
+        ) -> torch.Tensor:
+            nonlocal run_calls
+            run_calls += 1
+            assert token_mask is None
+            assert packed is not None
+            assert packed.max_seqlen == expected_padded_seq_len
+            return fn(x, token_mask, packed)
+
+        return wrapped
+
+    monkeypatch.setattr(model_impl, "use_flash_attn", enable_flash_attn)
+    monkeypatch.setattr(model_impl, "varlen_attention", fake_varlen_attention)
+    eager = model.encode_observations(obs)
+    state_keys = set(model.state_dict())
+    monkeypatch.setattr(model_impl.torch, "compile", fake_compile)
+
+    compiled = model.compile_transformer_trunk(mode="default")
+    encoded = model.encode_observations(obs)
+
+    assert compiled == 1
+    assert compile_calls == [{"mode": "default", "dynamic": True}]
+    assert run_calls == 1
+    assert set(model.state_dict()) == state_keys
+    torch.testing.assert_close(encoded.hidden, eager.hidden)
+    assert torch.equal(encoded.token_mask, eager.token_mask)
+
+
+def test_compile_transformer_trunk_rejects_unsupported_trunk_variants() -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    cross_action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+    cross_attention_model = _model(
+        StatelessTransformerV1Config(
+            actor=ActorDiscreteTargetsConfig(),
+            embed_dim=32,
+            depth=1,
+            n_heads=4,
+        ),
+        obs_spec=EntityBasedCrossAttnV1Config(max_entities=ACTION_ENTITY_SLOTS + 2),
+        action_spec=cross_action_spec,
+    )
+    adapter_model = _model(
+        StatelessTransformerV1Config(
+            embed_dim=32,
+            depth=2,
+            n_heads=4,
+            player_count_adapters_enabled=True,
+            player_count_adapter_blocks=1,
+        ),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=action_spec,
+    )
+
+    with pytest.raises(RuntimeError, match="does not support cross-attention"):
+        cross_attention_model.compile_transformer_trunk(mode="default")
+    with pytest.raises(RuntimeError, match="does not support player-count"):
+        adapter_model.compile_transformer_trunk(mode="default")
 
 
 def test_player_count_adapter_blocks_split_depth_and_packed_masks(
@@ -1334,11 +1469,19 @@ def test_player_count_adapter_blocks_split_depth_and_packed_masks(
     )
     assert [call[0] for call in calls] == [2, 2, 3, 3, 4, 4]
     expected_seqlens = {2: 9, 3: 13, 4: 17}
+    expected_max_seqlen = (
+        obs_spec.max_entities
+        + OUTER_PLAYER_SLOTS
+        + 1
+        + config.n_scratch_tokens
+        + OUTER_PLAYER_SLOTS
+        + OUTER_PLAYER_SLOTS
+    )
     for player_count, shape, cu_seqlens, max_seqlen, batch_size in calls:
         seqlen = expected_seqlens[player_count]
         assert shape == (seqlen, config.embed_dim)
         assert cu_seqlens == [0, seqlen]
-        assert max_seqlen == 17
+        assert max_seqlen == expected_max_seqlen
         assert batch_size == 1
     torch.testing.assert_close(
         encoded.hidden[:, 0, 0],
@@ -1433,11 +1576,13 @@ def test_autocast_encoder_packs_after_appending_player_tokens(
     def counted_pack_sequence(
         x: torch.Tensor,
         token_mask: torch.Tensor,
+        *,
+        max_seqlen: int | None = None,
     ) -> tuple[torch.Tensor, model_impl.PackedSequence]:
         nonlocal pack_calls
         pack_calls += 1
         assert x.dtype == torch.bfloat16
-        return original_pack_sequence(x, token_mask)
+        return original_pack_sequence(x, token_mask, max_seqlen=max_seqlen)
 
     def fake_varlen_attention(
         q: torch.Tensor,

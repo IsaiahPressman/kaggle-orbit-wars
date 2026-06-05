@@ -6,9 +6,9 @@ from typing import Literal, Protocol, assert_never
 
 import torch
 
-from owl.model import BaseModelAPI
+from owl.model import BaseModelAPI, StatelessTransformerV1
 
-ModelCompileTarget = Literal["none", "mlp"]
+ModelCompileTarget = Literal["none", "mlp", "trunk"]
 ModelCompileMode = Literal[
     "default",
     "reduce-overhead",
@@ -68,6 +68,12 @@ def configure_model_compile(model: BaseModelAPI, cfg: ModelCompileConfig) -> int
                 model,
                 mode=cfg.model_compile_mode,
             )
+        case "trunk":
+            if not isinstance(model, StatelessTransformerV1):
+                raise RuntimeError(
+                    "rl.model_compile='trunk' requires stateless_transformer_v1"
+                )
+            return model.compile_transformer_trunk(mode=cfg.model_compile_mode)
         case _:
             assert_never(cfg.model_compile)
 

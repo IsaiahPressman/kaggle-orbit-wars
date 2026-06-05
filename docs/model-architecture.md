@@ -234,6 +234,14 @@ Training also defaults to compiling each transformer-block MLP in place with
 flash-attn varlen calls remain eager. Per-player-count adapter block MLPs are
 compiled by the same setting.
 
+Set `rl.model_compile="trunk"` to compile the stateless self-attention trunk as
+one dynamic-shape callable after packing and before unpacking. Packed
+FlashAttention uses the fixed padded sequence capacity
+`max_entities + 13 + n_scratch_tokens` as `max_seqlen`, so the compiled trunk can
+reuse one graph across different live-token counts. This mode is opt-in for CUDA
+benchmarking and currently rejects `EntityBasedCrossAttnV1` and
+`player_count_adapter_blocks > 0`; use `mlp` for those paths.
+
 ## Recurrent Transformer V1
 
 `RecurrentTransformerV1` reuses the stateless input stems, token layout,
