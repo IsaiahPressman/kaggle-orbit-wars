@@ -10,7 +10,7 @@ env:
   two_player_weight: 0.5
   pin_memory: true
 
-model: stateless_transformer_153m
+model: stateless_transformer_200m
 
 optimizer:
   optimizer: muon

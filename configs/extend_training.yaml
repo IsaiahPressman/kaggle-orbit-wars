@@ -10,20 +10,20 @@ env:
   two_player_weight: 0.5
   pin_memory: true
 
-model: stateless_transformer_153m
+model: stateless_transformer_200m
 
 optimizer:
   optimizer: muon
-  adamw_lr: 0.0001
+  adamw_lr: 1.0e-05
   adamw_eps: 1.0e-05
   weight_decay: 0.0
-  muon_lr: 0.002
+  muon_lr: 2.0e-04
   muon_weight_decay: 0.01
   muon_momentum: 0.95
   lr_schedule:
     schedule: linear_warmup_cosine_decay
     warmup_steps: 500
-    decay_steps: 300_000
+    decay_steps: 150_000
     lr_min_ratio: 0.01
 
 rl:
@@ -45,7 +45,7 @@ rl:
   normalize_advantages: true
   eval_replay_games: 8
   teacher_mode: last_best
-  teacher_kl_coef: 0.005
-  teacher_value_coef: 0.005
+  teacher_kl_coef: 0.002
+  teacher_value_coef: 0.002
   compile_mode: default
   dtype: bfloat16
