@@ -240,10 +240,12 @@ uv run python scripts/run_ppo.py runs/20260505-120000
 uv run python scripts/run_ppo.py runs/20260505-120000/checkpoint_00_020_000_000.pt
 ```
 
-Directory resume loads `checkpoint_final.pt` when present, otherwise the latest
-numbered checkpoint, and never treats `checkpoint_last_best.pt` as the primary
-training checkpoint. File resume loads `config.yaml` from the checkpoint's
-parent directory. Both resume modes require the associated
+Directory resume compares `checkpoint_final.pt` with the latest numbered
+checkpoint when both exist, loads the one with more saved environment steps, and
+never treats `checkpoint_last_best.pt` as the primary training checkpoint. When
+`checkpoint_final.pt` is absent, directory resume loads the latest numbered
+checkpoint. File resume loads `config.yaml` from the checkpoint's parent
+directory. Both resume modes require the associated
 `checkpoint_last_best.pt` and W&B logging so the saved run ID can be resumed.
 Checkpoints do not save the Rust environment state or current observation, so
 resumed runs continue from a fresh environment batch rather than acting as exact
@@ -255,9 +257,9 @@ configured `env.two_player_weight`, with current and last-best seats randomly
 shuffled across active player slots for each eval game, and logs
 `eval/win_rate_against_last_best` plus terminal environment metrics under
 `eval/`. When the current model reaches at least 70% eval win rate, the
-last-best snapshot is replaced and also saved as `checkpoint_last_best.pt`.
-Runs that never promote a last-best snapshot may not have this file and are not
-resumable from numbered checkpoints.
+last-best snapshot is replaced and also saved as `checkpoint_last_best.pt`. If
+the first periodic checkpoint finds no `checkpoint_last_best.pt`, the starting
+last-best model is saved there first, using its starting environment-step count.
 Set `rl.eval_replay_games` to a positive count to save random eval replay
 samples from the weighted eval game set under
 `eval_replays/<checkpoint-name>/` in the run directory. The sampled game

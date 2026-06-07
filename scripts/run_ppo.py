@@ -379,6 +379,14 @@ def _run_training_loop(
                     )
                 if last_best_model is None:
                     raise RuntimeError("last_best_model must exist for checkpoints")
+                last_best_checkpoint_path = run_dir / CHECKPOINT_LAST_BEST
+                if dist_ctx.is_main_process and not last_best_checkpoint_path.is_file():
+                    trainer.write_checkpoint(
+                        last_best_checkpoint_path,
+                        env_steps=start_env_steps,
+                        wandb_run_id=wandb_run_id,
+                        model=last_best_model,
+                    )
                 dist_ctx.barrier()
                 eval_metrics: dict[str, float] | None = None
                 if dist_ctx.is_main_process:
@@ -412,12 +420,8 @@ def _run_training_loop(
                             active=True,
                         )
                     if dist_ctx.is_main_process:
-                        # Only promoted snapshots are persisted as last-best.
-                        # Short or unsuccessful fresh runs may have no
-                        # checkpoint_last_best.pt and are intentionally not
-                        # resumable from numbered checkpoints.
                         trainer.write_checkpoint(
-                            run_dir / CHECKPOINT_LAST_BEST,
+                            last_best_checkpoint_path,
                             env_steps=env_steps,
                             wandb_run_id=wandb_run_id,
                         )
@@ -560,16 +564,29 @@ def _resolve_resume_launch(target: Path) -> ResumeLaunch:
 
 def _latest_resume_checkpoint(run_dir: Path) -> Path:
     final_checkpoint = run_dir / CHECKPOINT_FINAL
-    if final_checkpoint.is_file():
+    latest_numbered_checkpoint = _latest_numbered_resume_checkpoint(run_dir)
+    if not final_checkpoint.is_file():
+        if latest_numbered_checkpoint is None:
+            raise ValueError(f"no resume checkpoint found in {run_dir}")
+        return latest_numbered_checkpoint
+    if latest_numbered_checkpoint is None:
         return final_checkpoint
 
+    final_env_steps = _checkpoint_env_steps(final_checkpoint)
+    numbered_env_steps = _checkpoint_env_steps(latest_numbered_checkpoint)
+    if final_env_steps >= numbered_env_steps:
+        return final_checkpoint
+    return latest_numbered_checkpoint
+
+
+def _latest_numbered_resume_checkpoint(run_dir: Path) -> Path | None:
     numbered_checkpoints: list[tuple[int, Path]] = []
     for checkpoint_path in run_dir.glob("checkpoint_*.pt"):
         step = _parse_numbered_checkpoint_step(checkpoint_path.name)
         if step is not None:
             numbered_checkpoints.append((step, checkpoint_path))
     if not numbered_checkpoints:
-        raise ValueError(f"no resume checkpoint found in {run_dir}")
+        return None
     return max(numbered_checkpoints, key=lambda item: item[0])[1]
 
 
@@ -578,6 +595,11 @@ def _parse_numbered_checkpoint_step(name: str) -> int | None:
     if match is None:
         return None
     return int("".join(match.groups()))
+
+
+def _checkpoint_env_steps(path: Path) -> int:
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    return _checkpoint_metadata(checkpoint, path=path).env_steps
 
 
 def _parse_cli_overrides(raw_overrides: list[list[str]] | None) -> dict[str, Any]:

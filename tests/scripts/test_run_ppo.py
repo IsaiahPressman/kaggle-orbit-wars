@@ -146,6 +146,7 @@ class _FakeTrainer:
         self.model = torch.nn.Linear(1, 1)
         self.device = torch.device("cpu")
         self.teacher_updates: list[tuple[torch.nn.Module | None, bool]] = []
+        self.checkpoint_models: dict[Path, torch.nn.Module | None] = {}
 
     def train_iteration(self) -> dict[str, float]:
         self.iterations += 1
@@ -159,8 +160,10 @@ class _FakeTrainer:
         *,
         env_steps: int,
         wandb_run_id: str | None = None,
+        model: torch.nn.Module | None = None,
     ) -> None:
         self.checkpoints.append((path, env_steps, wandb_run_id))
+        self.checkpoint_models[path] = model
 
     def set_teacher_model(
         self,
@@ -194,6 +197,23 @@ def _patch_eval_model_from_weights(
         fake_create_eval_model_from_weights,
     )
     return created_models
+
+
+def _write_checkpoint_metadata(path: Path, *, env_steps: int) -> None:
+    torch.save(
+        {
+            "model": {},
+            "optimizer": {},
+            "lr_scheduler": None,
+            "env_steps": env_steps,
+            "optimizer_steps": 0,
+            "player_step_total": 0,
+            "total_games_played": 0,
+            "target_kl_exceeded_total": 0,
+            "wandb_run_id": "run-123",
+        },
+        path,
+    )
 
 
 def test_next_periodic_checkpoint_step_handles_crossed_cadence() -> None:
@@ -648,8 +668,11 @@ def test_resolve_resume_launch_prefers_final_checkpoint(tmp_path: Path) -> None:
     run_dir.mkdir()
     (run_dir / "config.yaml").write_text("env: {}\nmodel: {}\noptimizer: {}\nrl: {}\n")
     final_checkpoint = run_dir / "checkpoint_final.pt"
-    final_checkpoint.touch()
-    (run_dir / "checkpoint_00_000_010_000.pt").touch()
+    _write_checkpoint_metadata(final_checkpoint, env_steps=20_000)
+    _write_checkpoint_metadata(
+        run_dir / "checkpoint_00_000_010_000.pt",
+        env_steps=10_000,
+    )
     (run_dir / "checkpoint_last_best.pt").touch()
 
     launch = run_ppo._resolve_resume_launch(run_dir)
@@ -657,6 +680,23 @@ def test_resolve_resume_launch_prefers_final_checkpoint(tmp_path: Path) -> None:
     assert launch.config_path == run_dir / "config.yaml"
     assert launch.checkpoint_path == final_checkpoint
     assert launch.last_best_checkpoint_path == run_dir / "checkpoint_last_best.pt"
+
+
+def test_resolve_resume_launch_uses_numbered_when_newer_than_final(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "config.yaml").write_text("env: {}\nmodel: {}\noptimizer: {}\nrl: {}\n")
+    final_checkpoint = run_dir / "checkpoint_final.pt"
+    _write_checkpoint_metadata(final_checkpoint, env_steps=10_000)
+    latest_checkpoint = run_dir / "checkpoint_00_000_020_000.pt"
+    _write_checkpoint_metadata(latest_checkpoint, env_steps=20_000)
+    (run_dir / "checkpoint_last_best.pt").touch()
+
+    launch = run_ppo._resolve_resume_launch(run_dir)
+
+    assert launch.checkpoint_path == latest_checkpoint
 
 
 def test_resolve_resume_launch_uses_latest_numbered_checkpoint(tmp_path: Path) -> None:
@@ -1447,8 +1487,10 @@ def test_run_training_loop_writes_periodic_checkpoints(
 
     assert env_steps == 1600
     assert trainer.checkpoints == [
-        (tmp_path / "checkpoint_00_000_001_600.pt", 1600, None)
+        (tmp_path / "checkpoint_00_000_001_600.pt", 1600, None),
+        (tmp_path / "checkpoint_last_best.pt", 0, None),
     ]
+    assert trainer.checkpoint_models[tmp_path / "checkpoint_last_best.pt"] is not None
     assert [step for _metrics, step in logger.logged] == [800, 1600, 1600]
     assert logger.logged[0][0]["train/max_entities"] == pytest.approx(17.0)
     assert logger.logged[1][0]["train/max_entities"] == pytest.approx(17.0)
@@ -1466,6 +1508,7 @@ def test_run_training_loop_resumes_checkpoint_cadence(
     trainer = _FakeTrainer()
     logger = _FakeLogger()
     _patch_eval_model_from_weights(monkeypatch)
+    (tmp_path / "checkpoint_last_best.pt").touch()
 
     def fake_evaluate_against_last_best(**_kwargs: object) -> dict[str, float]:
         return {"eval/win_rate_against_last_best": 0.25}
@@ -1558,6 +1601,7 @@ def test_run_training_loop_saves_last_best_when_eval_clears_threshold(
     assert env_steps == 1000
     assert trainer.checkpoints == [
         (tmp_path / "checkpoint_00_000_001_000.pt", 1000, None),
+        (tmp_path / "checkpoint_last_best.pt", 0, None),
         (tmp_path / "checkpoint_last_best.pt", 1000, None),
     ]
     assert logger.logged[-1][0]["eval/game_length_mean"] == 12.0
@@ -1744,6 +1788,45 @@ def test_ppo_trainer_write_checkpoint_includes_training_state(tmp_path: Path) ->
         "wandb_run_id",
     }
     assert not (tmp_path / ".checkpoint.pt.tmp").exists()
+
+
+def test_ppo_trainer_write_checkpoint_can_save_explicit_model(
+    tmp_path: Path,
+) -> None:
+    trainer_model = torch.nn.Linear(2, 1)
+    checkpoint_model = torch.nn.Linear(2, 1)
+    for param in trainer_model.parameters():
+        param.data.fill_(1.0)
+    for param in checkpoint_model.parameters():
+        param.data.fill_(3.0)
+    optimizer = torch.optim.AdamW(trainer_model.parameters(), lr=0.001)
+    trainer = PPOTrainer.__new__(PPOTrainer)
+    trainer.model = trainer_model
+    trainer.optimizer = optimizer
+    trainer.lr_scheduler = None
+    trainer.optimizer_steps = 7
+    trainer.player_step_total = 19
+    trainer.total_games_played = 23
+    trainer.target_kl_exceeded_total = 3
+    path = tmp_path / "checkpoint.pt"
+
+    trainer.write_checkpoint(
+        path,
+        env_steps=0,
+        wandb_run_id="run-abc",
+        model=checkpoint_model,
+    )
+
+    checkpoint = torch.load(path, weights_only=False)
+    assert checkpoint["env_steps"] == 0
+    assert torch.equal(
+        checkpoint["model"]["weight"],
+        checkpoint_model.state_dict()["weight"],
+    )
+    assert not torch.equal(
+        checkpoint["model"]["weight"],
+        trainer_model.state_dict()["weight"],
+    )
 
 
 def test_ppo_trainer_load_checkpoint_restores_training_state(tmp_path: Path) -> None:

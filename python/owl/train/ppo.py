@@ -621,9 +621,11 @@ class PPOTrainer:
         *,
         env_steps: int,
         wandb_run_id: str | None = None,
+        model: BaseModelAPI | None = None,
     ) -> None:
+        checkpoint_model = unwrap_model(self.model if model is None else model)
         checkpoint = {
-            "model": unwrap_model(self.model).state_dict(),
+            "model": checkpoint_model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "lr_scheduler": (
                 None if self.lr_scheduler is None else self.lr_scheduler.state_dict()
