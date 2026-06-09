@@ -121,9 +121,9 @@ Training presets live in `configs/`:
 - `model/stateless_transformer_21m_swiglu.yaml`: larger stateless transformer
   model config used by `baseline.yaml`, with an inline discrete-target actor
   override using eight action mixtures.
-- `model/stateless_transformer_6m.yaml` and
-  `model/stateless_transformer_21m_gelu.yaml`: GELU variants of the stateless
-  transformer presets.
+- `model/stateless_transformer_6m.yaml`, `model/stateless_transformer_11m.yaml`,
+  and `model/stateless_transformer_21m_gelu.yaml`: GELU variants of the
+  stateless transformer presets.
 - `model/stateless_transformer_28m.yaml`: larger SwiGLU stateless transformer
   preset with a discrete-target actor.
 

@@ -65,6 +65,7 @@ def test_actor_config_files_load(config_path: Path) -> None:
             5_968_014,
         ),
         ("stateless_transformer_6m_pure.yaml", EntityBasedExtV2Config(), 5_951_038),
+        ("stateless_transformer_11m.yaml", EntityBasedExtV2Config(), 10_950_158),
         ("stateless_transformer_21m_gelu.yaml", EntityBasedExtV2Config(), 20_529_914),
         (
             "stateless_transformer_21m_swiglu.yaml",
