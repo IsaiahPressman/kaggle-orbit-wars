@@ -500,9 +500,9 @@ Each player/source entity has one launch slot.
 For Kaggle submissions, `actions_to_kaggle(obs, player, actions, action_spec=...)`
 accepts a `PureActions` bundle with single batched tensors shaped
 `(1, 4, 44, max_per_planet_launches)` and returns the selected player's
-`list[list[float]]` action triples. Pure triples are
-`[from_planet_id, angle, ships]` and use the same Rust validation path as
-environment stepping.
+`[from_planet_id, angle, ships]` action triples. `from_planet_id` and `ships`
+are returned as Python `int`; `angle` is returned as `float`. Pure triples use
+the same Rust validation path as environment stepping.
 
 ## Discrete Targets Action Spec
 
@@ -571,7 +571,8 @@ ship count, missing source slots, and stale source slots. Launched target slots
 must be in range, present, and different from the source slot.
 The Kaggle conversion helper accepts the same batched model output shape and
 uses the Rust target decoder to convert discrete target slots into submitted
-`[from_planet_id, angle, ships]` triples for one selected player.
+`[from_planet_id, angle, ships]` triples for one selected player, with integer
+source IDs and ship counts.
 
 ### Targeting Rules
 
@@ -670,6 +671,8 @@ Bin `0` ignores the target value and emits no launch. Nonzero bins validate the
 selected source-target-bin tuple against `can_act`, decode the bin to a ship
 count, then use the same target-to-angle decoder and launch-failure accounting
 as `discrete_targets`.
+The Kaggle conversion helper returns `[from_planet_id, angle, ships]` triples
+with integer source IDs and ship counts.
 
 ## Decoded Launch Actions
 

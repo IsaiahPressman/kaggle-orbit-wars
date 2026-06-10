@@ -38,6 +38,17 @@ class Comet(BaseModel):
 
 
 class KaggleObservation(BaseModel):
+    """Strict parser for observations returned by the Kaggle Orbit Wars engine.
+
+    Verified against the installed kaggle_environments source:
+    fleet rows are only created after from_planet_id matches an existing planet,
+    ship counts are cast with int(...) before storage, and non-finite launch
+    angles either error during action processing or produce non-finite positions
+    that are removed by the engine's out-of-bounds check before observations are
+    returned. That means malformed opponent actions should not require lossy
+    row-level repair here.
+    """
+
     remaining_overage_time: float = Field(alias="remainingOverageTime")
     step: int = Field(ge=0, lt=KAGGLE_EPISODE_STEPS)
     planets: list[Planet]

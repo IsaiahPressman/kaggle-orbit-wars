@@ -1125,7 +1125,9 @@ def test_actions_to_kaggle_converts_pure_model_actions() -> None:
         action_spec=action_spec,
     )
 
-    assert actions == [[0.0, pytest.approx(1.25), float(action_spec.min_fleet_size)]]
+    assert actions == [[0, pytest.approx(1.25), action_spec.min_fleet_size]]
+    assert type(actions[0][0]) is int
+    assert type(actions[0][2]) is int
 
 
 def test_actions_to_kaggle_converts_discrete_target_model_actions() -> None:
@@ -1151,9 +1153,11 @@ def test_actions_to_kaggle_converts_discrete_target_model_actions() -> None:
     )
 
     assert len(actions) == 1
-    assert actions[0][0] == 0.0
+    assert actions[0][0] == 0
     assert np.isfinite(actions[0][1])
-    assert actions[0][2] == float(action_spec.min_fleet_size)
+    assert actions[0][2] == action_spec.min_fleet_size
+    assert type(actions[0][0]) is int
+    assert type(actions[0][2]) is int
 
 
 def test_actions_to_kaggle_respects_discrete_targeting_mode() -> None:
@@ -1193,8 +1197,10 @@ def test_actions_to_kaggle_respects_discrete_targeting_mode() -> None:
 
     assert stop_bad_launch == []
     assert len(anything_goes) == 1
-    assert anything_goes[0][0] == 0.0
-    assert anything_goes[0][2] == 100.0
+    assert anything_goes[0][0] == 0
+    assert anything_goes[0][2] == 100
+    assert type(anything_goes[0][0]) is int
+    assert type(anything_goes[0][2]) is int
 
 
 def test_actions_to_kaggle_converts_discrete_target_bin_actions() -> None:
@@ -1220,9 +1226,11 @@ def test_actions_to_kaggle_converts_discrete_target_bin_actions() -> None:
     )
 
     assert len(kaggle_actions) == 1
-    assert kaggle_actions[0][0] == 0.0
+    assert kaggle_actions[0][0] == 0
     assert np.isfinite(kaggle_actions[0][1])
-    assert kaggle_actions[0][2] == 10.0
+    assert kaggle_actions[0][2] == 10
+    assert type(kaggle_actions[0][0]) is int
+    assert type(kaggle_actions[0][2]) is int
 
 
 def test_min_fleet_size_controls_action_mask_and_validation() -> None:

@@ -191,14 +191,14 @@ class Agent:
     def _act(self, observation: Any) -> list[list[float]]:
         total_start = perf_counter()
         encode_start = total_start
-        observation = KaggleObservation.model_validate(observation)
-        if observation.remaining_overage_time < self.config.min_overage_time:
+        kaggle_obs = KaggleObservation.model_validate(observation)
+        if kaggle_obs.remaining_overage_time < self.config.min_overage_time:
             return []
 
         model = self.model
         checkpoint_config = self.checkpoint_config
         hidden_state = self.hidden_state
-        use_fallback = self._should_use_fallback(observation.remaining_overage_time)
+        use_fallback = self._should_use_fallback(kaggle_obs.remaining_overage_time)
         if use_fallback:
             assert self.fallback_model is not None
             assert self.fallback_checkpoint_config is not None
@@ -210,7 +210,7 @@ class Agent:
             self.config,
             checkpoint_config.env.action_spec,
         )
-        obs_dict = observation.to_rl_observation()
+        obs_dict = kaggle_obs.to_rl_observation()
         encoded = encode_python_observation_with_metrics(
             obs_dict,
             obs_spec=checkpoint_config.env.obs_spec,
@@ -228,7 +228,7 @@ class Agent:
         encode_ms = _elapsed_ms(encode_start)
 
         inference_start = perf_counter()
-        if not use_fallback and (observation.step == 0 or hidden_state is None):
+        if not use_fallback and (kaggle_obs.step == 0 or hidden_state is None):
             hidden_state = model.initial_hidden_state(1, device=self.device)
         output = model.serve(
             device_obs,
@@ -239,9 +239,9 @@ class Agent:
             self.hidden_state = output.next_hidden_state
         self._synchronize_device()
         values = output.values.detach().cpu()[0]
-        self_value = float(values[observation.player].item())
-        if observation.step == 0:
-            n_players = _observation_player_count(observation)
+        self_value = float(values[kaggle_obs.player].item())
+        if kaggle_obs.step == 0:
+            n_players = _observation_player_count(kaggle_obs)
             self._last_turn_value = (2.0 - n_players) / n_players
 
         advantage = self_value - self._last_turn_value
@@ -255,7 +255,7 @@ class Agent:
         )
         actions = actions_to_kaggle(
             obs_dict,
-            observation.player,
+            kaggle_obs.player,
             actions_cpu,
             action_spec=checkpoint_config.env.action_spec,
         )
@@ -263,13 +263,13 @@ class Agent:
         total_ms = _elapsed_ms(total_start)
         entity_count = obs.entity_mask.shape[1]
         peak_total_ms, peak_entities = self._update_peak_metrics(
-            step=observation.step,
+            step=kaggle_obs.step,
             total_ms=total_ms,
             entity_count=entity_count,
         )
 
         self.log(
-            step=observation.step,
+            step=kaggle_obs.step,
             total_ms=total_ms,
             peak_total_ms=peak_total_ms,
             encode_ms=encode_ms,
@@ -281,7 +281,7 @@ class Agent:
             entity_count=entity_count,
             peak_entities=peak_entities,
             filtered_fleets=encoded.filtered_fleets,
-            remaining_overage_time=observation.remaining_overage_time,
+            remaining_overage_time=kaggle_obs.remaining_overage_time,
             fallback_triggered=use_fallback,
         )
         self._last_turn_value = self_value

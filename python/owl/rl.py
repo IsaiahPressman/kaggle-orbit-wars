@@ -1189,7 +1189,37 @@ def actions_to_kaggle(
             torch_dtype=torch.float32,
         )
         _require_action_shape("angle", angle_array, expected_batched_shape)
-        return _pure_actions_to_kaggle(
+        return _sanitize_kaggle_actions(
+            _pure_actions_to_kaggle(
+                planets_in,
+                initial_planets_in,
+                fleets_in,
+                comet_planet_ids,
+                comet_path_indices,
+                comet_path_lengths,
+                comet_paths,
+                angular_velocity,
+                step,
+                episode_steps,
+                int(player),
+                launch_array,
+                np.ascontiguousarray(angle_array[0]),
+                ship_array,
+                action_spec.max_per_planet_launches,
+                action_spec.min_fleet_size,
+            )
+        )
+
+    discrete_actions = cast(DiscreteTargetActions, launch_actions)
+    target_array = _actions_to_numpy(
+        "target",
+        discrete_actions.target,
+        dtype=np.int64,
+        torch_dtype=torch.int64,
+    )
+    _require_action_shape("target", target_array, expected_batched_shape)
+    return _sanitize_kaggle_actions(
+        _discrete_target_actions_to_kaggle(
             planets_in,
             initial_planets_in,
             fleets_in,
@@ -1202,38 +1232,12 @@ def actions_to_kaggle(
             episode_steps,
             int(player),
             launch_array,
-            np.ascontiguousarray(angle_array[0]),
+            np.ascontiguousarray(target_array[0]),
             ship_array,
             action_spec.max_per_planet_launches,
             action_spec.min_fleet_size,
+            action_spec.targeting_mode,
         )
-
-    discrete_actions = cast(DiscreteTargetActions, launch_actions)
-    target_array = _actions_to_numpy(
-        "target",
-        discrete_actions.target,
-        dtype=np.int64,
-        torch_dtype=torch.int64,
-    )
-    _require_action_shape("target", target_array, expected_batched_shape)
-    return _discrete_target_actions_to_kaggle(
-        planets_in,
-        initial_planets_in,
-        fleets_in,
-        comet_planet_ids,
-        comet_path_indices,
-        comet_path_lengths,
-        comet_paths,
-        angular_velocity,
-        step,
-        episode_steps,
-        int(player),
-        launch_array,
-        np.ascontiguousarray(target_array[0]),
-        ship_array,
-        action_spec.max_per_planet_launches,
-        action_spec.min_fleet_size,
-        action_spec.targeting_mode,
     )
 
 
@@ -1389,24 +1393,30 @@ def _target_bin_actions_to_kaggle(
     expected_batched_shape = (1, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS)
     _require_action_shape("target", target_array, expected_batched_shape)
     _require_action_shape("fleet_bin", fleet_bin_array, expected_batched_shape)
-    return _discrete_target_bin_actions_to_kaggle(
-        planets_in,
-        initial_planets_in,
-        fleets_in,
-        comet_planet_ids,
-        comet_path_indices,
-        comet_path_lengths,
-        comet_paths,
-        angular_velocity,
-        step,
-        episode_steps,
-        int(player),
-        np.ascontiguousarray(target_array[0]),
-        np.ascontiguousarray(fleet_bin_array[0]),
-        action_spec.min_fleet_size,
-        action_spec.n_bins,
-        action_spec.targeting_mode,
+    return _sanitize_kaggle_actions(
+        _discrete_target_bin_actions_to_kaggle(
+            planets_in,
+            initial_planets_in,
+            fleets_in,
+            comet_planet_ids,
+            comet_path_indices,
+            comet_path_lengths,
+            comet_paths,
+            angular_velocity,
+            step,
+            episode_steps,
+            int(player),
+            np.ascontiguousarray(target_array[0]),
+            np.ascontiguousarray(fleet_bin_array[0]),
+            action_spec.min_fleet_size,
+            action_spec.n_bins,
+            action_spec.targeting_mode,
+        )
     )
+
+
+def _sanitize_kaggle_actions(actions: list[list[float]]) -> list[list[float]]:
+    return [[int(planet), angle, int(ships)] for (planet, angle, ships) in actions]
 
 
 def _can_act_shape(
