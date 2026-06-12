@@ -111,7 +111,7 @@ Training presets live in `configs/`:
   discrete-target actions, `max_entities=256`, one PPO epoch per rollout,
   larger rollout/minibatch sizing, Muon/AdamW optimizer rates, periodic
   checkpoints every 20M environment steps, `torch.compile` default mode for PPO
-  tensor helpers, compiled transformer MLPs with
+  tensor helpers, compiled transformer trunk with
   `max-autotune-no-cudagraphs`, and bfloat16 autocast by default.
 - `baseline_adam.yaml`: Adam optimizer variant with explicit optimizer
   settings, including `1e-4` learning rate, `(0.9, 0.999)` betas, `1e-5`
@@ -205,16 +205,16 @@ uv run python scripts/run_ppo.py configs/baseline.yaml runs --log-mode debug --m
 
 Fresh launches accept `-o`/`--overrides field.path=value`; when provided, rank 0
 prints the flattened override list before loading the config.
-`rl.model_compile` defaults to `mlp`, which compiles each shared or
-per-player-count adapter transformer-block MLP in place with
-`rl.model_compile_mode: max-autotune-no-cudagraphs` and
-`dynamic=True`. This keeps attention packing and flash-attn calls eager while
-allowing Inductor to optimize the FFN path. Set `rl.model_compile=none` for
-short CPU smoke tests or compile-debugging runs. Set `rl.model_compile=trunk`
-to compile the stateless self-attention transformer trunk as one dynamic-shape
-callable after FlashAttention packing and before unpacking. The trunk mode is an
-opt-in CUDA benchmark path and rejects cross-attention observations and
-player-count adapter trunk blocks.
+`rl.model_compile` defaults to `trunk`, which compiles the stateless
+self-attention transformer trunk as one dynamic-shape callable after
+FlashAttention packing and before unpacking, using
+`rl.model_compile_mode: max-autotune-no-cudagraphs`. Set
+`rl.model_compile=mlp` to compile each shared or per-player-count adapter
+transformer-block MLP in place with `dynamic=True`, keeping attention packing
+and flash-attn calls eager while allowing Inductor to optimize the FFN path. Set
+`rl.model_compile=none` for short CPU smoke tests or compile-debugging runs.
+The trunk mode rejects cross-attention observations and player-count adapter
+trunk blocks.
 
 Fresh launches can also initialize the model from an existing full training
 checkpoint without resuming the optimizer, scheduler, config, or W&B run:

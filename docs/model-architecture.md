@@ -228,19 +228,18 @@ Attention uses separate `q`, `k`, and `v` linear layers instead of one packed
 QKV projection. SwiGLU also uses separate gate and value projections. This keeps
 each weight matrix tied to one projection role, which is a better fit for Muon
 optimizer assumptions than packing multiple operations into one parameter.
-Training also defaults to compiling each transformer-block MLP in place with
-`rl.model_compile="mlp"` and
-`rl.model_compile_mode="max-autotune-no-cudagraphs"`. Packing, unpacking, and
-flash-attn varlen calls remain eager. Per-player-count adapter block MLPs are
-compiled by the same setting.
+Training defaults to compiling the stateless self-attention trunk as one
+dynamic-shape callable after packing and before unpacking with
+`rl.model_compile="trunk"` and
+`rl.model_compile_mode="max-autotune-no-cudagraphs"`. Packed FlashAttention uses
+the fixed padded sequence capacity `max_entities + 13 + n_scratch_tokens` as
+`max_seqlen`, so the compiled trunk can reuse one graph across different
+live-token counts. This mode currently rejects `EntityBasedCrossAttnV1` and
+`player_count_adapter_blocks > 0`.
 
-Set `rl.model_compile="trunk"` to compile the stateless self-attention trunk as
-one dynamic-shape callable after packing and before unpacking. Packed
-FlashAttention uses the fixed padded sequence capacity
-`max_entities + 13 + n_scratch_tokens` as `max_seqlen`, so the compiled trunk can
-reuse one graph across different live-token counts. This mode is opt-in for CUDA
-benchmarking and currently rejects `EntityBasedCrossAttnV1` and
-`player_count_adapter_blocks > 0`; use `mlp` for those paths.
+Set `rl.model_compile="mlp"` to compile each transformer-block MLP in place
+while keeping packing, unpacking, and flash-attn varlen calls eager.
+Per-player-count adapter block MLPs are compiled by the same setting.
 
 ## Recurrent Transformer V1
 

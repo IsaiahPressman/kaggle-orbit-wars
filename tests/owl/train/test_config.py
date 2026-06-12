@@ -38,7 +38,7 @@ def test_ppo_config_validates_with_pydantic() -> None:
     assert config.teacher_kl_coef == pytest.approx(0.001)
     assert config.teacher_value_coef == pytest.approx(0.001)
     assert config.ppo_clip_mode == "per_player"
-    assert config.model_compile == "mlp"
+    assert config.model_compile == "trunk"
     assert config.model_compile_mode == "max-autotune-no-cudagraphs"
 
     with pytest.raises(ValueError, match="greater than or equal to 0"):
@@ -346,7 +346,7 @@ def test_configure_model_compile_compiles_only_transformer_mlps(
     state_keys = set(model.state_dict())
     expected_module_ids = {id(block.mlp) for block in model.blocks}
 
-    compiled = configure_model_compile(model, PPOConfig())
+    compiled = configure_model_compile(model, PPOConfig(model_compile="mlp"))
 
     assert compiled == 2
     assert set(model.state_dict()) == state_keys
@@ -389,7 +389,7 @@ def test_configure_model_compile_includes_player_count_adapter_mlps(
         for block in adapter.blocks
     }
 
-    compiled = configure_model_compile(model, PPOConfig())
+    compiled = configure_model_compile(model, PPOConfig(model_compile="mlp"))
 
     assert compiled == len(expected_module_ids)
     assert {call[0] for call in calls} == expected_module_ids

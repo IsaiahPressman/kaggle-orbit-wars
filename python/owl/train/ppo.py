@@ -129,7 +129,7 @@ class PPOConfig(BaseConfig):
     teacher_kl_coef: float = Field(default=0.001, ge=0.0)
     teacher_value_coef: float = Field(default=0.001, ge=0.0)
     compile_mode: CompileMode | None = None
-    model_compile: _ModelCompileTarget = "mlp"
+    model_compile: _ModelCompileTarget = "trunk"
     model_compile_mode: _ModelCompileMode = "max-autotune-no-cudagraphs"
     dtype: _TrainingDType = "float32"
 
