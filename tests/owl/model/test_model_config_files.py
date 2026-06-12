@@ -59,6 +59,7 @@ def test_actor_config_files_load(config_path: Path) -> None:
     [
         ("stateless_transformer_2m.yaml", EntityBasedExtV2Config(), 1_810_318),
         ("stateless_transformer_6m.yaml", EntityBasedExtV2Config(), 5_679_118),
+        ("stateless_transformer_6m_deep.yaml", EntityBasedExtV2Config(), 5_833_118),
         (
             "stateless_transformer_6m_cross_attn.yaml",
             EntityBasedCrossAttnV1Config(),
@@ -74,7 +75,16 @@ def test_actor_config_files_load(config_path: Path) -> None:
         ),
         ("stateless_transformer_28m.yaml", EntityBasedExtV2Config(), 28_123_130),
         ("stateless_transformer_153m.yaml", EntityBasedExtV2Config(), 152_891_930),
-        ("stateless_transformer_200m.yaml", EntityBasedExtV2Config(), 200_162_330),
+        (
+            "stateless_transformer_200m_d38.yaml",
+            EntityBasedExtV2Config(),
+            200_162_330,
+        ),
+        (
+            "stateless_transformer_200m_d60.yaml",
+            EntityBasedExtV2Config(),
+            200_861_338,
+        ),
         ("recurrent_transformer_5m.yaml", EntityBasedExtV2Config(), 5_416_462),
     ],
 )
@@ -96,3 +106,17 @@ def test_model_config_file_parameter_count(
     )
 
     assert sum(parameter.numel() for parameter in model.parameters()) == expected_params
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_depth"),
+    [
+        ("stateless_transformer_200m_d38.yaml", 38),
+        ("stateless_transformer_200m_d60.yaml", 60),
+    ],
+)
+def test_200m_model_config_depths(filename: str, expected_depth: int) -> None:
+    config = _load_model_config_file(_REPO_ROOT / "configs" / "model" / filename)
+
+    assert isinstance(config, StatelessTransformerV1Config)
+    assert config.depth == expected_depth

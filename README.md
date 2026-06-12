@@ -126,6 +126,9 @@ Training presets live in `configs/`:
   stateless transformer presets.
 - `model/stateless_transformer_28m.yaml`: larger SwiGLU stateless transformer
   preset with a discrete-target actor.
+- `model/stateless_transformer_200m_d38.yaml`,
+  and `model/stateless_transformer_200m_d60.yaml`: depth-specific 200M stateless
+  transformer presets with discrete-target actors.
 
 The training entrypoint configures PyTorch for TF32 matmul/conv precision and
 cuDNN benchmarking before constructing the environment, model, and optimizer.
