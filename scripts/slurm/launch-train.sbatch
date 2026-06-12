@@ -5,7 +5,8 @@
 #SBATCH --gres=gpu:b200:1
 #SBATCH --cpus-per-gpu=28
 #SBATCH --mem-per-gpu=128G
-#SBATCH --partition=llm
+#SBATCH --account=research
+#SBATCH --partition=dev
 #SBATCH --time=24:00:00
 
 set -euo pipefail
