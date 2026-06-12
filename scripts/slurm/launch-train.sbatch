@@ -2,7 +2,7 @@
 #SBATCH --job-name=owl
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=1
+#SBATCH --gres=gpu:b200:1
 #SBATCH --cpus-per-gpu=28
 #SBATCH --mem-per-gpu=128G
 #SBATCH --partition=llm
@@ -12,7 +12,7 @@ set -euo pipefail
 
 IMAGE="${ORBIT_WARS_IMAGE:-ghcr.io#isaiahpressman/kaggle-orbit-wars:main}"
 WANDB_ENV_FILE="${ORBIT_WARS_ENV_FILE:-$HOME/.config/orbit-wars/wandb.env}"
-OUTPUT_DIR="${ORBIT_WARS_OUTPUT_DIR:-/sw/isaiah/orbit-wars/runs}"
+OUTPUT_DIR="${ORBIT_WARS_OUTPUT_DIR:-/data/personal/isaiah/orbit-wars/runs}"
 CONFIG="${ORBIT_WARS_CONFIG:-configs/baseline.yaml}"
 LOG_MODE="${ORBIT_WARS_LOG_MODE:-wandb}"
 MAX_RUNTIME_HOURS="${ORBIT_WARS_MAX_RUNTIME_HOURS:-23.5}"

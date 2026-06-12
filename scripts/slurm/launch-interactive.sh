@@ -3,7 +3,7 @@ set -euo pipefail
 
 IMAGE="${ORBIT_WARS_IMAGE:-ghcr.io#isaiahpressman/kaggle-orbit-wars:main}"
 ENV_FILE="${ORBIT_WARS_ENV_FILE:-$HOME/.config/orbit-wars/wandb.env}"
-OUTPUT_DIR="${ORBIT_WARS_OUTPUT_DIR:-/sw/isaiah/orbit-wars/runs}"
+OUTPUT_DIR="${ORBIT_WARS_OUTPUT_DIR:-/data/personal/isaiah/orbit-wars/runs}"
 CONFIG_DIR="${ORBIT_WARS_CONFIG_DIR:-configs}"
 GPUS="${ORBIT_WARS_GPUS:-1}"
 CPUS="${ORBIT_WARS_CPUS:-32}"
@@ -56,7 +56,7 @@ fi
 srun_args=(
     --ntasks=1
     --nodes=1
-    --gpus-per-node="$GPUS"
+    --gres="gpu:b200:$GPUS"
     --cpus-per-gpu="$CPUS"
     --mem-per-gpu="$MEM"
     --time="$TIME"

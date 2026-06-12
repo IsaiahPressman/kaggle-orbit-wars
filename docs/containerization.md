@@ -322,7 +322,7 @@ The batch launcher runs PPO through `torchrun` with one process per GPU on a
 single node. Override Slurm GPU resources in the normal `sbatch` position:
 
 ```sh
-sbatch --gpus-per-node=4 scripts/slurm/launch-train.sbatch
+sbatch --gres=gpu:b200:4 scripts/slurm/launch-train.sbatch
 ```
 
 `EnvConfig.n_envs`, `rl.horizon`, and `rl.segments_per_minibatch` are per rank.
@@ -355,7 +355,7 @@ scripts/slurm/launch-interactive.sh
 
 The helper uses `ghcr.io#isaiahpressman/kaggle-orbit-wars:main` by default.
 Set `ORBIT_WARS_IMAGE` to debug a different tag.
-It requests GPUs from Slurm with `--gpus-per-node=$ORBIT_WARS_GPUS`; Docker's
+It requests GPUs from Slurm with `--gres=gpu:b200:$ORBIT_WARS_GPUS`; Docker's
 `--gpus all` flag is not used with Pyxis.
 The image and helper also set `NVIDIA_VISIBLE_DEVICES=all` and
 `NVIDIA_DRIVER_CAPABILITIES=compute,utility` so Enroot's NVIDIA hook exposes
