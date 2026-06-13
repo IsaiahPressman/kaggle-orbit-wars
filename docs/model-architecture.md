@@ -234,8 +234,8 @@ dynamic-shape callable after packing and before unpacking with
 `rl.model_compile_mode="max-autotune-no-cudagraphs"`. Packed FlashAttention uses
 the fixed padded sequence capacity `max_entities + 13 + n_scratch_tokens` as
 `max_seqlen`, so the compiled trunk can reuse one graph across different
-live-token counts. This mode currently rejects `EntityBasedCrossAttnV1` and
-`player_count_adapter_blocks > 0`.
+live-token counts. This mode currently rejects `EntityBasedCrossAttnV1`,
+`recurrent_transformer_v1`, and `player_count_adapter_blocks > 0`.
 
 Set `rl.model_compile="mlp"` to compile each transformer-block MLP in place
 while keeping packing, unpacking, and flash-attn varlen calls eager.

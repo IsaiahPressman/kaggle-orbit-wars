@@ -2,9 +2,13 @@ from pathlib import Path
 
 import pytest
 import torch
-from owl.model import RecurrentTransformerV1Config, StatelessTransformerV1
+from owl.model import (
+    RecurrentTransformerV1,
+    RecurrentTransformerV1Config,
+    StatelessTransformerV1,
+)
 from owl.model.stateless_transformer_v1 import StatelessTransformerV1Config
-from owl.rl import ActionPureConfig, EntityBasedConfig
+from owl.rl import ActionDiscreteTargetsConfig, ActionPureConfig, EntityBasedConfig
 from owl.train import FullConfig, PPOConfig
 from owl.train.utils import (
     autocast_context,
@@ -429,6 +433,17 @@ def test_configure_model_compile_compiles_stateless_transformer_trunk(
     assert compiled == 1
     assert set(model.state_dict()) == state_keys
     assert calls == [(id(model), "default")]
+
+
+def test_configure_model_compile_rejects_recurrent_trunk() -> None:
+    model = RecurrentTransformerV1(
+        RecurrentTransformerV1Config(embed_dim=32, depth=2, n_heads=4, mlp_ratio=1.0),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+
+    with pytest.raises(RuntimeError, match="does not support recurrent_transformer_v1"):
+        configure_model_compile(model, PPOConfig(model_compile="trunk"))
 
 
 def test_configure_model_compile_can_be_disabled(

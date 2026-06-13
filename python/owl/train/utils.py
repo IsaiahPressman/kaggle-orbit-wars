@@ -6,7 +6,7 @@ from typing import Literal, Protocol, assert_never
 
 import torch
 
-from owl.model import BaseModelAPI, StatelessTransformerV1
+from owl.model import BaseModelAPI, RecurrentTransformerV1, StatelessTransformerV1
 
 ModelCompileTarget = Literal["none", "mlp", "trunk"]
 ModelCompileMode = Literal[
@@ -69,6 +69,10 @@ def configure_model_compile(model: BaseModelAPI, cfg: ModelCompileConfig) -> int
                 mode=cfg.model_compile_mode,
             )
         case "trunk":
+            if isinstance(model, RecurrentTransformerV1):
+                raise RuntimeError(
+                    "rl.model_compile='trunk' does not support recurrent_transformer_v1"
+                )
             if not isinstance(model, StatelessTransformerV1):
                 raise RuntimeError(
                     "rl.model_compile='trunk' requires stateless_transformer_v1"
