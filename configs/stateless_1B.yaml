@@ -22,16 +22,16 @@ optimizer:
   muon_momentum: 0.95
   lr_schedule:
     schedule: linear_warmup_cosine_decay
-    warmup_steps: 125
-    decay_steps: 75_000
+    warmup_steps: 250
+    decay_steps: 150_000
     lr_min_ratio: 0.01
 
 rl:
   horizon: 64
   checkpoint_freq: 20_000_000
   ppo_epochs: 1
-  segments_per_minibatch: 2
-  gradient_accumulation_steps: 8
+  segments_per_minibatch: 4
+  gradient_accumulation_steps: 4
   # gamma=1.0 keeps the critic softmax well-defined
   gamma: 1.0
   gae_lambda: 0.9
