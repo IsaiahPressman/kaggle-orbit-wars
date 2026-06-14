@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import torch
 import yaml
 from owl.model import (
     ActorPureConfig,
@@ -85,6 +86,11 @@ def test_actor_config_files_load(config_path: Path) -> None:
             EntityBasedExtV2Config(),
             200_861_338,
         ),
+        (
+            "stateless_transformer_1B.yaml",
+            EntityBasedExtV2Config(),
+            1_002_055_706,
+        ),
         ("recurrent_transformer_5m.yaml", EntityBasedExtV2Config(), 5_416_462),
     ],
 )
@@ -99,11 +105,12 @@ def test_model_config_file_parameter_count(
         action_spec = ActionPureConfig()
     else:
         action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
-    model = create_model(
-        config,
-        obs_spec=obs_spec,
-        action_spec=action_spec,
-    )
+    with torch.device("meta"):
+        model = create_model(
+            config,
+            obs_spec=obs_spec,
+            action_spec=action_spec,
+        )
 
     assert sum(parameter.numel() for parameter in model.parameters()) == expected_params
 
