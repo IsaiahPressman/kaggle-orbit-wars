@@ -190,9 +190,12 @@ The teacher architecture may differ from the student, but the observation and
 action specs must match exactly, and actor factorization details such as
 discrete-target launch mode or target-bin count must be compatible. Teacher
 models must be stateless; recurrent teachers are rejected because PPO teacher
-inference runs only from stored rollout segments during the update. Teacher
-updates use one student replay evaluation and one no-grad teacher evaluation
-per PPO minibatch.
+inference runs only from stored rollout segments. The frozen teacher trunk runs
+once per iteration in a chunked `no_grad` pass after rollout (chunk size
+`rl.teacher_segments_per_minibatch`, default `32` segments); its distribution
+targets are
+cached and each update minibatch consumes them without re-running the teacher
+trunk.
 `rl.teacher_kl_coef` and `rl.teacher_value_coef` weight the action KL and
 per-state winner-distribution cross-entropy stabilization losses; both default
 to `0.001`.

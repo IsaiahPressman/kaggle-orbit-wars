@@ -13,12 +13,15 @@ from pydantic import Field, model_validator
 from owl.config import BaseConfig
 from owl.model import (
     BaseModelAPI,
+    CachedTeacherDistillationTargets,
     ModelActionKLDivergences,
     ModelActions,
     ModelEvaluation,
     ModelHiddenState,
     ModelOutput,
     ModelTeacherEvaluation,
+    concat_teacher_distillation_targets,
+    index_teacher_distillation_targets,
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
@@ -128,6 +131,7 @@ class PPOConfig(BaseConfig):
     teacher_init: Path | None = None
     teacher_kl_coef: float = Field(default=0.001, ge=0.0)
     teacher_value_coef: float = Field(default=0.001, ge=0.0)
+    teacher_segments_per_minibatch: int = Field(default=32, ge=1)
     compile_mode: CompileMode | None = None
     model_compile: _ModelCompileTarget = "trunk"
     model_compile_mode: _ModelCompileMode = "max-autotune-no-cudagraphs"
@@ -527,6 +531,19 @@ class PPOTrainer:
                 batch_size=self.n_envs,
                 device=self.device,
             )
+            teacher_losses_enabled = (
+                self.config.teacher_kl_coef > 0.0
+                or self.config.teacher_value_coef > 0.0
+            )
+            if teacher_losses_enabled and not (
+                unwrap_model(self.model).supports_cached_teacher_distillation()
+                and teacher_model.supports_cached_teacher_distillation()
+            ):
+                raise ValueError(
+                    "teacher distillation requires the discrete_targets actor "
+                    "without player-count adapters for both the student and the "
+                    "teacher model"
+                )
             teacher_model.eval()
             for parameter in teacher_model.parameters():
                 parameter.requires_grad_(False)
@@ -540,6 +557,7 @@ class PPOTrainer:
         rollout_elapsed = max(perf_counter() - rollout_start, 1e-12)
         env_metrics = self._last_env_metrics
         segments = self.rollout.segment_major()
+        teacher_targets = self._precompute_teacher_targets(segments)
         max_entities_seen = segments.obs.entity_mask.sum(dim=-1).max()
         value_mask = segments.obs.still_playing
         policy_mask = _policy_mask(segments.obs)
@@ -558,6 +576,7 @@ class PPOTrainer:
             returns,
             policy_mask,
             value_mask,
+            teacher_targets,
         )
         update_elapsed = max(perf_counter() - update_start, 1e-12)
         player_returns, player_return_mask = _player_segment_returns(
@@ -742,6 +761,44 @@ class PPOTrainer:
             self._last_env_metrics = env_metrics
             return last_values.detach()
 
+    def _precompute_teacher_targets(
+        self,
+        segments: _PPORolloutSegments,
+    ) -> CachedTeacherDistillationTargets | None:
+        """Run the frozen teacher trunk once per iteration over the rollout.
+
+        Caches the teacher's action-distribution params and winner probabilities
+        in segment-major layout so each update minibatch can compute the KL /
+        value-distillation losses without re-running the teacher trunk. Runs as a
+        chunked ``no_grad`` inference loop (chunk size
+        ``teacher_segments_per_minibatch`` segments) outside DDP, since the teacher
+        is a raw, frozen model.
+        """
+        teacher_model = self.teacher_model if self.teacher_active else None
+        if teacher_model is None:
+            return None
+        compute_action_kl = self.config.teacher_kl_coef > 0.0
+        compute_value = self.config.teacher_value_coef > 0.0
+        if not (compute_action_kl or compute_value):
+            return None
+        chunk_size = self.config.teacher_segments_per_minibatch
+        chunks: list[CachedTeacherDistillationTargets] = []
+        for start in range(0, self.n_envs, chunk_size):
+            stop = min(start + chunk_size, self.n_envs)
+            chunk_idx = torch.arange(start, stop, device=segments.logp.device)
+            chunk_obs = _obs_index(segments.obs, chunk_idx)
+            chunk_actions = _actions_index(segments.actions, chunk_idx)
+            with torch.no_grad(), _autocast_context(self.config, self.device):
+                chunks.append(
+                    teacher_model.compute_teacher_distillation_targets(
+                        chunk_obs,
+                        chunk_actions,
+                        compute_action_kl=compute_action_kl,
+                        compute_value=compute_value,
+                    )
+                )
+        return concat_teacher_distillation_targets(chunks)
+
     def _update(
         self,
         segments: _PPORolloutSegments,
@@ -749,6 +806,7 @@ class PPOTrainer:
         returns: torch.Tensor,
         policy_mask: torch.Tensor,
         value_mask: torch.Tensor,
+        teacher_targets: CachedTeacherDistillationTargets | None,
     ) -> tuple[dict[str, float], int]:
         loss_metrics: list[_PPOLossMetrics] = []
         grad_norms: list[torch.Tensor] = []
@@ -775,6 +833,7 @@ class PPOTrainer:
                     policy_mask,
                     value_mask,
                     sample_indices,
+                    teacher_targets=teacher_targets,
                     value_clip_anchor=current_values,
                     loss_scale=1.0 / accumulation_steps,
                     step_optimizer=False,
@@ -820,6 +879,7 @@ class PPOTrainer:
         value_mask: torch.Tensor,
         indices: torch.Tensor,
         *,
+        teacher_targets: CachedTeacherDistillationTargets | None = None,
         value_clip_anchor: torch.Tensor,
         loss_scale: float = 1.0,
         step_optimizer: bool = True,
@@ -876,10 +936,9 @@ class PPOTrainer:
         compute_teacher_value = (
             teacher_model is not None and self.config.teacher_value_coef > 0.0
         )
-        use_teacher_model = compute_teacher_action_kl or compute_teacher_value
 
         with _autocast_context(self.config, self.device):
-            if teacher_model is None or not use_teacher_model:
+            if teacher_targets is None:
                 output = _model_evaluate_actions(
                     self.model,
                     batch_obs,
@@ -891,11 +950,11 @@ class PPOTrainer:
                 teacher_winner_probabilities = None
                 student_winner_log_probabilities = None
             else:
-                teacher_evaluation = _model_evaluate_actions_with_teacher(
+                teacher_evaluation = _model_evaluate_actions_with_cached_teacher(
                     self.model,
                     batch_segment_obs,
                     batch_segment_actions,
-                    teacher_model,
+                    index_teacher_distillation_targets(teacher_targets, idx),
                     hidden_state=batch_hidden_state,
                     dones=segments.dones[idx],
                     compute_teacher_action_kl=compute_teacher_action_kl,
@@ -2081,6 +2140,28 @@ def _model_evaluate_actions_with_teacher(
         obs,
         actions,
         teacher,
+        hidden_state=hidden_state,
+        dones=dones,
+        compute_teacher_action_kl=compute_teacher_action_kl,
+        compute_teacher_value=compute_teacher_value,
+    )
+
+
+def _model_evaluate_actions_with_cached_teacher(
+    model: BaseModelAPI,
+    obs: ObsBatch,
+    actions: ModelActions,
+    teacher_targets: CachedTeacherDistillationTargets,
+    *,
+    hidden_state: ModelHiddenState | None,
+    dones: torch.Tensor,
+    compute_teacher_action_kl: bool,
+    compute_teacher_value: bool,
+) -> ModelTeacherEvaluation:
+    return model.evaluate_actions_with_cached_teacher(
+        obs,
+        actions,
+        teacher_targets,
         hidden_state=hidden_state,
         dones=dones,
         compute_teacher_action_kl=compute_teacher_action_kl,

@@ -21,8 +21,11 @@ from owl.model.stateless_transformer_v1 import (
     ActorDiscreteTargetBinsConfig,
     ActorDiscreteTargetsConfig,
     ActorPureConfig,
+    CachedTeacherDistillationTargets,
     StatelessTransformerV1,
     StatelessTransformerV1Config,
+    concat_teacher_distillation_targets,
+    index_teacher_distillation_targets,
 )
 from owl.rl import (
     ActionBundle,
@@ -37,6 +40,7 @@ __all__ = [
     "ActorDiscreteTargetsConfig",
     "ActorPureConfig",
     "BaseModelAPI",
+    "CachedTeacherDistillationTargets",
     "DiscreteTargetActions",
     "DiscreteTargetBinActions",
     "InputLayer",
@@ -55,5 +59,7 @@ __all__ = [
     "RecurrentTransformerV1Config",
     "StatelessTransformerV1",
     "StatelessTransformerV1Config",
+    "concat_teacher_distillation_targets",
     "create_model",
+    "index_teacher_distillation_targets",
 ]

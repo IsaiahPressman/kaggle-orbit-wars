@@ -2610,6 +2610,219 @@ def test_discrete_targets_teacher_kl_skips_target_and_size_for_no_launch(
     assert size_kl_rows == [0]
 
 
+def test_discrete_targets_kl_from_teacher_params_matches_kl_divergence() -> None:
+    torch.manual_seed(7)
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(),
+        embed_dim=16,
+        depth=1,
+        n_heads=4,
+    )
+    student = DiscreteTargetsActor(config.actor, transformer_config=config)
+    teacher = DiscreteTargetsActor(config.actor, transformer_config=config)
+    student_inputs = _discrete_actor_inputs(
+        torch.randn((2, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    )
+    teacher_inputs = _discrete_actor_inputs(
+        torch.randn((2, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    )
+    can_act = torch.zeros(
+        (2, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
+        dtype=torch.bool,
+    )
+    can_act[:, 0, 0, 1] = True
+    can_act[:, 0, 1, 0] = True
+    max_launch = torch.zeros((2, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
+    max_launch[:, 0, 0] = 10
+    max_launch[:, 0, 1] = 8
+    actions = DiscreteTargetActions(
+        launch=torch.ones((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.bool),
+        target=torch.ones((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
+        ships=torch.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
+    )
+
+    reference = student.kl_divergence(
+        student_inputs,
+        teacher,
+        teacher_inputs,
+        can_act,
+        max_launch,
+        actions,
+        min_fleet_size=6,
+    )
+    teacher_params = teacher.teacher_policy_params(
+        teacher_inputs,
+        can_act,
+        max_launch,
+        actions,
+        min_fleet_size=6,
+    )
+    split = student.kl_divergence_from_teacher_params(
+        student_inputs,
+        teacher_params,
+        can_act,
+        max_launch,
+        actions,
+        min_fleet_size=6,
+    )
+
+    assert torch.allclose(reference.per_player_entity, split.per_player_entity)
+    assert torch.allclose(reference.launch, split.launch)
+    assert torch.allclose(reference.event, split.event)
+    assert reference.target is not None
+    assert split.target is not None
+    assert torch.allclose(reference.target, split.target)
+    assert reference.components.keys() == split.components.keys()
+    for key, value in reference.components.items():
+        assert torch.allclose(value, split.components[key])
+
+
+def test_cached_teacher_distillation_matches_inline_teacher() -> None:
+    torch.manual_seed(13)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionDiscreteTargetsConfig(
+        max_per_planet_launches=1,
+        min_fleet_size=2,
+    )
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(n_action_mixtures=3, entropy_ship_quantiles=8),
+        embed_dim=32,
+        depth=2,
+        n_heads=4,
+    )
+    student = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    teacher = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    student.eval()
+    teacher.eval()
+    for parameter in teacher.parameters():
+        parameter.requires_grad_(False)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    obs.action_mask.max_launch[:, 0, 0] = 8
+    obs.action_mask.max_launch[:, 1, 1] = 4
+    output = student(obs)
+
+    inline = student.evaluate_actions_with_teacher(
+        obs,
+        output.actions,
+        teacher,
+        compute_teacher_action_kl=True,
+        compute_teacher_value=True,
+    )
+    cached_targets = teacher.compute_teacher_distillation_targets(
+        obs,
+        output.actions,
+        compute_action_kl=True,
+        compute_value=True,
+    )
+    cached = student.evaluate_actions_with_cached_teacher(
+        obs,
+        output.actions,
+        cached_targets,
+        compute_teacher_action_kl=True,
+        compute_teacher_value=True,
+    )
+
+    assert inline.action_kl is not None
+    assert cached.action_kl is not None
+    assert torch.allclose(
+        inline.action_kl.per_player_entity,
+        cached.action_kl.per_player_entity,
+    )
+    assert torch.allclose(inline.action_kl.launch, cached.action_kl.launch)
+    assert torch.allclose(inline.action_kl.event, cached.action_kl.event)
+    assert inline.action_kl.target is not None
+    assert cached.action_kl.target is not None
+    assert torch.allclose(inline.action_kl.target, cached.action_kl.target)
+    assert inline.action_kl.components.keys() == cached.action_kl.components.keys()
+    for key, value in inline.action_kl.components.items():
+        assert torch.allclose(value, cached.action_kl.components[key])
+
+    assert inline.teacher_winner_probabilities is not None
+    assert cached.teacher_winner_probabilities is not None
+    assert torch.allclose(
+        inline.teacher_winner_probabilities,
+        cached.teacher_winner_probabilities,
+    )
+    assert inline.student_winner_log_probabilities is not None
+    assert cached.student_winner_log_probabilities is not None
+    assert torch.allclose(
+        inline.student_winner_log_probabilities,
+        cached.student_winner_log_probabilities,
+    )
+    assert torch.allclose(
+        inline.student.log_probs.per_player_entity,
+        cached.student.log_probs.per_player_entity,
+    )
+    assert torch.allclose(inline.student.values, cached.student.values)
+
+
+def test_cached_teacher_distillation_value_only_skips_action_params() -> None:
+    torch.manual_seed(17)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionDiscreteTargetsConfig(
+        max_per_planet_launches=1,
+        min_fleet_size=2,
+    )
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(),
+        embed_dim=16,
+        depth=1,
+        n_heads=4,
+    )
+    student = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    teacher = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    student.eval()
+    teacher.eval()
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    output = student(obs)
+
+    cached_targets = teacher.compute_teacher_distillation_targets(
+        obs,
+        output.actions,
+        compute_action_kl=False,
+        compute_value=True,
+    )
+    assert cached_targets.action_params is None
+    assert cached_targets.winner_probabilities is not None
+
+    cached = student.evaluate_actions_with_cached_teacher(
+        obs,
+        output.actions,
+        cached_targets,
+        compute_teacher_action_kl=False,
+        compute_teacher_value=True,
+    )
+    assert cached.action_kl is None
+    assert cached.teacher_winner_probabilities is not None
+
+
+def test_supports_cached_teacher_distillation_by_actor() -> None:
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    targets_model = _model(
+        StatelessTransformerV1Config(
+            actor=ActorDiscreteTargetsConfig(),
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+        ),
+        obs_spec=obs_spec,
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+    assert targets_model.supports_cached_teacher_distillation()
+    # Non-discrete-targets actors (pure, and likewise discrete_target_bins) do not
+    # implement the cached teacher-distillation path.
+    pure_model = _model(
+        StatelessTransformerV1Config(
+            actor=ActorPureConfig(),
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+        ),
+        obs_spec=obs_spec,
+    )
+    assert not pure_model.supports_cached_teacher_distillation()
+
+
 def test_logistic_mixture_kl_components_handles_empty_budget() -> None:
     shape = (0, 2)
     mixture_kl, logistic_kl = logistic_mixture_impl.logistic_mixture_kl_components(

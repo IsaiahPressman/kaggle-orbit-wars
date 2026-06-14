@@ -364,6 +364,60 @@ class DiscreteTargetsActor(nn.Module):
             raise ValueError(
                 "teacher and student discrete-target launch_mode must match"
             )
+        teacher_params = teacher_actor.teacher_policy_params(
+            teacher_inputs,
+            can_act,
+            max_launch,
+            actions,
+            min_fleet_size=min_fleet_size,
+        )
+        return self.kl_divergence_from_teacher_params(
+            actor_inputs,
+            teacher_params,
+            can_act,
+            max_launch,
+            actions,
+            min_fleet_size=min_fleet_size,
+        )
+
+    def teacher_policy_params(
+        self,
+        actor_inputs: DiscreteActorInputs,
+        can_act: torch.Tensor,
+        max_launch: torch.Tensor,
+        actions: DiscreteTargetActions,
+        *,
+        min_fleet_size: int,
+    ) -> DiscreteTargetPolicyParams:
+        """Frozen teacher distribution params for the taken action.
+
+        This is the teacher half of :meth:`kl_divergence`, factored out so the
+        result can be precomputed once per rollout and cached for reuse across
+        update minibatches (see ``compute_teacher_distillation_targets``). The
+        params depend on the rollout ``actions`` (via the selected target), which
+        are fixed for the iteration, so the cached value stays valid.
+        """
+        target = actions.target[..., 0]
+        with torch.no_grad():
+            selection = self._selection_params(actor_inputs, can_act)
+            return self._policy_params_for_selected_target(
+                selection,
+                actor_inputs.source,
+                max_launch,
+                target.clamp(0, selection.target_values.shape[2] - 1),
+                min_fleet_size=min_fleet_size,
+            )
+
+    def kl_divergence_from_teacher_params(
+        self,
+        actor_inputs: DiscreteActorInputs,
+        teacher_params: DiscreteTargetPolicyParams,
+        can_act: torch.Tensor,
+        max_launch: torch.Tensor,
+        actions: DiscreteTargetActions,
+        *,
+        min_fleet_size: int,
+    ) -> ModelActionKLDivergences:
         _require_discrete_actions_shape(
             actions,
             (
@@ -376,11 +430,6 @@ class DiscreteTargetsActor(nn.Module):
         launch = actions.launch[..., 0]
         target = actions.target[..., 0]
         student_selection = self._selection_params(actor_inputs, can_act)
-        with torch.no_grad():
-            teacher_selection = teacher_actor._selection_params(
-                teacher_inputs,
-                can_act,
-            )
         source_active = can_act.any(dim=-1) & (max_launch >= min_fleet_size)
         selected_target = target.clamp(0, student_selection.target_values.shape[2] - 1)
         student_params = self._policy_params_for_selected_target(
@@ -390,14 +439,6 @@ class DiscreteTargetsActor(nn.Module):
             selected_target,
             min_fleet_size=min_fleet_size,
         )
-        with torch.no_grad():
-            teacher_params = teacher_actor._policy_params_for_selected_target(
-                teacher_selection,
-                teacher_inputs.source,
-                max_launch,
-                selected_target.clamp(0, teacher_selection.target_values.shape[2] - 1),
-                min_fleet_size=min_fleet_size,
-            )
 
         launch_kl = discrete_launch_kl(
             teacher_params,
