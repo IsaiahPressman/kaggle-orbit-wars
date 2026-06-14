@@ -5,6 +5,7 @@ from contextlib import AbstractContextManager, nullcontext
 from typing import Literal, Protocol, assert_never
 
 import torch
+import torch._dynamo
 
 from owl.model import BaseModelAPI, RecurrentTransformerV1, StatelessTransformerV1
 
@@ -44,6 +45,13 @@ def configure_torch() -> None:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
+    # DDPOptimizer splits a torch.compile'd module under DDP into one subgraph per
+    # ~25MB gradient bucket. For the 1B trunk that is ~150 subgraphs, and a bucket
+    # boundary that falls mid-block trips an AOTAutograd functionalization bug
+    # ("tensor does not have a device") that desyncs ranks on the next collective.
+    # Compiling the trunk as a single graph avoids the split bug; we give up some
+    # comm/compute overlap but gradients are identical to the split path.
+    torch._dynamo.config.optimize_ddp = False
 
 
 def autocast_context(
