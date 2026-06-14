@@ -29,6 +29,7 @@ from owl.rl import (
     DiscreteTargetActions,
     DiscreteTargetBinActionMask,
     DiscreteTargetBinActions,
+    EntityBasedBaseConfig,
     ObsBatch,
     ObsConfig,
     PureActionMask,
@@ -693,6 +694,11 @@ def _load_teacher_init_model(
     if not checkpoint_path.is_file():
         raise ValueError(f"teacher_init checkpoint does not exist: {checkpoint_path}")
     teacher_cfg = FullConfig.from_file(_checkpoint_config_path(checkpoint_path))
+    teacher_obs_spec = _teacher_obs_spec_for_student(
+        teacher_cfg.env.obs_spec,
+        student_obs_spec=student_cfg.env.obs_spec,
+        checkpoint_path=checkpoint_path,
+    )
     _validate_teacher_specs(
         teacher_cfg,
         student_cfg=student_cfg,
@@ -700,7 +706,7 @@ def _load_teacher_init_model(
     )
     teacher_model = _create_model(
         teacher_cfg.model,
-        obs_spec=teacher_cfg.env.obs_spec,
+        obs_spec=teacher_obs_spec,
         action_spec=teacher_cfg.env.action_spec,
     ).to(device)
     _load_model_weights(teacher_model, path=checkpoint_path, device=device)
@@ -736,10 +742,38 @@ def _validate_teacher_specs(
     student_cfg: FullConfig,
     checkpoint_path: Path,
 ) -> None:
-    if teacher_cfg.env.obs_spec != student_cfg.env.obs_spec:
-        raise ValueError(f"teacher obs_spec must match student: {checkpoint_path}")
+    _teacher_obs_spec_for_student(
+        teacher_cfg.env.obs_spec,
+        student_obs_spec=student_cfg.env.obs_spec,
+        checkpoint_path=checkpoint_path,
+    )
     if teacher_cfg.env.action_spec != student_cfg.env.action_spec:
         raise ValueError(f"teacher action_spec must match student: {checkpoint_path}")
+
+
+def _teacher_obs_spec_for_student(
+    teacher_obs_spec: ObsConfig,
+    *,
+    student_obs_spec: ObsConfig,
+    checkpoint_path: Path,
+) -> ObsConfig:
+    if not isinstance(teacher_obs_spec, EntityBasedBaseConfig) or not isinstance(
+        student_obs_spec, EntityBasedBaseConfig
+    ):
+        raise TypeError("teacher and student obs_spec must be entity-based")
+
+    adjusted_teacher_obs_spec = type(teacher_obs_spec).model_validate(
+        {
+            **teacher_obs_spec.model_dump(mode="python"),
+            "max_entities": student_obs_spec.max_entities,
+        }
+    )
+    if adjusted_teacher_obs_spec != student_obs_spec:
+        raise ValueError(
+            "teacher obs_spec must match student except max_entities: "
+            f"{checkpoint_path}"
+        )
+    return adjusted_teacher_obs_spec
 
 
 def _load_model_weights(

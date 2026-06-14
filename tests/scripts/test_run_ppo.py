@@ -16,6 +16,7 @@ from owl.rl import (
     MAX_PLANETS,
     ActionPureConfig,
     EntityBasedConfig,
+    EntityBasedExtV1Config,
     ObsBatch,
     PureActionMask,
 )
@@ -397,6 +398,76 @@ def test_resolve_teacher_init_path_uses_config_directory(tmp_path: Path) -> None
     resolved = run_ppo._resolve_teacher_init_path(cfg, tmp_path / "config.yaml")
 
     assert resolved.rl.teacher_init == (tmp_path / "teachers/checkpoint.pt").resolve()
+
+
+def test_teacher_obs_spec_for_student_allows_max_entities_mismatch() -> None:
+    student_obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    teacher_obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 5)
+
+    resolved = run_ppo._teacher_obs_spec_for_student(
+        teacher_obs_spec,
+        student_obs_spec=student_obs_spec,
+        checkpoint_path=Path("teacher.pt"),
+    )
+
+    assert resolved == student_obs_spec
+    assert teacher_obs_spec.max_entities == MAX_PLANETS + MAX_COMETS + 5
+
+
+def test_teacher_obs_spec_for_student_rejects_other_obs_mismatches() -> None:
+    student_obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    teacher_obs_spec = EntityBasedExtV1Config(max_entities=MAX_PLANETS + MAX_COMETS + 5)
+
+    with pytest.raises(ValueError, match="except max_entities"):
+        run_ppo._teacher_obs_spec_for_student(
+            teacher_obs_spec,
+            student_obs_spec=student_obs_spec,
+            checkpoint_path=Path("teacher.pt"),
+        )
+
+
+def test_load_teacher_init_model_uses_student_max_entities(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    student_obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    teacher_obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 5)
+    base_cfg = _full_config()
+    student_cfg = base_cfg.model_copy(
+        update={"env": base_cfg.env.model_copy(update={"obs_spec": student_obs_spec})}
+    )
+    teacher_cfg = base_cfg.model_copy(
+        update={"env": base_cfg.env.model_copy(update={"obs_spec": teacher_obs_spec})}
+    )
+    checkpoint_path = tmp_path / "teacher" / "checkpoint.pt"
+    checkpoint_path.parent.mkdir()
+    checkpoint_path.touch()
+    teacher_cfg.to_file(checkpoint_path.parent / "config.yaml")
+    teacher_model = torch.nn.Linear(1, 1)
+    created_obs_specs: list[object] = []
+
+    def fake_create_model(
+        _config: object,
+        *,
+        obs_spec: object,
+        action_spec: object,
+    ) -> torch.nn.Module:
+        del action_spec
+        created_obs_specs.append(obs_spec)
+        return teacher_model
+
+    monkeypatch.setattr(run_ppo, "_create_model", fake_create_model)
+    monkeypatch.setattr(run_ppo, "_load_model_weights", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(run_ppo, "_compile_eval_model", lambda *_args, **_kwargs: None)
+
+    loaded = run_ppo._load_teacher_init_model(
+        checkpoint_path,
+        student_cfg=student_cfg,
+        device=torch.device("cpu"),
+    )
+
+    assert loaded is teacher_model
+    assert created_obs_specs == [student_obs_spec]
 
 
 def test_fixed_teacher_fresh_launch_leaves_last_best_unseeded(

@@ -186,12 +186,14 @@ evaluation against last-best follows the same checkpoint lifecycle as a run
 without a teacher. `rl.teacher_init` points at a training checkpoint whose
 adjacent `config.yaml` is used to construct the teacher model before loading
 weights.
-The teacher architecture may differ from the student, but the observation and
-action specs must match exactly, and actor factorization details such as
-discrete-target launch mode or target-bin count must be compatible. Teacher
-models must be stateless; recurrent teachers are rejected because PPO teacher
-inference runs only from stored rollout segments. The frozen teacher trunk runs
-once per iteration in a chunked `no_grad` pass after rollout (chunk size
+The teacher architecture may differ from the student. Observation specs must
+match except for `max_entities`, where the teacher model uses the student
+capacity for rollout tensors; action specs must match exactly. Actor
+factorization details such as discrete-target launch mode or target-bin count
+must be compatible. Teacher models must be stateless; recurrent teachers are
+rejected because PPO teacher inference runs only from stored rollout segments.
+The frozen teacher trunk runs once per iteration in a chunked `no_grad` pass
+after rollout (chunk size
 `rl.teacher_segments_per_minibatch`, default `32` segments); its distribution
 targets are
 cached and each update minibatch consumes them without re-running the teacher
