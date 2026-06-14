@@ -6,7 +6,7 @@ env:
   action_spec:
     action_spec: discrete_targets
     min_fleet_size: 3
-    targeting_mode: anything_goes
+    targeting_mode: full_mask
   two_player_weight: 0.5
   pin_memory: true
 
@@ -45,7 +45,7 @@ rl:
   normalize_advantages: true
   eval_replay_games: 8
   teacher_mode: last_best
-  teacher_kl_coef: 0.002
-  teacher_value_coef: 0.002
+  teacher_kl_coef: 0.0025
+  teacher_value_coef: 0.0025
   compile_mode: default
   dtype: bfloat16
