@@ -170,13 +170,24 @@ class BaseModelAPI(nn.Module, ABC):
         )
 
     def supports_cached_teacher_distillation(self) -> bool:
-        """Whether this model supports the cached teacher-distillation path.
+        """Whether this model supports the cached teacher action-KL path.
 
         PPO precomputes teacher distillation targets once per iteration and
         consumes them per minibatch (``compute_teacher_distillation_targets`` /
-        ``evaluate_actions_with_cached_teacher``). Only models that implement that
-        path should return ``True``; the trainer rejects active teachers whose
-        student/teacher models return ``False`` instead of failing mid-training.
+        ``evaluate_actions_with_cached_teacher``). The action-KL path additionally
+        requires the discrete_targets actor; only models that implement it return
+        ``True``. The trainer rejects active teachers (with ``teacher_kl_coef`` >
+        0) whose student/teacher models return ``False`` instead of failing
+        mid-training.
+        """
+        return False
+
+    def supports_cached_value_distillation(self) -> bool:
+        """Whether this model supports the cached teacher value-distillation path.
+
+        Value distillation only uses the critic's winner distribution, so it is
+        actor-agnostic; this is a looser condition than
+        ``supports_cached_teacher_distillation``.
         """
         return False
 

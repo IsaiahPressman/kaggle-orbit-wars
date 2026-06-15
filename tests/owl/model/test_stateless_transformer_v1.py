@@ -2809,8 +2809,10 @@ def test_supports_cached_teacher_distillation_by_actor() -> None:
         action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
     )
     assert targets_model.supports_cached_teacher_distillation()
+    assert targets_model.supports_cached_value_distillation()
     # Non-discrete-targets actors (pure, and likewise discrete_target_bins) do not
-    # implement the cached teacher-distillation path.
+    # implement the cached action-KL path, but value distillation is
+    # actor-agnostic, so it stays supported.
     pure_model = _model(
         StatelessTransformerV1Config(
             actor=ActorPureConfig(),
@@ -2821,6 +2823,7 @@ def test_supports_cached_teacher_distillation_by_actor() -> None:
         obs_spec=obs_spec,
     )
     assert not pure_model.supports_cached_teacher_distillation()
+    assert pure_model.supports_cached_value_distillation()
 
 
 def test_logistic_mixture_kl_components_handles_empty_budget() -> None:

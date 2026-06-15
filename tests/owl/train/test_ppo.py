@@ -2387,6 +2387,89 @@ def test_fixed_teacher_rejects_discrete_target_launch_mode_mismatch() -> None:
         )
 
 
+def test_cached_teacher_matches_inline_on_segment_major_rollout() -> None:
+    torch.manual_seed(0)
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model_config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(
+            n_action_mixtures=2,
+            entropy_ship_quantiles=8,
+        ),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    model = StatelessTransformerV1(
+        model_config,
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    teacher = StatelessTransformerV1(
+        model_config,
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    model.reset_parameters()
+    teacher.reset_parameters()
+    model.eval()
+    teacher.eval()
+    for parameter in teacher.parameters():
+        parameter.requires_grad_(False)
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(horizon=3, segments_per_minibatch=1),
+        device=torch.device("cpu"),
+        teacher_model=teacher,
+        teacher_active=True,
+    )
+    trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+
+    inline = model.evaluate_actions_with_teacher(
+        segments.obs,
+        segments.actions,
+        teacher,
+        compute_teacher_action_kl=True,
+        compute_teacher_value=True,
+    )
+    cached_targets = teacher.compute_teacher_distillation_targets(
+        segments.obs,
+        segments.actions,
+        compute_action_kl=True,
+        compute_value=True,
+    )
+    cached = model.evaluate_actions_with_cached_teacher(
+        segments.obs,
+        segments.actions,
+        cached_targets,
+        compute_teacher_action_kl=True,
+        compute_teacher_value=True,
+    )
+
+    assert inline.action_kl is not None
+    assert cached.action_kl is not None
+    # Segment-major [N, T, ...] outputs exercise the cache flatten/unflatten
+    # round-trip that the PPO update actually uses.
+    assert cached.action_kl.per_player_entity.shape[:2] == (env.n_envs, 3)
+    assert torch.allclose(
+        inline.action_kl.per_player_entity,
+        cached.action_kl.per_player_entity,
+    )
+    assert torch.allclose(inline.action_kl.launch, cached.action_kl.launch)
+    assert torch.allclose(inline.action_kl.event, cached.action_kl.event)
+    assert inline.action_kl.target is not None
+    assert cached.action_kl.target is not None
+    assert torch.allclose(inline.action_kl.target, cached.action_kl.target)
+    assert inline.teacher_winner_probabilities is not None
+    assert cached.teacher_winner_probabilities is not None
+    assert torch.allclose(
+        inline.teacher_winner_probabilities,
+        cached.teacher_winner_probabilities,
+    )
+
+
 def test_recurrent_transformer_train_iteration_keeps_parameters_finite() -> None:
     torch.manual_seed(0)
     env = TinyDiscreteTargetEnv(n_envs=2)

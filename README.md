@@ -195,9 +195,10 @@ rejected because PPO teacher inference runs only from stored rollout segments.
 The frozen teacher trunk runs once per iteration in a chunked `no_grad` pass
 after rollout (chunk size
 `rl.teacher_segments_per_minibatch`, default `32` segments); its distribution
-targets are
-cached and each update minibatch consumes them without re-running the teacher
-trunk.
+targets are cached and each update minibatch consumes them without re-running
+the teacher trunk. The cached action-KL path supports only the `discrete_targets`
+actor without player-count adapters (a fixed teacher must also match the
+student's launch mode); value distillation is actor-agnostic.
 `rl.teacher_kl_coef` and `rl.teacher_value_coef` weight the action KL and
 per-state winner-distribution cross-entropy stabilization losses; both default
 to `0.001`.

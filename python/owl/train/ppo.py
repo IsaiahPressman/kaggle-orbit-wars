@@ -533,18 +533,27 @@ class PPOTrainer:
                 batch_size=self.n_envs,
                 device=self.device,
             )
-            teacher_losses_enabled = (
-                self.config.teacher_kl_coef > 0.0
-                or self.config.teacher_value_coef > 0.0
-            )
-            if teacher_losses_enabled and not (
-                unwrap_model(self.model).supports_cached_teacher_distillation()
+            student_model = unwrap_model(self.model)
+            # The action-KL path runs through the discrete_targets actor.
+            if self.config.teacher_kl_coef > 0.0 and not (
+                student_model.supports_cached_teacher_distillation()
                 and teacher_model.supports_cached_teacher_distillation()
             ):
                 raise ValueError(
-                    "teacher distillation requires the discrete_targets actor "
-                    "without player-count adapters for both the student and the "
-                    "teacher model"
+                    "teacher action-KL distillation (rl.teacher_kl_coef > 0) "
+                    "requires the discrete_targets actor without player-count "
+                    "adapters for both the student and the teacher model"
+                )
+            if self.config.teacher_value_coef > 0.0 and not (
+                student_model.supports_cached_value_distillation()
+                and teacher_model.supports_cached_value_distillation()
+            ):
+                # Value distillation is actor-agnostic but still goes through the
+                # cached path, which does not support player-count adapters.
+                raise ValueError(
+                    "teacher value distillation (rl.teacher_value_coef > 0) "
+                    "requires the student and teacher models to support the cached "
+                    "distillation path (no player-count adapters)"
                 )
             if (
                 self.config.teacher_mode == "fixed"

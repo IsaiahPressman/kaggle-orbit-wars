@@ -1103,6 +1103,9 @@ class StatelessTransformerV1(BaseModelAPI):
             self.actor, DiscreteTargetsActor
         )
 
+    def supports_cached_value_distillation(self) -> bool:
+        return not self.player_count_adapters
+
     def compute_teacher_distillation_targets(
         self,
         obs: ObsBatch,
