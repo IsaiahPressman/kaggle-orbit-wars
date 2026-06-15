@@ -41,7 +41,6 @@ def test_ppo_config_validates_with_pydantic() -> None:
     assert config.teacher_init is None
     assert config.teacher_kl_coef == pytest.approx(0.001)
     assert config.teacher_value_coef == pytest.approx(0.001)
-    assert config.teacher_segments_per_minibatch == 32
     assert config.ppo_clip_mode == "per_player"
     assert config.model_compile == "trunk"
     assert config.model_compile_mode == "max-autotune-no-cudagraphs"
@@ -73,12 +72,6 @@ def test_ppo_config_validates_with_pydantic() -> None:
         PPOConfig(teacher_kl_coef=-0.1)
     with pytest.raises(ValueError, match="greater than or equal to 0"):
         PPOConfig(teacher_value_coef=-0.1)
-    assert (
-        PPOConfig(teacher_segments_per_minibatch=16).teacher_segments_per_minibatch
-        == 16
-    )
-    with pytest.raises(ValueError, match="greater than or equal to 1"):
-        PPOConfig(teacher_segments_per_minibatch=0)
     with pytest.raises(ValueError, match="Input should be 'last_best' or 'fixed'"):
         PPOConfig(teacher_mode="latest")
     with pytest.raises(ValueError, match="teacher_init is required"):

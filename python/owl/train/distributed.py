@@ -13,7 +13,6 @@ from torch.nn.parallel import DistributedDataParallel
 
 from owl.model import (
     BaseModelAPI,
-    CachedTeacherDistillationTargets,
     InputLayer,
     ModelActionKLDivergences,
     ModelActions,
@@ -181,7 +180,6 @@ class _DistributedModelDispatch(nn.Module):
         teacher: object | None = None,
         compute_teacher_action_kl: bool = True,
         compute_teacher_value: bool = True,
-        cached_teacher: object | None = None,
     ) -> object:
         if mode == "forward":
             if hidden_state is None:
@@ -237,25 +235,6 @@ class _DistributedModelDispatch(nn.Module):
                 cast(ObsBatch, obs),
                 cast(ModelActions, actions),
                 cast(BaseModelAPI, teacher),
-                hidden_state=hidden_state,
-                dones=cast(torch.Tensor | None, dones),
-                compute_teacher_action_kl=compute_teacher_action_kl,
-                compute_teacher_value=compute_teacher_value,
-            )
-        if mode == "evaluate_actions_with_cached_teacher":
-            if actions is None:
-                raise ValueError(
-                    "actions are required for evaluate_actions_with_cached_teacher"
-                )
-            if cached_teacher is None:
-                raise ValueError(
-                    "cached_teacher is required for "
-                    "evaluate_actions_with_cached_teacher"
-                )
-            return self.model.evaluate_actions_with_cached_teacher(
-                cast(ObsBatch, obs),
-                cast(ModelActions, actions),
-                cast(CachedTeacherDistillationTargets, cached_teacher),
                 hidden_state=hidden_state,
                 dones=cast(torch.Tensor | None, dones),
                 compute_teacher_action_kl=compute_teacher_action_kl,
@@ -371,33 +350,6 @@ class DistributedModelAdapter(BaseModelAPI):
                 teacher,
                 compute_teacher_action_kl,
                 compute_teacher_value,
-            ),
-        )
-
-    def evaluate_actions_with_cached_teacher(
-        self,
-        obs: ObsBatch,
-        actions: ModelActions,
-        teacher_targets: CachedTeacherDistillationTargets,
-        *,
-        hidden_state: ModelHiddenState | None = None,
-        dones: torch.Tensor | None = None,
-        compute_teacher_action_kl: bool = True,
-        compute_teacher_value: bool = True,
-    ) -> ModelTeacherEvaluation:
-        return cast(
-            ModelTeacherEvaluation,
-            self._ddp(
-                "evaluate_actions_with_cached_teacher",
-                obs,
-                actions,
-                False,
-                hidden_state,
-                dones,
-                None,
-                compute_teacher_action_kl,
-                compute_teacher_value,
-                teacher_targets,
             ),
         )
 

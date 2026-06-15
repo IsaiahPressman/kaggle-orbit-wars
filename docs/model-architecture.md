@@ -591,23 +591,15 @@ action-head divergences back to the player-step before applying
 `rl.teacher_kl_coef`. The value term uses cross-entropy from the teacher winner
 distribution to the student winner distribution over active player slots, then
 averages that per-state value over active states before applying
-`rl.teacher_value_coef`. The teacher trunk runs once per iteration over the
-stored rollout segments, not once per update minibatch. Teacher models must be
-stateless; trainers reject teachers that require recurrent hidden state.
+`rl.teacher_value_coef`. Teacher inference is performed only during PPO update
+minibatches from stored rollout segments. Teacher models must be stateless;
+trainers reject teachers that require recurrent hidden state.
 
-When a teacher is active, PPO precomputes the teacher's contribution after
-rollout via `compute_teacher_distillation_targets(...)`: a chunked
-`torch.no_grad()` pass (chunk size `rl.teacher_segments_per_minibatch` segments) that
-caches the teacher action-distribution params (`DiscreteTargetPolicyParams`) and
-winner probabilities as a `CachedTeacherDistillationTargets` in segment-major
-layout. Each update minibatch then calls `evaluate_actions_with_cached_teacher(...)`,
-which encodes the student once (with grad), returns the normal PPO replay
-log-probs, entropy, and values from that encoding, and computes the action KL
-against the cached teacher params via the actor's
-`kl_divergence_from_teacher_params(...)` — without re-running the teacher trunk.
-The combined `evaluate_actions_with_teacher(...)` path (one student pass plus a
-no-grad teacher pass) is retained and is bit-for-bit equivalent to the cached
-path. `evaluate_action_kl(...)` remains as a
+When a teacher is active, PPO calls `evaluate_actions_with_teacher(...)` instead
+of separate student replay and KL passes. The method encodes the student once,
+returns the normal PPO replay log-probs, entropy, and values from that encoding,
+and encodes the teacher once under `torch.no_grad()` to produce teacher value
+targets and KL reference distributions. `evaluate_action_kl(...)` remains as a
 compatibility path, but PPO updates do not use it. The KL comparison uses the
 same masks and factorization gates used by PPO replay. Non-acting source rows
 contribute zero KL. For binary discrete-target launch mode, no-launch replay
