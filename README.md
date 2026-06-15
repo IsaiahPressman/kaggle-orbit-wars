@@ -191,9 +191,15 @@ match except for `max_entities`, where the teacher model uses the student
 capacity for rollout tensors; action specs must match exactly. Actor
 factorization details such as discrete-target launch mode or target-bin count
 must be compatible. Teacher models must be stateless; recurrent teachers are
-rejected because PPO teacher inference runs only from stored rollout segments
-during the update. Teacher updates use one student replay evaluation and one
-no-grad teacher evaluation per PPO minibatch.
+rejected because PPO teacher inference runs only from stored rollout segments.
+The frozen teacher trunk runs once per iteration in a chunked `no_grad` pass
+after rollout (chunk size
+`rl.teacher_segments_per_minibatch`, default `32` segments); its distribution
+targets are cached and each update minibatch consumes them without re-running
+the teacher trunk. The cached action-KL path supports only the `discrete_targets`
+actor without player-count adapters (a fixed teacher must also match the
+student's launch mode). Value distillation does not use the actor KL path, but
+the trainer still requires matching action specs and non-adapter models.
 `rl.teacher_kl_coef` and `rl.teacher_value_coef` weight the action KL and
 per-state winner-distribution cross-entropy stabilization losses; both default
 to `0.001`.
@@ -287,6 +293,8 @@ Policy logs include total entropy plus policy-specific component means such as
 Teacher runs additionally log `teacher/kl`, `teacher/value_cross_entropy`,
 weighted loss terms, and per-action KL components such as
 `teacher/launch_kl`, `teacher/target_kl`, or `teacher/fleet_size_full_kl`.
+Teacher precompute timing is logged as `time/teacher_seconds` and
+`perf/teacher_sps`; both are `0.0` when no teacher precompute runs.
 
 ## Replay capture
 

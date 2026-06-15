@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 import torch
 from torch import nn
 
 from owl.rl import ActionBundle, ActionConfig, ObsBatch
+
+if TYPE_CHECKING:
+    from owl.model.stateless_transformer_v1 import CachedTeacherDistillationTargets
 
 InputLayer = nn.Module | nn.Parameter
 ModelActions: TypeAlias = ActionBundle
@@ -138,6 +141,55 @@ class BaseModelAPI(nn.Module, ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not implement teacher evaluation"
         )
+
+    def compute_teacher_distillation_targets(
+        self,
+        obs: ObsBatch,
+        actions: ModelActions,
+        *,
+        compute_action_kl: bool = True,
+        compute_value: bool = True,
+    ) -> CachedTeacherDistillationTargets:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement teacher distillation targets"
+        )
+
+    def evaluate_actions_with_cached_teacher(
+        self,
+        obs: ObsBatch,
+        actions: ModelActions,
+        teacher_targets: CachedTeacherDistillationTargets,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+        dones: torch.Tensor | None = None,
+        compute_teacher_action_kl: bool = True,
+        compute_teacher_value: bool = True,
+    ) -> ModelTeacherEvaluation:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement cached teacher evaluation"
+        )
+
+    def supports_cached_teacher_distillation(self) -> bool:
+        """Whether this model supports the cached teacher action-KL path.
+
+        PPO precomputes teacher distillation targets once per iteration and
+        consumes them per minibatch (``compute_teacher_distillation_targets`` /
+        ``evaluate_actions_with_cached_teacher``). The action-KL path additionally
+        requires the discrete_targets actor; only models that implement it return
+        ``True``. The trainer rejects active teachers (with ``teacher_kl_coef`` >
+        0) whose student/teacher models return ``False`` instead of failing
+        mid-training.
+        """
+        return False
+
+    def supports_cached_value_distillation(self) -> bool:
+        """Whether this model supports the cached teacher value-distillation path.
+
+        Value distillation only uses the critic's winner distribution, so it is
+        actor-agnostic; this is a looser condition than
+        ``supports_cached_teacher_distillation``.
+        """
+        return False
 
     def serve(
         self,

@@ -5,6 +5,7 @@ from typing import Any
 import owl.model.actor.discrete_target_bins as discrete_target_bins_impl
 import owl.model.actor.discrete_targets as discrete_targets_impl
 import owl.model.actor.logistic_mixture as logistic_mixture_impl
+import owl.model.actor.pure as pure_actor_impl
 import owl.model.stateless_transformer_v1 as model_impl
 import pytest
 import torch
@@ -2578,11 +2579,9 @@ def test_discrete_targets_teacher_kl_skips_target_and_size_for_no_launch(
         ships=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
     )
     size_kl_rows: list[int] = []
-    original_size_kl = discrete_targets_impl.logistic_mixture_kl_components
+    original_size_kl = discrete_targets_impl.logistic_mixture_kl
 
-    def recording_size_kl(
-        *args: Any, **kwargs: Any
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def recording_size_kl(*args: Any, **kwargs: Any) -> torch.Tensor:
         residual_budget = args[6]
         assert isinstance(residual_budget, torch.Tensor)
         size_kl_rows.append(residual_budget.numel())
@@ -2590,7 +2589,7 @@ def test_discrete_targets_teacher_kl_skips_target_and_size_for_no_launch(
 
     monkeypatch.setattr(
         discrete_targets_impl,
-        "logistic_mixture_kl_components",
+        "logistic_mixture_kl",
         recording_size_kl,
     )
 
@@ -2610,9 +2609,225 @@ def test_discrete_targets_teacher_kl_skips_target_and_size_for_no_launch(
     assert size_kl_rows == [0]
 
 
-def test_logistic_mixture_kl_components_handles_empty_budget() -> None:
+def test_discrete_targets_kl_from_teacher_params_matches_kl_divergence() -> None:
+    torch.manual_seed(7)
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(),
+        embed_dim=16,
+        depth=1,
+        n_heads=4,
+    )
+    student = DiscreteTargetsActor(config.actor, transformer_config=config)
+    teacher = DiscreteTargetsActor(config.actor, transformer_config=config)
+    student_inputs = _discrete_actor_inputs(
+        torch.randn((2, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    )
+    teacher_inputs = _discrete_actor_inputs(
+        torch.randn((2, 4, ACTION_ENTITY_SLOTS, config.embed_dim))
+    )
+    can_act = torch.zeros(
+        (2, 4, ACTION_ENTITY_SLOTS, ACTION_ENTITY_SLOTS),
+        dtype=torch.bool,
+    )
+    can_act[:, 0, 0, 1] = True
+    can_act[:, 0, 1, 0] = True
+    max_launch = torch.zeros((2, 4, ACTION_ENTITY_SLOTS), dtype=torch.int64)
+    max_launch[:, 0, 0] = 10
+    max_launch[:, 0, 1] = 8
+    actions = DiscreteTargetActions(
+        launch=torch.ones((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.bool),
+        target=torch.ones((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
+        ships=torch.zeros((2, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
+    )
+
+    reference = student.kl_divergence(
+        student_inputs,
+        teacher,
+        teacher_inputs,
+        can_act,
+        max_launch,
+        actions,
+        min_fleet_size=6,
+    )
+    teacher_params = teacher.teacher_policy_params(
+        teacher_inputs,
+        can_act,
+        max_launch,
+        actions,
+        min_fleet_size=6,
+    )
+    split = student.kl_divergence_from_teacher_params(
+        student_inputs,
+        teacher_params,
+        can_act,
+        max_launch,
+        actions,
+        min_fleet_size=6,
+    )
+
+    assert torch.allclose(reference.per_player_entity, split.per_player_entity)
+    assert torch.allclose(reference.launch, split.launch)
+    assert torch.allclose(reference.event, split.event)
+    assert reference.target is not None
+    assert split.target is not None
+    assert torch.allclose(reference.target, split.target)
+    assert reference.components.keys() == split.components.keys()
+    for key, value in reference.components.items():
+        assert torch.allclose(value, split.components[key])
+
+
+def test_cached_teacher_distillation_matches_inline_teacher() -> None:
+    torch.manual_seed(13)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionDiscreteTargetsConfig(
+        max_per_planet_launches=1,
+        min_fleet_size=2,
+    )
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(n_action_mixtures=3, entropy_ship_quantiles=8),
+        embed_dim=32,
+        depth=2,
+        n_heads=4,
+    )
+    student = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    teacher = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    student.eval()
+    teacher.eval()
+    for parameter in teacher.parameters():
+        parameter.requires_grad_(False)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    obs.action_mask.max_launch[:, 0, 0] = 8
+    obs.action_mask.max_launch[:, 1, 1] = 4
+    output = student(obs)
+
+    inline = student.evaluate_actions_with_teacher(
+        obs,
+        output.actions,
+        teacher,
+        compute_teacher_action_kl=True,
+        compute_teacher_value=True,
+    )
+    cached_targets = teacher.compute_teacher_distillation_targets(
+        obs,
+        output.actions,
+        compute_action_kl=True,
+        compute_value=True,
+    )
+    cached = student.evaluate_actions_with_cached_teacher(
+        obs,
+        output.actions,
+        cached_targets,
+        compute_teacher_action_kl=True,
+        compute_teacher_value=True,
+    )
+
+    assert inline.action_kl is not None
+    assert cached.action_kl is not None
+    assert torch.allclose(
+        inline.action_kl.per_player_entity,
+        cached.action_kl.per_player_entity,
+    )
+    assert torch.allclose(inline.action_kl.launch, cached.action_kl.launch)
+    assert torch.allclose(inline.action_kl.event, cached.action_kl.event)
+    assert inline.action_kl.target is not None
+    assert cached.action_kl.target is not None
+    assert torch.allclose(inline.action_kl.target, cached.action_kl.target)
+    assert inline.action_kl.components.keys() == cached.action_kl.components.keys()
+    for key, value in inline.action_kl.components.items():
+        assert torch.allclose(value, cached.action_kl.components[key])
+
+    assert inline.teacher_winner_probabilities is not None
+    assert cached.teacher_winner_probabilities is not None
+    assert torch.allclose(
+        inline.teacher_winner_probabilities,
+        cached.teacher_winner_probabilities,
+    )
+    assert inline.student_winner_log_probabilities is not None
+    assert cached.student_winner_log_probabilities is not None
+    assert torch.allclose(
+        inline.student_winner_log_probabilities,
+        cached.student_winner_log_probabilities,
+    )
+    assert torch.allclose(
+        inline.student.log_probs.per_player_entity,
+        cached.student.log_probs.per_player_entity,
+    )
+    assert torch.allclose(inline.student.values, cached.student.values)
+
+
+def test_cached_teacher_distillation_value_only_skips_action_params() -> None:
+    torch.manual_seed(17)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionDiscreteTargetsConfig(
+        max_per_planet_launches=1,
+        min_fleet_size=2,
+    )
+    config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(),
+        embed_dim=16,
+        depth=1,
+        n_heads=4,
+    )
+    student = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    teacher = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    student.eval()
+    teacher.eval()
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    output = student(obs)
+
+    cached_targets = teacher.compute_teacher_distillation_targets(
+        obs,
+        output.actions,
+        compute_action_kl=False,
+        compute_value=True,
+    )
+    assert cached_targets.action_params is None
+    assert cached_targets.winner_probabilities is not None
+
+    cached = student.evaluate_actions_with_cached_teacher(
+        obs,
+        output.actions,
+        cached_targets,
+        compute_teacher_action_kl=False,
+        compute_teacher_value=True,
+    )
+    assert cached.action_kl is None
+    assert cached.teacher_winner_probabilities is not None
+
+
+def test_supports_cached_teacher_distillation_by_actor() -> None:
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    targets_model = _model(
+        StatelessTransformerV1Config(
+            actor=ActorDiscreteTargetsConfig(),
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+        ),
+        obs_spec=obs_spec,
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+    assert targets_model.supports_cached_teacher_distillation()
+    assert targets_model.supports_cached_value_distillation()
+    # Non-discrete-targets actors (pure, and likewise discrete_target_bins) do not
+    # implement the cached action-KL path, but value distillation is
+    # actor-agnostic, so it stays supported.
+    pure_model = _model(
+        StatelessTransformerV1Config(
+            actor=ActorPureConfig(),
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+        ),
+        obs_spec=obs_spec,
+    )
+    assert not pure_model.supports_cached_teacher_distillation()
+    assert pure_model.supports_cached_value_distillation()
+
+
+def test_logistic_mixture_kl_handles_empty_budget() -> None:
     shape = (0, 2)
-    mixture_kl, logistic_kl = logistic_mixture_impl.logistic_mixture_kl_components(
+    logistic_kl = logistic_mixture_impl.logistic_mixture_kl(
         torch.empty(shape),
         torch.empty(shape),
         torch.empty(shape),
@@ -2623,8 +2838,160 @@ def test_logistic_mixture_kl_components_handles_empty_budget() -> None:
         min_fleet_size=3,
     )
 
-    assert mixture_kl.shape == (0,)
     assert logistic_kl.shape == (0,)
+
+
+def test_logistic_mixture_kl_ignores_component_permutation() -> None:
+    teacher_mix_logits = torch.tensor([[2.0, -0.5]])
+    teacher_mu = torch.tensor([[2.0, 8.0]])
+    teacher_scale = torch.tensor([[0.7, 1.3]])
+    student_mix_logits = teacher_mix_logits.flip(-1)
+    student_mu = teacher_mu.flip(-1)
+    student_scale = teacher_scale.flip(-1)
+
+    logistic_kl = logistic_mixture_impl.logistic_mixture_kl(
+        teacher_mix_logits,
+        teacher_mu,
+        teacher_scale,
+        student_mix_logits,
+        student_mu,
+        student_scale,
+        torch.tensor([12], dtype=torch.int64),
+        min_fleet_size=1,
+    )
+
+    assert torch.allclose(logistic_kl, torch.zeros_like(logistic_kl), atol=1e-6)
+
+
+def test_angle_policy_kl_ignores_component_permutation() -> None:
+    teacher_mix_logits = torch.tensor([[1.5, -0.25]])
+    teacher_loc = torch.tensor([[0.2, 2.4]])
+    teacher_kappa = torch.tensor([[3.0, 6.0]])
+    student_mix_logits = teacher_mix_logits.flip(-1)
+    student_loc = teacher_loc.flip(-1)
+    student_kappa = teacher_kappa.flip(-1)
+    zeros = torch.zeros_like(teacher_loc)
+    ones = torch.ones_like(teacher_loc)
+    teacher_params = PolicyParams(
+        continue_logits=torch.zeros(teacher_mix_logits.shape[:-1]),
+        angle_mix_logits=teacher_mix_logits,
+        angle_log_w=F.log_softmax(teacher_mix_logits, dim=-1),
+        loc=teacher_loc,
+        kappa=teacher_kappa,
+        size_mix_logits=zeros,
+        size_mu=zeros,
+        size_scale=ones,
+    )
+    student_params = PolicyParams(
+        continue_logits=torch.zeros(student_mix_logits.shape[:-1]),
+        angle_mix_logits=student_mix_logits,
+        angle_log_w=F.log_softmax(student_mix_logits, dim=-1),
+        loc=student_loc,
+        kappa=student_kappa,
+        size_mix_logits=zeros,
+        size_mu=zeros,
+        size_scale=ones,
+    )
+
+    angle_kl = pure_actor_impl.angle_policy_kl(teacher_params, student_params)
+
+    assert torch.allclose(angle_kl, torch.zeros_like(angle_kl), atol=1e-6)
+
+
+def test_angle_policy_kl_resolves_sharp_component() -> None:
+    teacher_mix_logits = torch.tensor([[0.0]])
+    teacher_loc = torch.tensor([[0.001]])
+    teacher_kappa = torch.tensor([[1_000_000.0]])
+    student_loc = torch.tensor([[0.002]])
+    zeros = torch.zeros_like(teacher_mix_logits)
+    ones = torch.ones_like(teacher_mix_logits)
+    teacher_params = PolicyParams(
+        continue_logits=torch.zeros(teacher_mix_logits.shape[:-1]),
+        angle_mix_logits=teacher_mix_logits,
+        angle_log_w=F.log_softmax(teacher_mix_logits, dim=-1),
+        loc=teacher_loc,
+        kappa=teacher_kappa,
+        size_mix_logits=zeros,
+        size_mu=zeros,
+        size_scale=ones,
+    )
+    student_params = PolicyParams(
+        continue_logits=torch.zeros(teacher_mix_logits.shape[:-1]),
+        angle_mix_logits=teacher_mix_logits,
+        angle_log_w=F.log_softmax(teacher_mix_logits, dim=-1),
+        loc=student_loc,
+        kappa=teacher_kappa,
+        size_mix_logits=zeros,
+        size_mu=zeros,
+        size_scale=ones,
+    )
+
+    angle_kl = pure_actor_impl.angle_policy_kl(teacher_params, student_params)
+    expected_kappa = teacher_kappa.double()
+    i1_over_i0 = torch.special.i1e(expected_kappa) / torch.special.i0e(expected_kappa)
+    expected = (
+        expected_kappa
+        * i1_over_i0
+        * (1.0 - torch.cos(teacher_loc.double() - student_loc.double()))
+    )
+
+    assert torch.allclose(
+        angle_kl,
+        expected.squeeze(-1).to(dtype=angle_kl.dtype),
+        rtol=1e-2,
+        atol=1e-3,
+    )
+
+
+def test_angle_policy_kl_matches_closed_form_for_near_aligned_sharp_component() -> None:
+    # Regression guard for float32 catastrophic cancellation: at large kappa with
+    # a tiny teacher/student loc difference, kappa*cos(theta-loc) loses all
+    # precision in float32 (cos of the small difference rounds to 1.0), inflating
+    # the KL ~100%. The quadrature must match the closed-form Von Mises KL because
+    # the angle math now runs in float64. dloc=1e-4 is the regime float32 breaks
+    # (the dloc=1e-3 case above stays accurate even in float32, so it cannot guard
+    # this bug).
+    teacher_mix_logits = torch.tensor([[0.0]])
+    teacher_loc = torch.tensor([[0.0]])
+    student_loc = torch.tensor([[1e-4]])
+    kappa = torch.tensor([[1_000_000.0]])
+    zeros = torch.zeros_like(teacher_mix_logits)
+    ones = torch.ones_like(teacher_mix_logits)
+    teacher_params = PolicyParams(
+        continue_logits=torch.zeros(teacher_mix_logits.shape[:-1]),
+        angle_mix_logits=teacher_mix_logits,
+        angle_log_w=F.log_softmax(teacher_mix_logits, dim=-1),
+        loc=teacher_loc,
+        kappa=kappa,
+        size_mix_logits=zeros,
+        size_mu=zeros,
+        size_scale=ones,
+    )
+    student_params = PolicyParams(
+        continue_logits=torch.zeros(teacher_mix_logits.shape[:-1]),
+        angle_mix_logits=teacher_mix_logits,
+        angle_log_w=F.log_softmax(teacher_mix_logits, dim=-1),
+        loc=student_loc,
+        kappa=kappa,
+        size_mix_logits=zeros,
+        size_mu=zeros,
+        size_scale=ones,
+    )
+
+    angle_kl = pure_actor_impl.angle_policy_kl(teacher_params, student_params)
+    expected_kappa = kappa.double()
+    i1_over_i0 = torch.special.i1e(expected_kappa) / torch.special.i0e(expected_kappa)
+    expected = (
+        expected_kappa
+        * i1_over_i0
+        * (1.0 - torch.cos(teacher_loc.double() - student_loc.double()))
+    ).squeeze(-1)
+
+    assert torch.allclose(
+        angle_kl.double(),
+        expected,
+        rtol=0.1,
+    )
 
 
 def test_discrete_target_bins_actor_adds_pairwise_bias_before_masking() -> None:

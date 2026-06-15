@@ -14,14 +14,13 @@ from owl.model.actor.common import (
     OutputProjectionMLP,
     binary_entropy_from_logits,
     binary_kl_from_logits,
-    categorical_kl_from_logits,
     sample_launch,
 )
 from owl.model.actor.config import ActorPureConfig
 from owl.model.actor.logistic_mixture import (
     discretized_logistic_mixture_log_prob,
     log_interpolate,
-    logistic_mixture_kl_components,
+    logistic_mixture_kl,
     sample_discretized_logistic_mixture,
     truncated_logistic_mixture_entropy,
 )
@@ -441,23 +440,19 @@ class PureActor(nn.Module):
             _index_policy_params(teacher_params, event_mask),
             _index_policy_params(student_params, event_mask),
         )
-        size_mixture_kl = torch.zeros_like(angle_kl)
         size_logistic_kl = torch.zeros_like(angle_kl)
-        compact_size_mixture_kl, compact_size_logistic_kl = (
-            logistic_mixture_kl_components(
-                teacher_params.size_mix_logits[event_mask],
-                teacher_params.size_mu[event_mask],
-                teacher_params.size_scale[event_mask],
-                student_params.size_mix_logits[event_mask],
-                student_params.size_mu[event_mask],
-                student_params.size_scale[event_mask],
-                max_launch[event_mask],
-                min_fleet_size=min_fleet_size,
-            )
+        compact_size_logistic_kl = logistic_mixture_kl(
+            teacher_params.size_mix_logits[event_mask],
+            teacher_params.size_mu[event_mask],
+            teacher_params.size_scale[event_mask],
+            student_params.size_mix_logits[event_mask],
+            student_params.size_mu[event_mask],
+            student_params.size_scale[event_mask],
+            max_launch[event_mask],
+            min_fleet_size=min_fleet_size,
         )
-        size_mixture_kl[event_mask] = compact_size_mixture_kl
         size_logistic_kl[event_mask] = compact_size_logistic_kl
-        size_kl = size_mixture_kl + size_logistic_kl
+        size_kl = size_logistic_kl
         event_kl = angle_kl + size_kl
         per_player_entity_kl = launch_kl + event_kl
         return ModelActionKLDivergences(
@@ -468,7 +463,6 @@ class PureActor(nn.Module):
                 "launch": launch_kl,
                 "angle": angle_kl,
                 "fleet_size_full": size_kl,
-                "fleet_size_mixture": size_mixture_kl,
                 "fleet_size_logistic": size_logistic_kl,
                 "event": event_kl,
             },
@@ -899,81 +893,81 @@ def angle_policy_kl(
     teacher_params: PolicyParams,
     student_params: PolicyParams,
 ) -> torch.Tensor:
-    if (
-        teacher_params.angle_mix_logits.shape[-1]
-        != student_params.angle_mix_logits.shape[-1]
-    ):
-        return angle_policy_grid_kl(teacher_params, student_params)
-    mask = torch.ones_like(teacher_params.angle_mix_logits, dtype=torch.bool)
-    mixture_kl = categorical_kl_from_logits(
-        teacher_params.angle_mix_logits,
-        student_params.angle_mix_logits,
-        mask,
+    return angle_policy_quadrature_kl(teacher_params, student_params)
+
+
+def angle_policy_quadrature_kl(
+    teacher_params: PolicyParams,
+    student_params: PolicyParams,
+    *,
+    samples: int = 32,
+    window_std: float = 8.0,
+) -> torch.Tensor:
+    # Use float64 for the angle math: at large kappa the kappa*cos(theta-loc)
+    # term in von_mises_log_prob catastrophically cancels in float32 (cos of a
+    # small teacher/student loc difference rounds to 1.0), destroying the KL for
+    # sharp, near-aligned components -- exactly the regime this quadrature
+    # targets. The result is cast back below.
+    teacher_loc = teacher_params.loc.double()
+    teacher_kappa = teacher_params.kappa.double()
+    teacher_log_w = F.log_softmax(teacher_params.angle_mix_logits.double(), dim=-1)
+    teacher_mix_prob = teacher_log_w.exp()
+    student_log_w = F.log_softmax(student_params.angle_mix_logits.double(), dim=-1)
+    student_loc = student_params.loc.double()
+    student_kappa = student_params.kappa.double()
+
+    # Cover roughly window_std circular standard deviations for sharp components,
+    # and fall back to the full circle for broad components.
+    offsets = (
+        torch.arange(samples, device=teacher_loc.device, dtype=teacher_loc.dtype) + 0.5
+    ) * (2.0 / float(samples)) - 1.0
+    half_width = (window_std * teacher_kappa.clamp_min(1e-12).rsqrt()).clamp_max(
+        math.pi,
     )
-    teacher_mix_prob = torch.softmax(teacher_params.angle_mix_logits.float(), dim=-1)
-    component_kl = von_mises_kl(
-        teacher_params.loc,
-        teacher_params.kappa,
-        student_params.loc,
-        student_params.kappa,
+    theta = teacher_loc.unsqueeze(-1) + half_width.unsqueeze(-1) * offsets.view(
+        *((1,) * teacher_loc.ndim),
+        samples,
     )
-    return mixture_kl + (teacher_mix_prob * component_kl).sum(dim=-1)
+    component_log_prob = von_mises_log_prob(
+        theta,
+        teacher_loc.unsqueeze(-1),
+        teacher_kappa.unsqueeze(-1),
+    )
+    quadrature_weight = torch.softmax(component_log_prob, dim=-1)
+    teacher_log_prob = torch.logsumexp(
+        teacher_log_w.unsqueeze(-2).unsqueeze(-2)
+        + von_mises_log_prob(
+            theta.unsqueeze(-1),
+            teacher_loc.unsqueeze(-2).unsqueeze(-2),
+            teacher_kappa.unsqueeze(-2).unsqueeze(-2),
+        ),
+        dim=-1,
+    )
+    student_log_prob = torch.logsumexp(
+        student_log_w.unsqueeze(-2).unsqueeze(-2)
+        + von_mises_log_prob(
+            theta.unsqueeze(-1),
+            student_loc.unsqueeze(-2).unsqueeze(-2),
+            student_kappa.unsqueeze(-2).unsqueeze(-2),
+        ),
+        dim=-1,
+    )
+    component_kl = (quadrature_weight * (teacher_log_prob - student_log_prob)).sum(
+        dim=-1,
+    )
+    return (teacher_mix_prob * component_kl).sum(dim=-1).float()
 
 
 def angle_policy_grid_kl(
     teacher_params: PolicyParams,
     student_params: PolicyParams,
     *,
-    samples: int = 64,
+    samples: int = 32,
 ) -> torch.Tensor:
-    theta = torch.linspace(
-        0.0,
-        2.0 * math.pi,
-        samples + 1,
-        device=teacher_params.loc.device,
-        dtype=teacher_params.loc.dtype,
-    )[:-1]
-    view_shape = (*((1,) * teacher_params.loc.ndim), samples)
-    theta = theta.view(view_shape)
-    teacher_log_prob = torch.logsumexp(
-        teacher_params.angle_log_w.unsqueeze(-2)
-        + von_mises_log_prob(
-            theta,
-            teacher_params.loc.unsqueeze(-2),
-            teacher_params.kappa.unsqueeze(-2),
-        ),
-        dim=-1,
-    )
-    student_log_w = F.log_softmax(student_params.angle_mix_logits.float(), dim=-1)
-    student_log_prob = torch.logsumexp(
-        student_log_w.unsqueeze(-2)
-        + von_mises_log_prob(
-            theta,
-            student_params.loc.unsqueeze(-2),
-            student_params.kappa.unsqueeze(-2),
-        ),
-        dim=-1,
-    )
-    teacher_prob = teacher_log_prob.exp()
-    return (teacher_prob * (teacher_log_prob - student_log_prob)).mean(dim=-1) * (
-        2.0 * math.pi
-    )
-
-
-def von_mises_kl(
-    teacher_loc: torch.Tensor,
-    teacher_kappa: torch.Tensor,
-    student_loc: torch.Tensor,
-    student_kappa: torch.Tensor,
-) -> torch.Tensor:
-    teacher_log_i0 = torch.log(torch.special.i0e(teacher_kappa)) + teacher_kappa
-    student_log_i0 = torch.log(torch.special.i0e(student_kappa)) + student_kappa
-    teacher_a = torch.special.i1e(teacher_kappa) / torch.special.i0e(teacher_kappa)
-    return (
-        student_log_i0
-        - teacher_log_i0
-        + teacher_kappa * teacher_a
-        - student_kappa * teacher_a * torch.cos(teacher_loc - student_loc)
+    return angle_policy_quadrature_kl(
+        teacher_params,
+        student_params,
+        samples=samples,
     )
 
 

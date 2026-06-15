@@ -591,27 +591,42 @@ action-head divergences back to the player-step before applying
 `rl.teacher_kl_coef`. The value term uses cross-entropy from the teacher winner
 distribution to the student winner distribution over active player slots, then
 averages that per-state value over active states before applying
-`rl.teacher_value_coef`. Teacher inference is performed only during PPO update
-minibatches from stored rollout segments. Teacher models must be stateless;
-trainers reject teachers that require recurrent hidden state.
+`rl.teacher_value_coef`. The teacher trunk runs once per iteration over the
+stored rollout segments, not once per update minibatch. Teacher models must be
+stateless; trainers reject teachers that require recurrent hidden state.
 
-When a teacher is active, PPO calls `evaluate_actions_with_teacher(...)` instead
-of separate student replay and KL passes. The method encodes the student once,
-returns the normal PPO replay log-probs, entropy, and values from that encoding,
-and encodes the teacher once under `torch.no_grad()` to produce teacher value
-targets and KL reference distributions. `evaluate_action_kl(...)` remains as a
+When a teacher is active, PPO precomputes the teacher's contribution after
+rollout via `compute_teacher_distillation_targets(...)`: a chunked
+`torch.no_grad()` pass (chunk size `rl.teacher_segments_per_minibatch` segments) that
+caches the teacher action-distribution params (`DiscreteTargetPolicyParams`) and
+winner probabilities as a `CachedTeacherDistillationTargets` in segment-major
+layout. Each update minibatch then calls `evaluate_actions_with_cached_teacher(...)`,
+which encodes the student once (with grad), returns the normal PPO replay
+log-probs, entropy, and values from that encoding, and computes the action KL
+against the cached teacher params via the actor's
+`kl_divergence_from_teacher_params(...)` — without re-running the teacher trunk.
+The combined `evaluate_actions_with_teacher(...)` path (one student pass plus a
+no-grad teacher pass) is retained and is bit-for-bit equivalent to the cached
+path. The cached action-KL path supports only the discrete_targets actor without
+player-count adapters; a fixed teacher (`rl.teacher_mode: fixed`) must
+additionally share the student's launch mode. Value distillation
+(`rl.teacher_value_coef` > 0) only uses the critic winner distribution and does
+not require actor KL support, but the trainer still requires matching action
+specs and non-adapter models. `evaluate_action_kl(...)` remains as a
 compatibility path, but PPO updates do not use it. The KL comparison uses the
 same masks and factorization gates used by PPO replay. Non-acting source rows
 contribute zero KL. For binary discrete-target launch mode, no-launch replay
 rows include only the Bernoulli launch KL; target and fleet-size KL are computed
 only for rows where the replayed action launched. Discrete target-bin KL
 compares the target categorical and the selected target's fleet-bin categorical.
-Pure-action KL compares launch, angle, and selected fleet-size distributions for
-launched rows.
+Pure-action KL compares launch, marginal angle, and selected fleet-size
+distributions for launched rows. Angle KL is a permutation-invariant numerical
+integral over the marginal Von Mises mixture using component-centered
+quadrature points for each teacher angle component.
 
-Fleet-size KL is computed on the selected truncated logistic mixture. Matching
-mixture counts use aligned component terms; incompatible mixture counts fall
-back to the full marginal mixture where supported. Per-action portions are
-logged with the same component naming style as entropy logging, for example
-`launch`, `target`, `angle`, `fleet_size_mixture`, `fleet_size_logistic`, and
-`fleet_size_full`.
+Fleet-size KL is computed as the exact marginal KL between the selected
+truncated logistic mixture distributions over integer fleet sizes from
+`min_fleet_size` through the row's `max_launch`. The KL does not compare latent
+mixture identities, so component permutations between teacher and student are
+not penalized. Per-action KL portions are logged as components such as
+`launch`, `target`, `angle`, `fleet_size_logistic`, and `fleet_size_full`.

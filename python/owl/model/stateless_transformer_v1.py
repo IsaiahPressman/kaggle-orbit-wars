@@ -79,6 +79,7 @@ __all__ = [
     "ActorDiscreteTargetBinsConfig",
     "ActorDiscreteTargetsConfig",
     "ActorPureConfig",
+    "CachedTeacherDistillationTargets",
     "DiscreteActorInputs",
     "DiscreteTargetBinsActor",
     "DiscreteTargetPolicyParams",
@@ -98,9 +99,11 @@ __all__ = [
     "binary_entropy_from_logits",
     "build_packed_sequence",
     "build_pairwise_action_features",
+    "concat_teacher_distillation_targets",
     "discrete_action_entropy",
     "discretized_logistic_mixture_log_prob",
     "event_entropy_from_params",
+    "index_teacher_distillation_targets",
     "masked_action_entropy_from_params",
     "masked_event_log_prob_from_params",
     "masked_softmax",
@@ -209,6 +212,32 @@ class _ValueDistillationOutput:
     values: torch.Tensor
     winner_probabilities: torch.Tensor
     winner_log_probabilities: torch.Tensor
+
+
+@dataclass(frozen=True)
+class CachedTeacherDistillationTargets:
+    """Precomputed frozen-teacher distillation targets for a rollout.
+
+    Produced once per iteration by ``compute_teacher_distillation_targets`` and
+    consumed per update minibatch by ``evaluate_actions_with_cached_teacher`` so
+    the teacher trunk runs once instead of once per minibatch. Tensors are stored
+    in the same layout as the observations they were computed from (segment-major
+    ``[N, T, ...]`` in the PPO trainer); they are sliced per minibatch with
+    ``index_teacher_distillation_targets``.
+    """
+
+    action_params: DiscreteTargetPolicyParams | None
+    winner_probabilities: torch.Tensor | None
+
+
+@dataclass(frozen=True)
+class _StudentDistillationEval:
+    """Student-side outputs shared by the live and cached teacher paths."""
+
+    student: ModelEvaluation
+    winner_log_probabilities: torch.Tensor | None
+    encoded: EncodedObservations
+    actor_inputs: _ActorInputs | None
 
 
 class StatelessTransformerV1(BaseModelAPI):
@@ -934,39 +963,14 @@ class StatelessTransformerV1(BaseModelAPI):
                 "teacher models with recurrent hidden state are not supported"
             )
 
-        student_encoded, student_next_state = self._encode_distillation_observations(
+        student_eval = self._evaluate_student_for_distillation(
             flat_obs,
+            flat_actions,
             sequence_shape=sequence_shape,
             hidden_state=hidden_state,
             dones=dones,
-        )
-        student_winner_log_probabilities: torch.Tensor | None = None
-        if compute_teacher_value:
-            student_value_output = self._value_distillation_from_encoded(
-                student_encoded,
-                flat_obs,
-            )
-            student_values = student_value_output.values
-            student_winner_probabilities = student_value_output.winner_probabilities
-            student_winner_log_probabilities = (
-                student_value_output.winner_log_probabilities
-            )
-        else:
-            student_values, student_winner_probabilities = self._value_from_encoded(
-                student_encoded,
-                flat_obs,
-            )
-        student_actor_inputs = (
-            self._actor_inputs_for_encoded(student_encoded, flat_obs)
-            if compute_teacher_action_kl and not self.player_count_adapters
-            else None
-        )
-        student_log_probs, student_entropies = self._actor_log_prob(
-            student_encoded,
-            flat_obs,
-            flat_obs.action_mask,
-            flat_actions,
-            actor_inputs=student_actor_inputs,
+            compute_action_kl=compute_teacher_action_kl,
+            compute_value=compute_teacher_value,
         )
         action_kl: ModelActionKLDivergences | None = None
         teacher_winner_probabilities: torch.Tensor | None = None
@@ -990,13 +994,65 @@ class StatelessTransformerV1(BaseModelAPI):
             if compute_teacher_action_kl:
                 action_kl = self._actor_kl_divergence(
                     teacher,
-                    student_encoded,
+                    student_eval.encoded,
                     teacher_encoded,
                     flat_obs,
                     flat_obs.action_mask,
                     flat_actions,
-                    student_actor_inputs=student_actor_inputs,
+                    student_actor_inputs=student_eval.actor_inputs,
                 )
+        return self._assemble_teacher_evaluation(
+            student_eval,
+            action_kl=action_kl,
+            teacher_winner_probabilities=teacher_winner_probabilities,
+            sequence_shape=sequence_shape,
+        )
+
+    def _evaluate_student_for_distillation(
+        self,
+        flat_obs: ObsBatch,
+        flat_actions: ModelActions,
+        *,
+        sequence_shape: tuple[int, int] | None,
+        hidden_state: ModelHiddenState | None,
+        dones: torch.Tensor | None,
+        compute_action_kl: bool,
+        compute_value: bool,
+    ) -> _StudentDistillationEval:
+        student_encoded, student_next_state = self._encode_distillation_observations(
+            flat_obs,
+            sequence_shape=sequence_shape,
+            hidden_state=hidden_state,
+            dones=dones,
+        )
+        student_winner_log_probabilities: torch.Tensor | None = None
+        if compute_value:
+            student_value_output = self._value_distillation_from_encoded(
+                student_encoded,
+                flat_obs,
+            )
+            student_values = student_value_output.values
+            student_winner_probabilities = student_value_output.winner_probabilities
+            student_winner_log_probabilities = (
+                student_value_output.winner_log_probabilities
+            )
+        else:
+            student_values, student_winner_probabilities = self._value_from_encoded(
+                student_encoded,
+                flat_obs,
+            )
+        student_actor_inputs = (
+            self._actor_inputs_for_encoded(student_encoded, flat_obs)
+            if compute_action_kl and not self.player_count_adapters
+            else None
+        )
+        student_log_probs, student_entropies = self._actor_log_prob(
+            student_encoded,
+            flat_obs,
+            flat_obs.action_mask,
+            flat_actions,
+            actor_inputs=student_actor_inputs,
+        )
         student = ModelEvaluation(
             log_probs=student_log_probs,
             entropies=student_entropies,
@@ -1004,6 +1060,23 @@ class StatelessTransformerV1(BaseModelAPI):
             winner_probabilities=student_winner_probabilities,
             next_hidden_state=student_next_state,
         )
+        return _StudentDistillationEval(
+            student=student,
+            winner_log_probabilities=student_winner_log_probabilities,
+            encoded=student_encoded,
+            actor_inputs=student_actor_inputs,
+        )
+
+    def _assemble_teacher_evaluation(
+        self,
+        student_eval: _StudentDistillationEval,
+        *,
+        action_kl: ModelActionKLDivergences | None,
+        teacher_winner_probabilities: torch.Tensor | None,
+        sequence_shape: tuple[int, int] | None,
+    ) -> ModelTeacherEvaluation:
+        student = student_eval.student
+        student_winner_log_probabilities = student_eval.winner_log_probabilities
         if sequence_shape is not None:
             student = _unflatten_evaluation(student, sequence_shape)
             if teacher_winner_probabilities is not None:
@@ -1023,6 +1096,178 @@ class StatelessTransformerV1(BaseModelAPI):
             action_kl=action_kl,
             teacher_winner_probabilities=teacher_winner_probabilities,
             student_winner_log_probabilities=student_winner_log_probabilities,
+        )
+
+    def supports_cached_teacher_distillation(self) -> bool:
+        return not self.player_count_adapters and isinstance(
+            self.actor, DiscreteTargetsActor
+        )
+
+    def supports_cached_value_distillation(self) -> bool:
+        return not self.player_count_adapters
+
+    def compute_teacher_distillation_targets(
+        self,
+        obs: ObsBatch,
+        actions: ModelActions,
+        *,
+        compute_action_kl: bool = True,
+        compute_value: bool = True,
+    ) -> CachedTeacherDistillationTargets:
+        if self.player_count_adapters:
+            raise NotImplementedError(
+                "cached teacher distillation does not support player-count adapters"
+            )
+        flat_obs, sequence_shape = _flatten_obs_time_if_sequence(obs)
+        flat_actions = _flatten_actions_time_if_sequence(actions, sequence_shape)
+        action_params: DiscreteTargetPolicyParams | None = None
+        winner_probabilities: torch.Tensor | None = None
+        with torch.no_grad():
+            encoded, _next_state = self._encode_distillation_observations(
+                flat_obs,
+                sequence_shape=sequence_shape,
+                hidden_state=None,
+                dones=None,
+            )
+            if compute_value:
+                _values, winner_probabilities = self._value_from_encoded(
+                    encoded,
+                    flat_obs,
+                )
+            if compute_action_kl:
+                action_params = self._teacher_policy_params_from_encoded(
+                    encoded,
+                    flat_obs,
+                    flat_actions,
+                )
+        if sequence_shape is not None:
+            if action_params is not None:
+                action_params = _unflatten_policy_params(action_params, sequence_shape)
+            if winner_probabilities is not None:
+                winner_probabilities = _unflatten_time_tensor(
+                    winner_probabilities,
+                    sequence_shape,
+                )
+        return CachedTeacherDistillationTargets(
+            action_params=action_params,
+            winner_probabilities=winner_probabilities,
+        )
+
+    def _teacher_policy_params_from_encoded(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+        actions: ModelActions,
+    ) -> DiscreteTargetPolicyParams:
+        actor = self._actor_module(None)
+        if not isinstance(actor, DiscreteTargetsActor):
+            raise NotImplementedError(
+                "cached teacher distillation requires the discrete_targets actor"
+            )
+        action_mask = obs.action_mask
+        if not isinstance(action_mask, DiscreteTargetActionMask):
+            raise RuntimeError(
+                "discrete_targets actor requires a discrete-target action mask"
+            )
+        if not isinstance(actions, DiscreteTargetActions):
+            raise ValueError("discrete_targets actor requires DiscreteTargetActions")
+        teacher_inputs = self._discrete_actor_inputs(encoded, obs)
+        return actor.teacher_policy_params(
+            teacher_inputs,
+            action_mask.can_act,
+            action_mask.max_launch,
+            actions,
+            min_fleet_size=self.action_spec.min_fleet_size,
+        )
+
+    def evaluate_actions_with_cached_teacher(
+        self,
+        obs: ObsBatch,
+        actions: ModelActions,
+        teacher_targets: CachedTeacherDistillationTargets,
+        *,
+        hidden_state: ModelHiddenState | None = None,
+        dones: torch.Tensor | None = None,
+        compute_teacher_action_kl: bool = True,
+        compute_teacher_value: bool = True,
+    ) -> ModelTeacherEvaluation:
+        flat_obs, sequence_shape = _flatten_obs_time_if_sequence(obs)
+        flat_actions = _flatten_actions_time_if_sequence(actions, sequence_shape)
+        student_eval = self._evaluate_student_for_distillation(
+            flat_obs,
+            flat_actions,
+            sequence_shape=sequence_shape,
+            hidden_state=hidden_state,
+            dones=dones,
+            compute_action_kl=compute_teacher_action_kl,
+            compute_value=compute_teacher_value,
+        )
+        action_kl: ModelActionKLDivergences | None = None
+        teacher_winner_probabilities: torch.Tensor | None = None
+        if compute_teacher_value:
+            if teacher_targets.winner_probabilities is None:
+                raise ValueError("cached teacher value targets are missing")
+            teacher_winner_probabilities = teacher_targets.winner_probabilities
+            if sequence_shape is not None:
+                teacher_winner_probabilities = _flatten_time_tensor(
+                    teacher_winner_probabilities
+                )
+        if compute_teacher_action_kl:
+            if teacher_targets.action_params is None:
+                raise ValueError("cached teacher action targets are missing")
+            teacher_params = teacher_targets.action_params
+            if sequence_shape is not None:
+                teacher_params = _flatten_policy_params(teacher_params)
+            action_kl = self._actor_kl_divergence_from_teacher_params(
+                student_eval.encoded,
+                teacher_params,
+                flat_obs,
+                flat_actions,
+                student_actor_inputs=student_eval.actor_inputs,
+            )
+        return self._assemble_teacher_evaluation(
+            student_eval,
+            action_kl=action_kl,
+            teacher_winner_probabilities=teacher_winner_probabilities,
+            sequence_shape=sequence_shape,
+        )
+
+    def _actor_kl_divergence_from_teacher_params(
+        self,
+        student_encoded: EncodedObservations,
+        teacher_params: DiscreteTargetPolicyParams,
+        obs: ObsBatch,
+        actions: ModelActions,
+        *,
+        student_actor_inputs: _ActorInputs | None,
+    ) -> ModelActionKLDivergences:
+        if self.player_count_adapters:
+            raise NotImplementedError(
+                "cached teacher distillation does not support player-count adapters"
+            )
+        actor = self._actor_module(None)
+        if not isinstance(actor, DiscreteTargetsActor):
+            raise NotImplementedError(
+                "cached teacher distillation requires the discrete_targets actor"
+            )
+        action_mask = obs.action_mask
+        if not isinstance(action_mask, DiscreteTargetActionMask):
+            raise RuntimeError(
+                "discrete_targets actor requires a discrete-target action mask"
+            )
+        if not isinstance(actions, DiscreteTargetActions):
+            raise ValueError("discrete_targets actor requires DiscreteTargetActions")
+        student_inputs = _require_discrete_actor_inputs(
+            student_actor_inputs,
+            lambda: self._discrete_actor_inputs(student_encoded, obs),
+        )
+        return actor.kl_divergence_from_teacher_params(
+            student_inputs,
+            teacher_params,
+            action_mask.can_act,
+            action_mask.max_launch,
+            actions,
+            min_fleet_size=self.action_spec.min_fleet_size,
         )
 
     def evaluate_action_kl(
@@ -2024,6 +2269,109 @@ def _unflatten_time_tensor(
 ) -> torch.Tensor:
     batch_size, time_steps = sequence_shape
     return tensor.reshape(batch_size, time_steps, *tensor.shape[1:])
+
+
+def _map_policy_params(
+    params: DiscreteTargetPolicyParams,
+    fn: Callable[[torch.Tensor], torch.Tensor],
+) -> DiscreteTargetPolicyParams:
+    return DiscreteTargetPolicyParams(
+        target_logits=fn(params.target_logits),
+        size_mix_logits=fn(params.size_mix_logits),
+        size_mu=fn(params.size_mu),
+        size_scale=fn(params.size_scale),
+        continue_logits=(
+            fn(params.continue_logits) if params.continue_logits is not None else None
+        ),
+    )
+
+
+def _flatten_policy_params(
+    params: DiscreteTargetPolicyParams,
+) -> DiscreteTargetPolicyParams:
+    return _map_policy_params(params, _flatten_time_tensor)
+
+
+def _unflatten_policy_params(
+    params: DiscreteTargetPolicyParams,
+    sequence_shape: tuple[int, int],
+) -> DiscreteTargetPolicyParams:
+    return _map_policy_params(
+        params,
+        lambda tensor: _unflatten_time_tensor(tensor, sequence_shape),
+    )
+
+
+def index_teacher_distillation_targets(
+    targets: CachedTeacherDistillationTargets,
+    indices: torch.Tensor,
+) -> CachedTeacherDistillationTargets:
+    """Slice cached teacher targets along the leading (segment) dimension."""
+    action_params = (
+        _map_policy_params(targets.action_params, lambda tensor: tensor[indices])
+        if targets.action_params is not None
+        else None
+    )
+    winner_probabilities = (
+        targets.winner_probabilities[indices]
+        if targets.winner_probabilities is not None
+        else None
+    )
+    return CachedTeacherDistillationTargets(
+        action_params=action_params,
+        winner_probabilities=winner_probabilities,
+    )
+
+
+def concat_teacher_distillation_targets(
+    chunks: list[CachedTeacherDistillationTargets],
+) -> CachedTeacherDistillationTargets:
+    """Concatenate per-chunk cached teacher targets along the segment dimension."""
+    if not chunks:
+        raise ValueError("cannot concatenate an empty list of teacher targets")
+    action_params: DiscreteTargetPolicyParams | None = None
+    if chunks[0].action_params is not None:
+        params: list[DiscreteTargetPolicyParams] = []
+        for chunk in chunks:
+            if chunk.action_params is None:
+                raise ValueError(
+                    "inconsistent action_params across teacher target chunks"
+                )
+            params.append(chunk.action_params)
+        action_params = DiscreteTargetPolicyParams(
+            target_logits=torch.cat([p.target_logits for p in params], dim=0),
+            size_mix_logits=torch.cat([p.size_mix_logits for p in params], dim=0),
+            size_mu=torch.cat([p.size_mu for p in params], dim=0),
+            size_scale=torch.cat([p.size_scale for p in params], dim=0),
+            continue_logits=_cat_optional_tensors([p.continue_logits for p in params]),
+        )
+    winner_probabilities: torch.Tensor | None = None
+    if chunks[0].winner_probabilities is not None:
+        winners: list[torch.Tensor] = []
+        for chunk in chunks:
+            if chunk.winner_probabilities is None:
+                raise ValueError(
+                    "inconsistent winner_probabilities across teacher target chunks"
+                )
+            winners.append(chunk.winner_probabilities)
+        winner_probabilities = torch.cat(winners, dim=0)
+    return CachedTeacherDistillationTargets(
+        action_params=action_params,
+        winner_probabilities=winner_probabilities,
+    )
+
+
+def _cat_optional_tensors(
+    tensors: list[torch.Tensor | None],
+) -> torch.Tensor | None:
+    if tensors[0] is None:
+        return None
+    present: list[torch.Tensor] = []
+    for tensor in tensors:
+        if tensor is None:
+            raise ValueError("inconsistent optional tensors across teacher chunks")
+        present.append(tensor)
+    return torch.cat(present, dim=0)
 
 
 def _merge_tensors_by_batch(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, Literal
 
 import pytest
@@ -1006,6 +1007,8 @@ def test_collect_rollout_does_not_call_teacher_model() -> None:
         config=ppo.PPOConfig(
             horizon=3,
             segments_per_minibatch=1,
+            teacher_kl_coef=0.0,
+            teacher_value_coef=0.0,
         ),
         device=torch.device("cpu"),
         teacher_model=teacher,
@@ -1070,8 +1073,10 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "train/4p_rate",
         "train/player_step_total",
         "time/rollout_seconds",
+        "time/teacher_seconds",
         "time/update_seconds",
         "perf/rollout_sps",
+        "perf/teacher_sps",
         "perf/update_sps",
     ):
         assert metrics[key] == pytest.approx(float(metrics[key]))
@@ -1087,6 +1092,8 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
     assert metrics["train/2p_rate"] == pytest.approx(0.0)
     assert metrics["train/3p_rate"] == pytest.approx(0.0)
     assert metrics["train/4p_rate"] == pytest.approx(1.0)
+    assert metrics["time/teacher_seconds"] == pytest.approx(0.0)
+    assert metrics["perf/teacher_sps"] == pytest.approx(0.0)
     assert metrics["train/player_step_total"] == pytest.approx(80.0)
     assert metrics["optimizer/steps"] == pytest.approx(2.0)
     assert metrics["optimizer/learning_rate"] == pytest.approx(0.05)
@@ -1474,6 +1481,7 @@ def test_ppo_epoch_one_uses_shuffled_single_pass_minibatches(
         value_mask: torch.Tensor,  # noqa: ARG001
         indices: torch.Tensor,
         *,
+        teacher_targets: ppo.CachedTeacherDistillationTargets | None = None,  # noqa: ARG001
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
         loss_scale: float = 1.0,  # noqa: ARG001
         step_optimizer: bool = True,  # noqa: ARG001
@@ -1495,6 +1503,7 @@ def test_ppo_epoch_one_uses_shuffled_single_pass_minibatches(
         returns,
         policy_mask,
         value_mask,
+        None,
     )
 
     assert [indices.shape for indices in seen] == [(2,), (2,), (2,)]
@@ -1557,6 +1566,7 @@ def test_update_uses_no_sync_for_gradient_accumulation_microbatches(
         value_mask: torch.Tensor,  # noqa: ARG001
         indices: torch.Tensor,
         *,
+        teacher_targets: ppo.CachedTeacherDistillationTargets | None = None,  # noqa: ARG001
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
         loss_scale: float = 1.0,  # noqa: ARG001
         step_optimizer: bool = True,  # noqa: ARG001
@@ -1580,6 +1590,7 @@ def test_update_uses_no_sync_for_gradient_accumulation_microbatches(
         returns,
         policy_mask,
         value_mask,
+        None,
     )
 
     assert context_enabled == [True, False, True, False]
@@ -1619,6 +1630,7 @@ def test_update_reports_target_kl_guard_when_exceeded(
         value_mask: torch.Tensor,  # noqa: ARG001
         indices: torch.Tensor,
         *,
+        teacher_targets: ppo.CachedTeacherDistillationTargets | None = None,  # noqa: ARG001
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
         loss_scale: float = 1.0,  # noqa: ARG001
         step_optimizer: bool = True,  # noqa: ARG001
@@ -1643,6 +1655,7 @@ def test_update_reports_target_kl_guard_when_exceeded(
         returns,
         policy_mask,
         value_mask,
+        None,
     )
 
     assert update_calls == 1
@@ -1678,6 +1691,7 @@ def test_train_iteration_update_sps_uses_actual_segments_when_target_kl_stops_up
         value_mask: torch.Tensor,  # noqa: ARG001
         indices: torch.Tensor,
         *,
+        teacher_targets: ppo.CachedTeacherDistillationTargets | None = None,  # noqa: ARG001
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
         loss_scale: float = 1.0,  # noqa: ARG001
         step_optimizer: bool = True,  # noqa: ARG001
@@ -2019,9 +2033,11 @@ def test_stateless_transformer_train_iteration_runs_with_teacher() -> None:
     assert torch.isfinite(torch.tensor(list(metrics.values()))).all()
     assert metrics["teacher/kl"] >= 0.0
     assert metrics["teacher/value_cross_entropy"] >= 0.0
+    assert metrics["time/teacher_seconds"] > 0.0
+    assert metrics["perf/teacher_sps"] > 0.0
 
 
-def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
+def test_teacher_update_uses_cached_targets_and_no_grad_teacher(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     torch.manual_seed(0)
@@ -2047,19 +2063,31 @@ def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
     )
     model.reset_parameters()
     teacher_model.reset_parameters()
-    combined_calls = 0
+    cached_calls = 0
+    precompute_calls = 0
     student_actor_input_grad_enabled: list[bool] = []
     teacher_encode_grad_enabled: list[bool] = []
     teacher_actor_input_grad_enabled: list[bool] = []
-    original_combined = model.evaluate_actions_with_teacher
+    original_cached = model.evaluate_actions_with_cached_teacher
+    original_precompute = teacher_model.compute_teacher_distillation_targets
     original_student_actor_inputs = model._discrete_actor_inputs
     original_teacher_encode = teacher_model.encode_observations
     original_teacher_actor_inputs = teacher_model._discrete_actor_inputs
 
-    def combined_wrapper(*args: object, **kwargs: object) -> object:
-        nonlocal combined_calls
-        combined_calls += 1
-        return original_combined(*args, **kwargs)
+    def cached_wrapper(*args: object, **kwargs: object) -> object:
+        nonlocal cached_calls
+        cached_calls += 1
+        return original_cached(*args, **kwargs)
+
+    def precompute_wrapper(*args: object, **kwargs: object) -> object:
+        nonlocal precompute_calls
+        precompute_calls += 1
+        return original_precompute(*args, **kwargs)
+
+    def fail_combined(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError(
+            "evaluate_actions_with_teacher should not run in the cached path"
+        )
 
     def fail_evaluate_actions(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("student evaluate_actions should not be called")
@@ -2082,13 +2110,19 @@ def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
         teacher_actor_input_grad_enabled.append(torch.is_grad_enabled())
         return original_teacher_actor_inputs(*args, **kwargs)
 
-    monkeypatch.setattr(model, "evaluate_actions_with_teacher", combined_wrapper)
+    monkeypatch.setattr(model, "evaluate_actions_with_cached_teacher", cached_wrapper)
+    monkeypatch.setattr(model, "evaluate_actions_with_teacher", fail_combined)
     monkeypatch.setattr(model, "evaluate_actions", fail_evaluate_actions)
     monkeypatch.setattr(model, "evaluate_action_kl", fail_evaluate_action_kl)
     monkeypatch.setattr(
         model,
         "_discrete_actor_inputs",
         student_actor_inputs_wrapper,
+    )
+    monkeypatch.setattr(
+        teacher_model,
+        "compute_teacher_distillation_targets",
+        precompute_wrapper,
     )
     monkeypatch.setattr(
         teacher_model,
@@ -2108,6 +2142,7 @@ def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
         config=ppo.PPOConfig(
             horizon=2,
             segments_per_minibatch=1,
+            teacher_segments_per_minibatch=1,
         ),
         device=torch.device("cpu"),
         teacher_model=teacher_model,
@@ -2116,11 +2151,15 @@ def test_teacher_update_uses_combined_student_pass_and_no_grad_teacher(
 
     trainer.train_iteration()
 
-    assert combined_calls > 0
-    assert sum(student_actor_input_grad_enabled) == combined_calls
+    # The teacher trunk runs once per iteration in the precompute, and each
+    # update minibatch consumes the cache instead of re-running the teacher.
+    assert precompute_calls > 0
+    assert cached_calls > 0
+    assert sum(student_actor_input_grad_enabled) == cached_calls
     assert teacher_encode_grad_enabled
     assert not any(teacher_encode_grad_enabled)
     assert teacher_actor_input_grad_enabled
+    assert not any(teacher_actor_input_grad_enabled)
     assert not any(teacher_actor_input_grad_enabled)
 
 
@@ -2261,6 +2300,174 @@ def test_trainer_rejects_recurrent_teacher() -> None:
             teacher_model=teacher_model,
             teacher_active=True,
         )
+
+
+def test_trainer_rejects_teacher_for_unsupported_student_actor() -> None:
+    torch.manual_seed(0)
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model = TinyDiscreteTargetModel()
+    teacher_model = StatelessTransformerV1(
+        StatelessTransformerV1Config(
+            actor=ActorDiscreteTargetsConfig(
+                n_action_mixtures=2,
+                entropy_ship_quantiles=8,
+            ),
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+        ),
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    teacher_model.reset_parameters()
+
+    with pytest.raises(ValueError, match="discrete_targets actor"):
+        ppo.PPOTrainer(
+            env=env,
+            model=model,
+            optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+            config=ppo.PPOConfig(
+                horizon=2,
+                segments_per_minibatch=1,
+            ),
+            device=torch.device("cpu"),
+            teacher_model=teacher_model,
+            teacher_active=True,
+        )
+
+
+def test_fixed_teacher_rejects_discrete_target_launch_mode_mismatch() -> None:
+    torch.manual_seed(0)
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(
+            actor=ActorDiscreteTargetsConfig(
+                launch_mode="binary",
+                n_action_mixtures=2,
+                entropy_ship_quantiles=8,
+            ),
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+        ),
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    teacher_model = StatelessTransformerV1(
+        StatelessTransformerV1Config(
+            actor=ActorDiscreteTargetsConfig(
+                launch_mode="binary_after",
+                n_action_mixtures=2,
+                entropy_ship_quantiles=8,
+            ),
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+        ),
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    model.reset_parameters()
+    teacher_model.reset_parameters()
+
+    with pytest.raises(ValueError, match="launch_mode"):
+        ppo.PPOTrainer(
+            env=env,
+            model=model,
+            optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+            config=ppo.PPOConfig(
+                horizon=2,
+                segments_per_minibatch=1,
+                teacher_mode="fixed",
+                teacher_init=Path("teacher/checkpoint.pt"),
+            ),
+            device=torch.device("cpu"),
+            teacher_model=teacher_model,
+            teacher_active=True,
+        )
+
+
+def test_cached_teacher_matches_inline_on_segment_major_rollout() -> None:
+    torch.manual_seed(0)
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model_config = StatelessTransformerV1Config(
+        actor=ActorDiscreteTargetsConfig(
+            n_action_mixtures=2,
+            entropy_ship_quantiles=8,
+        ),
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    model = StatelessTransformerV1(
+        model_config,
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    teacher = StatelessTransformerV1(
+        model_config,
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    model.reset_parameters()
+    teacher.reset_parameters()
+    model.eval()
+    teacher.eval()
+    for parameter in teacher.parameters():
+        parameter.requires_grad_(False)
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(horizon=3, segments_per_minibatch=1),
+        device=torch.device("cpu"),
+        teacher_model=teacher,
+        teacher_active=True,
+    )
+    trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+
+    inline = model.evaluate_actions_with_teacher(
+        segments.obs,
+        segments.actions,
+        teacher,
+        compute_teacher_action_kl=True,
+        compute_teacher_value=True,
+    )
+    cached_targets = teacher.compute_teacher_distillation_targets(
+        segments.obs,
+        segments.actions,
+        compute_action_kl=True,
+        compute_value=True,
+    )
+    cached = model.evaluate_actions_with_cached_teacher(
+        segments.obs,
+        segments.actions,
+        cached_targets,
+        compute_teacher_action_kl=True,
+        compute_teacher_value=True,
+    )
+
+    assert inline.action_kl is not None
+    assert cached.action_kl is not None
+    # Segment-major [N, T, ...] outputs exercise the cache flatten/unflatten
+    # round-trip that the PPO update actually uses.
+    assert cached.action_kl.per_player_entity.shape[:2] == (env.n_envs, 3)
+    assert torch.allclose(
+        inline.action_kl.per_player_entity,
+        cached.action_kl.per_player_entity,
+    )
+    assert torch.allclose(inline.action_kl.launch, cached.action_kl.launch)
+    assert torch.allclose(inline.action_kl.event, cached.action_kl.event)
+    assert inline.action_kl.target is not None
+    assert cached.action_kl.target is not None
+    assert torch.allclose(inline.action_kl.target, cached.action_kl.target)
+    assert inline.teacher_winner_probabilities is not None
+    assert cached.teacher_winner_probabilities is not None
+    assert torch.allclose(
+        inline.teacher_winner_probabilities,
+        cached.teacher_winner_probabilities,
+    )
 
 
 def test_recurrent_transformer_train_iteration_keeps_parameters_finite() -> None:

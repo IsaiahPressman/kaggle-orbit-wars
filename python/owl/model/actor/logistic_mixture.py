@@ -298,7 +298,7 @@ def truncated_logistic_mixture_entropy(
     return (mix_prob * component_entropy).sum(dim=-1)
 
 
-def logistic_mixture_kl_components(
+def logistic_mixture_kl(
     teacher_mix_logits: torch.Tensor,
     teacher_mu: torch.Tensor,
     teacher_scale: torch.Tensor,
@@ -308,10 +308,9 @@ def logistic_mixture_kl_components(
     residual_budget: torch.Tensor,
     *,
     min_fleet_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     if residual_budget.numel() == 0:
-        empty = residual_budget.to(dtype=torch.float32)
-        return empty, empty
+        return residual_budget.to(dtype=torch.float32)
     safe_residual = residual_budget.clamp_min(min_fleet_size)
     support = ship_support(
         safe_residual,
@@ -332,45 +331,7 @@ def logistic_mixture_kl_components(
         min_fleet_size=min_fleet_size,
     )
     valid = residual_budget >= min_fleet_size
-    if teacher_mix_logits.shape[-1] != student_mix_logits.shape[-1]:
-        return (
-            torch.where(valid, full_kl, torch.zeros_like(full_kl)),
-            torch.zeros_like(full_kl),
-        )
-
-    teacher_mix_log_prob = F.log_softmax(teacher_mix_logits.float(), dim=-1)
-    student_mix_log_prob = F.log_softmax(student_mix_logits.float(), dim=-1)
-    teacher_mix_prob = teacher_mix_log_prob.exp()
-    mixture_kl = (teacher_mix_prob * (teacher_mix_log_prob - student_mix_log_prob)).sum(
-        dim=-1
-    )
-    teacher_log_prob = _discretized_logistic_component_log_prob(
-        support,
-        safe_residual,
-        teacher_mu,
-        teacher_scale,
-        min_fleet_size=min_fleet_size,
-    )
-    student_log_prob = _discretized_logistic_component_log_prob(
-        support,
-        safe_residual,
-        student_mu,
-        student_scale,
-        min_fleet_size=min_fleet_size,
-    )
-    teacher_prob = teacher_log_prob.exp()
-    component_terms = teacher_prob * (teacher_log_prob - student_log_prob)
-    component_terms = torch.where(
-        torch.isfinite(component_terms),
-        component_terms,
-        torch.zeros_like(component_terms),
-    )
-    component_kl = component_terms.sum(dim=-2)
-    logistic_kl = (teacher_mix_prob * component_kl).sum(dim=-1)
-    return (
-        torch.where(valid, mixture_kl, torch.zeros_like(mixture_kl)),
-        torch.where(valid, logistic_kl, torch.zeros_like(logistic_kl)),
-    )
+    return torch.where(valid, full_kl, torch.zeros_like(full_kl))
 
 
 def discretized_logistic_mixture_kl(
@@ -405,38 +366,3 @@ def discretized_logistic_mixture_kl(
     teacher_prob = teacher_log_prob.exp()
     kl = teacher_prob * (teacher_log_prob - student_log_prob)
     return kl.masked_fill(~valid, 0.0).sum(dim=-1)
-
-
-def _discretized_logistic_component_log_prob(
-    ships: torch.Tensor,
-    residual_budget: torch.Tensor,
-    mu: torch.Tensor,
-    scale: torch.Tensor,
-    *,
-    min_fleet_size: int,
-) -> torch.Tensor:
-    mu = mu.float()
-    scale = scale.float()
-    n = ships.to(torch.float32).unsqueeze(-1)
-    residual = residual_budget.clamp_min(min_fleet_size).float()
-    residual_hi = residual.unsqueeze(-1).unsqueeze(-1) + 0.5
-    lo = (n - 0.5 - mu.unsqueeze(-2)) / scale.unsqueeze(-2)
-    hi = (n + 0.5 - mu.unsqueeze(-2)) / scale.unsqueeze(-2)
-    support_lo = (float(min_fleet_size) - 0.5 - mu) / scale
-    support_hi = (residual_hi - mu.unsqueeze(-2)) / scale.unsqueeze(-2)
-    log_bin_mass = logistic_cdf_diff_logprob(lo, hi)
-    log_support_mass = logistic_cdf_diff_logprob(
-        support_lo,
-        support_hi.squeeze(-2),
-    ).unsqueeze(-2)
-    valid = (
-        (ships >= min_fleet_size)
-        & (ships <= residual_budget.unsqueeze(-1))
-        & (residual_budget >= min_fleet_size).unsqueeze(-1)
-    )
-    log_prob = log_bin_mass - log_support_mass
-    return torch.where(
-        valid.unsqueeze(-1),
-        log_prob,
-        torch.full_like(log_prob, -torch.inf),
-    )
