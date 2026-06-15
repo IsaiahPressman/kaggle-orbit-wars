@@ -620,7 +620,8 @@ only for rows where the replayed action launched. Discrete target-bin KL
 compares the target categorical and the selected target's fleet-bin categorical.
 Pure-action KL compares launch, marginal angle, and selected fleet-size
 distributions for launched rows. Angle KL is a permutation-invariant numerical
-integral over the marginal Von Mises mixture using a 512-point uniform grid.
+integral over the marginal Von Mises mixture using component-centered
+quadrature points for each teacher angle component.
 
 Fleet-size KL is computed as the exact marginal KL between the selected
 truncated logistic mixture distributions over integer fleet sizes from

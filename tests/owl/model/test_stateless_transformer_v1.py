@@ -2898,6 +2898,51 @@ def test_angle_policy_kl_ignores_component_permutation() -> None:
     assert torch.allclose(angle_kl, torch.zeros_like(angle_kl), atol=1e-6)
 
 
+def test_angle_policy_kl_resolves_sharp_component() -> None:
+    teacher_mix_logits = torch.tensor([[0.0]])
+    teacher_loc = torch.tensor([[0.001]])
+    teacher_kappa = torch.tensor([[1_000_000.0]])
+    student_loc = torch.tensor([[0.002]])
+    zeros = torch.zeros_like(teacher_mix_logits)
+    ones = torch.ones_like(teacher_mix_logits)
+    teacher_params = PolicyParams(
+        continue_logits=torch.zeros(teacher_mix_logits.shape[:-1]),
+        angle_mix_logits=teacher_mix_logits,
+        angle_log_w=F.log_softmax(teacher_mix_logits, dim=-1),
+        loc=teacher_loc,
+        kappa=teacher_kappa,
+        size_mix_logits=zeros,
+        size_mu=zeros,
+        size_scale=ones,
+    )
+    student_params = PolicyParams(
+        continue_logits=torch.zeros(teacher_mix_logits.shape[:-1]),
+        angle_mix_logits=teacher_mix_logits,
+        angle_log_w=F.log_softmax(teacher_mix_logits, dim=-1),
+        loc=student_loc,
+        kappa=teacher_kappa,
+        size_mix_logits=zeros,
+        size_mu=zeros,
+        size_scale=ones,
+    )
+
+    angle_kl = pure_actor_impl.angle_policy_kl(teacher_params, student_params)
+    expected_kappa = teacher_kappa.double()
+    i1_over_i0 = torch.special.i1e(expected_kappa) / torch.special.i0e(expected_kappa)
+    expected = (
+        expected_kappa
+        * i1_over_i0
+        * (1.0 - torch.cos(teacher_loc.double() - student_loc.double()))
+    )
+
+    assert torch.allclose(
+        angle_kl,
+        expected.squeeze(-1).to(dtype=angle_kl.dtype),
+        rtol=1e-2,
+        atol=1e-3,
+    )
+
+
 def test_discrete_target_bins_actor_adds_pairwise_bias_before_masking() -> None:
     config = StatelessTransformerV1Config(
         actor=ActorDiscreteTargetBinsConfig(n_bins=3),

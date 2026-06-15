@@ -893,46 +893,76 @@ def angle_policy_kl(
     teacher_params: PolicyParams,
     student_params: PolicyParams,
 ) -> torch.Tensor:
-    return angle_policy_grid_kl(teacher_params, student_params)
+    return angle_policy_quadrature_kl(teacher_params, student_params)
+
+
+def angle_policy_quadrature_kl(
+    teacher_params: PolicyParams,
+    student_params: PolicyParams,
+    *,
+    samples: int = 32,
+    window_std: float = 8.0,
+) -> torch.Tensor:
+    teacher_loc = teacher_params.loc.float()
+    teacher_kappa = teacher_params.kappa.float()
+    teacher_log_w = F.log_softmax(teacher_params.angle_mix_logits.float(), dim=-1)
+    teacher_mix_prob = teacher_log_w.exp()
+    student_log_w = F.log_softmax(student_params.angle_mix_logits.float(), dim=-1)
+    student_loc = student_params.loc.float()
+    student_kappa = student_params.kappa.float()
+
+    # Cover roughly window_std circular standard deviations for sharp components,
+    # and fall back to the full circle for broad components.
+    offsets = (
+        torch.arange(samples, device=teacher_loc.device, dtype=teacher_loc.dtype) + 0.5
+    ) * (2.0 / float(samples)) - 1.0
+    half_width = (window_std * teacher_kappa.clamp_min(1e-12).rsqrt()).clamp_max(
+        math.pi,
+    )
+    theta = teacher_loc.unsqueeze(-1) + half_width.unsqueeze(-1) * offsets.view(
+        *((1,) * teacher_loc.ndim),
+        samples,
+    )
+    component_log_prob = von_mises_log_prob(
+        theta,
+        teacher_loc.unsqueeze(-1),
+        teacher_kappa.unsqueeze(-1),
+    )
+    quadrature_weight = torch.softmax(component_log_prob, dim=-1)
+    teacher_log_prob = torch.logsumexp(
+        teacher_log_w.unsqueeze(-2).unsqueeze(-2)
+        + von_mises_log_prob(
+            theta.unsqueeze(-1),
+            teacher_loc.unsqueeze(-2).unsqueeze(-2),
+            teacher_kappa.unsqueeze(-2).unsqueeze(-2),
+        ),
+        dim=-1,
+    )
+    student_log_prob = torch.logsumexp(
+        student_log_w.unsqueeze(-2).unsqueeze(-2)
+        + von_mises_log_prob(
+            theta.unsqueeze(-1),
+            student_loc.unsqueeze(-2).unsqueeze(-2),
+            student_kappa.unsqueeze(-2).unsqueeze(-2),
+        ),
+        dim=-1,
+    )
+    component_kl = (quadrature_weight * (teacher_log_prob - student_log_prob)).sum(
+        dim=-1,
+    )
+    return (teacher_mix_prob * component_kl).sum(dim=-1)
 
 
 def angle_policy_grid_kl(
     teacher_params: PolicyParams,
     student_params: PolicyParams,
     *,
-    samples: int = 512,
+    samples: int = 32,
 ) -> torch.Tensor:
-    theta = torch.linspace(
-        0.0,
-        2.0 * math.pi,
-        samples + 1,
-        device=teacher_params.loc.device,
-        dtype=teacher_params.loc.dtype,
-    )[:-1]
-    view_shape = (*((1,) * (teacher_params.loc.ndim - 1)), samples, 1)
-    theta = theta.view(view_shape)
-    teacher_log_prob = torch.logsumexp(
-        teacher_params.angle_log_w.unsqueeze(-2)
-        + von_mises_log_prob(
-            theta,
-            teacher_params.loc.unsqueeze(-2),
-            teacher_params.kappa.unsqueeze(-2),
-        ),
-        dim=-1,
-    )
-    student_log_w = F.log_softmax(student_params.angle_mix_logits.float(), dim=-1)
-    student_log_prob = torch.logsumexp(
-        student_log_w.unsqueeze(-2)
-        + von_mises_log_prob(
-            theta,
-            student_params.loc.unsqueeze(-2),
-            student_params.kappa.unsqueeze(-2),
-        ),
-        dim=-1,
-    )
-    teacher_prob = teacher_log_prob.exp()
-    return (teacher_prob * (teacher_log_prob - student_log_prob)).mean(dim=-1) * (
-        2.0 * math.pi
+    return angle_policy_quadrature_kl(
+        teacher_params,
+        student_params,
+        samples=samples,
     )
 
 
