@@ -47,5 +47,6 @@ rl:
   teacher_mode: last_best
   teacher_kl_coef: 0.005
   teacher_value_coef: 0.005
+  teacher_segments_per_minibatch: 32
   compile_mode: default
   dtype: bfloat16
