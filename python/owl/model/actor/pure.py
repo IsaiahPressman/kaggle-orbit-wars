@@ -903,13 +903,18 @@ def angle_policy_quadrature_kl(
     samples: int = 32,
     window_std: float = 8.0,
 ) -> torch.Tensor:
-    teacher_loc = teacher_params.loc.float()
-    teacher_kappa = teacher_params.kappa.float()
-    teacher_log_w = F.log_softmax(teacher_params.angle_mix_logits.float(), dim=-1)
+    # Use float64 for the angle math: at large kappa the kappa*cos(theta-loc)
+    # term in von_mises_log_prob catastrophically cancels in float32 (cos of a
+    # small teacher/student loc difference rounds to 1.0), destroying the KL for
+    # sharp, near-aligned components -- exactly the regime this quadrature
+    # targets. The result is cast back below.
+    teacher_loc = teacher_params.loc.double()
+    teacher_kappa = teacher_params.kappa.double()
+    teacher_log_w = F.log_softmax(teacher_params.angle_mix_logits.double(), dim=-1)
     teacher_mix_prob = teacher_log_w.exp()
-    student_log_w = F.log_softmax(student_params.angle_mix_logits.float(), dim=-1)
-    student_loc = student_params.loc.float()
-    student_kappa = student_params.kappa.float()
+    student_log_w = F.log_softmax(student_params.angle_mix_logits.double(), dim=-1)
+    student_loc = student_params.loc.double()
+    student_kappa = student_params.kappa.double()
 
     # Cover roughly window_std circular standard deviations for sharp components,
     # and fall back to the full circle for broad components.
@@ -950,7 +955,7 @@ def angle_policy_quadrature_kl(
     component_kl = (quadrature_weight * (teacher_log_prob - student_log_prob)).sum(
         dim=-1,
     )
-    return (teacher_mix_prob * component_kl).sum(dim=-1)
+    return (teacher_mix_prob * component_kl).sum(dim=-1).float()
 
 
 def angle_policy_grid_kl(

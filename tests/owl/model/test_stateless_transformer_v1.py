@@ -2943,6 +2943,57 @@ def test_angle_policy_kl_resolves_sharp_component() -> None:
     )
 
 
+def test_angle_policy_kl_matches_closed_form_for_near_aligned_sharp_component() -> None:
+    # Regression guard for float32 catastrophic cancellation: at large kappa with
+    # a tiny teacher/student loc difference, kappa*cos(theta-loc) loses all
+    # precision in float32 (cos of the small difference rounds to 1.0), inflating
+    # the KL ~100%. The quadrature must match the closed-form Von Mises KL because
+    # the angle math now runs in float64. dloc=1e-4 is the regime float32 breaks
+    # (the dloc=1e-3 case above stays accurate even in float32, so it cannot guard
+    # this bug).
+    teacher_mix_logits = torch.tensor([[0.0]])
+    teacher_loc = torch.tensor([[0.0]])
+    student_loc = torch.tensor([[1e-4]])
+    kappa = torch.tensor([[1_000_000.0]])
+    zeros = torch.zeros_like(teacher_mix_logits)
+    ones = torch.ones_like(teacher_mix_logits)
+    teacher_params = PolicyParams(
+        continue_logits=torch.zeros(teacher_mix_logits.shape[:-1]),
+        angle_mix_logits=teacher_mix_logits,
+        angle_log_w=F.log_softmax(teacher_mix_logits, dim=-1),
+        loc=teacher_loc,
+        kappa=kappa,
+        size_mix_logits=zeros,
+        size_mu=zeros,
+        size_scale=ones,
+    )
+    student_params = PolicyParams(
+        continue_logits=torch.zeros(teacher_mix_logits.shape[:-1]),
+        angle_mix_logits=teacher_mix_logits,
+        angle_log_w=F.log_softmax(teacher_mix_logits, dim=-1),
+        loc=student_loc,
+        kappa=kappa,
+        size_mix_logits=zeros,
+        size_mu=zeros,
+        size_scale=ones,
+    )
+
+    angle_kl = pure_actor_impl.angle_policy_kl(teacher_params, student_params)
+    expected_kappa = kappa.double()
+    i1_over_i0 = torch.special.i1e(expected_kappa) / torch.special.i0e(expected_kappa)
+    expected = (
+        expected_kappa
+        * i1_over_i0
+        * (1.0 - torch.cos(teacher_loc.double() - student_loc.double()))
+    ).squeeze(-1)
+
+    assert torch.allclose(
+        angle_kl.double(),
+        expected,
+        rtol=0.1,
+    )
+
+
 def test_discrete_target_bins_actor_adds_pairwise_bias_before_masking() -> None:
     config = StatelessTransformerV1Config(
         actor=ActorDiscreteTargetBinsConfig(n_bins=3),
