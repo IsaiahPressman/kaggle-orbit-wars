@@ -610,9 +610,10 @@ no-grad teacher pass) is retained and is bit-for-bit equivalent to the cached
 path. The cached action-KL path supports only the discrete_targets actor without
 player-count adapters; a fixed teacher (`rl.teacher_mode: fixed`) must
 additionally share the student's launch mode. Value distillation
-(`rl.teacher_value_coef` > 0) only uses the critic winner distribution, so it is
-actor-agnostic and stays supported for any non-adapter model. `evaluate_action_kl(...)` remains as a compatibility path,
-but PPO updates do not use it. The KL comparison uses the
+(`rl.teacher_value_coef` > 0) only uses the critic winner distribution and does
+not require actor KL support, but the trainer still requires matching action
+specs and non-adapter models. `evaluate_action_kl(...)` remains as a
+compatibility path, but PPO updates do not use it. The KL comparison uses the
 same masks and factorization gates used by PPO replay. Non-acting source rows
 contribute zero KL. For binary discrete-target launch mode, no-launch replay
 rows include only the Bernoulli launch KL; target and fleet-size KL are computed

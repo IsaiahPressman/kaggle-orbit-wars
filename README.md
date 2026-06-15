@@ -198,7 +198,8 @@ after rollout (chunk size
 targets are cached and each update minibatch consumes them without re-running
 the teacher trunk. The cached action-KL path supports only the `discrete_targets`
 actor without player-count adapters (a fixed teacher must also match the
-student's launch mode); value distillation is actor-agnostic.
+student's launch mode). Value distillation does not use the actor KL path, but
+the trainer still requires matching action specs and non-adapter models.
 `rl.teacher_kl_coef` and `rl.teacher_value_coef` weight the action KL and
 per-state winner-distribution cross-entropy stabilization losses; both default
 to `0.001`.
