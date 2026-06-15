@@ -618,12 +618,13 @@ contribute zero KL. For binary discrete-target launch mode, no-launch replay
 rows include only the Bernoulli launch KL; target and fleet-size KL are computed
 only for rows where the replayed action launched. Discrete target-bin KL
 compares the target categorical and the selected target's fleet-bin categorical.
-Pure-action KL compares launch, angle, and selected fleet-size distributions for
-launched rows.
+Pure-action KL compares launch, marginal angle, and selected fleet-size
+distributions for launched rows. Angle KL is a permutation-invariant numerical
+integral over the marginal Von Mises mixture using a 512-point uniform grid.
 
-Fleet-size KL is computed on the selected truncated logistic mixture. Matching
-mixture counts use aligned component terms; incompatible mixture counts fall
-back to the full marginal mixture where supported. Per-action portions are
-logged with the same component naming style as entropy logging, for example
-`launch`, `target`, `angle`, `fleet_size_mixture`, `fleet_size_logistic`, and
-`fleet_size_full`.
+Fleet-size KL is computed as the exact marginal KL between the selected
+truncated logistic mixture distributions over integer fleet sizes from
+`min_fleet_size` through the row's `max_launch`. The KL does not compare latent
+mixture identities, so component permutations between teacher and student are
+not penalized. Per-action KL portions are logged as components such as
+`launch`, `target`, `angle`, `fleet_size_logistic`, and `fleet_size_full`.

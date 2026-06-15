@@ -5,6 +5,7 @@ from typing import Any
 import owl.model.actor.discrete_target_bins as discrete_target_bins_impl
 import owl.model.actor.discrete_targets as discrete_targets_impl
 import owl.model.actor.logistic_mixture as logistic_mixture_impl
+import owl.model.actor.pure as pure_actor_impl
 import owl.model.stateless_transformer_v1 as model_impl
 import pytest
 import torch
@@ -2578,11 +2579,9 @@ def test_discrete_targets_teacher_kl_skips_target_and_size_for_no_launch(
         ships=torch.zeros((1, 4, ACTION_ENTITY_SLOTS, 1), dtype=torch.int64),
     )
     size_kl_rows: list[int] = []
-    original_size_kl = discrete_targets_impl.logistic_mixture_kl_components
+    original_size_kl = discrete_targets_impl.logistic_mixture_kl
 
-    def recording_size_kl(
-        *args: Any, **kwargs: Any
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def recording_size_kl(*args: Any, **kwargs: Any) -> torch.Tensor:
         residual_budget = args[6]
         assert isinstance(residual_budget, torch.Tensor)
         size_kl_rows.append(residual_budget.numel())
@@ -2590,7 +2589,7 @@ def test_discrete_targets_teacher_kl_skips_target_and_size_for_no_launch(
 
     monkeypatch.setattr(
         discrete_targets_impl,
-        "logistic_mixture_kl_components",
+        "logistic_mixture_kl",
         recording_size_kl,
     )
 
@@ -2826,9 +2825,9 @@ def test_supports_cached_teacher_distillation_by_actor() -> None:
     assert pure_model.supports_cached_value_distillation()
 
 
-def test_logistic_mixture_kl_components_handles_empty_budget() -> None:
+def test_logistic_mixture_kl_handles_empty_budget() -> None:
     shape = (0, 2)
-    mixture_kl, logistic_kl = logistic_mixture_impl.logistic_mixture_kl_components(
+    logistic_kl = logistic_mixture_impl.logistic_mixture_kl(
         torch.empty(shape),
         torch.empty(shape),
         torch.empty(shape),
@@ -2839,8 +2838,64 @@ def test_logistic_mixture_kl_components_handles_empty_budget() -> None:
         min_fleet_size=3,
     )
 
-    assert mixture_kl.shape == (0,)
     assert logistic_kl.shape == (0,)
+
+
+def test_logistic_mixture_kl_ignores_component_permutation() -> None:
+    teacher_mix_logits = torch.tensor([[2.0, -0.5]])
+    teacher_mu = torch.tensor([[2.0, 8.0]])
+    teacher_scale = torch.tensor([[0.7, 1.3]])
+    student_mix_logits = teacher_mix_logits.flip(-1)
+    student_mu = teacher_mu.flip(-1)
+    student_scale = teacher_scale.flip(-1)
+
+    logistic_kl = logistic_mixture_impl.logistic_mixture_kl(
+        teacher_mix_logits,
+        teacher_mu,
+        teacher_scale,
+        student_mix_logits,
+        student_mu,
+        student_scale,
+        torch.tensor([12], dtype=torch.int64),
+        min_fleet_size=1,
+    )
+
+    assert torch.allclose(logistic_kl, torch.zeros_like(logistic_kl), atol=1e-6)
+
+
+def test_angle_policy_kl_ignores_component_permutation() -> None:
+    teacher_mix_logits = torch.tensor([[1.5, -0.25]])
+    teacher_loc = torch.tensor([[0.2, 2.4]])
+    teacher_kappa = torch.tensor([[3.0, 6.0]])
+    student_mix_logits = teacher_mix_logits.flip(-1)
+    student_loc = teacher_loc.flip(-1)
+    student_kappa = teacher_kappa.flip(-1)
+    zeros = torch.zeros_like(teacher_loc)
+    ones = torch.ones_like(teacher_loc)
+    teacher_params = PolicyParams(
+        continue_logits=torch.zeros(teacher_mix_logits.shape[:-1]),
+        angle_mix_logits=teacher_mix_logits,
+        angle_log_w=F.log_softmax(teacher_mix_logits, dim=-1),
+        loc=teacher_loc,
+        kappa=teacher_kappa,
+        size_mix_logits=zeros,
+        size_mu=zeros,
+        size_scale=ones,
+    )
+    student_params = PolicyParams(
+        continue_logits=torch.zeros(student_mix_logits.shape[:-1]),
+        angle_mix_logits=student_mix_logits,
+        angle_log_w=F.log_softmax(student_mix_logits, dim=-1),
+        loc=student_loc,
+        kappa=student_kappa,
+        size_mix_logits=zeros,
+        size_mu=zeros,
+        size_scale=ones,
+    )
+
+    angle_kl = pure_actor_impl.angle_policy_kl(teacher_params, student_params)
+
+    assert torch.allclose(angle_kl, torch.zeros_like(angle_kl), atol=1e-6)
 
 
 def test_discrete_target_bins_actor_adds_pairwise_bias_before_masking() -> None:

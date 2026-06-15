@@ -22,7 +22,7 @@ from owl.model.actor.logistic_mixture import (
     discretized_logistic_mixture_log_prob,
     log_interpolate,
     logistic_cdf_diff_logprob,
-    logistic_mixture_kl_components,
+    logistic_mixture_kl,
     logsubexp,
     sample_discretized_logistic_mixture,
     ship_support,
@@ -463,23 +463,19 @@ class DiscreteTargetsActor(nn.Module):
             target_valid[target_mask],
         )
         event_mask = source_active & launch
-        size_mixture_kl = torch.zeros_like(target_kl)
         size_logistic_kl = torch.zeros_like(target_kl)
-        compact_size_mixture_kl, compact_size_logistic_kl = (
-            logistic_mixture_kl_components(
-                teacher_params.size_mix_logits[event_mask],
-                teacher_params.size_mu[event_mask],
-                teacher_params.size_scale[event_mask],
-                student_params.size_mix_logits[event_mask],
-                student_params.size_mu[event_mask],
-                student_params.size_scale[event_mask],
-                max_launch[event_mask],
-                min_fleet_size=min_fleet_size,
-            )
+        compact_size_logistic_kl = logistic_mixture_kl(
+            teacher_params.size_mix_logits[event_mask],
+            teacher_params.size_mu[event_mask],
+            teacher_params.size_scale[event_mask],
+            student_params.size_mix_logits[event_mask],
+            student_params.size_mu[event_mask],
+            student_params.size_scale[event_mask],
+            max_launch[event_mask],
+            min_fleet_size=min_fleet_size,
         )
-        size_mixture_kl[event_mask] = compact_size_mixture_kl
         size_logistic_kl[event_mask] = compact_size_logistic_kl
-        size_kl = size_mixture_kl + size_logistic_kl
+        size_kl = size_logistic_kl
         per_player_entity_kl = launch_kl + target_kl + size_kl
         return ModelActionKLDivergences(
             launch=launch_kl.unsqueeze(-1),
@@ -490,7 +486,6 @@ class DiscreteTargetsActor(nn.Module):
                 "launch": launch_kl,
                 "target": target_kl,
                 "fleet_size_full": size_kl,
-                "fleet_size_mixture": size_mixture_kl,
                 "fleet_size_logistic": size_logistic_kl,
             },
         )
