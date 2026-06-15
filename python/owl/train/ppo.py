@@ -12,6 +12,7 @@ from pydantic import Field, model_validator
 
 from owl.config import BaseConfig
 from owl.model import (
+    ActorDiscreteTargetsConfig,
     BaseModelAPI,
     CachedTeacherDistillationTargets,
     ModelActionKLDivergences,
@@ -20,6 +21,7 @@ from owl.model import (
     ModelHiddenState,
     ModelOutput,
     ModelTeacherEvaluation,
+    StatelessTransformerV1,
     concat_teacher_distillation_targets,
     index_teacher_distillation_targets,
 )
@@ -544,6 +546,14 @@ class PPOTrainer:
                     "without player-count adapters for both the student and the "
                     "teacher model"
                 )
+            if (
+                self.config.teacher_mode == "fixed"
+                and self.config.teacher_kl_coef > 0.0
+            ):
+                _validate_fixed_teacher_action_compatibility(
+                    unwrap_model(self.model),
+                    teacher_model,
+                )
             teacher_model.eval()
             for parameter in teacher_model.parameters():
                 parameter.requires_grad_(False)
@@ -557,7 +567,16 @@ class PPOTrainer:
         rollout_elapsed = max(perf_counter() - rollout_start, 1e-12)
         env_metrics = self._last_env_metrics
         segments = self.rollout.segment_major()
-        teacher_targets = self._precompute_teacher_targets(segments)
+        teacher_targets: CachedTeacherDistillationTargets | None = None
+        teacher_elapsed = 0.0
+        teacher_model = self.teacher_model if self.teacher_active else None
+        teacher_losses_enabled = (
+            self.config.teacher_kl_coef > 0.0 or self.config.teacher_value_coef > 0.0
+        )
+        if teacher_model is not None and teacher_losses_enabled:
+            teacher_start = perf_counter()
+            teacher_targets = self._precompute_teacher_targets(segments)
+            teacher_elapsed = max(perf_counter() - teacher_start, 1e-12)
         max_entities_seen = segments.obs.entity_mask.sum(dim=-1).max()
         value_mask = segments.obs.still_playing
         policy_mask = _policy_mask(segments.obs)
@@ -623,13 +642,18 @@ class PPOTrainer:
         metrics.update(env_metrics_logged)
         elapsed = self._max_float(max(perf_counter() - start, 1e-12))
         rollout_elapsed = self._max_float(rollout_elapsed)
+        teacher_elapsed = self._max_float(teacher_elapsed)
         update_elapsed = self._max_float(update_elapsed)
         rollout_steps = self.config.horizon * self.n_envs * self.world_size
         update_steps = self.config.horizon * sampled_segments
         metrics["time/rollout_seconds"] = float(rollout_elapsed)
+        metrics["time/teacher_seconds"] = float(teacher_elapsed)
         metrics["time/update_seconds"] = float(update_elapsed)
         metrics["time/iteration_seconds"] = float(elapsed)
         metrics["perf/rollout_sps"] = float(rollout_steps / rollout_elapsed)
+        metrics["perf/teacher_sps"] = (
+            float(rollout_steps / teacher_elapsed) if teacher_elapsed > 0.0 else 0.0
+        )
         metrics["perf/update_sps"] = float(update_steps / update_elapsed)
         metrics["perf/steps_per_second"] = float(rollout_steps / elapsed)
         return metrics
@@ -2088,6 +2112,28 @@ def _require_stateless_teacher(
     hidden_state = teacher.initial_hidden_state(batch_size, device=device)
     if hidden_state is not None:
         raise ValueError("teacher models with recurrent hidden state are not supported")
+
+
+def _validate_fixed_teacher_action_compatibility(
+    student: BaseModelAPI,
+    teacher: BaseModelAPI,
+) -> None:
+    if not isinstance(student, StatelessTransformerV1) or not isinstance(
+        teacher,
+        StatelessTransformerV1,
+    ):
+        return
+    student_actor_config = student.config.actor
+    teacher_actor_config = teacher.config.actor
+    if not isinstance(
+        student_actor_config,
+        ActorDiscreteTargetsConfig,
+    ) or not isinstance(teacher_actor_config, ActorDiscreteTargetsConfig):
+        return
+    if student_actor_config.launch_mode != teacher_actor_config.launch_mode:
+        raise ValueError(
+            "fixed teacher discrete-target launch_mode must match student launch_mode"
+        )
 
 
 def _model_forward(

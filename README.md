@@ -291,6 +291,8 @@ Policy logs include total entropy plus policy-specific component means such as
 Teacher runs additionally log `teacher/kl`, `teacher/value_cross_entropy`,
 weighted loss terms, and per-action KL components such as
 `teacher/launch_kl`, `teacher/target_kl`, or `teacher/fleet_size_full_kl`.
+Teacher precompute timing is logged as `time/teacher_seconds` and
+`perf/teacher_sps`; both are `0.0` when no teacher precompute runs.
 
 ## Replay capture
 

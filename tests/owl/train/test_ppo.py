@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, Literal
 
 import pytest
@@ -1072,8 +1073,10 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "train/4p_rate",
         "train/player_step_total",
         "time/rollout_seconds",
+        "time/teacher_seconds",
         "time/update_seconds",
         "perf/rollout_sps",
+        "perf/teacher_sps",
         "perf/update_sps",
     ):
         assert metrics[key] == pytest.approx(float(metrics[key]))
@@ -1089,6 +1092,8 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
     assert metrics["train/2p_rate"] == pytest.approx(0.0)
     assert metrics["train/3p_rate"] == pytest.approx(0.0)
     assert metrics["train/4p_rate"] == pytest.approx(1.0)
+    assert metrics["time/teacher_seconds"] == pytest.approx(0.0)
+    assert metrics["perf/teacher_sps"] == pytest.approx(0.0)
     assert metrics["train/player_step_total"] == pytest.approx(80.0)
     assert metrics["optimizer/steps"] == pytest.approx(2.0)
     assert metrics["optimizer/learning_rate"] == pytest.approx(0.05)
@@ -2028,6 +2033,8 @@ def test_stateless_transformer_train_iteration_runs_with_teacher() -> None:
     assert torch.isfinite(torch.tensor(list(metrics.values()))).all()
     assert metrics["teacher/kl"] >= 0.0
     assert metrics["teacher/value_cross_entropy"] >= 0.0
+    assert metrics["time/teacher_seconds"] > 0.0
+    assert metrics["perf/teacher_sps"] > 0.0
 
 
 def test_teacher_update_uses_cached_targets_and_no_grad_teacher(
@@ -2322,6 +2329,57 @@ def test_trainer_rejects_teacher_for_unsupported_student_actor() -> None:
             config=ppo.PPOConfig(
                 horizon=2,
                 segments_per_minibatch=1,
+            ),
+            device=torch.device("cpu"),
+            teacher_model=teacher_model,
+            teacher_active=True,
+        )
+
+
+def test_fixed_teacher_rejects_discrete_target_launch_mode_mismatch() -> None:
+    torch.manual_seed(0)
+    env = TinyDiscreteTargetEnv(n_envs=2)
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(
+            actor=ActorDiscreteTargetsConfig(
+                launch_mode="binary",
+                n_action_mixtures=2,
+                entropy_ship_quantiles=8,
+            ),
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+        ),
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    teacher_model = StatelessTransformerV1(
+        StatelessTransformerV1Config(
+            actor=ActorDiscreteTargetsConfig(
+                launch_mode="binary_after",
+                n_action_mixtures=2,
+                entropy_ship_quantiles=8,
+            ),
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+        ),
+        obs_spec=env.obs_spec,
+        action_spec=env.action_spec,
+    )
+    model.reset_parameters()
+    teacher_model.reset_parameters()
+
+    with pytest.raises(ValueError, match="launch_mode"):
+        ppo.PPOTrainer(
+            env=env,
+            model=model,
+            optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+            config=ppo.PPOConfig(
+                horizon=2,
+                segments_per_minibatch=1,
+                teacher_mode="fixed",
+                teacher_init=Path("teacher/checkpoint.pt"),
             ),
             device=torch.device("cpu"),
             teacher_model=teacher_model,
