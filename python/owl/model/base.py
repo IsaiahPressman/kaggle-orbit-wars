@@ -191,6 +191,14 @@ class BaseModelAPI(nn.Module, ABC):
         """
         return False
 
+    def count_non_masked_tokens(self, obs: ObsBatch) -> torch.Tensor:
+        """Return the number of unmasked model tokens represented by ``obs``.
+
+        Models with learned or architecture-specific tokens should override this.
+        The base implementation counts only unmasked observation entities.
+        """
+        return obs.entity_mask.sum(dtype=torch.int64)
+
     def serve(
         self,
         obs: ObsBatch,

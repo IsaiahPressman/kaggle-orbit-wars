@@ -148,6 +148,8 @@ planet, comet, fleet order and is concatenated with masks for the learned
 tokens. Player, actor-plan, and critic-value tokens use `still_playing`; the
 global-feature and board scratch tokens are always unmasked. Masked tokens are
 excluded from attention keys and are zeroed in the returned hidden states.
+`BaseModelAPI.count_non_masked_tokens` reports this unmasked token count for
+training throughput logs without running the model.
 Downstream code must consume the named `EncodedObservations` fields rather than
 assuming output meaning from positional slices.
 
@@ -172,6 +174,8 @@ routed fleets. The fleet residual stream is updated once per shared block by a
 separate fleet MLP and remains outside self-attention. Player-count adapter
 blocks are rejected for this observation spec because they would otherwise add
 trunk MLPs without the matching interleaved fleet cross-attention.
+The throughput token count includes both the self-attention token mask and
+active fleet rows processed through this separate fleet stream.
 
 Kaggle serving may compact inactive planet, comet, and fleet rows before model
 inference. Recurrent checkpoints with `recurrence_mode="include_planets"` keep

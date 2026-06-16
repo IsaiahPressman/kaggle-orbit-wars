@@ -303,6 +303,11 @@ weighted loss terms, and per-action KL components such as
 `teacher/launch_kl`, `teacher/target_kl`, or `teacher/fleet_size_full_kl`.
 Teacher precompute timing is logged as `time/teacher_seconds` and
 `perf/teacher_sps`; both are `0.0` when no teacher precompute runs.
+Iteration throughput is logged as `perf/steps_per_second`, plus
+`perf/tokens_per_second` for unmasked model tokens and
+`perf/active_entities_per_second` for action-taking source entities. These
+rates use total iteration time, including rollout, teacher precompute, and PPO
+update time.
 
 ## Replay capture
 

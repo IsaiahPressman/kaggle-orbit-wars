@@ -589,6 +589,10 @@ class PPOTrainer:
         max_entities_seen = segments.obs.entity_mask.sum(dim=-1).max()
         value_mask = segments.obs.still_playing
         policy_mask = _policy_mask(segments.obs)
+        model_tokens = self._sum_int(
+            unwrap_model(self.model).count_non_masked_tokens(segments.obs)
+        )
+        active_entities = self._sum_int(_policy_entity_mask(segments.obs).sum())
         advantages, returns = self._compute_gae(
             rewards=segments.rewards,
             values=segments.values,
@@ -665,6 +669,8 @@ class PPOTrainer:
         )
         metrics["perf/update_sps"] = float(update_steps / update_elapsed)
         metrics["perf/steps_per_second"] = float(rollout_steps / elapsed)
+        metrics["perf/tokens_per_second"] = float(model_tokens / elapsed)
+        metrics["perf/active_entities_per_second"] = float(active_entities / elapsed)
         return metrics
 
     def write_checkpoint(

@@ -1094,6 +1094,43 @@ def test_non_flash_encoder_does_not_build_or_pack_sequences(
     assert encoded.token_mask.shape == (2, obs_spec.max_entities + 17)
 
 
+def test_count_non_masked_tokens_matches_encoder_token_mask() -> None:
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    obs.still_playing[1, 2:] = False
+
+    encoded = model.encode_observations(obs)
+
+    assert model.count_non_masked_tokens(obs) == encoded.token_mask.sum()
+
+
+def test_count_non_masked_tokens_includes_cross_attention_fleets() -> None:
+    obs_spec = EntityBasedCrossAttnV1Config(max_entities=ACTION_ENTITY_SLOTS + 2)
+    config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+    )
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    obs.entity_mask[:, ACTION_ENTITY_SLOTS] = True
+    assert obs.fleet_target is not None
+    obs.fleet_target[:, 0] = 0
+
+    encoded = model.encode_observations(obs)
+    fleet_tokens = obs.entity_mask[:, ACTION_ENTITY_SLOTS:].sum()
+
+    assert model.count_non_masked_tokens(obs) == encoded.token_mask.sum() + fleet_tokens
+
+
 def test_force_flash_encoder_rejects_non_flash_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

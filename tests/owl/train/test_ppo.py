@@ -1078,6 +1078,9 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "perf/rollout_sps",
         "perf/teacher_sps",
         "perf/update_sps",
+        "perf/steps_per_second",
+        "perf/tokens_per_second",
+        "perf/active_entities_per_second",
     ):
         assert metrics[key] == pytest.approx(float(metrics[key]))
     assert any(
@@ -1095,6 +1098,12 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
     assert metrics["time/teacher_seconds"] == pytest.approx(0.0)
     assert metrics["perf/teacher_sps"] == pytest.approx(0.0)
     assert metrics["train/player_step_total"] == pytest.approx(80.0)
+    assert metrics["perf/tokens_per_second"] == pytest.approx(
+        40.0 / metrics["time/iteration_seconds"]
+    )
+    assert metrics["perf/active_entities_per_second"] == pytest.approx(
+        80.0 / metrics["time/iteration_seconds"]
+    )
     assert metrics["optimizer/steps"] == pytest.approx(2.0)
     assert metrics["optimizer/learning_rate"] == pytest.approx(0.05)
 

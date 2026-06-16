@@ -273,6 +273,27 @@ def test_recurrent_hidden_reset_uses_env_and_player_dones() -> None:
             assert reset.hidden[0, 0, token].eq(1.0).all()
 
 
+def test_count_non_masked_tokens_matches_recurrent_token_mask() -> None:
+    obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
+    action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)
+    model = RecurrentTransformerV1(
+        RecurrentTransformerV1Config(
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+            n_scratch_tokens=3,
+        ),
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    obs.still_playing[1, 2:] = False
+
+    encoded = model._build_flat_tokens(obs)
+
+    assert model.count_non_masked_tokens(obs) == encoded.token_mask.sum()
+
+
 def test_recurrent_include_planets_adds_env_level_state() -> None:
     obs_spec = EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2)
     action_spec = ActionDiscreteTargetsConfig(max_per_planet_launches=1)

@@ -476,6 +476,19 @@ class StatelessTransformerV1(BaseModelAPI):
             *actor.get_output_layers(),
         )
 
+    def count_non_masked_tokens(self, obs: ObsBatch) -> torch.Tensor:
+        row_count = obs.entity_mask.reshape(-1, obs.entity_mask.shape[-1]).shape[0]
+        always_on_count = row_count * (1 + self.config.n_scratch_tokens)
+        return (
+            obs.entity_mask.sum(dtype=torch.int64)
+            + 3 * obs.still_playing.sum(dtype=torch.int64)
+            + torch.tensor(
+                always_on_count,
+                dtype=torch.int64,
+                device=obs.entity_mask.device,
+            )
+        )
+
     def encode_observations(
         self,
         obs: ObsBatch,
