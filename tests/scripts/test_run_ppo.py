@@ -23,6 +23,7 @@ from owl.rl import (
 from owl.train import FullConfig, PPOTrainer
 from owl.train.distributed import DistributedContext
 from owl.train.logging import LogMode
+from owl.train.optimizer import CompositeOptimizer
 
 _RUN_PPO_PATH = Path(__file__).parents[2] / "scripts" / "run_ppo.py"
 _RUN_PPO_SPEC = importlib.util.spec_from_file_location("run_ppo", _RUN_PPO_PATH)
@@ -301,6 +302,7 @@ def test_validate_args_rejects_non_positive_runtime_hours() -> None:
                 output_dir=Path("runs"),
                 overrides=None,
                 load_model_weights=None,
+                load_model_weights_mode="model_only",
                 log_mode=LogMode.WANDB,
             )
         )
@@ -315,6 +317,7 @@ def test_validate_args_rejects_debug_resume() -> None:
                 output_dir=None,
                 overrides=None,
                 load_model_weights=None,
+                load_model_weights_mode="model_only",
                 log_mode=LogMode.DEBUG,
             )
         )
@@ -329,6 +332,7 @@ def test_validate_args_rejects_resume_overrides() -> None:
                 output_dir=None,
                 overrides=[["rl.horizon=8"]],
                 load_model_weights=None,
+                load_model_weights_mode="model_only",
                 log_mode=LogMode.WANDB,
             )
         )
@@ -346,6 +350,25 @@ def test_validate_args_rejects_resume_load_model_weights() -> None:
                 output_dir=None,
                 overrides=None,
                 load_model_weights=Path("checkpoint.pt"),
+                load_model_weights_mode="model_only",
+                log_mode=LogMode.WANDB,
+            )
+        )
+
+
+def test_validate_args_rejects_load_model_weights_mode_without_checkpoint() -> None:
+    with pytest.raises(
+        ValueError,
+        match="--load-model-weights-mode requires --load-model-weights",
+    ):
+        run_ppo._validate_args(
+            Namespace(
+                max_env_steps=None,
+                max_runtime_hours=None,
+                output_dir=Path("runs"),
+                overrides=None,
+                load_model_weights=None,
+                load_model_weights_mode="model_and_optimizer",
                 log_mode=LogMode.WANDB,
             )
         )
@@ -374,6 +397,7 @@ def test_resolve_fresh_launch_accepts_load_model_weights(tmp_path: Path) -> None
             output_dir=output_dir,
             overrides=[["rl.horizon=8"]],
             load_model_weights=checkpoint_path,
+            load_model_weights_mode="model_and_optimizer",
         )
     )
 
@@ -382,6 +406,7 @@ def test_resolve_fresh_launch_accepts_load_model_weights(tmp_path: Path) -> None
         output_dir=output_dir,
         overrides={"rl.horizon": 8},
         load_model_weights_path=checkpoint_path,
+        load_model_weights_mode="model_and_optimizer",
     )
 
 
@@ -646,8 +671,14 @@ def test_fresh_launch_from_checkpoint_uses_starting_checkpoint_as_teacher(
             self.teacher_updates: list[tuple[torch.nn.Module, bool]] = []
             trainer_ref["trainer"] = self
 
-        def load_model_weights(self, path: Path) -> run_ppo.PPOCheckpointMetadata:
+        def load_model_weights(
+            self,
+            path: Path,
+            *,
+            load_optimizer: bool = False,
+        ) -> run_ppo.PPOCheckpointMetadata:
             assert path == checkpoint_path
+            assert not load_optimizer
             loaded_model = self.model
             assert isinstance(loaded_model, torch.nn.Linear)
             loaded_model.weight.data.fill_(7.0)
@@ -2015,6 +2046,176 @@ def test_ppo_trainer_load_model_weights_keeps_only_logging_counters(
     assert dst_trainer.target_kl_exceeded_total == 0
     assert not dst_optimizer.state_dict()["state"]
     assert dst_scheduler.state_dict() == scheduler_state_before
+    for src_param, dst_param in zip(
+        src_model.parameters(),
+        dst_model.parameters(),
+        strict=True,
+    ):
+        assert torch.equal(src_param, dst_param)
+
+
+def test_ppo_trainer_load_model_weights_can_load_optimizer_without_scheduler(
+    tmp_path: Path,
+) -> None:
+    src_model = torch.nn.Linear(2, 1)
+    dst_model = torch.nn.Linear(2, 1)
+    src_optimizer = torch.optim.AdamW(src_model.parameters(), lr=0.001)
+    dst_optimizer = torch.optim.AdamW(dst_model.parameters(), lr=0.01)
+    src_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        src_optimizer,
+        lr_lambda=lambda step: 0.5**step,
+    )
+    dst_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        dst_optimizer,
+        lr_lambda=lambda step: 0.5**step,
+    )
+    for param in src_model.parameters():
+        param.data.fill_(3.0)
+    src_optimizer.zero_grad()
+    src_model(torch.ones(1, 2)).sum().backward()
+    src_optimizer.step()
+    src_scheduler.step()
+    src_trainer = PPOTrainer.__new__(PPOTrainer)
+    src_trainer.model = src_model
+    src_trainer.optimizer = src_optimizer
+    src_trainer.lr_scheduler = src_scheduler
+    src_trainer.optimizer_steps = 11
+    src_trainer.player_step_total = 37
+    src_trainer.total_games_played = 41
+    src_trainer.target_kl_exceeded_total = 5
+    path = tmp_path / "checkpoint.pt"
+    src_trainer.write_checkpoint(path, env_steps=2048, wandb_run_id="run-abc")
+
+    dst_trainer = PPOTrainer.__new__(PPOTrainer)
+    dst_trainer.model = dst_model
+    dst_trainer.optimizer = dst_optimizer
+    dst_trainer.lr_scheduler = dst_scheduler
+    dst_trainer.optimizer_steps = 0
+    dst_trainer.player_step_total = 0
+    dst_trainer.total_games_played = 0
+    dst_trainer.target_kl_exceeded_total = 0
+    dst_trainer.device = torch.device("cpu")
+    scheduler_state_before = dst_scheduler.state_dict()
+
+    metadata = dst_trainer.load_model_weights(path, load_optimizer=True)
+
+    assert metadata.env_steps == 2048
+    assert metadata.player_step_total == 37
+    assert metadata.total_games_played == 41
+    assert metadata.wandb_run_id == "run-abc"
+    assert dst_trainer.optimizer_steps == 0
+    assert dst_trainer.player_step_total == 37
+    assert dst_trainer.total_games_played == 41
+    assert dst_trainer.target_kl_exceeded_total == 0
+    assert dst_optimizer.state_dict()["state"]
+    assert dst_optimizer.param_groups[0]["lr"] == pytest.approx(0.01)
+    assert dst_scheduler.state_dict() == scheduler_state_before
+    for src_param, dst_param in zip(
+        src_model.parameters(),
+        dst_model.parameters(),
+        strict=True,
+    ):
+        assert torch.equal(src_param, dst_param)
+
+
+def test_ppo_trainer_load_model_weights_rejects_optimizer_state_shape_mismatch(
+    tmp_path: Path,
+) -> None:
+    src_model = torch.nn.Linear(2, 1)
+    dst_model = torch.nn.Linear(2, 1)
+    src_optimizer = torch.optim.AdamW(src_model.parameters(), lr=0.001)
+    dst_optimizer = torch.optim.AdamW(dst_model.parameters(), lr=0.001)
+    src_optimizer.zero_grad()
+    src_model(torch.ones(1, 2)).sum().backward()
+    src_optimizer.step()
+    src_trainer = PPOTrainer.__new__(PPOTrainer)
+    src_trainer.model = src_model
+    src_trainer.optimizer = src_optimizer
+    src_trainer.lr_scheduler = None
+    src_trainer.optimizer_steps = 11
+    src_trainer.player_step_total = 37
+    src_trainer.total_games_played = 41
+    src_trainer.target_kl_exceeded_total = 5
+    path = tmp_path / "checkpoint.pt"
+    src_trainer.write_checkpoint(path, env_steps=2048, wandb_run_id="run-abc")
+
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    assert isinstance(checkpoint, dict)
+    optimizer_state = checkpoint["optimizer"]
+    assert isinstance(optimizer_state, dict)
+    state = optimizer_state["state"]
+    assert isinstance(state, dict)
+    param_state = next(iter(state.values()))
+    assert isinstance(param_state, dict)
+    param_state["exp_avg"] = torch.ones(3, 3)
+    torch.save(checkpoint, path)
+
+    dst_trainer = PPOTrainer.__new__(PPOTrainer)
+    dst_trainer.model = dst_model
+    dst_trainer.optimizer = dst_optimizer
+    dst_trainer.lr_scheduler = None
+    dst_trainer.optimizer_steps = 0
+    dst_trainer.player_step_total = 0
+    dst_trainer.total_games_played = 0
+    dst_trainer.target_kl_exceeded_total = 0
+    dst_trainer.device = torch.device("cpu")
+
+    with pytest.raises(ValueError, match="optimizer state tensor 'exp_avg' shape"):
+        dst_trainer.load_model_weights(path, load_optimizer=True)
+
+
+def test_ppo_trainer_load_model_weights_can_load_composite_optimizer(
+    tmp_path: Path,
+) -> None:
+    src_model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 1))
+    dst_model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 1))
+    src_optimizer = CompositeOptimizer(
+        [
+            torch.optim.AdamW(src_model[0].parameters(), lr=0.001),
+            torch.optim.AdamW(src_model[1].parameters(), lr=0.002),
+        ]
+    )
+    dst_optimizer = CompositeOptimizer(
+        [
+            torch.optim.AdamW(dst_model[0].parameters(), lr=0.01),
+            torch.optim.AdamW(dst_model[1].parameters(), lr=0.02),
+        ]
+    )
+    for param in src_model.parameters():
+        param.data.fill_(3.0)
+    src_optimizer.zero_grad()
+    src_model(torch.ones(1, 2)).sum().backward()
+    src_optimizer.step()
+    src_trainer = PPOTrainer.__new__(PPOTrainer)
+    src_trainer.model = src_model
+    src_trainer.optimizer = src_optimizer
+    src_trainer.lr_scheduler = None
+    src_trainer.optimizer_steps = 11
+    src_trainer.player_step_total = 37
+    src_trainer.total_games_played = 41
+    src_trainer.target_kl_exceeded_total = 5
+    path = tmp_path / "checkpoint.pt"
+    src_trainer.write_checkpoint(path, env_steps=2048, wandb_run_id="run-abc")
+
+    dst_trainer = PPOTrainer.__new__(PPOTrainer)
+    dst_trainer.model = dst_model
+    dst_trainer.optimizer = dst_optimizer
+    dst_trainer.lr_scheduler = None
+    dst_trainer.optimizer_steps = 0
+    dst_trainer.player_step_total = 0
+    dst_trainer.total_games_played = 0
+    dst_trainer.target_kl_exceeded_total = 0
+    dst_trainer.device = torch.device("cpu")
+
+    metadata = dst_trainer.load_model_weights(path, load_optimizer=True)
+
+    assert metadata.env_steps == 2048
+    assert dst_trainer.optimizer_steps == 0
+    assert dst_trainer.target_kl_exceeded_total == 0
+    assert dst_optimizer.optimizers[0].state_dict()["state"]
+    assert dst_optimizer.optimizers[1].state_dict()["state"]
+    assert dst_optimizer.optimizers[0].param_groups[0]["lr"] == pytest.approx(0.01)
+    assert dst_optimizer.optimizers[1].param_groups[0]["lr"] == pytest.approx(0.02)
     for src_param, dst_param in zip(
         src_model.parameters(),
         dst_model.parameters(),

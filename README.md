@@ -134,7 +134,10 @@ The training entrypoint configures PyTorch for TF32 matmul/conv precision and
 cuDNN benchmarking before constructing the environment, model, and optimizer.
 Fresh launches explicitly reset model parameters before optimizer construction.
 When `--load-model-weights` is set, the fresh trainer then replaces those
-parameters from the checkpoint without loading optimizer state.
+parameters from the checkpoint. Set
+`--load-model-weights-mode model_and_optimizer` to also load optimizer
+moment/momentum state while keeping the fresh optimizer hyperparameters and
+scheduler state.
 resume launches load checkpoint weights and optimizer state without resetting
 the model first.
 Optimizer configs may set `lr_schedule.schedule` to
@@ -235,6 +238,11 @@ This loads only `checkpoint["model"]` plus the `env_steps`,
 `player_step_total`, and `total_games_played` logging counters. Optimizer steps,
 target-KL counters, optimizer state, scheduler state, and checkpoint config are
 fresh for the new run.
+Pass `--load-model-weights-mode model_and_optimizer` to additionally load the
+checkpoint optimizer moment/momentum state. That mode still keeps optimizer
+steps, target-KL counters, scheduler state, checkpoint config, and W&B run state
+fresh; optimizer hyperparameters such as LR and weight decay come from the fresh
+config, not from the checkpoint optimizer param groups.
 
 PPO run directories save `config.yaml` alongside checkpoints. The saved config
 includes `runtime.n_runtime_gpus`; resume uses it to keep the effective rollout

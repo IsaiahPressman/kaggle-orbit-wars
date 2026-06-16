@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from time import perf_counter
-from typing import Literal, Self, cast
+from typing import Any, Literal, Self, cast
 
 import torch
 from pydantic import Field, model_validator
@@ -726,13 +726,23 @@ class PPOTrainer:
         self.target_kl_exceeded_total = target_kl_exceeded_total
         return metadata
 
-    def load_model_weights(self, path: Path) -> PPOCheckpointMetadata:
+    def load_model_weights(
+        self,
+        path: Path,
+        *,
+        load_optimizer: bool = False,
+    ) -> PPOCheckpointMetadata:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         if not isinstance(checkpoint, dict):
             raise ValueError("checkpoint must be a dictionary")
 
         metadata = _checkpoint_metadata(checkpoint)
         unwrap_model(self.model).load_state_dict(checkpoint["model"])
+        if load_optimizer:
+            _load_optimizer_state_preserving_param_groups(
+                self.optimizer,
+                checkpoint["optimizer"],
+            )
         self.player_step_total = metadata.player_step_total
         self.total_games_played = metadata.total_games_played
         return metadata
@@ -2056,6 +2066,169 @@ def _player_segment_returns(
 def _masked_reward_max(rewards: torch.Tensor, value_mask: torch.Tensor) -> torch.Tensor:
     masked_rewards = rewards * value_mask.to(dtype=rewards.dtype)
     return masked_rewards.max()
+
+
+def _load_optimizer_state_preserving_param_groups(
+    optimizer: _Optimizer,
+    state_dict: object,
+) -> None:
+    if not isinstance(state_dict, dict):
+        raise ValueError("checkpoint optimizer state must be a dictionary")
+    if isinstance(optimizer, _CompositeOptimizer):
+        optimizer_states = state_dict.get("optimizers")
+        if not isinstance(optimizer_states, list):
+            raise ValueError("CompositeOptimizer state must contain optimizer states")
+        if len(optimizer_states) != len(optimizer.optimizers):
+            raise ValueError(
+                "CompositeOptimizer state optimizer count must match current "
+                f"optimizer count {len(optimizer.optimizers)}, "
+                f"got {len(optimizer_states)}"
+            )
+        for inner_optimizer, inner_state in zip(
+            optimizer.optimizers,
+            optimizer_states,
+            strict=True,
+        ):
+            _load_torch_optimizer_state_preserving_param_groups(
+                inner_optimizer,
+                inner_state,
+            )
+        return
+    if isinstance(optimizer, torch.optim.Optimizer):
+        _load_torch_optimizer_state_preserving_param_groups(optimizer, state_dict)
+        return
+    raise TypeError("optimizer must be a torch optimizer or CompositeOptimizer")
+
+
+def _load_torch_optimizer_state_preserving_param_groups(
+    optimizer: torch.optim.Optimizer,
+    state_dict: object,
+) -> None:
+    if not isinstance(state_dict, dict):
+        raise ValueError("optimizer state must be a dictionary")
+    saved_state = state_dict.get("state")
+    if not isinstance(saved_state, dict):
+        raise ValueError("optimizer state must contain state")
+    saved_param_groups = state_dict.get("param_groups")
+    if not isinstance(saved_param_groups, list):
+        raise ValueError("optimizer state must contain param_groups")
+    current_state_dict = optimizer.state_dict()
+    current_param_groups = current_state_dict["param_groups"]
+    if len(saved_param_groups) != len(current_param_groups):
+        raise ValueError(
+            "optimizer state param group count must match current optimizer "
+            f"count {len(current_param_groups)}, got {len(saved_param_groups)}"
+        )
+
+    updated_param_groups: list[dict[str, Any]] = []
+    for index, saved_group in enumerate(saved_param_groups):
+        if not isinstance(saved_group, dict):
+            raise ValueError("optimizer param groups must be dictionaries")
+        current_group = current_param_groups[index]
+        if not isinstance(current_group, dict):
+            raise RuntimeError("optimizer state_dict param groups must be dictionaries")
+        current_optimizer_group = optimizer.param_groups[index]
+        saved_params = _optimizer_state_params(saved_group, group_index=index)
+        current_state_params = _optimizer_state_params(
+            current_group,
+            group_index=index,
+        )
+        current_params = current_optimizer_group["params"]
+        if not isinstance(current_params, list):
+            raise RuntimeError("optimizer param group params must be a list")
+        if len(saved_params) != len(current_state_params) or len(saved_params) != len(
+            current_params
+        ):
+            raise ValueError(
+                "optimizer state param count must match current optimizer "
+                f"group {index} count {len(current_params)}, got {len(saved_params)}"
+            )
+        _validate_optimizer_param_names(
+            saved_group,
+            current_group,
+            group_index=index,
+        )
+        for param_index, (saved_param, current_param) in enumerate(
+            zip(saved_params, current_params, strict=True),
+        ):
+            if not isinstance(current_param, torch.Tensor):
+                raise RuntimeError("optimizer param group entries must be tensors")
+            _validate_optimizer_state_tensor_shapes(
+                saved_state,
+                saved_param,
+                current_param,
+                group_index=index,
+                param_index=param_index,
+            )
+        preserved_group = dict(current_group)
+        preserved_group["params"] = list(saved_params)
+        updated_param_groups.append(preserved_group)
+
+    updated_state = dict(state_dict)
+    updated_state["param_groups"] = updated_param_groups
+
+    optimizer.load_state_dict(cast(dict[str, Any], updated_state))
+
+
+def _optimizer_state_params(
+    param_group: dict[object, object],
+    *,
+    group_index: int,
+) -> list[object]:
+    params = param_group.get("params")
+    if not isinstance(params, list):
+        raise ValueError(f"optimizer param group {group_index} must contain params")
+    return params
+
+
+def _validate_optimizer_param_names(
+    saved_group: dict[object, object],
+    current_group: dict[object, object],
+    *,
+    group_index: int,
+) -> None:
+    saved_names = saved_group.get("param_names")
+    current_names = current_group.get("param_names")
+    if saved_names is None and current_names is None:
+        return
+    if not isinstance(saved_names, list) or not isinstance(current_names, list):
+        raise ValueError(
+            "optimizer param_names must be present in both checkpoint and current "
+            f"optimizer for group {group_index}"
+        )
+    if saved_names != current_names:
+        raise ValueError(
+            "optimizer param_names must match current optimizer "
+            f"for group {group_index}"
+        )
+
+
+def _validate_optimizer_state_tensor_shapes(
+    saved_state: dict[object, object],
+    saved_param: object,
+    current_param: torch.Tensor,
+    *,
+    group_index: int,
+    param_index: int,
+) -> None:
+    param_state = saved_state.get(saved_param)
+    if param_state is None:
+        return
+    if not isinstance(param_state, dict):
+        raise ValueError(
+            "optimizer state entries must be dictionaries "
+            f"for group {group_index} param {param_index}"
+        )
+    for state_name, state_value in param_state.items():
+        if not isinstance(state_value, torch.Tensor):
+            continue
+        if state_value.ndim == 0 or state_value.shape == current_param.shape:
+            continue
+        raise ValueError(
+            f"optimizer state tensor {state_name!r} shape "
+            f"{tuple(state_value.shape)} must match current parameter shape "
+            f"{tuple(current_param.shape)} for group {group_index} param {param_index}"
+        )
 
 
 def _current_learning_rate(

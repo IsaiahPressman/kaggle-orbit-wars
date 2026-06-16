@@ -9,7 +9,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import yaml
@@ -68,6 +68,11 @@ CHECKPOINT_LAST_BEST = "checkpoint_last_best.pt"
 _NUMBERED_CHECKPOINT_RE = re.compile(
     r"^checkpoint_(\d{2})_(\d{3})_(\d{3})_(\d{3})\.pt$"
 )
+LoadModelWeightsMode = Literal["model_only", "model_and_optimizer"]
+LOAD_MODEL_WEIGHTS_MODES: tuple[LoadModelWeightsMode, ...] = (
+    "model_only",
+    "model_and_optimizer",
+)
 
 
 @dataclass(frozen=True)
@@ -76,6 +81,7 @@ class FreshLaunch:
     output_dir: Path
     overrides: dict[str, Any]
     load_model_weights_path: Path | None = None
+    load_model_weights_mode: LoadModelWeightsMode = "model_only"
 
 
 @dataclass(frozen=True)
@@ -202,7 +208,10 @@ def main() -> None:
                 trainer.set_teacher_model(last_best_model, active=True)
         elif launch.load_model_weights_path is not None:
             checkpoint_metadata = trainer.load_model_weights(
-                launch.load_model_weights_path
+                launch.load_model_weights_path,
+                load_optimizer=(
+                    launch.load_model_weights_mode == "model_and_optimizer"
+                ),
             )
             start_env_steps = checkpoint_metadata.env_steps
             if cfg.rl.teacher_mode == "last_best":
@@ -484,6 +493,16 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--load-model-weights-mode",
+        choices=LOAD_MODEL_WEIGHTS_MODES,
+        default="model_only",
+        help=(
+            "State to load with --load-model-weights. model_and_optimizer also "
+            "loads optimizer moment/momentum state while keeping the fresh "
+            "scheduler and fresh optimizer hyperparameters."
+        ),
+    )
+    parser.add_argument(
         "--max-env-steps",
         type=int,
         default=None,
@@ -509,6 +528,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("resume launches cannot use config overrides")
     if args.output_dir is None and args.load_model_weights is not None:
         raise ValueError("resume launches cannot use --load-model-weights")
+    if args.output_dir is None and args.load_model_weights_mode != "model_only":
+        raise ValueError("resume launches cannot use --load-model-weights-mode")
+    if args.load_model_weights is None and args.load_model_weights_mode != "model_only":
+        raise ValueError("--load-model-weights-mode requires --load-model-weights")
     if args.output_dir is None and args.log_mode == LogMode.DEBUG:
         raise ValueError("resume launches require wandb logging")
 
@@ -529,6 +552,7 @@ def _resolve_launch(args: argparse.Namespace) -> Launch:
             output_dir=args.output_dir,
             overrides=_parse_cli_overrides(args.overrides),
             load_model_weights_path=args.load_model_weights,
+            load_model_weights_mode=args.load_model_weights_mode,
         )
     return _resolve_resume_launch(args.target)
 

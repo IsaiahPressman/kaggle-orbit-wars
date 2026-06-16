@@ -268,6 +268,11 @@ ORBIT_WARS_LOAD_MODEL_WEIGHTS=/path/to/checkpoints/checkpoint_last_best.pt \
   sbatch scripts/slurm/launch-train.sbatch
 ```
 
+Set `ORBIT_WARS_LOAD_MODEL_WEIGHTS_MODE=model_and_optimizer` to also reload the
+checkpoint optimizer moment/momentum state. Scheduler state and optimizer-step
+counters remain fresh, and optimizer hyperparameters such as LR and weight decay
+come from the fresh config rather than the checkpoint param groups.
+
 You can also pass `--load-model-weights` after the batch script. Use a container
 path under `/runs`, a host path under `ORBIT_WARS_OUTPUT_DIR`, or another
 existing host checkpoint path:
@@ -285,9 +290,10 @@ sbatch scripts/slurm/launch-train.sbatch \
 ```
 
 The new run keeps only the checkpoint model weights plus `env_steps`,
-`player_step_total`, and `total_games_played` logging counters. Host checkpoint
-paths under `ORBIT_WARS_OUTPUT_DIR` are mapped into the container's `/runs`
-mount before launch; other host checkpoint directories are mounted read-only at
+`player_step_total`, and `total_games_played` logging counters unless
+`--load-model-weights-mode model_and_optimizer` is set. Host checkpoint paths
+under `ORBIT_WARS_OUTPUT_DIR` are mapped into the container's `/runs` mount
+before launch; other host checkpoint directories are mounted read-only at
 `/model-weights`.
 
 Teacher checkpoints configured with `rl.teacher_init` are loaded by

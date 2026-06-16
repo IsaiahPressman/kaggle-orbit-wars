@@ -18,6 +18,7 @@ CONFIG="${ORBIT_WARS_CONFIG:-configs/baseline.yaml}"
 LOG_MODE="${ORBIT_WARS_LOG_MODE:-wandb}"
 MAX_RUNTIME_HOURS="${ORBIT_WARS_MAX_RUNTIME_HOURS:-23.5}"
 LOAD_MODEL_WEIGHTS="${ORBIT_WARS_LOAD_MODEL_WEIGHTS:-}"
+LOAD_MODEL_WEIGHTS_MODE="${ORBIT_WARS_LOAD_MODEL_WEIGHTS_MODE:-model_only}"
 CONFIG_MOUNT_TARGET="/config"
 CONFIG_MOUNT_DIR=""
 MODEL_WEIGHTS_MOUNT_TARGET="/model-weights"
@@ -99,6 +100,17 @@ has_load_model_weights_arg() {
     return 1
 }
 
+has_load_model_weights_mode_arg() {
+    local arg
+    for arg in "${RUN_ARGS[@]}"; do
+        if [[ "$arg" == "--load-model-weights-mode" || \
+            "$arg" == --load-model-weights-mode=* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 map_model_weights_path() {
     local path="$1"
     local mapped_path
@@ -157,6 +169,29 @@ if [[ -n "$LOAD_MODEL_WEIGHTS" ]]; then
     LOAD_MODEL_WEIGHTS="$MAPPED_MODEL_WEIGHTS_PATH"
 fi
 map_load_model_weights_args
+if [[ "$LOAD_MODEL_WEIGHTS_MODE" != "model_only" && \
+    "$LOAD_MODEL_WEIGHTS_MODE" != "model_and_optimizer" ]]; then
+    echo \
+        "ORBIT_WARS_LOAD_MODEL_WEIGHTS_MODE must be model_only or model_and_optimizer." \
+        >&2
+    exit 1
+fi
+FORWARD_LOAD_MODEL_WEIGHTS_MODE=0
+if [[ "$LOAD_MODEL_WEIGHTS_MODE" != "model_only" ]]; then
+    if has_load_model_weights_mode_arg; then
+        echo \
+            "Use either ORBIT_WARS_LOAD_MODEL_WEIGHTS_MODE or --load-model-weights-mode, not both." \
+            >&2
+        exit 1
+    fi
+    if [[ -z "$LOAD_MODEL_WEIGHTS" ]]; then
+        echo \
+            "ORBIT_WARS_LOAD_MODEL_WEIGHTS_MODE requires ORBIT_WARS_LOAD_MODEL_WEIGHTS." \
+            >&2
+        exit 1
+    fi
+    FORWARD_LOAD_MODEL_WEIGHTS_MODE=1
+fi
 
 set -a
 # shellcheck disable=SC1090
@@ -186,6 +221,9 @@ if [[ "$USE_DEFAULT_FRESH_LAUNCH" -eq 1 ]]; then
     train_cmd+=("$CONFIG" /runs)
     if [[ -n "$LOAD_MODEL_WEIGHTS" ]]; then
         train_cmd+=(--load-model-weights "$LOAD_MODEL_WEIGHTS")
+    fi
+    if [[ "$FORWARD_LOAD_MODEL_WEIGHTS_MODE" -eq 1 ]]; then
+        train_cmd+=(--load-model-weights-mode "$LOAD_MODEL_WEIGHTS_MODE")
     fi
 fi
 
