@@ -41,6 +41,7 @@ def test_ppo_config_validates_with_pydantic() -> None:
     assert config.teacher_init is None
     assert config.teacher_kl_coef == pytest.approx(0.001)
     assert config.teacher_value_coef == pytest.approx(0.001)
+    assert config.teacher_schedule.mode == "none"
     assert config.teacher_segments_per_minibatch == 32
     assert config.ppo_clip_mode == "per_player"
     assert config.model_compile == "trunk"
@@ -65,6 +66,16 @@ def test_ppo_config_validates_with_pydantic() -> None:
         teacher_mode="fixed",
         teacher_init=Path("teacher/checkpoint.pt"),
     ).teacher_init == Path("teacher/checkpoint.pt")
+    teacher_schedule = PPOConfig(
+        teacher_schedule={
+            "mode": "linear_decay",
+            "decay_steps": 100,
+            "decay_min_ratio": 0.25,
+        }
+    ).teacher_schedule
+    assert teacher_schedule.mode == "linear_decay"
+    assert teacher_schedule.decay_steps == 100
+    assert teacher_schedule.decay_min_ratio == pytest.approx(0.25)
     assert PPOConfig(ppo_clip_mode="per_entity").ppo_clip_mode == "per_entity"
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
@@ -73,6 +84,24 @@ def test_ppo_config_validates_with_pydantic() -> None:
         PPOConfig(teacher_kl_coef=-0.1)
     with pytest.raises(ValueError, match="greater than or equal to 0"):
         PPOConfig(teacher_value_coef=-0.1)
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        PPOConfig(teacher_schedule={"mode": "none", "decay_steps": 100})
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        PPOConfig(
+            teacher_schedule={
+                "mode": "linear_decay",
+                "decay_steps": 0,
+                "decay_min_ratio": 0.25,
+            }
+        )
+    with pytest.raises(ValueError, match="less than 1"):
+        PPOConfig(
+            teacher_schedule={
+                "mode": "linear_decay",
+                "decay_steps": 100,
+                "decay_min_ratio": 1.0,
+            }
+        )
     assert (
         PPOConfig(teacher_segments_per_minibatch=16).teacher_segments_per_minibatch
         == 16

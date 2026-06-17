@@ -595,9 +595,12 @@ action-head divergences back to the player-step before applying
 `rl.teacher_kl_coef`. The value term uses cross-entropy from the teacher winner
 distribution to the student winner distribution over active player slots, then
 averages that per-state value over active states before applying
-`rl.teacher_value_coef`. The teacher trunk runs once per iteration over the
-stored rollout segments, not once per update minibatch. Teacher models must be
-stateless; trainers reject teachers that require recurrent hidden state.
+`rl.teacher_value_coef`. `rl.teacher_schedule.mode` defaults to `none`; with
+`linear_decay`, PPO multiplies both teacher coefficients by a linear
+optimizer-step schedule from `1.0` to `decay_min_ratio` over `decay_steps`.
+The teacher trunk runs once per iteration over the stored rollout segments, not
+once per update minibatch. Teacher models must be stateless; trainers reject
+teachers that require recurrent hidden state.
 
 When a teacher is active, PPO precomputes the teacher's contribution after
 rollout via `compute_teacher_distillation_targets(...)`: a chunked

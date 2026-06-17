@@ -1072,6 +1072,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
         "train/3p_rate",
         "train/4p_rate",
         "train/player_step_total",
+        "train/total_active_entities",
         "time/rollout_seconds",
         "time/teacher_seconds",
         "time/update_seconds",
@@ -1098,6 +1099,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
     assert metrics["time/teacher_seconds"] == pytest.approx(0.0)
     assert metrics["perf/teacher_sps"] == pytest.approx(0.0)
     assert metrics["train/player_step_total"] == pytest.approx(80.0)
+    assert metrics["train/total_active_entities"] == pytest.approx(80.0)
     assert metrics["perf/tokens_per_second"] == pytest.approx(
         40.0 / metrics["time/iteration_seconds"]
     )
@@ -1110,6 +1112,7 @@ def test_trainer_smoke_keeps_metrics_finite_and_updates_parameters() -> None:
     next_metrics = trainer.train_iteration()
 
     assert next_metrics["train/player_step_total"] == pytest.approx(160.0)
+    assert next_metrics["train/total_active_entities"] == pytest.approx(160.0)
     assert next_metrics["optimizer/steps"] == pytest.approx(4.0)
 
 
@@ -1335,6 +1338,8 @@ def test_update_minibatch_normalizes_policy_advantages_only() -> None:
         policy_weight: torch.Tensor,
         value_weight: torch.Tensor,  # noqa: ARG001
         config: ppo.PPOConfig,  # noqa: ARG001
+        teacher_kl_coef: float,  # noqa: ARG001
+        teacher_value_coef: float,  # noqa: ARG001
         context: ppo.DistributedContext | None = None,  # noqa: ARG001
     ) -> tuple[ppo._PPOLossMetrics, torch.Tensor]:
         seen["advantages"] = advantages.detach().clone()
@@ -1398,6 +1403,143 @@ def test_update_minibatch_value_clipping_uses_current_value_anchor() -> None:
     assert update.metrics.value_loss.item() == pytest.approx(2.0)
 
 
+def test_update_minibatch_passes_scheduled_teacher_coefficients_to_loss() -> None:
+    env = TinyOrbitEnv(n_envs=1)
+    model = FixedEvaluationModel(value=0.0)
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.SGD(model.parameters(), lr=0.0),
+        config=ppo.PPOConfig(
+            horizon=2,
+            teacher_kl_coef=0.2,
+            teacher_value_coef=0.4,
+            teacher_schedule={
+                "mode": "linear_decay",
+                "decay_steps": 10,
+                "decay_min_ratio": 0.25,
+            },
+            segments_per_minibatch=1,
+        ),
+        device=torch.device("cpu"),
+    )
+    trainer.optimizer_steps = 5
+    trainer._collect_rollout()
+    segments = trainer.rollout.segment_major()
+    seen: dict[str, float | ppo.PPOConfig] = {}
+
+    def fake_ppo_loss(
+        *,
+        new_logp: torch.Tensor,
+        entropy: torch.Tensor,  # noqa: ARG001
+        new_values: torch.Tensor,
+        old_logp: torch.Tensor,  # noqa: ARG001
+        old_values: torch.Tensor,  # noqa: ARG001
+        returns: torch.Tensor,  # noqa: ARG001
+        advantages: torch.Tensor,  # noqa: ARG001
+        policy_weight: torch.Tensor,  # noqa: ARG001
+        value_weight: torch.Tensor,  # noqa: ARG001
+        config: ppo.PPOConfig,
+        teacher_kl_coef: float,
+        teacher_value_coef: float,
+        context: ppo.DistributedContext | None = None,  # noqa: ARG001
+    ) -> tuple[ppo._PPOLossMetrics, torch.Tensor]:
+        seen["config"] = config
+        seen["teacher_kl_coef"] = teacher_kl_coef
+        seen["teacher_value_coef"] = teacher_value_coef
+        loss = new_values.mean() + 0.0 * new_logp.mean()
+        return _zero_loss_metrics(loss), loss
+
+    trainer._ppo_loss = fake_ppo_loss
+    trainer._update_minibatch(
+        segments,
+        advantages=torch.zeros_like(segments.values),
+        returns=torch.zeros_like(segments.values),
+        policy_mask=torch.ones_like(segments.values, dtype=torch.bool),
+        value_mask=torch.ones_like(segments.values, dtype=torch.bool),
+        indices=torch.zeros((1,), dtype=torch.int64),
+        value_clip_anchor=segments.values,
+        step_optimizer=False,
+    )
+
+    assert seen["config"] is trainer.config
+    assert seen["teacher_kl_coef"] == pytest.approx(0.125)
+    assert seen["teacher_value_coef"] == pytest.approx(0.25)
+
+
+def test_scheduled_teacher_coefficients_reach_min_ratio() -> None:
+    config = ppo.PPOConfig(
+        teacher_kl_coef=0.2,
+        teacher_value_coef=0.4,
+        teacher_schedule={
+            "mode": "linear_decay",
+            "decay_steps": 10,
+            "decay_min_ratio": 0.25,
+        },
+    )
+
+    assert ppo._scheduled_teacher_coefficients(
+        0, config.teacher_schedule, config
+    ) == pytest.approx((0.2, 0.4))
+    assert ppo._scheduled_teacher_coefficients(
+        5, config.teacher_schedule, config
+    ) == pytest.approx((0.125, 0.25))
+    assert ppo._scheduled_teacher_coefficients(
+        10, config.teacher_schedule, config
+    ) == pytest.approx((0.05, 0.1))
+    assert ppo._scheduled_teacher_coefficients(
+        20, config.teacher_schedule, config
+    ) == pytest.approx((0.05, 0.1))
+
+
+def test_teacher_schedule_zero_min_ratio_skips_teacher_precompute() -> None:
+    trainer = ppo.PPOTrainer.__new__(ppo.PPOTrainer)
+    trainer.teacher_model = object()
+    trainer.teacher_active = True
+    trainer.optimizer_steps = 1
+    trainer.config = ppo.PPOConfig(
+        teacher_kl_coef=0.2,
+        teacher_value_coef=0.4,
+        teacher_schedule={
+            "mode": "linear_decay",
+            "decay_steps": 1,
+            "decay_min_ratio": 0.0,
+        },
+    )
+
+    assert trainer._precompute_teacher_targets(object()) is None
+
+
+def test_teacher_schedule_zero_min_ratio_skips_teacher_timing() -> None:
+    env = TinyOrbitEnv(n_envs=1)
+    model = TinyOrbitModel()
+    trainer = ppo.PPOTrainer(
+        env=env,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=0.01, eps=1e-5),
+        config=ppo.PPOConfig(
+            horizon=2,
+            segments_per_minibatch=1,
+            teacher_kl_coef=0.2,
+            teacher_value_coef=0.4,
+            teacher_schedule={
+                "mode": "linear_decay",
+                "decay_steps": 1,
+                "decay_min_ratio": 0.0,
+            },
+        ),
+        device=torch.device("cpu"),
+    )
+    trainer.teacher_model = object()
+    trainer.teacher_active = True
+    trainer.optimizer_steps = 1
+
+    metrics = trainer.train_iteration()
+
+    assert metrics["time/teacher_seconds"] == pytest.approx(0.0)
+    assert metrics["perf/teacher_sps"] == pytest.approx(0.0)
+
+
 def test_update_minibatch_steps_before_target_kl_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1430,6 +1572,8 @@ def test_update_minibatch_steps_before_target_kl_guard(
         policy_weight: torch.Tensor,  # noqa: ARG001
         value_weight: torch.Tensor,  # noqa: ARG001
         config: ppo.PPOConfig,  # noqa: ARG001
+        teacher_kl_coef: float,  # noqa: ARG001
+        teacher_value_coef: float,  # noqa: ARG001
         context: ppo.DistributedContext | None = None,  # noqa: ARG001
     ) -> tuple[ppo._PPOLossMetrics, torch.Tensor]:
         loss = new_logp.sum()

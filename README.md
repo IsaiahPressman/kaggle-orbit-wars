@@ -205,7 +205,9 @@ student's launch mode). Value distillation does not use the actor KL path, but
 the trainer still requires matching action specs and non-adapter models.
 `rl.teacher_kl_coef` and `rl.teacher_value_coef` weight the action KL and
 per-state winner-distribution cross-entropy stabilization losses; both default
-to `0.001`.
+to `0.001`. `rl.teacher_schedule.mode` defaults to `none`; set it to
+`linear_decay` with `decay_steps` and `decay_min_ratio` to linearly decay both
+teacher coefficients by optimizer step down to the configured minimum ratio.
 
 Run a preset with:
 
@@ -235,9 +237,9 @@ uv run python scripts/run_ppo.py configs/baseline.yaml runs \
 ```
 
 This loads only `checkpoint["model"]` plus the `env_steps`,
-`player_step_total`, and `total_games_played` logging counters. Optimizer steps,
-target-KL counters, optimizer state, scheduler state, and checkpoint config are
-fresh for the new run.
+`player_step_total`, `total_games_played`, and `total_active_entities` logging
+counters. Optimizer steps, target-KL counters, optimizer state, scheduler state,
+and checkpoint config are fresh for the new run.
 Pass `--load-model-weights-mode model_and_optimizer` to additionally load the
 checkpoint optimizer moment/momentum state. That mode still keeps optimizer
 steps, target-KL counters, scheduler state, checkpoint config, and W&B run state
@@ -307,7 +309,8 @@ Iteration throughput is logged as `perf/steps_per_second`, plus
 `perf/tokens_per_second` for unmasked model tokens and
 `perf/active_entities_per_second` for action-taking source entities. These
 rates use total iteration time, including rollout, teacher precompute, and PPO
-update time.
+update time. The active-entity count is also accumulated as
+`train/total_active_entities` and saved in checkpoints.
 
 ## Replay capture
 

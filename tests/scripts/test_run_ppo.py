@@ -211,6 +211,7 @@ def _write_checkpoint_metadata(path: Path, *, env_steps: int) -> None:
             "optimizer_steps": 0,
             "player_step_total": 0,
             "total_games_played": 0,
+            "total_active_entities": 0,
             "target_kl_exceeded_total": 0,
             "wandb_run_id": "run-123",
         },
@@ -852,6 +853,57 @@ def test_resume_wandb_run_id_requires_checkpoint_run_id() -> None:
 def test_checkpoint_metadata_rejects_positional_fields() -> None:
     with pytest.raises(TypeError):
         run_ppo.PPOCheckpointMetadata(1, "run-abc")
+
+
+def test_checkpoint_metadata_accepts_current_trainer_checkpoint_schema(
+    tmp_path: Path,
+) -> None:
+    checkpoint = {
+        "model": {},
+        "optimizer": {},
+        "lr_scheduler": None,
+        "env_steps": 123,
+        "optimizer_steps": 7,
+        "player_step_total": 19,
+        "total_games_played": 23,
+        "total_active_entities": 29,
+        "target_kl_exceeded_total": 3,
+        "wandb_run_id": "run-abc",
+    }
+
+    metadata = run_ppo._checkpoint_metadata(
+        checkpoint,
+        path=tmp_path / "checkpoint.pt",
+    )
+
+    assert metadata.env_steps == 123
+    assert metadata.player_step_total == 19
+    assert metadata.total_games_played == 23
+    assert metadata.total_active_entities == 29
+    assert metadata.wandb_run_id == "run-abc"
+
+
+def test_checkpoint_metadata_defaults_missing_total_active_entities(
+    tmp_path: Path,
+) -> None:
+    checkpoint = {
+        "model": {},
+        "optimizer": {},
+        "lr_scheduler": None,
+        "env_steps": 123,
+        "optimizer_steps": 7,
+        "player_step_total": 19,
+        "total_games_played": 23,
+        "target_kl_exceeded_total": 3,
+        "wandb_run_id": "run-abc",
+    }
+
+    metadata = run_ppo._checkpoint_metadata(
+        checkpoint,
+        path=tmp_path / "checkpoint.pt",
+    )
+
+    assert metadata.total_active_entities == 0
 
 
 def test_evaluate_against_last_best_uses_eval_mode_no_grad_and_eval_prefix(
@@ -1859,6 +1911,7 @@ def test_ppo_trainer_write_checkpoint_includes_training_state(tmp_path: Path) ->
     trainer.optimizer_steps = 7
     trainer.player_step_total = 19
     trainer.total_games_played = 23
+    trainer.total_active_entities = 29
     trainer.target_kl_exceeded_total = 3
     path = tmp_path / "checkpoint.pt"
 
@@ -1873,6 +1926,7 @@ def test_ppo_trainer_write_checkpoint_includes_training_state(tmp_path: Path) ->
     assert checkpoint["optimizer_steps"] == 7
     assert checkpoint["player_step_total"] == 19
     assert checkpoint["total_games_played"] == 23
+    assert checkpoint["total_active_entities"] == 29
     assert checkpoint["target_kl_exceeded_total"] == 3
     assert checkpoint["wandb_run_id"] == "run-abc"
     assert checkpoint["model"].keys() == model.state_dict().keys()
@@ -1886,9 +1940,13 @@ def test_ppo_trainer_write_checkpoint_includes_training_state(tmp_path: Path) ->
         "optimizer_steps",
         "player_step_total",
         "total_games_played",
+        "total_active_entities",
         "target_kl_exceeded_total",
         "wandb_run_id",
     }
+    metadata = run_ppo._checkpoint_metadata(checkpoint, path=path)
+    assert metadata.env_steps == 512
+    assert metadata.total_active_entities == 29
     assert not (tmp_path / ".checkpoint.pt.tmp").exists()
 
 
@@ -1909,6 +1967,7 @@ def test_ppo_trainer_write_checkpoint_can_save_explicit_model(
     trainer.optimizer_steps = 7
     trainer.player_step_total = 19
     trainer.total_games_played = 23
+    trainer.total_active_entities = 29
     trainer.target_kl_exceeded_total = 3
     path = tmp_path / "checkpoint.pt"
 
@@ -1957,6 +2016,7 @@ def test_ppo_trainer_load_checkpoint_restores_training_state(tmp_path: Path) -> 
     src_trainer.optimizer_steps = 11
     src_trainer.player_step_total = 37
     src_trainer.total_games_played = 41
+    src_trainer.total_active_entities = 43
     src_trainer.target_kl_exceeded_total = 5
     path = tmp_path / "checkpoint.pt"
     src_trainer.write_checkpoint(path, env_steps=2048, wandb_run_id="run-abc")
@@ -1968,6 +2028,7 @@ def test_ppo_trainer_load_checkpoint_restores_training_state(tmp_path: Path) -> 
     dst_trainer.optimizer_steps = 0
     dst_trainer.player_step_total = 0
     dst_trainer.total_games_played = 0
+    dst_trainer.total_active_entities = 0
     dst_trainer.target_kl_exceeded_total = 0
     dst_trainer.device = torch.device("cpu")
 
@@ -1976,10 +2037,12 @@ def test_ppo_trainer_load_checkpoint_restores_training_state(tmp_path: Path) -> 
     assert metadata.env_steps == 2048
     assert metadata.player_step_total == 37
     assert metadata.total_games_played == 41
+    assert metadata.total_active_entities == 43
     assert metadata.wandb_run_id == "run-abc"
     assert dst_trainer.optimizer_steps == 11
     assert dst_trainer.player_step_total == 37
     assert dst_trainer.total_games_played == 41
+    assert dst_trainer.total_active_entities == 43
     assert dst_trainer.target_kl_exceeded_total == 5
     for src_param, dst_param in zip(
         src_model.parameters(),
@@ -1989,6 +2052,43 @@ def test_ppo_trainer_load_checkpoint_restores_training_state(tmp_path: Path) -> 
         assert torch.equal(src_param, dst_param)
     assert dst_optimizer.state_dict()["state"]
     assert dst_scheduler.state_dict() == src_scheduler.state_dict()
+
+
+def test_ppo_trainer_load_checkpoint_defaults_missing_total_active_entities(
+    tmp_path: Path,
+) -> None:
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
+    trainer = PPOTrainer.__new__(PPOTrainer)
+    trainer.model = model
+    trainer.optimizer = optimizer
+    trainer.lr_scheduler = None
+    trainer.optimizer_steps = 0
+    trainer.player_step_total = 0
+    trainer.total_games_played = 0
+    trainer.total_active_entities = 17
+    trainer.target_kl_exceeded_total = 0
+    trainer.device = torch.device("cpu")
+    path = tmp_path / "checkpoint.pt"
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "lr_scheduler": None,
+            "env_steps": 1,
+            "optimizer_steps": 0,
+            "player_step_total": 5,
+            "total_games_played": 7,
+            "target_kl_exceeded_total": 0,
+            "wandb_run_id": "run-abc",
+        },
+        path,
+    )
+
+    metadata = trainer.load_checkpoint(path)
+
+    assert metadata.total_active_entities == 0
+    assert trainer.total_active_entities == 0
 
 
 def test_ppo_trainer_load_model_weights_keeps_only_logging_counters(
@@ -2019,6 +2119,7 @@ def test_ppo_trainer_load_model_weights_keeps_only_logging_counters(
     src_trainer.optimizer_steps = 11
     src_trainer.player_step_total = 37
     src_trainer.total_games_played = 41
+    src_trainer.total_active_entities = 43
     src_trainer.target_kl_exceeded_total = 5
     path = tmp_path / "checkpoint.pt"
     src_trainer.write_checkpoint(path, env_steps=2048, wandb_run_id="run-abc")
@@ -2030,6 +2131,7 @@ def test_ppo_trainer_load_model_weights_keeps_only_logging_counters(
     dst_trainer.optimizer_steps = 0
     dst_trainer.player_step_total = 0
     dst_trainer.total_games_played = 0
+    dst_trainer.total_active_entities = 0
     dst_trainer.target_kl_exceeded_total = 0
     dst_trainer.device = torch.device("cpu")
     scheduler_state_before = dst_scheduler.state_dict()
@@ -2039,10 +2141,12 @@ def test_ppo_trainer_load_model_weights_keeps_only_logging_counters(
     assert metadata.env_steps == 2048
     assert metadata.player_step_total == 37
     assert metadata.total_games_played == 41
+    assert metadata.total_active_entities == 43
     assert metadata.wandb_run_id == "run-abc"
     assert dst_trainer.optimizer_steps == 0
     assert dst_trainer.player_step_total == 37
     assert dst_trainer.total_games_played == 41
+    assert dst_trainer.total_active_entities == 43
     assert dst_trainer.target_kl_exceeded_total == 0
     assert not dst_optimizer.state_dict()["state"]
     assert dst_scheduler.state_dict() == scheduler_state_before
@@ -2082,6 +2186,7 @@ def test_ppo_trainer_load_model_weights_can_load_optimizer_without_scheduler(
     src_trainer.optimizer_steps = 11
     src_trainer.player_step_total = 37
     src_trainer.total_games_played = 41
+    src_trainer.total_active_entities = 43
     src_trainer.target_kl_exceeded_total = 5
     path = tmp_path / "checkpoint.pt"
     src_trainer.write_checkpoint(path, env_steps=2048, wandb_run_id="run-abc")
@@ -2093,6 +2198,7 @@ def test_ppo_trainer_load_model_weights_can_load_optimizer_without_scheduler(
     dst_trainer.optimizer_steps = 0
     dst_trainer.player_step_total = 0
     dst_trainer.total_games_played = 0
+    dst_trainer.total_active_entities = 0
     dst_trainer.target_kl_exceeded_total = 0
     dst_trainer.device = torch.device("cpu")
     scheduler_state_before = dst_scheduler.state_dict()
@@ -2102,10 +2208,12 @@ def test_ppo_trainer_load_model_weights_can_load_optimizer_without_scheduler(
     assert metadata.env_steps == 2048
     assert metadata.player_step_total == 37
     assert metadata.total_games_played == 41
+    assert metadata.total_active_entities == 43
     assert metadata.wandb_run_id == "run-abc"
     assert dst_trainer.optimizer_steps == 0
     assert dst_trainer.player_step_total == 37
     assert dst_trainer.total_games_played == 41
+    assert dst_trainer.total_active_entities == 43
     assert dst_trainer.target_kl_exceeded_total == 0
     assert dst_optimizer.state_dict()["state"]
     assert dst_optimizer.param_groups[0]["lr"] == pytest.approx(0.01)
@@ -2135,6 +2243,7 @@ def test_ppo_trainer_load_model_weights_rejects_optimizer_state_shape_mismatch(
     src_trainer.optimizer_steps = 11
     src_trainer.player_step_total = 37
     src_trainer.total_games_played = 41
+    src_trainer.total_active_entities = 43
     src_trainer.target_kl_exceeded_total = 5
     path = tmp_path / "checkpoint.pt"
     src_trainer.write_checkpoint(path, env_steps=2048, wandb_run_id="run-abc")
@@ -2157,6 +2266,7 @@ def test_ppo_trainer_load_model_weights_rejects_optimizer_state_shape_mismatch(
     dst_trainer.optimizer_steps = 0
     dst_trainer.player_step_total = 0
     dst_trainer.total_games_played = 0
+    dst_trainer.total_active_entities = 0
     dst_trainer.target_kl_exceeded_total = 0
     dst_trainer.device = torch.device("cpu")
 
@@ -2193,6 +2303,7 @@ def test_ppo_trainer_load_model_weights_can_load_composite_optimizer(
     src_trainer.optimizer_steps = 11
     src_trainer.player_step_total = 37
     src_trainer.total_games_played = 41
+    src_trainer.total_active_entities = 43
     src_trainer.target_kl_exceeded_total = 5
     path = tmp_path / "checkpoint.pt"
     src_trainer.write_checkpoint(path, env_steps=2048, wandb_run_id="run-abc")
@@ -2204,13 +2315,16 @@ def test_ppo_trainer_load_model_weights_can_load_composite_optimizer(
     dst_trainer.optimizer_steps = 0
     dst_trainer.player_step_total = 0
     dst_trainer.total_games_played = 0
+    dst_trainer.total_active_entities = 0
     dst_trainer.target_kl_exceeded_total = 0
     dst_trainer.device = torch.device("cpu")
 
     metadata = dst_trainer.load_model_weights(path, load_optimizer=True)
 
     assert metadata.env_steps == 2048
+    assert metadata.total_active_entities == 43
     assert dst_trainer.optimizer_steps == 0
+    assert dst_trainer.total_active_entities == 43
     assert dst_trainer.target_kl_exceeded_total == 0
     assert dst_optimizer.optimizers[0].state_dict()["state"]
     assert dst_optimizer.optimizers[1].state_dict()["state"]
@@ -2237,6 +2351,7 @@ def test_ppo_trainer_load_checkpoint_rejects_scheduler_mismatch(
     trainer.optimizer_steps = 0
     trainer.player_step_total = 0
     trainer.total_games_played = 0
+    trainer.total_active_entities = 0
     trainer.target_kl_exceeded_total = 0
     trainer.device = torch.device("cpu")
     path = tmp_path / "checkpoint.pt"

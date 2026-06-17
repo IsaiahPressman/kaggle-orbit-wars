@@ -290,11 +290,11 @@ sbatch scripts/slurm/launch-train.sbatch \
 ```
 
 The new run keeps only the checkpoint model weights plus `env_steps`,
-`player_step_total`, and `total_games_played` logging counters unless
-`--load-model-weights-mode model_and_optimizer` is set. Host checkpoint paths
-under `ORBIT_WARS_OUTPUT_DIR` are mapped into the container's `/runs` mount
-before launch; other host checkpoint directories are mounted read-only at
-`/model-weights`.
+`player_step_total`, `total_games_played`, and `total_active_entities` logging
+counters unless `--load-model-weights-mode model_and_optimizer` is set. Host
+checkpoint paths under `ORBIT_WARS_OUTPUT_DIR` are mapped into the container's
+`/runs` mount before launch; other host checkpoint directories are mounted
+read-only at `/model-weights`.
 
 Teacher checkpoints configured with `rl.teacher_init` are loaded by
 `scripts/run_ppo.py` itself, not by the Slurm wrapper. The checkpoint path must

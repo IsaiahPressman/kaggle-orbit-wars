@@ -489,7 +489,8 @@ def _parse_args() -> argparse.Namespace:
         metavar="CHECKPOINT",
         help=(
             "For fresh launches, initialize model weights from a checkpoint while "
-            "keeping only env_steps, player_step_total, and total_games_played"
+            "keeping only env_steps, player_step_total, total_games_played, "
+            "and total_active_entities"
         ),
     )
     parser.add_argument(
@@ -989,7 +990,7 @@ def _checkpoint_metadata(
 ) -> PPOCheckpointMetadata:
     if not isinstance(checkpoint, dict):
         raise ValueError(f"checkpoint must be a dictionary: {path}")
-    expected_keys = {
+    required_keys = {
         "model",
         "optimizer",
         "lr_scheduler",
@@ -1000,11 +1001,17 @@ def _checkpoint_metadata(
         "target_kl_exceeded_total",
         "wandb_run_id",
     }
-    if set(checkpoint) != expected_keys:
+    optional_keys = {"total_active_entities"}
+    checkpoint_keys = set(checkpoint)
+    missing_keys = required_keys - checkpoint_keys
+    unexpected_keys = checkpoint_keys - required_keys - optional_keys
+    if missing_keys or unexpected_keys:
         raise ValueError(
-            f"checkpoint keys must be {sorted(expected_keys)}, "
+            f"checkpoint keys must include {sorted(required_keys)} and only "
+            f"optional keys {sorted(optional_keys)}, "
             f"got {sorted(checkpoint)}: {path}"
         )
+    total_active_entities = checkpoint.get("total_active_entities", 0)
     return PPOCheckpointMetadata(
         env_steps=_checkpoint_nonnegative_int(
             checkpoint["env_steps"],
@@ -1019,6 +1026,11 @@ def _checkpoint_metadata(
         total_games_played=_checkpoint_nonnegative_int(
             checkpoint["total_games_played"],
             name="total_games_played",
+            path=path,
+        ),
+        total_active_entities=_checkpoint_nonnegative_int(
+            total_active_entities,
+            name="total_active_entities",
             path=path,
         ),
         wandb_run_id=_checkpoint_optional_str(

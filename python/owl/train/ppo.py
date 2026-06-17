@@ -5,7 +5,7 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Literal, Self, cast
+from typing import Annotated, Any, Literal, Self, TypeAlias, cast
 
 import torch
 from pydantic import Field, model_validator
@@ -92,6 +92,23 @@ CompileMode = Literal[
 ]
 PPOClipMode = Literal["per_player", "per_entity"]
 TeacherMode = Literal["last_best", "fixed"]
+_TeacherScheduleMode = Literal["none", "linear_decay"]
+
+
+class NoTeacherScheduleConfig(BaseConfig):
+    mode: Literal["none"] = "none"
+
+
+class LinearDecayTeacherScheduleConfig(BaseConfig):
+    mode: Literal["linear_decay"] = "linear_decay"
+    decay_steps: int = Field(ge=1)
+    decay_min_ratio: float = Field(ge=0.0, lt=1.0)
+
+
+TeacherScheduleConfig: TypeAlias = Annotated[
+    NoTeacherScheduleConfig | LinearDecayTeacherScheduleConfig,
+    Field(discriminator="mode"),
+]
 
 
 _OBS_TENSOR_FIELDS = tuple(
@@ -133,6 +150,9 @@ class PPOConfig(BaseConfig):
     teacher_init: Path | None = None
     teacher_kl_coef: float = Field(default=0.001, ge=0.0)
     teacher_value_coef: float = Field(default=0.001, ge=0.0)
+    teacher_schedule: TeacherScheduleConfig = Field(
+        default_factory=NoTeacherScheduleConfig
+    )
     teacher_segments_per_minibatch: int = Field(default=32, ge=1)
     compile_mode: CompileMode | None = None
     model_compile: _ModelCompileTarget = "trunk"
@@ -197,6 +217,7 @@ class PPOCheckpointMetadata:
     env_steps: int
     player_step_total: int = 0
     total_games_played: int = 0
+    total_active_entities: int = 0
     wandb_run_id: str | None = None
 
 
@@ -487,6 +508,7 @@ class PPOTrainer:
         self.optimizer_steps = 0
         self.player_step_total = 0
         self.total_games_played = 0
+        self.total_active_entities = 0
         self.target_kl_exceeded_total = 0
         self._non_blocking_env_to_device = (
             device.type == "cuda" and env.pin_memory_enabled
@@ -579,9 +601,12 @@ class PPOTrainer:
         teacher_targets: CachedTeacherDistillationTargets | None = None
         teacher_elapsed = 0.0
         teacher_model = self.teacher_model if self.teacher_active else None
-        teacher_losses_enabled = (
-            self.config.teacher_kl_coef > 0.0 or self.config.teacher_value_coef > 0.0
+        teacher_kl_coef, teacher_value_coef = _scheduled_teacher_coefficients(
+            self.optimizer_steps,
+            self.config.teacher_schedule,
+            self.config,
         )
+        teacher_losses_enabled = teacher_kl_coef > 0.0 or teacher_value_coef > 0.0
         if teacher_model is not None and teacher_losses_enabled:
             teacher_start = perf_counter()
             teacher_targets = self._precompute_teacher_targets(segments)
@@ -641,6 +666,8 @@ class PPOTrainer:
             metrics[key] = float(self._mean_scalar(rate).item())
         self.player_step_total += self._sum_int(value_mask.sum())
         metrics["train/player_step_total"] = float(self.player_step_total)
+        self.total_active_entities += active_entities
+        metrics["train/total_active_entities"] = float(self.total_active_entities)
         env_metrics_logged = _mean_env_metrics(
             env_metrics,
             context=self.distributed_context,
@@ -692,6 +719,7 @@ class PPOTrainer:
             "optimizer_steps": self.optimizer_steps,
             "player_step_total": self.player_step_total,
             "total_games_played": self.total_games_played,
+            "total_active_entities": self.total_active_entities,
             "target_kl_exceeded_total": self.target_kl_exceeded_total,
             "wandb_run_id": wandb_run_id,
         }
@@ -729,6 +757,7 @@ class PPOTrainer:
         self.optimizer_steps = optimizer_steps
         self.player_step_total = metadata.player_step_total
         self.total_games_played = metadata.total_games_played
+        self.total_active_entities = metadata.total_active_entities
         self.target_kl_exceeded_total = target_kl_exceeded_total
         return metadata
 
@@ -751,6 +780,7 @@ class PPOTrainer:
             )
         self.player_step_total = metadata.player_step_total
         self.total_games_played = metadata.total_games_played
+        self.total_active_entities = metadata.total_active_entities
         return metadata
 
     def _collect_rollout(self) -> torch.Tensor:
@@ -826,8 +856,13 @@ class PPOTrainer:
         teacher_model = self.teacher_model if self.teacher_active else None
         if teacher_model is None:
             return None
-        compute_action_kl = self.config.teacher_kl_coef > 0.0
-        compute_value = self.config.teacher_value_coef > 0.0
+        teacher_kl_coef, teacher_value_coef = _scheduled_teacher_coefficients(
+            self.optimizer_steps,
+            self.config.teacher_schedule,
+            self.config,
+        )
+        compute_action_kl = teacher_kl_coef > 0.0
+        compute_value = teacher_value_coef > 0.0
         if not (compute_action_kl or compute_value):
             return None
         chunk_size = self.config.teacher_segments_per_minibatch
@@ -914,6 +949,13 @@ class PPOTrainer:
             self.optimizer,
             self.lr_scheduler,
         )
+        teacher_kl_coef, teacher_value_coef = _scheduled_teacher_coefficients(
+            self.optimizer_steps,
+            self.config.teacher_schedule,
+            self.config,
+        )
+        metrics["teacher/kl_coef"] = teacher_kl_coef
+        metrics["teacher/value_coef"] = teacher_value_coef
         sampled_segment_total = self._sum_int(
             torch.tensor(sampled_segments, device=self.device)
         )
@@ -979,12 +1021,13 @@ class PPOTrainer:
             if batch_entity_policy_mask is None
             else batch_entity_policy_mask.to(dtype=batch_advantages.dtype)
         )
-        compute_teacher_action_kl = (
-            teacher_model is not None and self.config.teacher_kl_coef > 0.0
+        teacher_kl_coef, teacher_value_coef = _scheduled_teacher_coefficients(
+            self.optimizer_steps,
+            self.config.teacher_schedule,
+            self.config,
         )
-        compute_teacher_value = (
-            teacher_model is not None and self.config.teacher_value_coef > 0.0
-        )
+        compute_teacher_action_kl = teacher_model is not None and teacher_kl_coef > 0.0
+        compute_teacher_value = teacher_model is not None and teacher_value_coef > 0.0
 
         with _autocast_context(self.config, self.device):
             if teacher_targets is None:
@@ -1070,6 +1113,8 @@ class PPOTrainer:
             "policy_weight": batch_policy_weight,
             "value_weight": batch_value_weight,
             "config": self.config,
+            "teacher_kl_coef": teacher_kl_coef,
+            "teacher_value_coef": teacher_value_coef,
             "context": (
                 self.distributed_context
                 if self.distributed_context.initialized
@@ -1199,6 +1244,29 @@ class PPOTrainer:
         }
 
 
+def _scheduled_teacher_coefficients(
+    optimizer_steps: int,
+    teacher_schedule: TeacherScheduleConfig,
+    config: PPOConfig,
+) -> tuple[float, float]:
+    multiplier = _teacher_schedule_multiplier(teacher_schedule, optimizer_steps)
+    return config.teacher_kl_coef * multiplier, config.teacher_value_coef * multiplier
+
+
+def _teacher_schedule_multiplier(
+    config: TeacherScheduleConfig,
+    optimizer_steps: int,
+) -> float:
+    if optimizer_steps < 0:
+        raise ValueError("optimizer_steps must be non-negative")
+    if isinstance(config, NoTeacherScheduleConfig):
+        return 1.0
+    if isinstance(config, LinearDecayTeacherScheduleConfig):
+        progress = min(optimizer_steps / config.decay_steps, 1.0)
+        return 1.0 - (1.0 - config.decay_min_ratio) * progress
+    raise TypeError("unknown teacher schedule config")
+
+
 def _compile_ppo_loss(
     compile_mode: CompileMode | None,
 ) -> Callable[..., tuple[_PPOLossMetrics, torch.Tensor]]:
@@ -1218,6 +1286,8 @@ def _compile_ppo_loss(
         policy_weight: torch.Tensor,
         value_weight: torch.Tensor,
         config: PPOConfig,
+        teacher_kl_coef: float | None = None,
+        teacher_value_coef: float | None = None,
         teacher_kl: torch.Tensor | None = None,
         teacher_value_loss_values: torch.Tensor | None = None,
         context: DistributedContext | None = None,
@@ -1236,6 +1306,8 @@ def _compile_ppo_loss(
             policy_weight=policy_weight,
             value_weight=value_weight,
             config=config,
+            teacher_kl_coef=teacher_kl_coef,
+            teacher_value_coef=teacher_value_coef,
             context=context,
             loss_components=compiled_loss_components,
             entity_policy_weight=entity_policy_weight,
@@ -1256,6 +1328,8 @@ def _ppo_loss(
     policy_weight: torch.Tensor,
     value_weight: torch.Tensor,
     config: PPOConfig,
+    teacher_kl_coef: float | None = None,
+    teacher_value_coef: float | None = None,
     teacher_kl: torch.Tensor | None = None,
     teacher_value_loss_values: torch.Tensor | None = None,
     context: DistributedContext | None = None,
@@ -1268,6 +1342,10 @@ def _ppo_loss(
         teacher_kl = torch.zeros_like(policy_weight)
     if teacher_value_loss_values is None:
         teacher_value_loss_values = torch.zeros_like(value_weight[..., 0])
+    if teacher_kl_coef is None:
+        teacher_kl_coef = config.teacher_kl_coef
+    if teacher_value_coef is None:
+        teacher_value_coef = config.teacher_value_coef
     return _ppo_loss_metrics_from_components(
         loss_components(
             new_logp,
@@ -1286,8 +1364,8 @@ def _ppo_loss(
         value_weight=value_weight,
         teacher_kl_values=teacher_kl,
         teacher_value_loss_values=teacher_value_loss_values,
-        teacher_kl_coef=config.teacher_kl_coef,
-        teacher_value_coef=config.teacher_value_coef,
+        teacher_kl_coef=teacher_kl_coef,
+        teacher_value_coef=teacher_value_coef,
         vf_coef=config.vf_coef,
         ent_coef=config.ent_coef,
         context=context,
@@ -2263,6 +2341,7 @@ def _checkpoint_nonnegative_int(value: object, *, name: str) -> int:
 
 
 def _checkpoint_metadata(checkpoint: dict[object, object]) -> PPOCheckpointMetadata:
+    total_active_entities = checkpoint.get("total_active_entities", 0)
     return PPOCheckpointMetadata(
         env_steps=_checkpoint_nonnegative_int(
             checkpoint["env_steps"],
@@ -2275,6 +2354,10 @@ def _checkpoint_metadata(checkpoint: dict[object, object]) -> PPOCheckpointMetad
         total_games_played=_checkpoint_nonnegative_int(
             checkpoint["total_games_played"],
             name="total_games_played",
+        ),
+        total_active_entities=_checkpoint_nonnegative_int(
+            total_active_entities,
+            name="total_active_entities",
         ),
         wandb_run_id=_checkpoint_optional_str(
             checkpoint["wandb_run_id"],
