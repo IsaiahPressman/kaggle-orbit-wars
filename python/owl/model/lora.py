@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
+import torch
 from torch import nn
 
 from owl.model.base import BaseModelAPI
@@ -76,6 +77,38 @@ def lora_parameters(model: nn.Module) -> tuple[nn.Parameter, ...]:
     )
 
 
+def roundtrip_lora_base_quantization(
+    model: nn.Module,
+    config: LoRAConfig,
+) -> None:
+    quantization = config.roundtrip_quantization
+    if quantization is None:
+        return
+
+    from owl.checkpoint_quantization import (
+        dequantize_model_state_dict,
+        quantize_model_state_dict,
+    )
+
+    model_state = model.state_dict()
+    base_state = {
+        name: tensor
+        for name, tensor in model_state.items()
+        if not _is_lora_adapter_state_key(name)
+    }
+    dequantized = dequantize_model_state_dict(
+        quantize_model_state_dict(base_state, quantization)
+    )
+    if dequantized.keys() != base_state.keys():
+        raise RuntimeError("LoRA base quantization changed model state keys")
+
+    destination = model.state_dict()
+    with torch.no_grad():
+        for name, tensor in dequantized.items():
+            target = destination[name]
+            target.copy_(tensor.to(device=target.device, dtype=target.dtype))
+
+
 def load_model_state_dict_allowing_lora(
     model: nn.Module,
     state_dict: object,
@@ -113,6 +146,10 @@ def _lora_state_keys(model: nn.Module) -> set[str]:
             keys.add(f"{prefix}lora_down")
             keys.add(f"{prefix}lora_up")
     return keys
+
+
+def _is_lora_adapter_state_key(name: str) -> bool:
+    return name.endswith((".lora_down", ".lora_up"))
 
 
 def _target_block_indices(

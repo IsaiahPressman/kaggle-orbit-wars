@@ -19,6 +19,7 @@ from owl.model.lora import (
     load_model_state_dict_allowing_lora,
     lora_config_for_model,
     lora_parameters,
+    roundtrip_lora_base_quantization,
 )
 from owl.model.lora_config import LoRAConfig
 from owl.model.lora_linear import LoRALinear
@@ -78,4 +79,5 @@ __all__ = [
     "load_model_state_dict_allowing_lora",
     "lora_config_for_model",
     "lora_parameters",
+    "roundtrip_lora_base_quantization",
 ]

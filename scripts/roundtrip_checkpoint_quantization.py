@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from owl.agent.checkpoint_quantization import (
+from owl.checkpoint_quantization import (
     SUPPORTED_QUANTIZATION_FORMATS,
     QuantizationFormat,
     dequantize_model_state_dict,

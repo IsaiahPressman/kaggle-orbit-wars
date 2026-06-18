@@ -5,6 +5,7 @@ from typing import Literal, Self
 from pydantic import Field, model_validator
 
 from owl.config import BaseConfig
+from owl.quantization_formats import QuantizationFormat
 
 LoRATargetModule = Literal["q", "k", "v", "out", "up", "down", "gate", "value"]
 
@@ -16,6 +17,7 @@ class LoRAConfig(BaseConfig):
     target_block_count: int | None = Field(default=None, ge=1)
     target_value_head: bool = False
     target_policy_head: bool = False
+    roundtrip_quantization: QuantizationFormat | None = None
 
     @model_validator(mode="after")
     def _validate_targets(self) -> Self:

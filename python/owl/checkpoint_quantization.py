@@ -1,33 +1,34 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal, TypeAlias, TypeGuard
+from typing import Literal, TypeGuard
 
 import torch
 
-QuantizationFormat: TypeAlias = Literal[
-    "fp8_e4m3fn",
-    "fp4_e2m1fn_x2_scaled_block16",
-    "nf5_g128_lsq_policy_last_fp8",
-    "nf4_g128_lsq",
-    "nf3_nf4_structured_3p5",
-    "nf3_g128_lsq",
-]
-
-FP8_E4M3FN: QuantizationFormat = "fp8_e4m3fn"
-FP4_E2M1FN_X2_SCALED_BLOCK16: QuantizationFormat = "fp4_e2m1fn_x2_scaled_block16"
-NF5_G128_LSQ_POLICY_LAST_FP8: QuantizationFormat = "nf5_g128_lsq_policy_last_fp8"
-NF4_G128_LSQ: QuantizationFormat = "nf4_g128_lsq"
-NF3_NF4_STRUCTURED_3P5: QuantizationFormat = "nf3_nf4_structured_3p5"
-NF3_G128_LSQ: QuantizationFormat = "nf3_g128_lsq"
-SUPPORTED_QUANTIZATION_FORMATS: tuple[QuantizationFormat, ...] = (
-    FP8_E4M3FN,
+from owl.quantization_formats import (
     FP4_E2M1FN_X2_SCALED_BLOCK16,
-    NF5_G128_LSQ_POLICY_LAST_FP8,
-    NF4_G128_LSQ,
-    NF3_NF4_STRUCTURED_3P5,
+    FP8_E4M3FN,
     NF3_G128_LSQ,
+    NF3_NF4_STRUCTURED_3P5,
+    NF4_G128_LSQ,
+    NF5_G128_LSQ_POLICY_LAST_FP8,
+    SUPPORTED_QUANTIZATION_FORMATS,
+    QuantizationFormat,
 )
+
+__all__ = [
+    "FP4_E2M1FN_X2_SCALED_BLOCK16",
+    "FP8_E4M3FN",
+    "NF3_G128_LSQ",
+    "NF3_NF4_STRUCTURED_3P5",
+    "NF4_G128_LSQ",
+    "NF5_G128_LSQ_POLICY_LAST_FP8",
+    "SUPPORTED_QUANTIZATION_FORMATS",
+    "QuantizationFormat",
+    "dequantize_model_state_dict",
+    "load_model_state_dict_streaming",
+    "quantize_model_state_dict",
+]
 
 _QUANTIZED_STATE_MARKER = "__owl_quantized_model_state_dict__"
 _QUANTIZED_STATE_VERSION = 1
@@ -656,20 +657,32 @@ def _quantize_normalfloat_g128_lsq(
     padded = torch.zeros((rows, padded_cols), dtype=torch.float32, device=tensor.device)
     padded[:, :cols] = tensor
     groups = padded.reshape(rows * group_count, _NORMALFLOAT_GROUP_SIZE)
+    valid = torch.zeros((rows, padded_cols), dtype=torch.bool, device=tensor.device)
+    valid[:, :cols] = True
+    valid_groups = valid.reshape(rows * group_count, _NORMALFLOAT_GROUP_SIZE)
 
-    scale = groups.abs().amax(dim=1, keepdim=True)
+    valid_abs_groups = torch.where(valid_groups, groups.abs(), torch.zeros_like(groups))
+    max_abs = valid_abs_groups.amax(dim=1, keepdim=True)
+    scale = max_abs
     values = _normalfloat_values_for_bits(bits).to(device=tensor.device)
     thresholds = _normalfloat_thresholds_for_bits(bits).to(device=tensor.device)
     for _ in range(2):
         safe_scale = torch.where(scale == 0, torch.ones_like(scale), scale)
         codes = torch.bucketize(groups / safe_scale, thresholds).to(torch.long)
         quantized = values[codes]
-        denominator = (quantized * quantized).sum(dim=1, keepdim=True)
+        valid_quantized = torch.where(
+            valid_groups,
+            quantized,
+            torch.zeros_like(quantized),
+        )
+        valid_group_values = torch.where(valid_groups, groups, torch.zeros_like(groups))
+        denominator = (valid_quantized * valid_quantized).sum(dim=1, keepdim=True)
+        raw_improved = (valid_group_values * valid_quantized).sum(
+            dim=1, keepdim=True
+        ) / denominator
         improved = torch.where(
             denominator > 0,
-            ((groups * quantized).sum(dim=1, keepdim=True) / denominator).clamp_min(
-                0.0
-            ),
+            torch.minimum(raw_improved.clamp_min(0.0), max_abs),
             torch.zeros_like(scale),
         )
         scale = torch.where(scale == 0, scale, improved)

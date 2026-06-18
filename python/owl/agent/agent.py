@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal, TypeAlias, assert_never
 import torch
 from pydantic import ConfigDict, Field
 
+from owl.checkpoint_quantization import load_model_state_dict_streaming
 from owl.config import BaseConfig
 from owl.model import (
     BaseModelAPI,
@@ -39,7 +40,6 @@ from owl.rl import (
     encode_python_observation_with_metrics,
 )
 
-from .checkpoint_quantization import load_model_state_dict_streaming
 from .kaggle_observation import KaggleObservation
 
 AGENT_CONFIG_PATH = Path(__file__).with_name("agent_config.yaml")

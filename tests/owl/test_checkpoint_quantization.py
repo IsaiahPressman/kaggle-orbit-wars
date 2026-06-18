@@ -3,13 +3,14 @@ from pathlib import Path
 import pytest
 import torch
 from owl.agent.agent import Agent, AgentCheckpointConfig, AgentConfig
-from owl.agent.checkpoint_quantization import (
+from owl.checkpoint_quantization import (
     FP4_E2M1FN_X2_SCALED_BLOCK16,
     FP8_E4M3FN,
     NF3_G128_LSQ,
     NF3_NF4_STRUCTURED_3P5,
     NF4_G128_LSQ,
     NF5_G128_LSQ_POLICY_LAST_FP8,
+    SUPPORTED_QUANTIZATION_FORMATS,
     dequantize_model_state_dict,
     load_model_state_dict_streaming,
     quantize_model_state_dict,
@@ -301,6 +302,40 @@ def test_nf5_quantization_stores_non_2d_floating_tensors_as_fp16() -> None:
 
     dequantized = dequantize_model_state_dict(quantized)["linear.bias"]
     _assert_float32_bits_equal(dequantized, expected_lowp.to(torch.float32))
+
+
+@pytest.mark.parametrize("quantization", SUPPORTED_QUANTIZATION_FORMATS)
+def test_quantization_roundtrip_is_exactly_requantizable(
+    quantization: str,
+) -> None:
+    model_state = {
+        "blocks.0.attn.q.weight": torch.linspace(
+            -2.0,
+            2.0,
+            steps=16 * 33,
+            dtype=torch.float32,
+        ).reshape(16, 33),
+        "blocks.1.attn.out.weight": torch.linspace(
+            2.5,
+            -1.5,
+            steps=2 * 129,
+            dtype=torch.float32,
+        ).reshape(2, 129),
+        "source_actor_input_proj.weight": torch.tensor(
+            [[0.375, 1.125, -2.25]],
+            dtype=torch.float32,
+        ),
+        "linear.bias": torch.tensor([0.1, 1.5, 8.0], dtype=torch.float32),
+        "step": torch.tensor(7, dtype=torch.int64),
+    }
+    quantized = quantize_model_state_dict(model_state, quantization)
+
+    requantized = quantize_model_state_dict(
+        dequantize_model_state_dict(quantized),
+        quantization,
+    )
+
+    _assert_quantized_state_equal(requantized, quantized)
 
 
 @pytest.mark.parametrize(
@@ -595,6 +630,20 @@ def _expected_dequantized(values: torch.Tensor, quantization: str) -> torch.Tens
             quantize_model_state_dict({"weight": values}, quantization)
         )["weight"]
     raise AssertionError(f"unexpected quantization: {quantization}")
+
+
+def _assert_quantized_state_equal(left: object, right: object) -> None:
+    if isinstance(left, dict) and isinstance(right, dict):
+        assert left.keys() == right.keys()
+        for key in left:
+            _assert_quantized_state_equal(left[key], right[key])
+        return
+    if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
+        assert left.dtype == right.dtype
+        assert left.shape == right.shape
+        assert torch.equal(left, right)
+        return
+    assert left == right
 
 
 def _reference_fp4_e2m1fn_scaled_block16(

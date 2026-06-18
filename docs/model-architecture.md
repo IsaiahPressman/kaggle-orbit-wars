@@ -265,6 +265,7 @@ actor heads. Recurrent models reject `lora` fields.
 | `target_block_count` | `null` | If set, wrap only the final N shared transformer blocks; otherwise wrap all shared blocks. Only selects transformer-block projections, so it requires a non-empty `target_modules`. |
 | `target_value_head` | `false` | Wrap every linear projection in the critic (value) head with LoRA adapters. |
 | `target_policy_head` | `false` | Wrap every linear projection in the actor (policy) head, including its source/target input projections and learned pairwise-bias MLP when enabled, with LoRA adapters. |
+| `roundtrip_quantization` | `null` | Optional checkpoint quantization format. When set, fresh LoRA training quantizes and dequantizes the frozen base-model tensors before adapter optimization, leaving LoRA adapter tensors unchanged. |
 
 LoRA presets live under `configs/model/lora/`. For example,
 `model.lora=2p_200m_qv_r16` resolves
@@ -288,6 +289,10 @@ non-LoRA base tensors must match. Resume checkpoints are expected to match the
 saved LoRA config and include adapter tensors. Fresh LoRA launches reject
 `--load-model-weights-mode model_and_optimizer`; use `model_only` for base
 checkpoint initialization or resume an existing LoRA run.
+If `roundtrip_quantization` is set, fresh scratch launches roundtrip the freshly
+initialized base tensors, and fresh checkpoint-initialized launches roundtrip
+after base checkpoint weights are loaded. Existing run resumes load their saved
+checkpoint state without an additional quantization pass.
 
 ## Recurrent Transformer V1
 

@@ -4,12 +4,18 @@ import importlib.util
 import sys
 import time
 from argparse import Namespace
+from collections.abc import Mapping
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+from owl.checkpoint_quantization import (
+    NF4_G128_LSQ,
+    dequantize_model_state_dict,
+    quantize_model_state_dict,
+)
 from owl.model import LoRALinear
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
@@ -114,6 +120,32 @@ def _distributed_context(world_size: int) -> run_ppo.DistributedContext:
     )
 
 
+def _is_lora_adapter_key(key: str) -> bool:
+    return key.endswith((".lora_down", ".lora_up"))
+
+
+def _base_lora_state(
+    state_dict: Mapping[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    return {
+        key: value for key, value in state_dict.items() if not _is_lora_adapter_key(key)
+    }
+
+
+def _assert_quantized_state_equal(left: object, right: object) -> None:
+    if isinstance(left, dict) and isinstance(right, dict):
+        assert left.keys() == right.keys()
+        for key in left:
+            _assert_quantized_state_equal(left[key], right[key])
+        return
+    if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
+        assert left.dtype == right.dtype
+        assert left.shape == right.shape
+        assert torch.equal(left, right)
+        return
+    assert left == right
+
+
 def test_apply_lora_for_config_wraps_stateless_training_model() -> None:
     cfg = FullConfig.model_validate(
         {
@@ -158,6 +190,58 @@ def test_apply_lora_for_config_wraps_stateless_training_model() -> None:
         name.endswith((".lora_down", ".lora_up")) == parameter.requires_grad
         for name, parameter in model.named_parameters()
     )
+
+
+def test_create_training_model_roundtrip_quantizes_lora_base_model() -> None:
+    base_cfg = _full_config()
+    cfg = FullConfig.model_validate(
+        {
+            **base_cfg.model_dump(mode="python"),
+            "model": {
+                **base_cfg.model.model_dump(mode="python"),
+                "lora": {
+                    "rank": 2,
+                    "target_modules": ["q"],
+                    "roundtrip_quantization": NF4_G128_LSQ,
+                },
+            },
+        }
+    )
+    torch.manual_seed(123)
+    reference_model = run_ppo._create_model(
+        cfg.model,
+        obs_spec=cfg.env.obs_spec,
+        action_spec=cfg.env.action_spec,
+    )
+    reference_model.reset_parameters()
+    assert run_ppo._apply_lora_for_config(reference_model, cfg.model) is not None
+    reference_state = reference_model.state_dict()
+    reference_base_state = _base_lora_state(reference_state)
+    expected_quantized = quantize_model_state_dict(
+        reference_base_state,
+        NF4_G128_LSQ,
+    )
+    expected_base_state = dequantize_model_state_dict(expected_quantized)
+
+    torch.manual_seed(123)
+    model, application = run_ppo._create_training_model_for_config(
+        cfg,
+        device=torch.device("cpu"),
+        reset_parameters=True,
+    )
+
+    assert application is not None
+    actual_state = model.state_dict()
+    for key, expected_tensor in expected_base_state.items():
+        assert torch.equal(actual_state[key], expected_tensor)
+    for key, expected_tensor in reference_state.items():
+        if _is_lora_adapter_key(key):
+            assert torch.equal(actual_state[key], expected_tensor)
+    actual_quantized = quantize_model_state_dict(
+        _base_lora_state(actual_state),
+        NF4_G128_LSQ,
+    )
+    _assert_quantized_state_equal(actual_quantized, expected_quantized)
 
 
 def test_load_model_weights_allows_base_checkpoint_for_lora_model(

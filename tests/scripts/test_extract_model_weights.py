@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from owl.agent.checkpoint_quantization import (
+from owl.checkpoint_quantization import (
     FP4_E2M1FN_X2_SCALED_BLOCK16,
     FP8_E4M3FN,
     NF3_G128_LSQ,

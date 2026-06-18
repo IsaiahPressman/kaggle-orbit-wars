@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from owl.checkpoint_quantization import NF4_G128_LSQ
 from owl.model import (
     RecurrentTransformerV1,
     RecurrentTransformerV1Config,
@@ -153,6 +154,7 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
                     "target_block_count": 1,
                     "target_value_head": True,
                     "target_policy_head": True,
+                    "roundtrip_quantization": NF4_G128_LSQ,
                 },
             },
             "optimizer": {
@@ -179,6 +181,7 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
     assert config.optimizer.lr_schedule.warmup_steps == 2
     assert isinstance(config.model, StatelessTransformerV1Config)
     assert config.model.lora is not None
+    assert config.model.lora.roundtrip_quantization == NF4_G128_LSQ
     assert config.model.lora.rank == 8
     assert config.model.lora.alpha == pytest.approx(16.0)
     assert config.model.lora.target_value_head is True
@@ -220,6 +223,34 @@ def test_full_config_rejects_lora_without_any_target() -> None:
                     "depth": 1,
                     "n_heads": 4,
                     "lora": {"rank": 2, "target_modules": []},
+                },
+                "optimizer": {
+                    "optimizer": "adamw",
+                    "learning_rate": 0.001,
+                },
+                "rl": {
+                    "horizon": 4,
+                },
+            }
+        )
+
+
+def test_full_config_rejects_unknown_lora_roundtrip_quantization() -> None:
+    with pytest.raises(ValueError, match="Input should be"):
+        FullConfig.model_validate(
+            {
+                "env": {
+                    "n_envs": 2,
+                },
+                "model": {
+                    "model_arch": "stateless_transformer_v1",
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                    "lora": {
+                        "rank": 2,
+                        "roundtrip_quantization": "nf2_g128_lsq",
+                    },
                 },
                 "optimizer": {
                     "optimizer": "adamw",

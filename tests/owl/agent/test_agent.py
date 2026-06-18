@@ -16,10 +16,6 @@ from owl.agent.agent import (
     compact_entities,
     expand_actions_to_full_action_slots,
 )
-from owl.agent.checkpoint_quantization import (
-    FP4_E2M1FN_X2_SCALED_BLOCK16,
-    quantize_model_state_dict,
-)
 from owl.agent.kaggle_observation import (
     FLEET_ANGLE_INDEX,
     FLEET_FROM_PLANET_ID_INDEX,
@@ -35,6 +31,10 @@ from owl.agent.kaggle_observation import (
     PLANET_SHIPS_INDEX,
     PLANET_X_INDEX,
     PLANET_Y_INDEX,
+)
+from owl.checkpoint_quantization import (
+    FP4_E2M1FN_X2_SCALED_BLOCK16,
+    quantize_model_state_dict,
 )
 from owl.model import (
     RecurrentTransformerV1Config,

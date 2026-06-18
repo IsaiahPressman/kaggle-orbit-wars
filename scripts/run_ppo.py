@@ -23,6 +23,7 @@ from owl.model import (
     create_model,
     load_model_state_dict_allowing_lora,
     lora_config_for_model,
+    roundtrip_lora_base_quantization,
 )
 from owl.replay import ReplayRecorder
 from owl.rl import (
@@ -160,6 +161,10 @@ def main() -> None:
             cfg,
             device=device,
             reset_parameters=isinstance(launch, FreshLaunch),
+            roundtrip_lora_base=(
+                isinstance(launch, FreshLaunch)
+                and launch.load_model_weights_path is None
+            ),
         )
         compiled_model_modules = configure_model_compile(model, cfg.rl)
         teacher_init_model = (
@@ -215,6 +220,10 @@ def main() -> None:
                 load_optimizer=(
                     launch.load_model_weights_mode == "model_and_optimizer"
                 ),
+            )
+            _roundtrip_lora_base_quantization_for_config(
+                unwrap_model(model),
+                cfg.model,
             )
             start_env_steps = checkpoint_metadata.env_steps
             if cfg.rl.teacher_mode == "last_best":
@@ -712,6 +721,7 @@ def _create_training_model_for_config(
     *,
     device: torch.device,
     reset_parameters: bool = False,
+    roundtrip_lora_base: bool = True,
 ) -> tuple[BaseModelAPI, LoRAApplication | None]:
     model = _create_model(
         cfg.model,
@@ -721,6 +731,8 @@ def _create_training_model_for_config(
     if reset_parameters:
         model.reset_parameters()
     lora_application = _apply_lora_for_config(model, cfg.model)
+    if roundtrip_lora_base:
+        _roundtrip_lora_base_quantization_for_config(model, cfg.model)
     return model, lora_application
 
 
@@ -732,6 +744,16 @@ def _apply_lora_for_config(
     if lora_config is None:
         return None
     return apply_lora_to_stateless_transformer(model, lora_config)
+
+
+def _roundtrip_lora_base_quantization_for_config(
+    model: BaseModelAPI,
+    config: ModelConfig,
+) -> None:
+    lora_config = lora_config_for_model(config)
+    if lora_config is None:
+        return
+    roundtrip_lora_base_quantization(model, lora_config)
 
 
 def _validate_lora_launch_config(cfg: FullConfig, launch: Launch) -> None:
@@ -786,6 +808,7 @@ def _load_teacher_init_model(
             }
         ),
         device=device,
+        roundtrip_lora_base=False,
     )
     _load_model_weights(teacher_model, path=checkpoint_path, device=device)
     _compile_eval_model(teacher_model, student_cfg)
@@ -815,8 +838,13 @@ def _initial_last_best_model(
     # checkpoint (its adapters initialize from config).
     teacher_cfg = FullConfig.from_file(_checkpoint_config_path(teacher_init))
     _validate_teacher_specs(teacher_cfg, student_cfg=cfg, checkpoint_path=teacher_init)
-    model = _create_eval_model_for_config(cfg, device=device)
+    model = _create_eval_model_for_config(
+        cfg,
+        device=device,
+        roundtrip_lora_base=False,
+    )
     _load_model_weights(model, path=teacher_init, device=device)
+    _roundtrip_lora_base_quantization_for_config(model, cfg.model)
     _compile_eval_model(model, cfg)
     return model
 
@@ -990,8 +1018,13 @@ def _create_eval_model_for_config(
     cfg: FullConfig,
     *,
     device: torch.device,
+    roundtrip_lora_base: bool = True,
 ) -> BaseModelAPI:
-    model, _ = _create_training_model_for_config(cfg, device=device)
+    model, _ = _create_training_model_for_config(
+        cfg,
+        device=device,
+        roundtrip_lora_base=roundtrip_lora_base,
+    )
     model.eval()
     return model
 
@@ -1002,7 +1035,11 @@ def _create_eval_model_from_weights(
     *,
     device: torch.device,
 ) -> BaseModelAPI:
-    model = _create_eval_model_for_config(cfg, device=device)
+    model = _create_eval_model_for_config(
+        cfg,
+        device=device,
+        roundtrip_lora_base=False,
+    )
     model.load_state_dict(source_model.state_dict())
     _compile_eval_model(model, cfg)
     model.eval()
