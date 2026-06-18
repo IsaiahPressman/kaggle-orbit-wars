@@ -218,19 +218,13 @@ class Agent:
         model.eval()
         return model
 
-    def _load_fallback_model_if_due(
-        self,
-        step: int,
-        remaining_overage_time: float,
-    ) -> None:
+    def _load_fallback_model_if_due(self, step: int) -> None:
         if self.fallback_model is not None or self._fallback_checkpoint_path is None:
             return
         threshold = self.config.fallback_min_overage_time
         if threshold is None:
             return
         if step < _FALLBACK_LOAD_MIN_STEP:
-            return
-        if remaining_overage_time < threshold:
             return
 
         assert self.fallback_checkpoint_config is not None
@@ -261,12 +255,7 @@ class Agent:
         if kaggle_obs.remaining_overage_time < self.config.min_overage_time:
             return []
 
-        self._load_fallback_model_if_due(
-            kaggle_obs.step,
-            kaggle_obs.remaining_overage_time,
-        )
-        if self._needs_unloaded_fallback(kaggle_obs.remaining_overage_time):
-            return []
+        self._load_fallback_model_if_due(kaggle_obs.step)
 
         model = self.model
         checkpoint_config = self.checkpoint_config
@@ -363,14 +352,6 @@ class Agent:
     def _should_use_fallback(self, remaining_overage_time: float) -> bool:
         return (
             self.fallback_model is not None
-            and self.config.fallback_min_overage_time is not None
-            and remaining_overage_time < self.config.fallback_min_overage_time
-        )
-
-    def _needs_unloaded_fallback(self, remaining_overage_time: float) -> bool:
-        return (
-            self.fallback_model is None
-            and self._fallback_checkpoint_path is not None
             and self.config.fallback_min_overage_time is not None
             and remaining_overage_time < self.config.fallback_min_overage_time
         )

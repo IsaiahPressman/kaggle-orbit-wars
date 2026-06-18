@@ -269,13 +269,13 @@ def test_agent_loads_fallback_model_on_second_step(
 
     monkeypatch.setattr(agent, "_load_model_from_config", fake_load_model_from_config)
 
-    agent._load_fallback_model_if_due(0, 60.0)
+    agent._load_fallback_model_if_due(0)
 
     assert agent.fallback_model is None
     assert loaded == []
     assert capsys.readouterr().out == ""
 
-    agent._load_fallback_model_if_due(1, 60.0)
+    agent._load_fallback_model_if_due(1)
 
     assert agent.fallback_model is fallback_model
     assert loaded == [(agent.fallback_checkpoint_config, fallback_checkpoint_path)]
@@ -301,83 +301,45 @@ def test_agent_does_not_load_fallback_when_routing_is_disabled(
 
     monkeypatch.setattr(agent, "_load_model_from_config", fail_load_model_from_config)
 
-    agent._load_fallback_model_if_due(1, 60.0)
+    agent._load_fallback_model_if_due(1)
 
     assert agent.fallback_model is None
 
 
-def test_agent_does_not_load_fallback_once_overage_is_below_threshold(
+def test_agent_loads_fallback_even_once_overage_is_below_threshold(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     agent = Agent.__new__(Agent)
     agent.config = AgentConfig(deterministic=True, fallback_min_overage_time=5.0)
     agent.fallback_checkpoint_config = object()
     agent.fallback_model = None
     agent._fallback_checkpoint_path = tmp_path / "fallback_checkpoint.pt"
+    loaded: list[tuple[object, Path]] = []
 
-    def fail_load_model_from_config(
+    class FallbackModel:
+        pass
+
+    fallback_model = FallbackModel()
+
+    def fake_load_model_from_config(
         *,
-        checkpoint_config: object,  # noqa: ARG001
-        checkpoint_path: Path,  # noqa: ARG001
+        checkpoint_config: object,
+        checkpoint_path: Path,
     ) -> object:
-        raise AssertionError("low-overage fallback should not load lazily")
+        loaded.append((checkpoint_config, checkpoint_path))
+        return fallback_model
 
-    monkeypatch.setattr(agent, "_load_model_from_config", fail_load_model_from_config)
+    monkeypatch.setattr(agent, "_load_model_from_config", fake_load_model_from_config)
 
-    agent._load_fallback_model_if_due(1, 4.0)
+    agent._load_fallback_model_if_due(1)
 
-    assert agent.fallback_model is None
-
-
-def test_agent_act_returns_empty_when_fallback_needed_before_lazy_load() -> None:
-    action_spec = ActionPureConfig(max_per_planet_launches=1)
-    agent = Agent.__new__(Agent)
-    checkpoint_config = SimpleNamespace(
-        env=SimpleNamespace(
-            obs_spec=EntityBasedConfig(),
-            action_spec=action_spec,
-        ),
-        model=StatelessTransformerV1Config(),
-    )
-    agent.checkpoint_config = checkpoint_config
-    agent.fallback_checkpoint_config = checkpoint_config
-    agent.config = AgentConfig(
-        deterministic=True,
-        min_overage_time=1.0,
-        fallback_min_overage_time=10.0,
-    )
-    agent.device = torch.device("cpu")
-    agent.hidden_state = "primary-hidden"
-    agent.fallback_model = None
-    agent._fallback_checkpoint_path = Path("fallback_checkpoint.pt")
-    agent._last_turn_value = float("nan")
-    agent._peak_total_ms = 0
-    agent._peak_entities = 0
-
-    class PrimaryModel:
-        def initial_hidden_state(
-            self,
-            _batch_size: int,
-            *,
-            device: torch.device,  # noqa: ARG002
-        ) -> None:
-            raise AssertionError("primary model should not be used")
-
-        def serve(
-            self,
-            obs: object,  # noqa: ARG002
-            *,
-            deterministic: bool,  # noqa: ARG002
-            hidden_state: object | None,  # noqa: ARG002
-        ) -> object:
-            raise AssertionError("primary model should not be used")
-
-    agent.model = PrimaryModel()
-    observation = _raw_observation(remaining_overage_time=5.0)
-    observation["step"] = 1
-
-    assert agent.act(KaggleObservation.model_validate(observation)) == []
+    assert agent.fallback_model is fallback_model
+    assert loaded == [
+        (agent.fallback_checkpoint_config, agent._fallback_checkpoint_path)
+    ]
+    assert capsys.readouterr().out.startswith("fallback_init_s=")
 
 
 def test_agent_init_quantizes_linear_layers_for_int8_inference(
