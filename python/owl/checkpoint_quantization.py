@@ -36,6 +36,7 @@ __all__ = [
     "QuantizationFormat",
     "TensorQuantizationFormat",
     "dequantize_model_state_dict",
+    "effective_lora_quantization",
     "is_lora_adapter_state_key",
     "load_model_state_dict_streaming",
     "quantize_model_state_dict",
@@ -252,12 +253,12 @@ def quantize_model_state_dict(
         for name, tensor in validated_model_state.items()
         if not is_lora_adapter_state_key(name)
     }
-    effective_lora_quantization = _effective_lora_quantization(
+    effective_lora_format = effective_lora_quantization(
         has_lora=bool(lora_state),
         quantization=quantization,
         lora_quantization=lora_quantization,
     )
-    if quantization is None and effective_lora_quantization is None:
+    if quantization is None and effective_lora_format is None:
         raise ValueError("quantization requires a model or LoRA quantization format")
 
     normalfloat_bits: dict[str, int] = {}
@@ -268,13 +269,13 @@ def quantize_model_state_dict(
             base_state,
             quantization,
         )
-    if _is_supported_model_quantization(effective_lora_quantization):
+    if _is_supported_model_quantization(effective_lora_format):
         normalfloat_bits.update(
-            _normalfloat_tensor_bits(lora_state, effective_lora_quantization)
+            _normalfloat_tensor_bits(lora_state, effective_lora_format)
         )
         fp8_tensor_names = fp8_tensor_names | _policy_fp8_tensor_names(
             lora_state,
-            effective_lora_quantization,
+            effective_lora_format,
         )
 
     quantized_state: dict[str, object] = {
@@ -285,7 +286,7 @@ def quantize_model_state_dict(
                 name,
                 tensor,
                 (
-                    effective_lora_quantization
+                    effective_lora_format
                     if is_lora_adapter_state_key(name)
                     else quantization
                 ),
@@ -297,12 +298,12 @@ def quantize_model_state_dict(
     }
     if lora_state:
         quantized_state["lora_format"] = (
-            FP32 if effective_lora_quantization is None else effective_lora_quantization
+            FP32 if effective_lora_format is None else effective_lora_format
         )
     return quantized_state
 
 
-def _effective_lora_quantization(
+def effective_lora_quantization(
     *,
     has_lora: bool,
     quantization: QuantizationFormat | None,
@@ -347,7 +348,6 @@ def load_model_state_dict_streaming(
     module: torch.nn.Module,
     model_state: object,
     *,
-    allow_missing_lora_adapters: bool = False,
     ignore_unexpected_lora_adapters: bool = False,
 ) -> None:
     if not _is_quantized_model_state_dict(model_state):
@@ -356,7 +356,6 @@ def load_model_state_dict_streaming(
         _load_unquantized_model_state_dict(
             module,
             model_state,
-            allow_missing_lora_adapters=allow_missing_lora_adapters,
             ignore_unexpected_lora_adapters=ignore_unexpected_lora_adapters,
         )
         return
@@ -399,11 +398,9 @@ def load_model_state_dict_streaming(
 
     missing_keys = set(destination) - loaded_keys
     _extend_state_dict_error_messages(
-        module,
         error_messages,
         missing_keys=missing_keys,
         unexpected_keys=set(unexpected_keys),
-        allow_missing_lora_adapters=allow_missing_lora_adapters,
         ignore_unexpected_lora_adapters=ignore_unexpected_lora_adapters,
     )
     if error_messages:
@@ -414,18 +411,15 @@ def _load_unquantized_model_state_dict(
     module: torch.nn.Module,
     model_state: Mapping[object, object],
     *,
-    allow_missing_lora_adapters: bool,
     ignore_unexpected_lora_adapters: bool,
 ) -> None:
     validated = _validate_unquantized_model_state(model_state)
     result = module.load_state_dict(validated, strict=False)
     error_messages: list[str] = []
     _extend_state_dict_error_messages(
-        module,
         error_messages,
         missing_keys=set(result.missing_keys),
         unexpected_keys=set(result.unexpected_keys),
-        allow_missing_lora_adapters=allow_missing_lora_adapters,
         ignore_unexpected_lora_adapters=ignore_unexpected_lora_adapters,
     )
     if error_messages:
@@ -433,27 +427,16 @@ def _load_unquantized_model_state_dict(
 
 
 def _extend_state_dict_error_messages(
-    module: torch.nn.Module,
     error_messages: list[str],
     *,
     missing_keys: set[str],
     unexpected_keys: set[str],
-    allow_missing_lora_adapters: bool,
     ignore_unexpected_lora_adapters: bool,
 ) -> None:
     if ignore_unexpected_lora_adapters:
         unexpected_keys = {
             key for key in unexpected_keys if not is_lora_adapter_state_key(key)
         }
-
-    if allow_missing_lora_adapters:
-        destination_lora_keys = {
-            name for name in module.state_dict() if is_lora_adapter_state_key(name)
-        }
-        missing_lora_keys = missing_keys & destination_lora_keys
-        provided_lora_keys = destination_lora_keys - missing_lora_keys
-        if not provided_lora_keys:
-            missing_keys = missing_keys - missing_lora_keys
 
     if missing_keys:
         error_messages.append(

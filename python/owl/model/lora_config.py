@@ -12,7 +12,7 @@ LoRATargetModule = Literal["q", "k", "v", "out", "up", "down", "gate", "value"]
 
 class LoRAConfig(BaseConfig):
     rank: int = Field(ge=1)
-    alpha: float | None = Field(default=None, gt=0.0)
+    alpha_scale: float = Field(default=1.0, gt=0.0)
     target_modules: tuple[LoRATargetModule, ...] = ("q", "v")
     target_block_count: int | None = Field(default=None, ge=1)
     target_value_head: bool = False
@@ -38,7 +38,3 @@ class LoRAConfig(BaseConfig):
                 "projections, so it requires a non-empty target_modules"
             )
         return self
-
-    @property
-    def scaling_alpha(self) -> float:
-        return float(self.rank if self.alpha is None else self.alpha)

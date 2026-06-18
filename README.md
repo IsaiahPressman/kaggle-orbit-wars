@@ -149,8 +149,8 @@ the model first.
 Set `model.lora` on stateless transformer configs to run PPO as a LoRA
 fine-tune. LoRA freezes the base model, wraps selected linear projections, and
 trains only the low-rank adapter parameters. `rank` is required; optional fields
-include `alpha`, `target_modules`, and `target_block_count` for final-block-only
-adaptation. Set `target_value_head` / `target_policy_head` to also wrap the
+include `alpha_scale` (the LoRA update scale, default `1.0`), `target_modules`,
+and `target_block_count` for final-block-only adaptation. Set `target_value_head` / `target_policy_head` to also wrap the
 critic and actor heads (set `target_modules` to `[]` to adapt only the heads).
 Set `roundtrip_quantization` to a supported checkpoint quantization format to
 quantize and dequantize the frozen base weights before adapter training, so

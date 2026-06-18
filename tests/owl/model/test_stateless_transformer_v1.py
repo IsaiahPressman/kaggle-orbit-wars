@@ -557,8 +557,11 @@ def test_lora_clamps_adapter_rank_for_degenerate_projections() -> None:
     assert tuple(critic_out.lora_up.shape) == (1, 1)
     # The embed_dim -> embed_dim hidden projection keeps the configured rank.
     assert critic_up.rank == 8
-    # Scaling stays alpha / configured-rank (alpha defaults to rank -> 1.0).
+    # Scaling equals alpha_scale (default 1.0) regardless of how much the rank
+    # was clamped, so the clamped output adapter and the full-rank hidden adapter
+    # share the same update scale.
     assert critic_out.scaling == pytest.approx(1.0)
+    assert critic_up.scaling == pytest.approx(1.0)
     # The clamped adapter is still an exact no-op at init.
     x = torch.randn(2, 3, 16)
     assert torch.allclose(
@@ -569,8 +572,8 @@ def test_lora_clamps_adapter_rank_for_degenerate_projections() -> None:
 def test_lora_linear_applies_scaled_low_rank_update() -> None:
     torch.manual_seed(0)
     base = torch.nn.Linear(8, 6)
-    wrapped = LoRALinear(base, rank=2, alpha=4.0)
-    # alpha / rank = 4 / 2 = 2; the scale must reach the final update regardless
+    wrapped = LoRALinear(base, rank=2, alpha_scale=2.0)
+    # scaling equals alpha_scale; the scale must reach the final update regardless
     # of where it is folded internally.
     assert wrapped.scaling == pytest.approx(2.0)
     with torch.no_grad():
@@ -587,7 +590,7 @@ def test_lora_linear_applies_scaled_low_rank_update() -> None:
 
 def test_fold_lora_adapters_preserves_output_and_removes_wrappers() -> None:
     base = torch.nn.Linear(8, 6)
-    wrapped = LoRALinear(base, rank=2, alpha=4.0)
+    wrapped = LoRALinear(base, rank=2, alpha_scale=2.0)
     model = torch.nn.Sequential(wrapped)
     with torch.no_grad():
         wrapped.lora_down.copy_(torch.randn(2, 8))

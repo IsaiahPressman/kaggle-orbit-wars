@@ -150,6 +150,31 @@ def test_roundtrip_checkpoint_model_dtype_defaults_lora_to_bf16(
     )
 
 
+def test_roundtrip_checkpoint_model_dtype_keeps_lora_at_base_dtype(
+    tmp_path: Path,
+) -> None:
+    # A dtype-only roundtrip (fp16) is not quantization, so adapters follow the
+    # base dtype and stay fp16 rather than silently defaulting to bf16.
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    output_path = tmp_path / "checkpoint_fp16_roundtrip.pt"
+    model_state = {
+        "linear.weight": torch.tensor([[0.1, 1.5, 2.5]], dtype=torch.float32),
+        "linear.lora_down": torch.tensor([[0.1, -0.2, 0.3]], dtype=torch.float32),
+    }
+    torch.save({"model": model_state}, checkpoint_path)
+
+    roundtrip_checkpoint_quantization.roundtrip_checkpoint_model_dtype(
+        checkpoint_path,
+        "fp16",
+    )
+
+    checkpoint = torch.load(output_path, map_location="cpu", weights_only=True)
+    expected_lora = model_state["linear.lora_down"].to(torch.float16).to(torch.float32)
+    bf16_lora = model_state["linear.lora_down"].to(torch.bfloat16).to(torch.float32)
+    _assert_float32_bits_equal(checkpoint["model"]["linear.lora_down"], expected_lora)
+    assert not torch.equal(checkpoint["model"]["linear.lora_down"], bf16_lora)
+
+
 def test_roundtrip_checkpoint_model_dtype_rejects_unique_prefix(
     tmp_path: Path,
 ) -> None:

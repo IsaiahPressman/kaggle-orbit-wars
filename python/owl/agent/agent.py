@@ -227,10 +227,15 @@ class Agent:
                 f"checkpoint must be a dictionary with key 'model': {checkpoint_path}"
             )
 
+        # The model configuration (whether LoRA adapters were applied above)
+        # determines how to load: when use_lora is True the adapter modules are
+        # present, so the checkpoint must supply their weights (missing adapters
+        # fail fast). When the model supports LoRA but we are not using it, the
+        # adapters are absent here, so adapter tensors in the checkpoint are
+        # ignored as unexpected.
         load_model_state_dict_streaming(
             model,
             checkpoint["model"],
-            allow_missing_lora_adapters=use_lora,
             ignore_unexpected_lora_adapters=lora_config is not None and not use_lora,
         )
         if use_lora:

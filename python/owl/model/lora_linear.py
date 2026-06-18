@@ -27,7 +27,7 @@ class LoRALinear(nn.Module):
         base: nn.Linear,
         *,
         rank: int,
-        alpha: float,
+        alpha_scale: float,
     ) -> None:
         super().__init__()
         self.in_features = base.in_features
@@ -35,10 +35,13 @@ class LoRALinear(nn.Module):
         # Clamp the adapter rank to min(in, out): a rank above that cannot raise
         # the update's rank, so it would only add redundant parameters (e.g. the
         # critic's embed_dim -> 1 output). The adapter stays separate from the
-        # frozen base weight, and the scaling keeps the configured alpha / rank so
-        # every adapter shares the same update scale regardless of clamping.
+        # frozen base weight.
         self.rank = min(rank, base.in_features, base.out_features)
-        self.scaling = alpha / rank
+        # Standard LoRA scaling is alpha / rank. Deriving alpha from the clamped
+        # rank (alpha = rank * alpha_scale) makes the scale reduce to alpha_scale
+        # for every adapter, so clamping never changes the configured update scale.
+        alpha = self.rank * alpha_scale
+        self.scaling = alpha / self.rank
         self.weight = base.weight
         self.bias = base.bias
         self.lora_down = nn.Parameter(

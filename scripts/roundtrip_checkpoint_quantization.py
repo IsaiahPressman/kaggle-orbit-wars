@@ -6,7 +6,7 @@ import copy
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 from owl.checkpoint_quantization import (
@@ -18,6 +18,7 @@ from owl.checkpoint_quantization import (
     QuantizationFormat,
     TensorQuantizationFormat,
     dequantize_model_state_dict,
+    effective_lora_quantization,
     is_lora_adapter_state_key,
     quantize_model_state_dict,
 )
@@ -193,11 +194,19 @@ def _effective_lora_roundtrip_target(
 ) -> str | None:
     if not any(is_lora_adapter_state_key(name) for name in model_state):
         return None
-    if lora_target_format is not None:
-        return lora_target_format
-    if target_format != FP32:
-        return BF16
-    return None
+    if target_format in SUPPORTED_QUANTIZATION_FORMATS:
+        # Real quantization of the base: adapters follow the shared library
+        # default (an explicit override, otherwise bf16).
+        return effective_lora_quantization(
+            has_lora=True,
+            quantization=target_format,
+            lora_quantization=cast(
+                "TensorQuantizationFormat | None", lora_target_format
+            ),
+        )
+    # Dtype-only roundtrip (fp32/fp16/bf16): keep the adapters at the explicit
+    # override, otherwise match the base dtype so the output stays uniform.
+    return lora_target_format if lora_target_format is not None else target_format
 
 
 def _target_state_groups(
@@ -435,7 +444,8 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Optional LoRA adapter roundtrip format. Choices: "
             f"{', '.join(LORA_TARGET_FORMATS)}. Unique prefixes are accepted "
-            "when unambiguous. Defaults to bf16 when target_format is not fp32."
+            "when unambiguous. Defaults to bf16 when target_format is a "
+            "quantization format, otherwise matches the base target dtype."
         ),
     )
     return parser.parse_args()

@@ -149,7 +149,7 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
                 "n_heads": 4,
                 "lora": {
                     "rank": 8,
-                    "alpha": 16.0,
+                    "alpha_scale": 2.0,
                     "target_modules": ["q", "v"],
                     "target_block_count": 1,
                     "target_value_head": True,
@@ -183,7 +183,7 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
     assert config.model.lora is not None
     assert config.model.lora.roundtrip_quantization == NF4_G128_LSQ
     assert config.model.lora.rank == 8
-    assert config.model.lora.alpha == pytest.approx(16.0)
+    assert config.model.lora.alpha_scale == pytest.approx(2.0)
     assert config.model.lora.target_value_head is True
     assert config.model.lora.target_policy_head is True
     assert config.rl.segments_per_minibatch == 2
@@ -202,7 +202,7 @@ def test_full_config_resolves_lora_subconfig_override() -> None:
     assert isinstance(config.model, StatelessTransformerV1Config)
     assert config.model.lora is not None
     assert config.model.lora.rank == 16
-    assert config.model.lora.alpha == pytest.approx(16.0)
+    assert config.model.lora.alpha_scale == pytest.approx(1.0)
     assert config.model.lora.target_modules == ("q", "v")
     assert config.model.lora.target_block_count is None
     assert config.model.lora.target_value_head is True

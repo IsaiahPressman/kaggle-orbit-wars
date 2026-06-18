@@ -370,6 +370,58 @@ def test_agent_init_ignores_lora_adapters_when_mode_does_not_match(
     assert torch.equal(agent.model.blocks[0].attn.q.weight, expected_q_weight)
 
 
+def test_agent_init_requires_lora_adapters_when_mode_matches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When the model configuration selects LoRA, the adapter modules are present,
+    # so the checkpoint must supply their weights. A base-only checkpoint (the
+    # adapters were dropped) must fail fast rather than load as a plain base model.
+    agent_config_path = tmp_path / "agent_config.yaml"
+    agent_config_path.write_text(
+        "\n".join(
+            (
+                "deterministic: true",
+                "lora_mode: 2p",
+                "min_overage_time: 0.0",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("owl.agent.agent.AGENT_CONFIG_PATH", agent_config_path)
+    model_config = StatelessTransformerV1Config(
+        embed_dim=8,
+        depth=1,
+        n_heads=1,
+        lora=LoRAConfig(rank=1, target_modules=("q",), target_block_count=1),
+    )
+    env_config = EnvConfig(
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(),
+    )
+    checkpoint_config_path = tmp_path / "config.yaml"
+    AgentCheckpointConfig(env=env_config, model=model_config).to_file(
+        checkpoint_config_path
+    )
+    source = create_model(
+        model_config,
+        obs_spec=env_config.obs_spec,
+        action_spec=env_config.action_spec,
+    )
+    assert isinstance(source, StatelessTransformerV1)
+    source.reset_parameters()
+    # Save a base-only checkpoint: LoRA adapters are never applied or saved.
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    torch.save({"model": source.state_dict()}, checkpoint_path)
+
+    with pytest.raises(RuntimeError, match="lora_down"):
+        Agent(
+            checkpoint_config_path=checkpoint_config_path,
+            checkpoint_path=checkpoint_path,
+            game_player_count=2,
+        )
+
+
 def test_agent_loads_fallback_model_on_second_step(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

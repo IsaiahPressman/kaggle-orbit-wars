@@ -6,13 +6,13 @@ from typing import Literal, TypeAlias, cast
 
 import torch
 from owl.checkpoint_quantization import (
-    BF16,
     FP32,
     SUPPORTED_QUANTIZATION_FORMATS,
     SUPPORTED_TENSOR_QUANTIZATION_FORMATS,
     QuantizationFormat,
     TensorQuantizationFormat,
     dequantize_model_state_dict,
+    effective_lora_quantization,
     is_lora_adapter_state_key,
     quantize_model_state_dict,
 )
@@ -58,22 +58,23 @@ def extract_model_weights(
         raise ValueError(f"checkpoint['model'] must be a dictionary: {checkpoint_path}")
     model_state = dequantize_model_state_dict(model_state)
     has_lora_adapters = any(is_lora_adapter_state_key(name) for name in model_state)
-    effective_lora_quantization = _effective_lora_output_quantization(
-        quantization=quantization,
+    base_quantization = _base_output_quantization(quantization)
+    # Resolve the adapter format the same way quantize_model_state_dict will, so
+    # the pass-through gate below matches what quantization would actually emit.
+    effective_lora = effective_lora_quantization(
+        has_lora=has_lora_adapters,
+        quantization=base_quantization,
         lora_quantization=lora_quantization,
-        has_lora_adapters=has_lora_adapters,
     )
 
     output_model_state: dict[str, torch.Tensor] | dict[str, object]
-    if (
-        quantization is None or quantization == FP32
-    ) and effective_lora_quantization is None:
+    if base_quantization is None and effective_lora is None:
         output_model_state = model_state
     else:
         output_model_state = quantize_model_state_dict(
             model_state,
-            _base_output_quantization(quantization),
-            lora_quantization=effective_lora_quantization,
+            base_quantization,
+            lora_quantization=lora_quantization,
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,21 +134,6 @@ def _base_output_quantization(
     if quantization is None or quantization == FP32:
         return None
     return cast(QuantizationFormat, quantization)
-
-
-def _effective_lora_output_quantization(
-    *,
-    quantization: OutputModelFormat | None,
-    lora_quantization: LoRAOutputModelFormat | None,
-    has_lora_adapters: bool,
-) -> LoRAOutputModelFormat | None:
-    if not has_lora_adapters:
-        return None
-    if lora_quantization is not None:
-        return lora_quantization
-    if quantization is not None and quantization != FP32:
-        return BF16
-    return None
 
 
 def main() -> None:

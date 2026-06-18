@@ -260,7 +260,7 @@ actor heads. Recurrent models reject `lora` fields.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `rank` | Required | Low-rank adapter dimension. |
-| `alpha` | `rank` | LoRA scaling numerator; the update is scaled by `alpha / rank`. |
+| `alpha_scale` | `1.0` | LoRA update scale. The standard scaling is `alpha / rank`; `alpha` is derived as `clamped_rank * alpha_scale`, so the update is scaled by `alpha_scale` for every adapter regardless of clamping. |
 | `target_modules` | `["q", "v"]` | Transformer block projections to wrap. Supported values are `q`, `k`, `v`, `out`, `up`, `down`, `gate`, and `value`; `gate`/`value` exist only for SwiGLU MLPs. May be empty (`[]`) to wrap only the heads. |
 | `target_block_count` | `null` | If set, wrap only the final N shared transformer blocks; otherwise wrap all shared blocks. Only selects transformer-block projections, so it requires a non-empty `target_modules`. |
 | `target_value_head` | `false` | Wrap every linear projection in the critic (value) head with LoRA adapters. |
@@ -279,8 +279,9 @@ the chosen head subtree is wrapped, so it adapts regardless of actor variant.
 Each adapter's rank is clamped to `min(rank, in_features, out_features)`, so tiny
 head projections (e.g. the critic's `embed_dim -> 1` output) still adapt without
 wasting parameters on a rank that could not raise the update's rank. The adapter
-always stays separate from the frozen base weight, and the scaling keeps the
-configured `alpha / rank` regardless of clamping.
+always stays separate from the frozen base weight, and because `alpha` is derived
+from the clamped rank, the update scale stays at `alpha_scale` regardless of
+clamping.
 
 Fresh launches still reset the base model before LoRA is attached. When
 `--load-model-weights` points at a non-LoRA base checkpoint, missing LoRA

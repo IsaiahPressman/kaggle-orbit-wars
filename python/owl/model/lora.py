@@ -91,6 +91,7 @@ def roundtrip_lora_base_quantization(
 
     from owl.checkpoint_quantization import (
         dequantize_model_state_dict,
+        is_lora_adapter_state_key,
         quantize_model_state_dict,
     )
 
@@ -98,7 +99,7 @@ def roundtrip_lora_base_quantization(
     base_state = {
         name: tensor
         for name, tensor in model_state.items()
-        if not _is_lora_adapter_state_key(name)
+        if not is_lora_adapter_state_key(name)
     }
     dequantized = dequantize_model_state_dict(
         quantize_model_state_dict(base_state, quantization)
@@ -150,10 +151,6 @@ def _lora_state_keys(model: nn.Module) -> set[str]:
             keys.add(f"{prefix}lora_down")
             keys.add(f"{prefix}lora_up")
     return keys
-
-
-def _is_lora_adapter_state_key(name: str) -> bool:
-    return name.endswith((".lora_down", ".lora_up"))
 
 
 def _target_block_indices(
@@ -262,12 +259,19 @@ def _fold_lora_children(root: nn.Module) -> int:
 
 
 def _set_folded_linear(parent: nn.Module, attribute: str, module: LoRALinear) -> None:
-    folded = nn.Linear(
-        module.in_features,
-        module.out_features,
-        bias=module.bias is not None,
-        device=module.weight.device,
-        dtype=module.weight.dtype,
+    # skip_init constructs the layer with uninitialized weights (no kaiming/uniform
+    # init), since copy_ below immediately overwrites every element. This avoids a
+    # full random init per folded layer at checkpoint-load time.
+    folded = cast(
+        nn.Linear,
+        nn.utils.skip_init(
+            nn.Linear,
+            module.in_features,
+            module.out_features,
+            bias=module.bias is not None,
+            device=module.weight.device,
+            dtype=module.weight.dtype,
+        ),
     )
     with torch.no_grad():
         update = torch.matmul(
@@ -296,5 +300,5 @@ def _set_lora_linear(
     # Module surgery: swap a frozen nn.Linear leaf for its LoRA-wrapped form.
     # setattr is required here because LoRALinear is intentionally not an
     # nn.Linear subclass, so the assignment cannot be statically typed.
-    wrapped = LoRALinear(base, rank=config.rank, alpha=config.scaling_alpha)
+    wrapped = LoRALinear(base, rank=config.rank, alpha_scale=config.alpha_scale)
     setattr(parent, attribute, wrapped)
