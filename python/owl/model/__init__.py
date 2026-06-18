@@ -18,6 +18,7 @@ from owl.model.lora import (
     LoRALinear,
     apply_lora_to_stateless_transformer,
     load_model_state_dict_allowing_lora,
+    lora_config_for_model,
     lora_parameters,
 )
 from owl.model.lora_config import LoRAConfig
@@ -75,5 +76,6 @@ __all__ = [
     "create_model",
     "index_teacher_distillation_targets",
     "load_model_state_dict_allowing_lora",
+    "lora_config_for_model",
     "lora_parameters",
 ]

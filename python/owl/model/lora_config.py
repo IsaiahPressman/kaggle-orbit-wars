@@ -12,18 +12,24 @@ LoRATargetModule = Literal["q", "k", "v", "out", "up", "down", "gate", "value"]
 class LoRAConfig(BaseConfig):
     rank: int = Field(ge=1)
     alpha: float | None = Field(default=None, gt=0.0)
-    dropout: float = Field(default=0.0, ge=0.0, lt=1.0)
     target_modules: tuple[LoRATargetModule, ...] = ("q", "v")
     target_block_count: int | None = Field(default=None, ge=1)
+    target_value_head: bool = False
+    target_policy_head: bool = False
 
     @model_validator(mode="after")
-    def _validate_target_modules(self) -> Self:
-        if not self.target_modules:
-            raise ValueError("lora.target_modules must not be empty")
+    def _validate_targets(self) -> Self:
         if len(set(self.target_modules)) != len(self.target_modules):
             raise ValueError("lora.target_modules must not contain duplicates")
-        if self.dropout != 0.0:
-            raise ValueError("lora.dropout must be 0.0 for PPO fine-tuning")
+        if (
+            not self.target_modules
+            and not self.target_value_head
+            and not self.target_policy_head
+        ):
+            raise ValueError(
+                "lora must target at least one of target_modules, "
+                "target_value_head, or target_policy_head"
+            )
         return self
 
     @property

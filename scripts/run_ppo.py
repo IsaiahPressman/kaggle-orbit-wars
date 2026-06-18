@@ -19,9 +19,9 @@ from owl.model import (
     ModelConfig,
     ModelHiddenState,
     ModelOutput,
-    RecurrentTransformerV1Config,
     apply_lora_to_stateless_transformer,
     create_model,
+    lora_config_for_model,
 )
 from owl.replay import ReplayRecorder
 from owl.rl import (
@@ -155,14 +155,11 @@ def main() -> None:
             two_player_weight=cfg.env.two_player_weight,
             pin_memory=cfg.env.pin_memory,
         )
-        model = _create_model(
-            cfg.model,
-            obs_spec=cfg.env.obs_spec,
-            action_spec=cfg.env.action_spec,
-        ).to(device)
-        if isinstance(launch, FreshLaunch):
-            model.reset_parameters()
-        lora_application = _apply_lora_for_config(model, cfg.model)
+        model, lora_application = _create_training_model_for_config(
+            cfg,
+            device=device,
+            reset_parameters=isinstance(launch, FreshLaunch),
+        )
         compiled_model_modules = configure_model_compile(model, cfg.rl)
         teacher_init_model = (
             _load_teacher_init_model(
@@ -713,31 +710,33 @@ def _create_training_model_for_config(
     cfg: FullConfig,
     *,
     device: torch.device,
-) -> BaseModelAPI:
+    reset_parameters: bool = False,
+) -> tuple[BaseModelAPI, LoRAApplication | None]:
     model = _create_model(
         cfg.model,
         obs_spec=cfg.env.obs_spec,
         action_spec=cfg.env.action_spec,
     ).to(device)
-    _apply_lora_for_config(model, cfg.model)
-    return model
+    if reset_parameters:
+        model.reset_parameters()
+    lora_application = _apply_lora_for_config(model, cfg.model)
+    return model, lora_application
 
 
 def _apply_lora_for_config(
     model: BaseModelAPI,
     config: ModelConfig,
 ) -> LoRAApplication | None:
-    if isinstance(config, RecurrentTransformerV1Config):
+    lora_config = lora_config_for_model(config)
+    if lora_config is None:
         return None
-    if config.lora is None:
-        return None
-    return apply_lora_to_stateless_transformer(model, config.lora)
+    return apply_lora_to_stateless_transformer(model, lora_config)
 
 
 def _validate_lora_launch_config(cfg: FullConfig, launch: Launch) -> None:
     if not isinstance(launch, FreshLaunch):
         return
-    if isinstance(cfg.model, RecurrentTransformerV1Config) or cfg.model.lora is None:
+    if lora_config_for_model(cfg.model) is None:
         return
     if launch.load_model_weights_mode == "model_and_optimizer":
         raise ValueError(
@@ -779,7 +778,7 @@ def _load_teacher_init_model(
         student_cfg=student_cfg,
         checkpoint_path=checkpoint_path,
     )
-    teacher_model = _create_training_model_for_config(
+    teacher_model, _ = _create_training_model_for_config(
         teacher_cfg.model_copy(
             update={
                 "env": teacher_cfg.env.model_copy(update={"obs_spec": teacher_obs_spec})
@@ -975,7 +974,7 @@ def _create_eval_model_for_config(
     *,
     device: torch.device,
 ) -> BaseModelAPI:
-    model = _create_training_model_for_config(cfg, device=device)
+    model, _ = _create_training_model_for_config(cfg, device=device)
     model.eval()
     return model
 

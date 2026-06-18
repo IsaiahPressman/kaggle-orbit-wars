@@ -141,12 +141,15 @@ scheduler state.
 resume launches load checkpoint weights and optimizer state without resetting
 the model first.
 Set `model.lora` on stateless transformer configs to run PPO as a LoRA
-fine-tune. LoRA freezes the base model, wraps selected transformer-block
-projections, and trains only the low-rank adapter parameters. `rank` is
-required; optional fields include `alpha`, `target_modules`, and
-`target_block_count` for final-block-only adaptation. The `dropout` field is
-reserved but must remain `0.0` for PPO fine-tuning. Recurrent models do not
-support LoRA. Fresh LoRA launches can use `--load-model-weights` with a
+fine-tune. LoRA freezes the base model, wraps selected linear projections, and
+trains only the low-rank adapter parameters. `rank` is required; optional fields
+include `alpha`, `target_modules`, and `target_block_count` for final-block-only
+adaptation. Set `target_value_head` / `target_policy_head` to also wrap the
+critic and actor heads (set `target_modules` to `[]` to adapt only the heads).
+LoRA presets under `configs/model/lora/` can be selected with overrides such as
+`-o model.lora=2p_200m_qv_r16`.
+Recurrent models do not support LoRA. Fresh LoRA launches can use
+`--load-model-weights` with a
 non-LoRA base checkpoint; missing LoRA adapter tensors are initialized from the
 config while base tensors are loaded from the checkpoint. Fresh LoRA launches
 must use `--load-model-weights-mode model_only`; resume existing LoRA runs to

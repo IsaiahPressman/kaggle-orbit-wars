@@ -158,7 +158,7 @@ class StatelessTransformerV1Config(BaseConfig):
 
     @classmethod
     def subconfig_dirs(cls) -> set[str]:
-        return {"actor"}
+        return {"actor", "lora"}
 
     @model_validator(mode="after")
     def _validate_config(self) -> Self:
@@ -374,6 +374,14 @@ class StatelessTransformerV1(BaseModelAPI):
                 )
 
     def reset_parameters(self) -> None:
+        # Local import avoids an import cycle (owl.model.lora imports this module).
+        from owl.model.lora import LoRALinear
+
+        if any(isinstance(module, LoRALinear) for module in self.modules()):
+            raise RuntimeError(
+                "reset_parameters() must be called before applying LoRA adapters; "
+                "reset the base model first, then attach LoRA"
+            )
         self.apply(_init_module)
         for layer in self.get_input_layers():
             _init_input_layer(layer)

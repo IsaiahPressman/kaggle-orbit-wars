@@ -155,7 +155,7 @@ def test_apply_lora_for_config_wraps_stateless_training_model() -> None:
     assert isinstance(model.blocks[1].attn.q, LoRALinear)
     assert isinstance(model.blocks[1].attn.v, LoRALinear)
     assert all(
-        (".lora_down." in name or ".lora_up." in name) == parameter.requires_grad
+        name.endswith((".lora_down", ".lora_up")) == parameter.requires_grad
         for name, parameter in model.named_parameters()
     )
 

@@ -149,9 +149,10 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
                 "lora": {
                     "rank": 8,
                     "alpha": 16.0,
-                    "dropout": 0.0,
                     "target_modules": ["q", "v"],
                     "target_block_count": 1,
+                    "target_value_head": True,
+                    "target_policy_head": True,
                 },
             },
             "optimizer": {
@@ -180,13 +181,34 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
     assert config.model.lora is not None
     assert config.model.lora.rank == 8
     assert config.model.lora.alpha == pytest.approx(16.0)
-    assert config.model.lora.dropout == pytest.approx(0.0)
+    assert config.model.lora.target_value_head is True
+    assert config.model.lora.target_policy_head is True
     assert config.rl.segments_per_minibatch == 2
     assert config.runtime.n_runtime_gpus == 1
 
 
-def test_full_config_rejects_nonzero_lora_dropout() -> None:
-    with pytest.raises(ValueError, match=r"lora\.dropout must be 0\.0"):
+def test_full_config_resolves_lora_subconfig_override() -> None:
+    config = FullConfig.from_file(
+        _REPO_ROOT / "configs/stateless_200m.yaml",
+        overrides={
+            "model.lora": "2p_200m_qv_r16",
+            "env.two_player_weight": 1.0,
+        },
+    )
+
+    assert isinstance(config.model, StatelessTransformerV1Config)
+    assert config.model.lora is not None
+    assert config.model.lora.rank == 16
+    assert config.model.lora.alpha == pytest.approx(16.0)
+    assert config.model.lora.target_modules == ("q", "v")
+    assert config.model.lora.target_block_count is None
+    assert config.model.lora.target_value_head is False
+    assert config.model.lora.target_policy_head is False
+    assert config.env.two_player_weight == pytest.approx(1.0)
+
+
+def test_full_config_rejects_lora_without_any_target() -> None:
+    with pytest.raises(ValueError, match="lora must target at least one"):
         FullConfig.model_validate(
             {
                 "env": {
@@ -197,7 +219,7 @@ def test_full_config_rejects_nonzero_lora_dropout() -> None:
                     "embed_dim": 32,
                     "depth": 1,
                     "n_heads": 4,
-                    "lora": {"rank": 2, "dropout": 0.1},
+                    "lora": {"rank": 2, "target_modules": []},
                 },
                 "optimizer": {
                     "optimizer": "adamw",
