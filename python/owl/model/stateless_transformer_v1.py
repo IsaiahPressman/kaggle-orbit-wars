@@ -55,6 +55,7 @@ from owl.model.base import (
     ModelServingOutput,
     ModelTeacherEvaluation,
 )
+from owl.model.lora_config import LoRAConfig
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     OUTER_PLAYER_SLOTS,
@@ -153,6 +154,7 @@ class StatelessTransformerV1Config(BaseConfig):
     force_flash_attn: bool = False
     use_learned_pairwise_bias: bool = False
     actor: ActorConfig = Field(default_factory=ActorPureConfig)
+    lora: LoRAConfig | None = None
 
     @classmethod
     def subconfig_dirs(cls) -> set[str]:

@@ -40,6 +40,7 @@ configs may contain either architecture.
 | `use_learned_pairwise_bias` | `False` | Enable an auxiliary source-target feature MLP for discrete target selection. Only valid with `"discrete_targets"` and `"discrete_target_bins"` actors. |
 | `n_scratch_tokens` | `4` | Learned shared scratch tokens appended to the trunk sequence. |
 | `actor` | `{"action_spec": "pure"}` | Discriminated actor-head config. Supported actor specs are `"pure"`, `"discrete_targets"`, and `"discrete_target_bins"`. |
+| `lora` | `null` | Optional LoRA fine-tuning config used by `scripts/run_ppo.py` for stateless transformer models. |
 
 Actor-specific fields live inside the actor config. `ActorPureConfig` owns
 pure-head fields such as `n_angle_mixtures`, `n_fleet_size_mixtures`,
@@ -244,6 +245,31 @@ live-token counts. This mode currently rejects `EntityBasedCrossAttnV1`,
 Set `rl.model_compile="mlp"` to compile each transformer-block MLP in place
 while keeping packing, unpacking, and flash-attn varlen calls eager.
 Per-player-count adapter block MLPs are compiled by the same setting.
+
+## LoRA Fine-Tuning
+
+Stateless transformer configs may set `model.lora` to enable LoRA fine-tuning
+in `scripts/run_ppo.py`. When enabled, PPO freezes all base model parameters,
+wraps the selected transformer-block linear projections with low-rank adapters,
+and optimizes only the LoRA parameters. Recurrent models reject `lora` fields.
+
+`LoRAConfig` fields:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `rank` | Required | Low-rank adapter dimension. |
+| `alpha` | `rank` | LoRA scaling numerator; the update is scaled by `alpha / rank`. |
+| `dropout` | `0.0` | Reserved for LoRA dropout; must be `0.0` for PPO fine-tuning so rollout and update log-probabilities use the same policy. |
+| `target_modules` | `["q", "v"]` | Transformer block projections to wrap. Supported values are `q`, `k`, `v`, `out`, `up`, `down`, `gate`, and `value`; `gate`/`value` exist only for SwiGLU MLPs. |
+| `target_block_count` | `null` | If set, wrap only the final N shared transformer blocks; otherwise wrap all shared blocks. |
+
+Fresh launches still reset the base model before LoRA is attached. When
+`--load-model-weights` points at a non-LoRA base checkpoint, missing LoRA
+adapter tensors are accepted and initialized from the LoRA config, while all
+non-LoRA base tensors must match. Resume checkpoints are expected to match the
+saved LoRA config and include adapter tensors. Fresh LoRA launches reject
+`--load-model-weights-mode model_and_optimizer`; use `model_only` for base
+checkpoint initialization or resume an existing LoRA run.
 
 ## Recurrent Transformer V1
 

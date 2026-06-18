@@ -11,9 +11,13 @@ import pytest
 import torch
 import torch.nn.functional as F
 from owl.model import (
+    LoRAConfig,
+    LoRALinear,
     ModelConfig,
     StatelessTransformerV1,
     StatelessTransformerV1Config,
+    apply_lora_to_stateless_transformer,
+    load_model_state_dict_allowing_lora,
 )
 from owl.model.actor.discrete_targets import (
     DiscreteTargetSelectionParams,
@@ -340,6 +344,91 @@ def test_model_config_requires_enabled_player_count_adapters_for_blocks() -> Non
         match="player_count_adapter_blocks requires player_count_adapters_enabled=True",
     ):
         StatelessTransformerV1Config(player_count_adapter_blocks=1)
+
+
+def test_model_config_rejects_duplicate_lora_targets() -> None:
+    with pytest.raises(ValueError, match=r"lora\.target_modules must not contain"):
+        StatelessTransformerV1Config(
+            lora=LoRAConfig(rank=2, target_modules=("q", "q")),
+        )
+
+
+def test_apply_lora_wraps_requested_final_block_modules_and_freezes_base() -> None:
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(
+            embed_dim=16,
+            depth=3,
+            n_heads=4,
+            mlp_ratio=2.0,
+        ),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    model.reset_parameters()
+
+    application = apply_lora_to_stateless_transformer(
+        model,
+        LoRAConfig(
+            rank=2,
+            target_modules=("q", "v", "up"),
+            target_block_count=2,
+        ),
+    )
+
+    assert application.module_count == 6
+    assert application.trainable_parameters == 448
+    assert not isinstance(model.blocks[0].attn.q, LoRALinear)
+    assert isinstance(model.blocks[1].attn.q, LoRALinear)
+    assert isinstance(model.blocks[1].attn.v, LoRALinear)
+    assert isinstance(model.blocks[1].mlp.up, LoRALinear)
+    assert isinstance(model.blocks[2].attn.q, LoRALinear)
+    assert all(
+        (".lora_down." in name or ".lora_up." in name) == parameter.requires_grad
+        for name, parameter in model.named_parameters()
+    )
+
+
+def test_lora_wrapped_linear_starts_as_noop_and_loads_base_state_dict() -> None:
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    model.reset_parameters()
+    base_state_dict = model.state_dict()
+    x = torch.randn(2, 3, 16)
+    expected = model.blocks[0].attn.q(x)
+
+    apply_lora_to_stateless_transformer(
+        model,
+        LoRAConfig(rank=4, target_modules=("q",), target_block_count=1),
+    )
+
+    assert isinstance(model.blocks[0].attn.q, LoRALinear)
+    assert torch.allclose(model.blocks[0].attn.q(x), expected)
+    load_model_state_dict_allowing_lora(model, base_state_dict)
+
+
+def test_lora_state_dict_loader_rejects_partial_lora_checkpoint() -> None:
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    model.reset_parameters()
+    apply_lora_to_stateless_transformer(
+        model,
+        LoRAConfig(rank=4, target_modules=("q",), target_block_count=1),
+    )
+    state_dict = model.state_dict()
+    partial_state_dict = {
+        key: value
+        for key, value in state_dict.items()
+        if not key.endswith("attn.q.lora_up.weight")
+    }
+
+    with pytest.raises(RuntimeError, match="missing LoRA model state_dict keys"):
+        load_model_state_dict_allowing_lora(model, partial_state_dict)
 
 
 def test_actor_pure_config_requires_ordered_kappa_bounds() -> None:

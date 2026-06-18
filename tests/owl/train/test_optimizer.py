@@ -113,6 +113,29 @@ def test_create_optimizer_supports_adam_adamw_and_muon() -> None:
     assert id(muon_model.token_state) not in muon_param_ids
 
 
+def test_create_optimizer_uses_only_trainable_parameters() -> None:
+    model = OptimizerTestModel()
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    model.hidden.weight.requires_grad_(True)
+
+    adamw = create_optimizer(model, AdamWConfig(learning_rate=0.001))
+
+    assert isinstance(adamw, torch.optim.AdamW)
+    assert [id(param) for param in adamw.param_groups[0]["params"]] == [
+        id(model.hidden.weight)
+    ]
+
+
+def test_create_optimizer_rejects_model_without_trainable_parameters() -> None:
+    model = OptimizerTestModel()
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+
+    with pytest.raises(ValueError, match="at least one trainable parameter"):
+        create_optimizer(model, AdamWConfig(learning_rate=0.001))
+
+
 def test_composite_optimizer_round_trips_nested_state_dict() -> None:
     model = OptimizerTestModel()
     optimizer = create_optimizer(

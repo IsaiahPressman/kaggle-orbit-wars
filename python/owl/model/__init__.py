@@ -13,6 +13,14 @@ from owl.model.base import (
 )
 from owl.model.config import ModelConfig
 from owl.model.factory import create_model
+from owl.model.lora import (
+    LoRAApplication,
+    LoRALinear,
+    apply_lora_to_stateless_transformer,
+    load_model_state_dict_allowing_lora,
+    lora_parameters,
+)
+from owl.model.lora_config import LoRAConfig
 from owl.model.recurrent_transformer_v1 import (
     RecurrentTransformerV1,
     RecurrentTransformerV1Config,
@@ -44,6 +52,9 @@ __all__ = [
     "DiscreteTargetActions",
     "DiscreteTargetBinActions",
     "InputLayer",
+    "LoRAApplication",
+    "LoRAConfig",
+    "LoRALinear",
     "ModelActionEntropies",
     "ModelActionKLDivergences",
     "ModelActionLogProbs",
@@ -59,7 +70,10 @@ __all__ = [
     "RecurrentTransformerV1Config",
     "StatelessTransformerV1",
     "StatelessTransformerV1Config",
+    "apply_lora_to_stateless_transformer",
     "concat_teacher_distillation_targets",
     "create_model",
     "index_teacher_distillation_targets",
+    "load_model_state_dict_allowing_lora",
+    "lora_parameters",
 ]

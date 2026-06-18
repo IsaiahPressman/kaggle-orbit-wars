@@ -15,9 +15,12 @@ import torch
 import yaml
 from owl.model import (
     BaseModelAPI,
+    LoRAApplication,
     ModelConfig,
     ModelHiddenState,
     ModelOutput,
+    RecurrentTransformerV1Config,
+    apply_lora_to_stateless_transformer,
     create_model,
 )
 from owl.replay import ReplayRecorder
@@ -126,6 +129,7 @@ def main() -> None:
             overrides=launch.overrides if isinstance(launch, FreshLaunch) else None,
         )
         cfg = _resolve_teacher_init_path(cfg, launch.config_path)
+        _validate_lora_launch_config(cfg, launch)
 
         if isinstance(launch, FreshLaunch):
             cfg = _with_runtime_gpus(cfg, distributed.world_size)
@@ -158,6 +162,7 @@ def main() -> None:
         ).to(device)
         if isinstance(launch, FreshLaunch):
             model.reset_parameters()
+        lora_application = _apply_lora_for_config(model, cfg.model)
         compiled_model_modules = configure_model_compile(model, cfg.rl)
         teacher_init_model = (
             _load_teacher_init_model(
@@ -243,6 +248,7 @@ def main() -> None:
             last_best_model=last_best_model,
             trainable_parameters=trainable_parameters,
             compiled_model_modules=compiled_model_modules,
+            lora_application=lora_application,
         )
 
 
@@ -261,6 +267,7 @@ def _run_training_session(
     last_best_model: BaseModelAPI | None = None,
     trainable_parameters: int | None = None,
     compiled_model_modules: int = 0,
+    lora_application: LoRAApplication | None = None,
 ) -> None:
     if not distributed.is_main_process:
         _run_training_session_worker(
@@ -283,6 +290,12 @@ def _run_training_session(
             logger.set_summary("trainable_parameters", trainable_parameters)
         if compiled_model_modules > 0:
             logger.set_summary("compiled_model_modules", compiled_model_modules)
+        if lora_application is not None:
+            logger.set_summary("lora_modules", lora_application.module_count)
+            logger.set_summary(
+                "lora_trainable_parameters",
+                lora_application.trainable_parameters,
+            )
         env_steps = _run_training_loop(
             trainer=trainer,
             logger=logger,
@@ -696,6 +709,43 @@ def _create_model(
     return create_model(config, obs_spec=obs_spec, action_spec=action_spec)
 
 
+def _create_training_model_for_config(
+    cfg: FullConfig,
+    *,
+    device: torch.device,
+) -> BaseModelAPI:
+    model = _create_model(
+        cfg.model,
+        obs_spec=cfg.env.obs_spec,
+        action_spec=cfg.env.action_spec,
+    ).to(device)
+    _apply_lora_for_config(model, cfg.model)
+    return model
+
+
+def _apply_lora_for_config(
+    model: BaseModelAPI,
+    config: ModelConfig,
+) -> LoRAApplication | None:
+    if isinstance(config, RecurrentTransformerV1Config):
+        return None
+    if config.lora is None:
+        return None
+    return apply_lora_to_stateless_transformer(model, config.lora)
+
+
+def _validate_lora_launch_config(cfg: FullConfig, launch: Launch) -> None:
+    if not isinstance(launch, FreshLaunch):
+        return
+    if isinstance(cfg.model, RecurrentTransformerV1Config) or cfg.model.lora is None:
+        return
+    if launch.load_model_weights_mode == "model_and_optimizer":
+        raise ValueError(
+            "--load-model-weights-mode model_and_optimizer is not supported with "
+            "model.lora; load base weights with model_only or resume a LoRA run"
+        )
+
+
 def _resolve_teacher_init_path(cfg: FullConfig, config_path: Path) -> FullConfig:
     teacher_init = cfg.rl.teacher_init
     if teacher_init is None or teacher_init.is_absolute():
@@ -729,11 +779,14 @@ def _load_teacher_init_model(
         student_cfg=student_cfg,
         checkpoint_path=checkpoint_path,
     )
-    teacher_model = _create_model(
-        teacher_cfg.model,
-        obs_spec=teacher_obs_spec,
-        action_spec=teacher_cfg.env.action_spec,
-    ).to(device)
+    teacher_model = _create_training_model_for_config(
+        teacher_cfg.model_copy(
+            update={
+                "env": teacher_cfg.env.model_copy(update={"obs_spec": teacher_obs_spec})
+            }
+        ),
+        device=device,
+    )
     _load_model_weights(teacher_model, path=checkpoint_path, device=device)
     _compile_eval_model(teacher_model, student_cfg)
     teacher_model.eval()
@@ -922,11 +975,7 @@ def _create_eval_model_for_config(
     *,
     device: torch.device,
 ) -> BaseModelAPI:
-    model = _create_model(
-        cfg.model,
-        obs_spec=cfg.env.obs_spec,
-        action_spec=cfg.env.action_spec,
-    ).to(device)
+    model = _create_training_model_for_config(cfg, device=device)
     model.eval()
     return model
 

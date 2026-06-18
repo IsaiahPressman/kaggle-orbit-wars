@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from owl.model import LoRALinear
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     MAX_COMETS,
@@ -111,6 +112,132 @@ def _distributed_context(world_size: int) -> run_ppo.DistributedContext:
         world_size=world_size,
         initialized=False,
     )
+
+
+def test_apply_lora_for_config_wraps_stateless_training_model() -> None:
+    cfg = FullConfig.model_validate(
+        {
+            "env": {
+                "n_envs": 2,
+            },
+            "model": {
+                "model_arch": "stateless_transformer_v1",
+                "embed_dim": 32,
+                "depth": 2,
+                "n_heads": 4,
+                "lora": {
+                    "rank": 4,
+                    "target_modules": ["q", "v"],
+                    "target_block_count": 1,
+                },
+            },
+            "optimizer": {
+                "optimizer": "adamw",
+                "learning_rate": 0.001,
+            },
+            "rl": {
+                "horizon": 4,
+            },
+        }
+    )
+    model = run_ppo._create_model(
+        cfg.model,
+        obs_spec=cfg.env.obs_spec,
+        action_spec=cfg.env.action_spec,
+    )
+
+    application = run_ppo._apply_lora_for_config(model, cfg.model)
+
+    assert application is not None
+    assert application.module_count == 2
+    assert application.trainable_parameters == 512
+    assert not isinstance(model.blocks[0].attn.q, LoRALinear)
+    assert isinstance(model.blocks[1].attn.q, LoRALinear)
+    assert isinstance(model.blocks[1].attn.v, LoRALinear)
+    assert all(
+        (".lora_down." in name or ".lora_up." in name) == parameter.requires_grad
+        for name, parameter in model.named_parameters()
+    )
+
+
+def test_load_model_weights_allows_base_checkpoint_for_lora_model(
+    tmp_path: Path,
+) -> None:
+    base_cfg = _full_config()
+    lora_cfg = FullConfig.model_validate(
+        {
+            **base_cfg.model_dump(mode="python"),
+            "model": {
+                **base_cfg.model.model_dump(mode="python"),
+                "lora": {
+                    "rank": 2,
+                    "target_modules": ["q", "v"],
+                },
+            },
+        }
+    )
+    base_model = run_ppo._create_model(
+        base_cfg.model,
+        obs_spec=base_cfg.env.obs_spec,
+        action_spec=base_cfg.env.action_spec,
+    )
+    lora_model = run_ppo._create_model(
+        lora_cfg.model,
+        obs_spec=lora_cfg.env.obs_spec,
+        action_spec=lora_cfg.env.action_spec,
+    )
+    assert run_ppo._apply_lora_for_config(lora_model, lora_cfg.model) is not None
+    path = tmp_path / "base_checkpoint.pt"
+    torch.save(
+        {
+            "model": base_model.state_dict(),
+            "env_steps": 64,
+            "player_step_total": 5,
+            "total_games_played": 7,
+            "total_active_entities": 11,
+            "wandb_run_id": "run-abc",
+        },
+        path,
+    )
+    trainer = PPOTrainer.__new__(PPOTrainer)
+    trainer.model = lora_model
+    trainer.device = torch.device("cpu")
+    trainer.player_step_total = 0
+    trainer.total_games_played = 0
+    trainer.total_active_entities = 0
+
+    metadata = trainer.load_model_weights(path)
+
+    assert metadata.env_steps == 64
+    assert trainer.player_step_total == 5
+    assert trainer.total_games_played == 7
+    assert trainer.total_active_entities == 11
+    lora_state = lora_model.state_dict()
+    for key, value in base_model.state_dict().items():
+        assert torch.equal(lora_state[key], value)
+
+
+def test_lora_fresh_launch_rejects_loading_optimizer_state() -> None:
+    base_cfg = _full_config()
+    cfg = FullConfig.model_validate(
+        {
+            **base_cfg.model_dump(mode="python"),
+            "model": {
+                **base_cfg.model.model_dump(mode="python"),
+                "lora": {"rank": 2},
+            },
+        }
+    )
+    launch = run_ppo.FreshLaunch(
+        config_path=Path("config.yaml"),
+        output_dir=Path("runs"),
+        overrides={},
+        load_model_weights_path=Path("checkpoint.pt"),
+        load_model_weights_mode="model_and_optimizer",
+    )
+
+    with pytest.raises(ValueError, match="model_and_optimizer is not supported"):
+        run_ppo._validate_lora_launch_config(cfg, launch)
 
 
 class _FakeLogger:
