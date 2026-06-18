@@ -206,9 +206,12 @@ def lr_multiplier(config: LRScheduleConfig, step: int) -> float:
 
 
 def create_optimizer(model: BaseModelAPI, config: OptimizerConfig) -> Optimizer:
+    trainable_params = [param for param in model.parameters() if param.requires_grad]
+    if not trainable_params:
+        raise ValueError("optimizer requires at least one trainable parameter")
     if config.optimizer == "adam":
         return torch.optim.Adam(
-            model.parameters(),
+            trainable_params,
             lr=config.learning_rate,
             betas=config.betas,
             eps=config.eps,
@@ -217,7 +220,7 @@ def create_optimizer(model: BaseModelAPI, config: OptimizerConfig) -> Optimizer:
         )
     if config.optimizer == "adamw":
         return torch.optim.AdamW(
-            model.parameters(),
+            trainable_params,
             lr=config.learning_rate,
             betas=config.betas,
             eps=config.adamw_eps,

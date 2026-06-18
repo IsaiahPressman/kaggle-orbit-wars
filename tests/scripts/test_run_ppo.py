@@ -4,12 +4,19 @@ import importlib.util
 import sys
 import time
 from argparse import Namespace
+from collections.abc import Mapping
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+from owl.checkpoint_quantization import (
+    NF4_G128_LSQ,
+    dequantize_model_state_dict,
+    quantize_model_state_dict,
+)
+from owl.model import LoRALinear
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     MAX_COMETS,
@@ -111,6 +118,272 @@ def _distributed_context(world_size: int) -> run_ppo.DistributedContext:
         world_size=world_size,
         initialized=False,
     )
+
+
+def _is_lora_adapter_key(key: str) -> bool:
+    return key.endswith((".lora_down", ".lora_up"))
+
+
+def _base_lora_state(
+    state_dict: Mapping[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    return {
+        key: value for key, value in state_dict.items() if not _is_lora_adapter_key(key)
+    }
+
+
+def _assert_quantized_state_equal(left: object, right: object) -> None:
+    if isinstance(left, dict) and isinstance(right, dict):
+        assert left.keys() == right.keys()
+        for key in left:
+            _assert_quantized_state_equal(left[key], right[key])
+        return
+    if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
+        assert left.dtype == right.dtype
+        assert left.shape == right.shape
+        assert torch.equal(left, right)
+        return
+    assert left == right
+
+
+def test_apply_lora_for_config_wraps_stateless_training_model() -> None:
+    cfg = FullConfig.model_validate(
+        {
+            "env": {
+                "n_envs": 2,
+            },
+            "model": {
+                "model_arch": "stateless_transformer_v1",
+                "embed_dim": 32,
+                "depth": 2,
+                "n_heads": 4,
+                "lora": {
+                    "rank": 4,
+                    "target_modules": ["q", "v"],
+                    "target_block_count": 1,
+                },
+            },
+            "optimizer": {
+                "optimizer": "adamw",
+                "learning_rate": 0.001,
+            },
+            "rl": {
+                "horizon": 4,
+            },
+        }
+    )
+    model = run_ppo._create_model(
+        cfg.model,
+        obs_spec=cfg.env.obs_spec,
+        action_spec=cfg.env.action_spec,
+    )
+
+    application = run_ppo._apply_lora_for_config(model, cfg.model)
+
+    assert application is not None
+    assert application.module_count == 2
+    assert application.trainable_parameters == 512
+    assert not isinstance(model.blocks[0].attn.q, LoRALinear)
+    assert isinstance(model.blocks[1].attn.q, LoRALinear)
+    assert isinstance(model.blocks[1].attn.v, LoRALinear)
+    assert all(
+        name.endswith((".lora_down", ".lora_up")) == parameter.requires_grad
+        for name, parameter in model.named_parameters()
+    )
+
+
+def test_create_training_model_roundtrip_quantizes_lora_base_model() -> None:
+    base_cfg = _full_config()
+    cfg = FullConfig.model_validate(
+        {
+            **base_cfg.model_dump(mode="python"),
+            "model": {
+                **base_cfg.model.model_dump(mode="python"),
+                "lora": {
+                    "rank": 2,
+                    "target_modules": ["q"],
+                    "roundtrip_quantization": NF4_G128_LSQ,
+                },
+            },
+        }
+    )
+    torch.manual_seed(123)
+    reference_model = run_ppo._create_model(
+        cfg.model,
+        obs_spec=cfg.env.obs_spec,
+        action_spec=cfg.env.action_spec,
+    )
+    reference_model.reset_parameters()
+    assert run_ppo._apply_lora_for_config(reference_model, cfg.model) is not None
+    reference_state = reference_model.state_dict()
+    reference_base_state = _base_lora_state(reference_state)
+    expected_quantized = quantize_model_state_dict(
+        reference_base_state,
+        NF4_G128_LSQ,
+    )
+    expected_base_state = dequantize_model_state_dict(expected_quantized)
+
+    torch.manual_seed(123)
+    model, application = run_ppo._create_training_model_for_config(
+        cfg,
+        device=torch.device("cpu"),
+        reset_parameters=True,
+    )
+
+    assert application is not None
+    actual_state = model.state_dict()
+    for key, expected_tensor in expected_base_state.items():
+        assert torch.equal(actual_state[key], expected_tensor)
+    for key, expected_tensor in reference_state.items():
+        if _is_lora_adapter_key(key):
+            assert torch.equal(actual_state[key], expected_tensor)
+    actual_quantized = quantize_model_state_dict(
+        _base_lora_state(actual_state),
+        NF4_G128_LSQ,
+    )
+    _assert_quantized_state_equal(actual_quantized, expected_quantized)
+
+
+def test_load_model_weights_allows_base_checkpoint_for_lora_model(
+    tmp_path: Path,
+) -> None:
+    base_cfg = _full_config()
+    lora_cfg = FullConfig.model_validate(
+        {
+            **base_cfg.model_dump(mode="python"),
+            "model": {
+                **base_cfg.model.model_dump(mode="python"),
+                "lora": {
+                    "rank": 2,
+                    "target_modules": ["q", "v"],
+                },
+            },
+        }
+    )
+    base_model = run_ppo._create_model(
+        base_cfg.model,
+        obs_spec=base_cfg.env.obs_spec,
+        action_spec=base_cfg.env.action_spec,
+    )
+    lora_model = run_ppo._create_model(
+        lora_cfg.model,
+        obs_spec=lora_cfg.env.obs_spec,
+        action_spec=lora_cfg.env.action_spec,
+    )
+    assert run_ppo._apply_lora_for_config(lora_model, lora_cfg.model) is not None
+    path = tmp_path / "base_checkpoint.pt"
+    torch.save(
+        {
+            "model": base_model.state_dict(),
+            "env_steps": 64,
+            "player_step_total": 5,
+            "total_games_played": 7,
+            "total_active_entities": 11,
+            "wandb_run_id": "run-abc",
+        },
+        path,
+    )
+    trainer = PPOTrainer.__new__(PPOTrainer)
+    trainer.model = lora_model
+    trainer.device = torch.device("cpu")
+    trainer.player_step_total = 0
+    trainer.total_games_played = 0
+    trainer.total_active_entities = 0
+
+    metadata = trainer.load_model_weights(path)
+
+    assert metadata.env_steps == 64
+    assert trainer.player_step_total == 5
+    assert trainer.total_games_played == 7
+    assert trainer.total_active_entities == 11
+    lora_state = lora_model.state_dict()
+    for key, value in base_model.state_dict().items():
+        assert torch.equal(lora_state[key], value)
+
+
+def test_lora_fresh_launch_rejects_loading_optimizer_state() -> None:
+    base_cfg = _full_config()
+    cfg = FullConfig.model_validate(
+        {
+            **base_cfg.model_dump(mode="python"),
+            "model": {
+                **base_cfg.model.model_dump(mode="python"),
+                "lora": {"rank": 2},
+            },
+        }
+    )
+    launch = run_ppo.FreshLaunch(
+        config_path=Path("config.yaml"),
+        output_dir=Path("runs"),
+        overrides={},
+        load_model_weights_path=Path("checkpoint.pt"),
+        load_model_weights_mode="model_and_optimizer",
+    )
+
+    with pytest.raises(ValueError, match="model_and_optimizer is not supported"):
+        run_ppo._validate_lora_launch_config(cfg, launch)
+
+
+def test_initial_last_best_model_wraps_lora_and_supports_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: teacher_mode=last_best fine-tuning seeded from a non-LoRA base.
+    # last_best must share the LoRA-wrapped student architecture so that a later
+    # _refresh_eval_model_from_weights can copy the student's adapter-bearing
+    # state dict into it instead of crashing on unexpected LoRA keys.
+    monkeypatch.setattr(run_ppo, "_compile_eval_model", lambda *_a, **_k: None)
+    base_cfg = _full_config()
+    base_model = run_ppo._create_model(
+        base_cfg.model,
+        obs_spec=base_cfg.env.obs_spec,
+        action_spec=base_cfg.env.action_spec,
+    )
+    base_checkpoint = tmp_path / "base_checkpoint.pt"
+    torch.save({"model": base_model.state_dict()}, base_checkpoint)
+    # last_best validation reads the teacher checkpoint's sibling config.yaml.
+    base_cfg.to_file(tmp_path / "config.yaml")
+
+    student_cfg = FullConfig.model_validate(
+        {
+            **base_cfg.model_dump(mode="python"),
+            "model": {
+                **base_cfg.model.model_dump(mode="python"),
+                "lora": {"rank": 2, "target_modules": ["q", "v"]},
+            },
+            "rl": {
+                **base_cfg.rl.model_dump(mode="python"),
+                "teacher_mode": "last_best",
+                "teacher_init": str(base_checkpoint),
+            },
+        }
+    )
+
+    last_best = run_ppo._initial_last_best_model(
+        student_cfg, device=torch.device("cpu")
+    )
+
+    assert last_best is not None
+    # last_best is LoRA-wrapped like the student, and its frozen base weights are
+    # seeded from the non-LoRA base checkpoint (adapters stay at config init).
+    assert isinstance(last_best.blocks[0].attn.q, LoRALinear)
+    last_best_state = last_best.state_dict()
+    for key, value in base_model.state_dict().items():
+        assert torch.equal(last_best_state[key], value)
+
+    # Winning triggers refreshing last_best from the adapter-bearing student; this
+    # is the path that previously raised on unexpected LoRA keys.
+    student = run_ppo._create_model(
+        student_cfg.model,
+        obs_spec=student_cfg.env.obs_spec,
+        action_spec=student_cfg.env.action_spec,
+    )
+    assert run_ppo._apply_lora_for_config(student, student_cfg.model) is not None
+    run_ppo._refresh_eval_model_from_weights(last_best, student)
+
+    refreshed_state = last_best.state_dict()
+    for key, value in student.state_dict().items():
+        assert torch.equal(refreshed_state[key], value)
 
 
 class _FakeLogger:

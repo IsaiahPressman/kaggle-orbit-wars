@@ -40,6 +40,7 @@ configs may contain either architecture.
 | `use_learned_pairwise_bias` | `False` | Enable an auxiliary source-target feature MLP for discrete target selection. Only valid with `"discrete_targets"` and `"discrete_target_bins"` actors. |
 | `n_scratch_tokens` | `4` | Learned shared scratch tokens appended to the trunk sequence. |
 | `actor` | `{"action_spec": "pure"}` | Discriminated actor-head config. Supported actor specs are `"pure"`, `"discrete_targets"`, and `"discrete_target_bins"`. |
+| `lora` | `null` | Optional LoRA fine-tuning config used by `scripts/run_ppo.py` for stateless transformer models. |
 
 Actor-specific fields live inside the actor config. `ActorPureConfig` owns
 pure-head fields such as `n_angle_mixtures`, `n_fleet_size_mixtures`,
@@ -244,6 +245,65 @@ live-token counts. This mode currently rejects `EntityBasedCrossAttnV1`,
 Set `rl.model_compile="mlp"` to compile each transformer-block MLP in place
 while keeping packing, unpacking, and flash-attn varlen calls eager.
 Per-player-count adapter block MLPs are compiled by the same setting.
+
+## LoRA Fine-Tuning
+
+Stateless transformer configs may set `model.lora` to enable LoRA fine-tuning
+in `scripts/run_ppo.py`. When enabled, PPO freezes all base model parameters,
+wraps the selected linear projections with low-rank adapters, and optimizes only
+the LoRA parameters. By default only transformer-block projections are wrapped;
+`target_value_head` / `target_policy_head` extend adaptation to the critic and
+actor heads. Recurrent models reject `lora` fields.
+
+`LoRAConfig` fields:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `rank` | Required | Low-rank adapter dimension. |
+| `alpha_scale` | `1.0` | LoRA update scale. The standard scaling is `alpha / rank`; `alpha` is derived as `clamped_rank * alpha_scale`, so the update is scaled by `alpha_scale` for every adapter regardless of clamping. |
+| `target_modules` | `["q", "v"]` | Transformer block projections to wrap. Supported values are `q`, `k`, `v`, `out`, `up`, `down`, `gate`, and `value`; `gate`/`value` exist only for SwiGLU MLPs. May be empty (`[]`) to wrap only the heads. |
+| `target_block_count` | `null` | If set, wrap only the final N shared transformer blocks; otherwise wrap all shared blocks. Only selects transformer-block projections, so it requires a non-empty `target_modules`. |
+| `target_value_head` | `false` | Wrap every linear projection in the critic (value) head with LoRA adapters. |
+| `target_policy_head` | `false` | Wrap every linear projection in the actor (policy) head, including its source/target input projections and learned pairwise-bias MLP when enabled, with LoRA adapters. |
+| `roundtrip_quantization` | `null` | Optional checkpoint quantization format. When set, fresh LoRA training quantizes and dequantizes the frozen base-model tensors before adapter optimization, leaving LoRA adapter tensors unchanged. |
+
+LoRA presets live under `configs/model/lora/`. For example,
+`model.lora=2p_200m_qv_r16` resolves
+`configs/model/lora/2p_200m_qv_r16.yaml`, a rank-16 q/v plus value/policy-head
+adapter preset intended for 200M two-player fine-tuning when the adapter will be
+merged into the NF4 base model before packaging with a 1-2M fallback.
+
+At least one of `target_modules`, `target_value_head`, or `target_policy_head`
+must select something. Head wrapping is structural: every `nn.Linear` leaf in
+the chosen head subtree is wrapped, so it adapts regardless of actor variant.
+Each adapter's rank is clamped to `min(rank, in_features, out_features)`, so tiny
+head projections (e.g. the critic's `embed_dim -> 1` output) still adapt without
+wasting parameters on a rank that could not raise the update's rank. The adapter
+always stays separate from the frozen base weight, and because `alpha` is derived
+from the clamped rank, the update scale stays at `alpha_scale` regardless of
+clamping.
+
+Fresh launches still reset the base model before LoRA is attached. When
+`--load-model-weights` points at a non-LoRA base checkpoint, missing LoRA
+adapter tensors are accepted and initialized from the LoRA config, while all
+non-LoRA base tensors must match. Resume checkpoints are expected to match the
+saved LoRA config and include adapter tensors. Fresh LoRA launches reject
+`--load-model-weights-mode model_and_optimizer`; use `model_only` for base
+checkpoint initialization or resume an existing LoRA run.
+If `roundtrip_quantization` is set, fresh scratch launches roundtrip the freshly
+initialized base tensors, and fresh checkpoint-initialized launches roundtrip
+after base checkpoint weights are loaded. Existing run resumes load their saved
+checkpoint state without an additional quantization pass.
+
+Checkpoint packaging keeps LoRA adapters as separate tensors. Quantized payloads
+can use one format for base-model tensors and another for adapter tensors; when
+base quantization is requested without an explicit adapter format, adapters
+default to bf16. Inference consumers fold adapters into ordinary `nn.Linear`
+weights after checkpoint dequantization and before int8 emulation/quantization.
+The Kaggle agent controls whether packaged adapters are used with
+`AgentConfig.lora_mode`: `always` folds them for every game, `2p` only for
+two-player games, and `4p` only for four-player games. If a checkpoint has no
+LoRA adapters, this setting is ignored.
 
 ## Recurrent Transformer V1
 

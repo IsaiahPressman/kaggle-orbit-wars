@@ -146,6 +146,31 @@ moment/momentum state while keeping the fresh optimizer hyperparameters and
 scheduler state.
 resume launches load checkpoint weights and optimizer state without resetting
 the model first.
+Set `model.lora` on stateless transformer configs to run PPO as a LoRA
+fine-tune. LoRA freezes the base model, wraps selected linear projections, and
+trains only the low-rank adapter parameters. `rank` is required; optional fields
+include `alpha_scale` (the LoRA update scale, default `1.0`), `target_modules`,
+and `target_block_count` for final-block-only adaptation. Set `target_value_head` / `target_policy_head` to also wrap the
+critic and actor heads (set `target_modules` to `[]` to adapt only the heads).
+Set `roundtrip_quantization` to a supported checkpoint quantization format to
+quantize and dequantize the frozen base weights before adapter training, so
+fresh LoRA fine-tuning sees the same base-weight numerics used after final
+checkpoint quantization.
+LoRA presets under `configs/model/lora/` can be selected with overrides such as
+`-o model.lora=2p_200m_qv_r16`.
+Checkpoint extraction and Kaggle submission packaging accept separate base-model
+and LoRA adapter quantization formats. When base quantization is enabled and no
+LoRA format is provided, adapter tensors default to bf16. Packaged LoRA adapters
+are folded into the base model before inference int8 quantization/emulation.
+Recurrent models do not support LoRA. Fresh LoRA launches can use
+`--load-model-weights` with a
+non-LoRA base checkpoint; missing LoRA adapter tensors are initialized from the
+config while base tensors are loaded from the checkpoint. Fresh LoRA launches
+must use `--load-model-weights-mode model_only`; resume existing LoRA runs to
+restore optimizer state. `teacher_mode: last_best` also works with LoRA: the
+self-play opponent is built with the student's adapter architecture and seeded
+from the (possibly non-LoRA) `teacher_init` checkpoint, so it can be refreshed
+in place each time the student wins.
 Optimizer configs may set `lr_schedule.schedule` to
 `linear_warmup_cosine_decay` for warmup followed by cosine decay, or `cosine`
 for a repeating LambdaLR multiplier that moves from `1.0` to `lr_min_ratio`

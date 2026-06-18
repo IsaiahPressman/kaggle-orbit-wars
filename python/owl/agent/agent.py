@@ -8,13 +8,17 @@ from typing import Annotated, Any, Literal, TypeAlias, assert_never
 import torch
 from pydantic import ConfigDict, Field
 
+from owl.checkpoint_quantization import load_model_state_dict_streaming
 from owl.config import BaseConfig
 from owl.model import (
     BaseModelAPI,
     ModelConfig,
     ModelHiddenState,
     RecurrentTransformerV1Config,
+    apply_lora_to_stateless_transformer,
     create_model,
+    fold_lora_adapters,
+    lora_config_for_model,
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
@@ -39,11 +43,11 @@ from owl.rl import (
     encode_python_observation_with_metrics,
 )
 
-from .checkpoint_quantization import load_model_state_dict_streaming
 from .kaggle_observation import KaggleObservation
 
 AGENT_CONFIG_PATH = Path(__file__).with_name("agent_config.yaml")
 InferenceQuantization: TypeAlias = Literal["int8"]
+LoRAMode: TypeAlias = Literal["always", "2p", "4p"]
 _FALLBACK_LOAD_MIN_STEP = 1
 _QUANTIZED_ENGINE_PREFERENCE = ("x86", "fbgemm", "qnnpack", "onednn")
 _OBS_REQUIRED_TENSOR_FIELDS = tuple(
@@ -72,6 +76,7 @@ class AgentConfig(BaseConfig):
     max_entities_override: int | None = None
     targeting_mode_override: TargetingMode | None = None
     inference_quantization: InferenceQuantization | None = None
+    lora_mode: LoRAMode = "always"
     min_fleet_size: Literal["match"] | Annotated[int, Field(ge=1)] = "match"
     min_overage_time: float = Field(default=0.0, ge=0.0, le=60.0)
     fallback_min_overage_time: float | None = Field(default=None, ge=0.0, le=60.0)
@@ -94,6 +99,7 @@ class Agent:
         checkpoint_path: Path,
         fallback_checkpoint_config_path: Path | None = None,
         fallback_checkpoint_path: Path | None = None,
+        game_player_count: int | None = None,
     ) -> None:
         init_start = perf_counter()
         if (fallback_checkpoint_config_path is None) != (
@@ -105,6 +111,7 @@ class Agent:
             )
 
         self.config = AgentConfig.from_file(AGENT_CONFIG_PATH)
+        self._game_player_count = game_player_count
         self._last_turn_value = float("nan")
         self._peak_total_ms = 0
         self._peak_entities = 0
@@ -200,6 +207,16 @@ class Agent:
                     action_spec=checkpoint_config.env.action_spec,
                 )
             model.to_empty(device=self.device)
+        lora_config = lora_config_for_model(checkpoint_config.model)
+        use_lora = _should_use_lora_adapters(
+            checkpoint_config=checkpoint_config,
+            agent_config=self.config,
+            game_player_count=self._game_player_count,
+        )
+        if use_lora:
+            if lora_config is None:
+                raise RuntimeError("LoRA mode selected without a LoRA config")
+            apply_lora_to_stateless_transformer(model, lora_config)
         checkpoint = torch.load(
             checkpoint_path,
             map_location=self.device,
@@ -210,7 +227,19 @@ class Agent:
                 f"checkpoint must be a dictionary with key 'model': {checkpoint_path}"
             )
 
-        load_model_state_dict_streaming(model, checkpoint["model"])
+        # The model configuration (whether LoRA adapters were applied above)
+        # determines how to load: when use_lora is True the adapter modules are
+        # present, so the checkpoint must supply their weights (missing adapters
+        # fail fast). When the model supports LoRA but we are not using it, the
+        # adapters are absent here, so adapter tensors in the checkpoint are
+        # ignored as unexpected.
+        load_model_state_dict_streaming(
+            model,
+            checkpoint["model"],
+            ignore_unexpected_lora_adapters=lora_config is not None and not use_lora,
+        )
+        if use_lora:
+            fold_lora_adapters(model)
         model = _quantize_model_for_inference(
             model,
             self.config.inference_quantization,
@@ -218,14 +247,14 @@ class Agent:
         model.eval()
         return model
 
-    def _load_fallback_model_if_due(self, step: int) -> None:
+    def _load_fallback_model_if_due(self, step: int) -> float:
         if self.fallback_model is not None or self._fallback_checkpoint_path is None:
-            return
+            return 0.0
         threshold = self.config.fallback_min_overage_time
         if threshold is None:
-            return
+            return 0.0
         if step < _FALLBACK_LOAD_MIN_STEP:
-            return
+            return 0.0
 
         assert self.fallback_checkpoint_config is not None
         fallback_init_start = perf_counter()
@@ -233,11 +262,13 @@ class Agent:
             checkpoint_config=self.fallback_checkpoint_config,
             checkpoint_path=self._fallback_checkpoint_path,
         )
+        fallback_init_s = perf_counter() - fallback_init_start
         print(
-            f"fallback_init_s={perf_counter() - fallback_init_start:.2f} - ",
+            f"fallback_init_s={fallback_init_s:.2f} - ",
             end="",
             flush=True,
         )
+        return fallback_init_s
 
     @torch.inference_mode()
     def act(self, observation: Any) -> list[list[float]]:
@@ -255,7 +286,7 @@ class Agent:
         if kaggle_obs.remaining_overage_time < self.config.min_overage_time:
             return []
 
-        self._load_fallback_model_if_due(kaggle_obs.step)
+        fallback_init_s = self._load_fallback_model_if_due(kaggle_obs.step)
 
         model = self.model
         checkpoint_config = self.checkpoint_config
@@ -287,7 +318,7 @@ class Agent:
         obs = compacted.obs
         device_obs = self._obs_to_device(obs)
         self._synchronize_device()
-        encode_ms = _elapsed_ms(encode_start)
+        encode_ms = _elapsed_ms(encode_start, exclude_s=fallback_init_s)
 
         inference_start = perf_counter()
         if not use_fallback and (kaggle_obs.step == 0 or hidden_state is None):
@@ -322,7 +353,7 @@ class Agent:
             action_spec=checkpoint_config.env.action_spec,
         )
         conversion_ms = _elapsed_ms(conversion_start)
-        total_ms = _elapsed_ms(total_start)
+        total_ms = _elapsed_ms(total_start, exclude_s=fallback_init_s)
         entity_count = obs.entity_mask.shape[1]
         peak_total_ms, peak_entities = self._update_peak_metrics(
             step=kaggle_obs.step,
@@ -439,8 +470,8 @@ class Agent:
         return peak_total_ms, peak_entities
 
 
-def _elapsed_ms(start: float) -> int:
-    return round((perf_counter() - start) * 1000)
+def _elapsed_ms(start: float, *, exclude_s: float = 0.0) -> int:
+    return round((perf_counter() - start - exclude_s) * 1000)
 
 
 def _resolve_agent_device(
@@ -516,7 +547,29 @@ def _resolve_min_fleet_size(config: AgentConfig, action_spec: ActionConfig) -> i
     return config.min_fleet_size
 
 
-def _observation_player_count(observation: KaggleObservation) -> int:
+def _should_use_lora_adapters(
+    *,
+    checkpoint_config: AgentCheckpointConfig,
+    agent_config: AgentConfig,
+    game_player_count: int | None,
+) -> bool:
+    if lora_config_for_model(checkpoint_config.model) is None:
+        return False
+    match agent_config.lora_mode:
+        case "always":
+            return True
+        case "2p" | "4p":
+            if game_player_count is None:
+                raise ValueError(
+                    f"lora_mode={agent_config.lora_mode!r} requires game_player_count"
+                )
+            expected_player_count = 2 if agent_config.lora_mode == "2p" else 4
+            return game_player_count == expected_player_count
+        case _:
+            assert_never(agent_config.lora_mode)
+
+
+def observation_player_count(observation: KaggleObservation) -> int:
     player_indexes = [observation.player]
     player_indexes.extend(
         owner
@@ -528,6 +581,10 @@ def _observation_player_count(observation: KaggleObservation) -> int:
         if owner >= 0
     )
     return 4 if max(player_indexes) >= 2 else 2
+
+
+def _observation_player_count(observation: KaggleObservation) -> int:
+    return observation_player_count(observation)
 
 
 def _model_actions_to_cpu(actions: ActionBundle) -> ActionBundle:

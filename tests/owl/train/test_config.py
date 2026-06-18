@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from owl.checkpoint_quantization import NF4_G128_LSQ
 from owl.model import (
     RecurrentTransformerV1,
     RecurrentTransformerV1Config,
@@ -146,6 +147,15 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
                 "embed_dim": 32,
                 "depth": 1,
                 "n_heads": 4,
+                "lora": {
+                    "rank": 8,
+                    "alpha_scale": 2.0,
+                    "target_modules": ["q", "v"],
+                    "target_block_count": 1,
+                    "target_value_head": True,
+                    "target_policy_head": True,
+                    "roundtrip_quantization": NF4_G128_LSQ,
+                },
             },
             "optimizer": {
                 "optimizer": "adamw",
@@ -169,8 +179,118 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
     assert config.optimizer.learning_rate == pytest.approx(0.001)
     assert config.optimizer.lr_schedule is not None
     assert config.optimizer.lr_schedule.warmup_steps == 2
+    assert isinstance(config.model, StatelessTransformerV1Config)
+    assert config.model.lora is not None
+    assert config.model.lora.roundtrip_quantization == NF4_G128_LSQ
+    assert config.model.lora.rank == 8
+    assert config.model.lora.alpha_scale == pytest.approx(2.0)
+    assert config.model.lora.target_value_head is True
+    assert config.model.lora.target_policy_head is True
     assert config.rl.segments_per_minibatch == 2
     assert config.runtime.n_runtime_gpus == 1
+
+
+def test_full_config_resolves_lora_subconfig_override() -> None:
+    config = FullConfig.from_file(
+        _REPO_ROOT / "configs/stateless_200m.yaml",
+        overrides={
+            "model.lora": "2p_200m_qv_r16",
+            "env.two_player_weight": 1.0,
+        },
+    )
+
+    assert isinstance(config.model, StatelessTransformerV1Config)
+    assert config.model.lora is not None
+    assert config.model.lora.rank == 16
+    assert config.model.lora.alpha_scale == pytest.approx(1.0)
+    assert config.model.lora.target_modules == ("q", "v")
+    assert config.model.lora.target_block_count is None
+    assert config.model.lora.target_value_head is True
+    assert config.model.lora.target_policy_head is True
+    assert config.env.two_player_weight == pytest.approx(1.0)
+
+
+def test_full_config_rejects_lora_without_any_target() -> None:
+    with pytest.raises(ValueError, match="lora must target at least one"):
+        FullConfig.model_validate(
+            {
+                "env": {
+                    "n_envs": 2,
+                },
+                "model": {
+                    "model_arch": "stateless_transformer_v1",
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                    "lora": {"rank": 2, "target_modules": []},
+                },
+                "optimizer": {
+                    "optimizer": "adamw",
+                    "learning_rate": 0.001,
+                },
+                "rl": {
+                    "horizon": 4,
+                },
+            }
+        )
+
+
+def test_full_config_rejects_unknown_lora_roundtrip_quantization() -> None:
+    with pytest.raises(ValueError, match="Input should be"):
+        FullConfig.model_validate(
+            {
+                "env": {
+                    "n_envs": 2,
+                },
+                "model": {
+                    "model_arch": "stateless_transformer_v1",
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                    "lora": {
+                        "rank": 2,
+                        "roundtrip_quantization": "nf2_g128_lsq",
+                    },
+                },
+                "optimizer": {
+                    "optimizer": "adamw",
+                    "learning_rate": 0.001,
+                },
+                "rl": {
+                    "horizon": 4,
+                },
+            }
+        )
+
+
+def test_full_config_rejects_lora_on_recurrent_model() -> None:
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        FullConfig.model_validate(
+            {
+                "env": {
+                    "n_envs": 2,
+                    "action_spec": {
+                        "action_spec": "discrete_targets",
+                        "max_per_planet_launches": 1,
+                    },
+                },
+                "model": {
+                    "model_arch": "recurrent_transformer_v1",
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                    "actor": {"action_spec": "discrete_targets"},
+                    "lora": {"rank": 2},
+                },
+                "optimizer": {
+                    "optimizer": "adamw",
+                    "learning_rate": 0.001,
+                },
+                "rl": {
+                    "horizon": 4,
+                },
+            }
+        )
 
 
 def test_full_config_rejects_more_eval_replays_than_envs() -> None:

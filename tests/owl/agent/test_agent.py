@@ -16,10 +16,6 @@ from owl.agent.agent import (
     compact_entities,
     expand_actions_to_full_action_slots,
 )
-from owl.agent.checkpoint_quantization import (
-    FP4_E2M1FN_X2_SCALED_BLOCK16,
-    quantize_model_state_dict,
-)
 from owl.agent.kaggle_observation import (
     FLEET_ANGLE_INDEX,
     FLEET_FROM_PLANET_ID_INDEX,
@@ -36,9 +32,17 @@ from owl.agent.kaggle_observation import (
     PLANET_X_INDEX,
     PLANET_Y_INDEX,
 )
+from owl.checkpoint_quantization import (
+    FP4_E2M1FN_X2_SCALED_BLOCK16,
+    quantize_model_state_dict,
+)
 from owl.model import (
+    LoRAConfig,
+    LoRALinear,
     RecurrentTransformerV1Config,
+    StatelessTransformerV1,
     StatelessTransformerV1Config,
+    apply_lora_to_stateless_transformer,
     create_model,
 )
 from owl.rl import (
@@ -239,6 +243,183 @@ def test_agent_init_loads_quantized_checkpoint(
     assert agent.fallback_checkpoint_config is not None
     assert agent.fallback_model is None
     assert agent._fallback_checkpoint_path == fallback_checkpoint_path
+
+
+def test_agent_init_folds_lora_adapters_when_mode_matches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_config_path = tmp_path / "agent_config.yaml"
+    agent_config_path.write_text(
+        "\n".join(
+            (
+                "deterministic: true",
+                "lora_mode: 2p",
+                "min_overage_time: 0.0",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("owl.agent.agent.AGENT_CONFIG_PATH", agent_config_path)
+    model_config = StatelessTransformerV1Config(
+        embed_dim=8,
+        depth=1,
+        n_heads=1,
+        lora=LoRAConfig(rank=1, target_modules=("q",), target_block_count=1),
+    )
+    env_config = EnvConfig(
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(),
+    )
+    checkpoint_config_path = tmp_path / "config.yaml"
+    AgentCheckpointConfig(env=env_config, model=model_config).to_file(
+        checkpoint_config_path
+    )
+    source = create_model(
+        model_config,
+        obs_spec=env_config.obs_spec,
+        action_spec=env_config.action_spec,
+    )
+    assert isinstance(source, StatelessTransformerV1)
+    source.reset_parameters()
+    assert model_config.lora is not None
+    apply_lora_to_stateless_transformer(source, model_config.lora)
+    assert isinstance(source.blocks[0].attn.q, LoRALinear)
+    with torch.no_grad():
+        source.blocks[0].attn.q.lora_down.fill_(0.25)
+        source.blocks[0].attn.q.lora_up.fill_(0.5)
+    expected_q_weight = (
+        source.blocks[0].attn.q.weight
+        + (source.blocks[0].attn.q.lora_up @ source.blocks[0].attn.q.lora_down)
+        * source.blocks[0].attn.q.scaling
+    )
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    torch.save({"model": source.state_dict()}, checkpoint_path)
+
+    agent = Agent(
+        checkpoint_config_path=checkpoint_config_path,
+        checkpoint_path=checkpoint_path,
+        game_player_count=2,
+    )
+
+    assert isinstance(agent.model, StatelessTransformerV1)
+    assert isinstance(agent.model.blocks[0].attn.q, torch.nn.Linear)
+    assert not isinstance(agent.model.blocks[0].attn.q, LoRALinear)
+    assert not any(
+        name.endswith((".lora_down", ".lora_up")) for name in agent.model.state_dict()
+    )
+    assert torch.allclose(agent.model.blocks[0].attn.q.weight, expected_q_weight)
+
+
+def test_agent_init_ignores_lora_adapters_when_mode_does_not_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_config_path = tmp_path / "agent_config.yaml"
+    agent_config_path.write_text(
+        "\n".join(
+            (
+                "deterministic: true",
+                "lora_mode: 4p",
+                "min_overage_time: 0.0",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("owl.agent.agent.AGENT_CONFIG_PATH", agent_config_path)
+    model_config = StatelessTransformerV1Config(
+        embed_dim=8,
+        depth=1,
+        n_heads=1,
+        lora=LoRAConfig(rank=1, target_modules=("q",), target_block_count=1),
+    )
+    env_config = EnvConfig(
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(),
+    )
+    checkpoint_config_path = tmp_path / "config.yaml"
+    AgentCheckpointConfig(env=env_config, model=model_config).to_file(
+        checkpoint_config_path
+    )
+    source = create_model(
+        model_config,
+        obs_spec=env_config.obs_spec,
+        action_spec=env_config.action_spec,
+    )
+    assert isinstance(source, StatelessTransformerV1)
+    source.reset_parameters()
+    assert model_config.lora is not None
+    apply_lora_to_stateless_transformer(source, model_config.lora)
+    assert isinstance(source.blocks[0].attn.q, LoRALinear)
+    with torch.no_grad():
+        source.blocks[0].attn.q.lora_down.fill_(0.25)
+        source.blocks[0].attn.q.lora_up.fill_(0.5)
+    expected_q_weight = source.blocks[0].attn.q.weight.detach().clone()
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    torch.save({"model": source.state_dict()}, checkpoint_path)
+
+    agent = Agent(
+        checkpoint_config_path=checkpoint_config_path,
+        checkpoint_path=checkpoint_path,
+        game_player_count=2,
+    )
+
+    assert isinstance(agent.model, StatelessTransformerV1)
+    assert isinstance(agent.model.blocks[0].attn.q, torch.nn.Linear)
+    assert not isinstance(agent.model.blocks[0].attn.q, LoRALinear)
+    assert torch.equal(agent.model.blocks[0].attn.q.weight, expected_q_weight)
+
+
+def test_agent_init_requires_lora_adapters_when_mode_matches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When the model configuration selects LoRA, the adapter modules are present,
+    # so the checkpoint must supply their weights. A base-only checkpoint (the
+    # adapters were dropped) must fail fast rather than load as a plain base model.
+    agent_config_path = tmp_path / "agent_config.yaml"
+    agent_config_path.write_text(
+        "\n".join(
+            (
+                "deterministic: true",
+                "lora_mode: 2p",
+                "min_overage_time: 0.0",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("owl.agent.agent.AGENT_CONFIG_PATH", agent_config_path)
+    model_config = StatelessTransformerV1Config(
+        embed_dim=8,
+        depth=1,
+        n_heads=1,
+        lora=LoRAConfig(rank=1, target_modules=("q",), target_block_count=1),
+    )
+    env_config = EnvConfig(
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(),
+    )
+    checkpoint_config_path = tmp_path / "config.yaml"
+    AgentCheckpointConfig(env=env_config, model=model_config).to_file(
+        checkpoint_config_path
+    )
+    source = create_model(
+        model_config,
+        obs_spec=env_config.obs_spec,
+        action_spec=env_config.action_spec,
+    )
+    assert isinstance(source, StatelessTransformerV1)
+    source.reset_parameters()
+    # Save a base-only checkpoint: LoRA adapters are never applied or saved.
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    torch.save({"model": source.state_dict()}, checkpoint_path)
+
+    with pytest.raises(RuntimeError, match="lora_down"):
+        Agent(
+            checkpoint_config_path=checkpoint_config_path,
+            checkpoint_path=checkpoint_path,
+            game_player_count=2,
+        )
 
 
 def test_agent_loads_fallback_model_on_second_step(
@@ -1287,6 +1468,94 @@ def test_agent_peak_metrics_exclude_first_step_total_time() -> None:
     assert agent._update_peak_metrics(step=1, total_ms=10, entity_count=5) == (10, 5)
     assert agent._update_peak_metrics(step=2, total_ms=7, entity_count=4) == (10, 5)
     assert agent._update_peak_metrics(step=3, total_ms=11, entity_count=2) == (11, 5)
+
+
+def test_agent_act_excludes_fallback_init_from_total_metrics(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    agent = Agent.__new__(Agent)
+    agent.checkpoint_config = SimpleNamespace(
+        env=SimpleNamespace(
+            obs_spec=EntityBasedConfig(),
+            action_spec=action_spec,
+        ),
+        model=StatelessTransformerV1Config(),
+    )
+    agent.fallback_checkpoint_config = agent.checkpoint_config
+    agent.config = AgentConfig(
+        deterministic=True,
+        fallback_min_overage_time=1.0,
+    )
+    agent.device = torch.device("cpu")
+    agent.hidden_state = None
+    agent.fallback_model = None
+    agent._fallback_checkpoint_path = tmp_path / "fallback_checkpoint.pt"
+    agent._last_turn_value = float("nan")
+    agent._peak_total_ms = 0
+    agent._peak_entities = 0
+
+    times = iter([100.0, 101.0, 111.0, 112.0, 112.0, 113.0, 113.0, 114.0, 115.0])
+    monkeypatch.setattr("owl.agent.agent.perf_counter", lambda: next(times))
+
+    class FakeModel:
+        def initial_hidden_state(
+            self,
+            _batch_size: int,
+            *,
+            device: torch.device,  # noqa: ARG002
+        ) -> None:
+            return None
+
+        def serve(
+            self,
+            obs: object,
+            *,
+            deterministic: bool,
+            hidden_state: object | None,
+        ) -> object:
+            assert deterministic
+            assert hidden_state is None
+            action_shape = (
+                1,
+                4,
+                obs.action_mask.can_act.shape[2],
+                action_spec.max_per_planet_launches,
+            )
+            return SimpleNamespace(
+                actions=PureActions(
+                    launch=torch.zeros(action_shape, dtype=torch.bool),
+                    angle=torch.zeros(action_shape, dtype=torch.float32),
+                    ships=torch.zeros(action_shape, dtype=torch.int64),
+                ),
+                values=torch.tensor([[0.25, -0.5, 0.0, 0.75]]),
+                next_hidden_state=None,
+            )
+
+    agent.model = FakeModel()
+
+    def fake_load_model_from_config(
+        *,
+        checkpoint_config: object,
+        checkpoint_path: Path,
+    ) -> FakeModel:
+        assert checkpoint_config is agent.fallback_checkpoint_config
+        assert checkpoint_path == agent._fallback_checkpoint_path
+        return FakeModel()
+
+    monkeypatch.setattr(agent, "_load_model_from_config", fake_load_model_from_config)
+
+    observation = _raw_observation()
+    observation["step"] = 1
+
+    actions = agent.act(KaggleObservation.model_validate(observation))
+
+    assert actions == []
+    log_line = capsys.readouterr().out
+    assert "fallback_init_s=10.00 - " in log_line
+    assert "total_ms=5000 - peak_total_ms=5000 - " in log_line
 
 
 def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:

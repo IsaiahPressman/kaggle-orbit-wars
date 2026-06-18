@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from owl.agent.checkpoint_quantization import (
+from owl.checkpoint_quantization import (
     FP4_E2M1FN_X2_SCALED_BLOCK16,
     FP8_E4M3FN,
     NF3_G128_LSQ,
@@ -115,6 +115,64 @@ def test_roundtrip_checkpoint_model_dtype_supports_agent_quantization_formats(
         unchanged_tensors=1,
         original_dtypes=("torch.float32",),
     )
+
+
+def test_roundtrip_checkpoint_model_dtype_defaults_lora_to_bf16(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    output_path = tmp_path / f"checkpoint_{FP4_E2M1FN_X2_SCALED_BLOCK16}_roundtrip.pt"
+    model_state = {
+        "linear.weight": torch.tensor([[0.375, 1.125, 2.5]], dtype=torch.float32),
+        "linear.lora_down": torch.tensor([[0.1, -0.2, 0.3]], dtype=torch.float32),
+    }
+    torch.save({"model": model_state}, checkpoint_path)
+
+    stats = roundtrip_checkpoint_quantization.roundtrip_checkpoint_model_dtype(
+        checkpoint_path,
+        FP4_E2M1FN_X2_SCALED_BLOCK16,
+    )
+
+    checkpoint = torch.load(output_path, map_location="cpu", weights_only=True)
+    expected_base = dequantize_model_state_dict(
+        quantize_model_state_dict(
+            {"linear.weight": model_state["linear.weight"]},
+            FP4_E2M1FN_X2_SCALED_BLOCK16,
+        )
+    )["linear.weight"]
+    expected_lora = model_state["linear.lora_down"].to(torch.bfloat16).to(torch.float32)
+    _assert_float32_bits_equal(checkpoint["model"]["linear.weight"], expected_base)
+    _assert_float32_bits_equal(checkpoint["model"]["linear.lora_down"], expected_lora)
+    assert stats == roundtrip_checkpoint_quantization.RoundTripStats(
+        converted_tensors=2,
+        unchanged_tensors=0,
+        original_dtypes=("torch.float32",),
+    )
+
+
+def test_roundtrip_checkpoint_model_dtype_keeps_lora_at_base_dtype(
+    tmp_path: Path,
+) -> None:
+    # A dtype-only roundtrip (fp16) is not quantization, so adapters follow the
+    # base dtype and stay fp16 rather than silently defaulting to bf16.
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    output_path = tmp_path / "checkpoint_fp16_roundtrip.pt"
+    model_state = {
+        "linear.weight": torch.tensor([[0.1, 1.5, 2.5]], dtype=torch.float32),
+        "linear.lora_down": torch.tensor([[0.1, -0.2, 0.3]], dtype=torch.float32),
+    }
+    torch.save({"model": model_state}, checkpoint_path)
+
+    roundtrip_checkpoint_quantization.roundtrip_checkpoint_model_dtype(
+        checkpoint_path,
+        "fp16",
+    )
+
+    checkpoint = torch.load(output_path, map_location="cpu", weights_only=True)
+    expected_lora = model_state["linear.lora_down"].to(torch.float16).to(torch.float32)
+    bf16_lora = model_state["linear.lora_down"].to(torch.bfloat16).to(torch.float32)
+    _assert_float32_bits_equal(checkpoint["model"]["linear.lora_down"], expected_lora)
+    assert not torch.equal(checkpoint["model"]["linear.lora_down"], bf16_lora)
 
 
 def test_roundtrip_checkpoint_model_dtype_rejects_unique_prefix(
@@ -302,6 +360,8 @@ def test_main_help_lists_target_format_choices(
     assert exc_info.value.code == 0
     captured = capsys.readouterr()
     assert "target_format" in captured.out
+    assert "--lora-target-format" in captured.out
+    assert "fp32" in captured.out
     assert "fp16" in captured.out
     assert "bf16" in captured.out
     assert FP8_E4M3FN in captured.out

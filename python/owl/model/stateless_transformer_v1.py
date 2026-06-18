@@ -55,6 +55,8 @@ from owl.model.base import (
     ModelServingOutput,
     ModelTeacherEvaluation,
 )
+from owl.model.lora_config import LoRAConfig
+from owl.model.lora_linear import LoRALinear
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     OUTER_PLAYER_SLOTS,
@@ -153,10 +155,11 @@ class StatelessTransformerV1Config(BaseConfig):
     force_flash_attn: bool = False
     use_learned_pairwise_bias: bool = False
     actor: ActorConfig = Field(default_factory=ActorPureConfig)
+    lora: LoRAConfig | None = None
 
     @classmethod
     def subconfig_dirs(cls) -> set[str]:
-        return {"actor"}
+        return {"actor", "lora"}
 
     @model_validator(mode="after")
     def _validate_config(self) -> Self:
@@ -372,6 +375,11 @@ class StatelessTransformerV1(BaseModelAPI):
                 )
 
     def reset_parameters(self) -> None:
+        if any(isinstance(module, LoRALinear) for module in self.modules()):
+            raise RuntimeError(
+                "reset_parameters() must be called before applying LoRA adapters; "
+                "reset the base model first, then attach LoRA"
+            )
         self.apply(_init_module)
         for layer in self.get_input_layers():
             _init_input_layer(layer)
@@ -408,6 +416,9 @@ class StatelessTransformerV1(BaseModelAPI):
         if self.critic_head is not None:
             critic_output_layer_ids.add(id(self.critic_head.out))
         for layer in self.get_output_layers():
+            # reset_parameters runs before any LoRA wrapping (guarded above), so
+            # every output layer is still a plain nn.Linear here.
+            assert isinstance(layer, nn.Linear)
             gain = (
                 _CRITIC_HEAD_INIT_GAIN
                 if id(layer) in critic_output_layer_ids
@@ -456,7 +467,7 @@ class StatelessTransformerV1(BaseModelAPI):
             *head_input_layers,
         )
 
-    def get_output_layers(self) -> tuple[nn.Linear, ...]:
+    def get_output_layers(self) -> tuple[nn.Module, ...]:
         if self.player_count_adapters:
             return tuple(
                 layer
@@ -2079,7 +2090,7 @@ class PlayerCountAdapter(nn.Module):
             *self.actor.get_input_layers(),
         )
 
-    def get_output_layers(self) -> tuple[nn.Linear, ...]:
+    def get_output_layers(self) -> tuple[nn.Module, ...]:
         return (
             self.critic_head.out,
             *(
@@ -2718,7 +2729,7 @@ class PairwiseBiasMLP(nn.Module):
             case _:
                 assert_never(self.activation)
 
-    def get_output_layers(self) -> tuple[nn.Linear, ...]:
+    def get_output_layers(self) -> tuple[nn.Module, ...]:
         return (self.out,)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:

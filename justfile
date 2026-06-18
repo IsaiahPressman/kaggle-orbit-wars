@@ -64,6 +64,7 @@ kaggle-submission model submission="submission" quantization="fp32" *extra_args:
 	set -euo pipefail
 	submission="{{submission}}"
 	quantization="{{quantization}}"
+	lora_quantization=""
 	extra_args=({{extra_args}})
 	if [[ -z "$submission" || "$submission" == *"/"* || "$submission" == "." || "$submission" == ".." ]]; then
 	  echo "Submission name must be a non-empty file name, not a path: $submission" >&2
@@ -79,6 +80,14 @@ kaggle-submission model submission="submission" quantization="fp32" *extra_args:
 	        exit 2
 	      fi
 	      fallback_model_abs="$(cd "$(dirname "${extra_args[1]}")" && pwd)/$(basename "${extra_args[1]}")"
+	      extra_args=("${extra_args[@]:2}")
+	      ;;
+	    --lora-quantization)
+	      if [[ ${#extra_args[@]} -lt 2 ]]; then
+	        echo "--lora-quantization requires a format argument" >&2
+	        exit 2
+	      fi
+	      lora_quantization="${extra_args[1]}"
 	      extra_args=("${extra_args[@]:2}")
 	      ;;
 	    *)
@@ -101,6 +110,9 @@ kaggle-submission model submission="submission" quantization="fp32" *extra_args:
 	fi
 	if [[ "$quantization" != "fp32" ]]; then
 	  submission_args+=(--quantization "$quantization")
+	fi
+	if [[ -n "$lora_quantization" ]]; then
+	  submission_args+=(--lora-quantization "$lora_quantization")
 	fi
 	docker run --rm \
 	  "${docker_args[@]}" \

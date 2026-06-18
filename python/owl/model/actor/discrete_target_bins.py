@@ -70,7 +70,7 @@ class DiscreteTargetBinsActor(nn.Module):
     def get_input_layers(self) -> tuple[InputLayer, ...]:
         return (self.source_role, self.target_role)
 
-    def get_output_layers(self) -> tuple[nn.Linear, ...]:
+    def get_output_layers(self) -> tuple[nn.Module, ...]:
         return (self.fleet_bin_head.out,)
 
     def forward(

@@ -1,0 +1,9 @@
+rank: 16
+alpha_scale: 1.0
+target_modules:
+  - q
+  - v
+target_block_count: null
+target_value_head: true
+target_policy_head: true
+roundtrip_quantization: nf4_g128_lsq

@@ -88,6 +88,15 @@ weights inside the submission image:
 just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt my-run fp4
 ```
 
+For LoRA checkpoints, pass `--lora-quantization` after the existing arguments to
+choose adapter quantization independently from the base model. If the base model
+is quantized and no adapter format is provided, adapter tensors default to bf16:
+
+```sh
+just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt my-run fp4 \
+  --lora-quantization bf16
+```
+
 Pass an optional fallback checkpoint after the existing arguments to package a
 second, faster model:
 
@@ -107,21 +116,26 @@ The package script expects `python/main.py` or `main.py` to exist and copies it
 to `main.py` at the archive root. It also extracts `checkpoint["model"]` from
 the requested checkpoint into a temporary file, copies that file to
 `models/primary/checkpoint.pt`, optionally quantizes those weights when the
-recipe quantization argument is not `fp32`, and copies `config.yaml` from the
-same directory to `models/primary/config.yaml`. If `--fallback-checkpoint` is
+recipe quantization argument is not `fp32`, optionally applies a separate LoRA
+adapter quantization format, and copies `config.yaml` from the same directory to
+`models/primary/config.yaml`. If `--fallback-checkpoint` is
 provided, the fallback checkpoint and adjacent config are packaged under
 `models/fallback/` using the same fixed filenames. Supported quantization
 formats include `fp8_e4m3fn`, `fp4_e2m1fn_x2_scaled_block16`, and
 `nf5_g128_lsq_policy_last_fp8`. Lower-bit normal-float formats `nf4_g128_lsq`,
 `nf3_nf4_structured_3p5`, and `nf3_g128_lsq` are also supported; unique
-quantization prefixes such as `fp4` are accepted. The extraction step validates
-that fp32 model states contain only
-string keys and tensor values, and custom quantized checkpoint payloads are
-checked before packaging. The checked-in
+quantization prefixes such as `fp4` are accepted. LoRA adapter formats also
+accept `fp32`, `fp16`, and `bf16`. The extraction step validates that fp32 model
+states contain only string keys and tensor values, and custom quantized
+checkpoint payloads are checked before packaging. The checked-in
 `python/owl/agent/agent_config.yaml` configures `inference_quantization: int8`,
 which converts loaded `nn.Linear` layers to PyTorch dynamic int8 CPU inference
 while keeping final actor/critic output heads in fp32; `null` disables
-serving-time quantization and uses fp32 inference. Quantized slim checkpoints
+serving-time quantization and uses fp32 inference. LoRA adapters are dequantized
+and folded into regular `nn.Linear` weights before int8 inference quantization.
+`lora_mode` in the agent config controls whether adapters are folded for every
+game (`always`) or only for two-player or four-player games (`2p` / `4p`).
+Quantized slim checkpoints
 are stream-dequantized into the live model one tensor at a time, so agent
 startup does not hold a complete fp32 dequantized state dict in addition to the
 model. Set

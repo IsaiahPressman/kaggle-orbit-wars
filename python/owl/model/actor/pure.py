@@ -151,7 +151,7 @@ class PureActor(nn.Module):
     def reset_base_dirs(self) -> None:
         _init_evenly_spaced_directions(self.actor_heads.base_dirs)
 
-    def get_output_layers(self) -> tuple[nn.Linear, ...]:
+    def get_output_layers(self) -> tuple[nn.Module, ...]:
         return (
             self.actor_heads.continue_head.out,
             self.actor_heads.angle_mix_head.out,

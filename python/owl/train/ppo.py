@@ -24,6 +24,7 @@ from owl.model import (
     StatelessTransformerV1,
     concat_teacher_distillation_targets,
     index_teacher_distillation_targets,
+    load_model_state_dict_allowing_lora,
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
@@ -772,7 +773,10 @@ class PPOTrainer:
             raise ValueError("checkpoint must be a dictionary")
 
         metadata = _checkpoint_metadata(checkpoint)
-        unwrap_model(self.model).load_state_dict(checkpoint["model"])
+        load_model_state_dict_allowing_lora(
+            unwrap_model(self.model),
+            checkpoint["model"],
+        )
         if load_optimizer:
             _load_optimizer_state_preserving_param_groups(
                 self.optimizer,

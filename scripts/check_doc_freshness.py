@@ -48,7 +48,8 @@ DOC_RULES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     (
         "checkpoint-quantization",
         (
-            "python/owl/agent/checkpoint_quantization.py",
+            "python/owl/checkpoint_quantization.py",
+            "python/owl/quantization_formats.py",
             "scripts/extract_model_weights.py",
             "scripts/roundtrip_checkpoint_quantization.py",
         ),

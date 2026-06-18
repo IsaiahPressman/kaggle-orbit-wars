@@ -11,9 +11,14 @@ import pytest
 import torch
 import torch.nn.functional as F
 from owl.model import (
+    LoRAConfig,
+    LoRALinear,
     ModelConfig,
     StatelessTransformerV1,
     StatelessTransformerV1Config,
+    apply_lora_to_stateless_transformer,
+    fold_lora_adapters,
+    load_model_state_dict_allowing_lora,
 )
 from owl.model.actor.discrete_targets import (
     DiscreteTargetSelectionParams,
@@ -340,6 +345,339 @@ def test_model_config_requires_enabled_player_count_adapters_for_blocks() -> Non
         match="player_count_adapter_blocks requires player_count_adapters_enabled=True",
     ):
         StatelessTransformerV1Config(player_count_adapter_blocks=1)
+
+
+def _is_lora_parameter(name: str) -> bool:
+    return name.endswith((".lora_down", ".lora_up"))
+
+
+def test_model_config_rejects_duplicate_lora_targets() -> None:
+    with pytest.raises(ValueError, match=r"lora\.target_modules must not contain"):
+        StatelessTransformerV1Config(
+            lora=LoRAConfig(rank=2, target_modules=("q", "q")),
+        )
+
+
+def test_model_config_rejects_target_block_count_without_target_modules() -> None:
+    # target_block_count only selects transformer-block projections, so it would
+    # silently do nothing without target_modules; reject it rather than ignore it.
+    with pytest.raises(ValueError, match=r"target_block_count only selects"):
+        LoRAConfig(
+            rank=2,
+            target_modules=(),
+            target_block_count=1,
+            target_value_head=True,
+        )
+
+
+def test_lora_config_allows_target_block_count_with_target_modules() -> None:
+    config = LoRAConfig(rank=2, target_modules=("q",), target_block_count=1)
+    assert config.target_block_count == 1
+
+
+def test_apply_lora_wraps_requested_final_block_modules_and_freezes_base() -> None:
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(
+            embed_dim=16,
+            depth=3,
+            n_heads=4,
+            mlp_ratio=2.0,
+        ),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    model.reset_parameters()
+
+    application = apply_lora_to_stateless_transformer(
+        model,
+        LoRAConfig(
+            rank=2,
+            target_modules=("q", "v", "up"),
+            target_block_count=2,
+        ),
+    )
+
+    assert application.module_count == 6
+    assert application.trainable_parameters == 448
+    assert not isinstance(model.blocks[0].attn.q, LoRALinear)
+    assert isinstance(model.blocks[1].attn.q, LoRALinear)
+    assert isinstance(model.blocks[1].attn.v, LoRALinear)
+    assert isinstance(model.blocks[1].mlp.up, LoRALinear)
+    assert isinstance(model.blocks[2].attn.q, LoRALinear)
+    assert all(
+        _is_lora_parameter(name) == parameter.requires_grad
+        for name, parameter in model.named_parameters()
+    )
+
+
+def test_lora_wrapped_linear_starts_as_noop_and_loads_base_state_dict() -> None:
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    model.reset_parameters()
+    base_state_dict = model.state_dict()
+    x = torch.randn(2, 3, 16)
+    expected = model.blocks[0].attn.q(x)
+
+    apply_lora_to_stateless_transformer(
+        model,
+        LoRAConfig(rank=4, target_modules=("q",), target_block_count=1),
+    )
+
+    assert isinstance(model.blocks[0].attn.q, LoRALinear)
+    assert torch.allclose(model.blocks[0].attn.q(x), expected)
+    load_model_state_dict_allowing_lora(model, base_state_dict)
+
+
+def test_lora_state_dict_loader_rejects_partial_lora_checkpoint() -> None:
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    model.reset_parameters()
+    apply_lora_to_stateless_transformer(
+        model,
+        LoRAConfig(rank=4, target_modules=("q",), target_block_count=1),
+    )
+    state_dict = model.state_dict()
+    partial_state_dict = {
+        key: value
+        for key, value in state_dict.items()
+        if not key.endswith("attn.q.lora_up")
+    }
+
+    with pytest.raises(RuntimeError, match="missing LoRA model state_dict keys"):
+        load_model_state_dict_allowing_lora(model, partial_state_dict)
+
+
+def test_apply_lora_wraps_value_and_policy_heads() -> None:
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    model.reset_parameters()
+
+    application = apply_lora_to_stateless_transformer(
+        model,
+        LoRAConfig(
+            rank=2,
+            target_modules=(),
+            target_value_head=True,
+            target_policy_head=True,
+        ),
+    )
+
+    wrapped = {
+        name for name, module in model.named_modules() if isinstance(module, LoRALinear)
+    }
+    assert "critic_head.out" in wrapped
+    assert "critic_head.up" in wrapped
+    assert "source_actor_input_proj" in wrapped
+    assert "target_actor_input_proj" in wrapped
+    assert "actor.q" in wrapped
+    assert "actor.actor_heads.continue_head.out" in wrapped
+    # target_modules is empty, so no transformer-block projection is wrapped.
+    assert not any(name.startswith("blocks.") for name in wrapped)
+    assert application.module_count == len(wrapped)
+    assert application.trainable_parameters == sum(
+        parameter.numel()
+        for name, parameter in model.named_parameters()
+        if _is_lora_parameter(name)
+    )
+    assert all(
+        _is_lora_parameter(name) == parameter.requires_grad
+        for name, parameter in model.named_parameters()
+    )
+
+
+def test_apply_lora_policy_head_wraps_pairwise_bias_mlp() -> None:
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+            actor={"action_spec": "discrete_targets"},
+            use_learned_pairwise_bias=True,
+        ),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+    model.reset_parameters()
+
+    application = apply_lora_to_stateless_transformer(
+        model,
+        LoRAConfig(
+            rank=2,
+            target_modules=(),
+            target_policy_head=True,
+        ),
+    )
+
+    wrapped = {
+        name for name, module in model.named_modules() if isinstance(module, LoRALinear)
+    }
+    assert "source_actor_input_proj" in wrapped
+    assert "target_actor_input_proj" in wrapped
+    assert "pairwise_bias_mlp.up" in wrapped
+    assert "pairwise_bias_mlp.out" in wrapped
+    assert "actor.q" in wrapped
+    assert application.module_count == len(wrapped)
+    assert all(
+        _is_lora_parameter(name) == parameter.requires_grad
+        for name, parameter in model.named_parameters()
+    )
+
+
+def test_lora_clamps_adapter_rank_for_degenerate_projections() -> None:
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    model.reset_parameters()
+    apply_lora_to_stateless_transformer(
+        model,
+        LoRAConfig(rank=8, target_modules=(), target_value_head=True),
+    )
+
+    modules = dict(model.named_modules())
+    critic_out = modules["critic_head.out"]
+    critic_up = modules["critic_head.up"]
+    assert isinstance(critic_out, LoRALinear)
+    assert isinstance(critic_up, LoRALinear)
+    # The embed_dim -> 1 output clamps to min(rank=8, in=16, out=1) == 1, so the
+    # adapter is not over-parameterized but still adapts (and stays separate from
+    # the frozen base weight).
+    assert critic_out.rank == 1
+    assert tuple(critic_out.lora_down.shape) == (1, 16)
+    assert tuple(critic_out.lora_up.shape) == (1, 1)
+    # The embed_dim -> embed_dim hidden projection keeps the configured rank.
+    assert critic_up.rank == 8
+    # Scaling equals alpha_scale (default 1.0) regardless of how much the rank
+    # was clamped, so the clamped output adapter and the full-rank hidden adapter
+    # share the same update scale.
+    assert critic_out.scaling == pytest.approx(1.0)
+    assert critic_up.scaling == pytest.approx(1.0)
+    # The clamped adapter is still an exact no-op at init.
+    x = torch.randn(2, 3, 16)
+    assert torch.allclose(
+        critic_out(x), F.linear(x, critic_out.weight, critic_out.bias)
+    )
+
+
+def test_lora_linear_applies_scaled_low_rank_update() -> None:
+    torch.manual_seed(0)
+    base = torch.nn.Linear(8, 6)
+    wrapped = LoRALinear(base, rank=2, alpha_scale=2.0)
+    # scaling equals alpha_scale; the scale must reach the final update regardless
+    # of where it is folded internally.
+    assert wrapped.scaling == pytest.approx(2.0)
+    with torch.no_grad():
+        wrapped.lora_down.copy_(torch.randn(2, 8))
+        wrapped.lora_up.copy_(torch.randn(6, 2))
+
+    x = torch.randn(3, 8)
+    expected = F.linear(x, base.weight, base.bias) + wrapped.scaling * F.linear(
+        F.linear(x, wrapped.lora_down), wrapped.lora_up
+    )
+
+    assert torch.allclose(wrapped(x), expected, atol=1e-6)
+
+
+def test_fold_lora_adapters_preserves_output_and_removes_wrappers() -> None:
+    base = torch.nn.Linear(8, 6)
+    wrapped = LoRALinear(base, rank=2, alpha_scale=2.0)
+    model = torch.nn.Sequential(wrapped)
+    with torch.no_grad():
+        wrapped.lora_down.copy_(torch.randn(2, 8))
+        wrapped.lora_up.copy_(torch.randn(6, 2))
+    x = torch.randn(3, 8)
+    expected = model(x)
+
+    folded_count = fold_lora_adapters(model)
+
+    assert folded_count == 1
+    assert isinstance(model[0], torch.nn.Linear)
+    assert not isinstance(model[0], LoRALinear)
+    assert torch.allclose(model(x), expected, atol=1e-6)
+
+
+def test_reset_parameters_after_lora_raises() -> None:
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    model.reset_parameters()
+    apply_lora_to_stateless_transformer(
+        model,
+        LoRAConfig(rank=2, target_modules=("q",), target_block_count=1),
+    )
+
+    with pytest.raises(RuntimeError, match="before applying LoRA"):
+        model.reset_parameters()
+
+
+@pytest.mark.parametrize(
+    ("action_spec", "launch_mode"),
+    [
+        (ActionPureConfig(max_per_planet_launches=1), None),
+        (ActionDiscreteTargetsConfig(max_per_planet_launches=1), "binary"),
+        (ActionDiscreteTargetsConfig(max_per_planet_launches=1), "binary_after"),
+        (ActionDiscreteTargetsConfig(max_per_planet_launches=1), "target_token"),
+        (ActionDiscreteTargetBinsConfig(n_bins=5), None),
+    ],
+)
+def test_lora_head_wrapping_keeps_every_adapter_gradient_active(
+    action_spec: ActionConfig, launch_mode: str | None
+) -> None:
+    # Guards the DDP path: LoRA models train with find_unused_parameters=False,
+    # so every wrapped adapter (trunk plus value/policy heads) must receive a
+    # gradient on each backward or multi-GPU training would hang on an unused
+    # parameter. This exercises every actor variant.
+    actor_cfg: dict[str, Any] = {"action_spec": action_spec.action_spec}
+    if launch_mode is not None:
+        actor_cfg["launch_mode"] = launch_mode
+    if isinstance(action_spec, ActionDiscreteTargetBinsConfig):
+        actor_cfg["n_bins"] = action_spec.n_bins
+    obs_spec = EntityBasedConfig()
+    config = StatelessTransformerV1Config(
+        embed_dim=16,
+        depth=2,
+        n_heads=4,
+        actor=actor_cfg,
+        lora=LoRAConfig(
+            rank=4,
+            target_modules=("q", "up", "down"),
+            target_value_head=True,
+            target_policy_head=True,
+        ),
+    )
+    model = StatelessTransformerV1(config, obs_spec=obs_spec, action_spec=action_spec)
+    model.reset_parameters()
+    assert config.lora is not None
+    apply_lora_to_stateless_transformer(model, config.lora)
+
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    evaluation = model.evaluate_actions(obs, model.forward(obs).actions)
+    loss = (
+        evaluation.values.sum()
+        + evaluation.log_probs.per_player_entity.sum()
+        + evaluation.entropies.per_player_entity.sum()
+    )
+    model.zero_grad()
+    loss.backward()
+
+    trainable = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
+    # Only LoRA adapters are trainable; the base model stays fully frozen.
+    assert trainable
+    assert all(_is_lora_parameter(name) for name, _ in trainable)
+    # Every adapter receives a gradient, so DDP has no unused parameter to hang on.
+    assert all(parameter.grad is not None for _, parameter in trainable)
 
 
 def test_actor_pure_config_requires_ordered_kappa_bounds() -> None:

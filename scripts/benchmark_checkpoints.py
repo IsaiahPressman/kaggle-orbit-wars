@@ -10,8 +10,18 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from owl.checkpoint_quantization import dequantize_model_state_dict
 from owl.int8_emulation import apply_int8_emulation
-from owl.model import BaseModelAPI, ModelHiddenState, ModelOutput, create_model
+from owl.model import (
+    BaseModelAPI,
+    ModelHiddenState,
+    ModelOutput,
+    apply_lora_to_stateless_transformer,
+    create_model,
+    fold_lora_adapters,
+    load_model_state_dict_allowing_lora,
+    lora_config_for_model,
+)
 from owl.replay import ReplayRecorder
 from owl.rl import (
     ActionBundle,
@@ -316,7 +326,13 @@ def _load_checkpoint(
         obs_spec=config.env.obs_spec,
         action_spec=config.env.action_spec,
     ).to(device)
-    model.load_state_dict(checkpoint["model"])
+    lora_config = lora_config_for_model(config.model)
+    if lora_config is not None:
+        apply_lora_to_stateless_transformer(model, lora_config)
+    model_state = dequantize_model_state_dict(checkpoint["model"])
+    load_model_state_dict_allowing_lora(model, model_state)
+    if lora_config is not None:
+        fold_lora_adapters(model)
     if int8_emulation:
         apply_int8_emulation(model)
     model.eval()
