@@ -236,8 +236,74 @@ def test_agent_init_loads_quantized_checkpoint(
 
     assert set(agent.model.state_dict()) == set(model.state_dict())
     assert all(parameter.isfinite().all() for parameter in agent.model.parameters())
-    assert agent.fallback_model is not None
-    assert set(agent.fallback_model.state_dict()) == set(model.state_dict())
+    assert agent.fallback_checkpoint_config is not None
+    assert agent.fallback_model is None
+    assert agent._fallback_checkpoint_path == fallback_checkpoint_path
+
+
+def test_agent_loads_fallback_model_on_second_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    agent = Agent.__new__(Agent)
+    agent.config = AgentConfig(deterministic=True, fallback_min_overage_time=5.0)
+    agent.fallback_checkpoint_config = object()
+    agent.fallback_model = None
+    fallback_checkpoint_path = tmp_path / "fallback_checkpoint.pt"
+    agent._fallback_checkpoint_path = fallback_checkpoint_path
+    loaded: list[tuple[object, Path]] = []
+
+    class FallbackModel:
+        pass
+
+    fallback_model = FallbackModel()
+
+    def fake_load_model_from_config(
+        *,
+        checkpoint_config: object,
+        checkpoint_path: Path,
+    ) -> object:
+        loaded.append((checkpoint_config, checkpoint_path))
+        return fallback_model
+
+    monkeypatch.setattr(agent, "_load_model_from_config", fake_load_model_from_config)
+
+    agent._load_fallback_model_if_due(0)
+
+    assert agent.fallback_model is None
+    assert loaded == []
+    assert capsys.readouterr().out == ""
+
+    agent._load_fallback_model_if_due(1)
+
+    assert agent.fallback_model is fallback_model
+    assert loaded == [(agent.fallback_checkpoint_config, fallback_checkpoint_path)]
+    assert capsys.readouterr().out.startswith("fallback_init_s=")
+
+
+def test_agent_does_not_load_fallback_when_routing_is_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Agent.__new__(Agent)
+    agent.config = AgentConfig(deterministic=True, fallback_min_overage_time=None)
+    agent.fallback_checkpoint_config = object()
+    agent.fallback_model = None
+    agent._fallback_checkpoint_path = tmp_path / "fallback_checkpoint.pt"
+
+    def fail_load_model_from_config(
+        *,
+        checkpoint_config: object,  # noqa: ARG001
+        checkpoint_path: Path,  # noqa: ARG001
+    ) -> object:
+        raise AssertionError("disabled fallback should not load")
+
+    monkeypatch.setattr(agent, "_load_model_from_config", fail_load_model_from_config)
+
+    agent._load_fallback_model_if_due(1)
+
+    assert agent.fallback_model is None
 
 
 def test_agent_init_quantizes_linear_layers_for_int8_inference(

@@ -121,11 +121,16 @@ checked before packaging. The checked-in
 `python/owl/agent/agent_config.yaml` configures `inference_quantization: int8`,
 which converts loaded `nn.Linear` layers to PyTorch dynamic int8 CPU inference
 while keeping final actor/critic output heads in fp32; `null` disables
-serving-time quantization and uses fp32 inference. Set
+serving-time quantization and uses fp32 inference. Quantized slim checkpoints
+are stream-dequantized into the live model one tensor at a time, so agent
+startup does not hold a complete fp32 dequantized state dict in addition to the
+model. Set
 `fallback_min_overage_time` in
 `python/owl/agent/agent_config.yaml` to switch to the fallback model when
 remaining overage time drops below that threshold; `null` disables fallback
-routing even when the fallback model is packaged. The image build validates
+routing even when the fallback model is packaged. A packaged fallback config is
+validated during startup, but the fallback weights are loaded on the second
+observed turn instead of initial agent construction. The image build validates
 Kaggle-targeted Rust compilation directly before artifact generation runs with
 the mounted checkpoint directory.
 
