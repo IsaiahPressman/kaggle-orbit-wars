@@ -11,9 +11,10 @@ from owl.agent.checkpoint_quantization import (
     NF4_G128_LSQ,
     NF5_G128_LSQ_POLICY_LAST_FP8,
     dequantize_model_state_dict,
+    load_model_state_dict_streaming,
     quantize_model_state_dict,
 )
-from owl.model import StatelessTransformerV1Config
+from owl.model import RecurrentTransformerV1Config, StatelessTransformerV1Config
 from owl.rl import EntityBasedConfig, EnvConfig
 
 _FP4_E2M1FN_VALUES = torch.tensor(
@@ -400,6 +401,42 @@ def test_unquantized_model_state_still_loads_unchanged() -> None:
     assert dequantized["weight"] is values
 
 
+def test_streaming_loader_loads_quantized_state_into_module() -> None:
+    source = torch.nn.Sequential(
+        torch.nn.Linear(3, 2),
+        torch.nn.LayerNorm(2),
+    )
+    with torch.no_grad():
+        source[0].weight.copy_(torch.tensor([[0.25, 1.75, 5.0], [-1.0, 0.0, 3.0]]))
+        source[0].bias.copy_(torch.tensor([0.5, -0.25]))
+        source[1].weight.copy_(torch.tensor([1.5, -0.75]))
+        source[1].bias.copy_(torch.tensor([0.125, -0.375]))
+    quantized = quantize_model_state_dict(
+        source.state_dict(),
+        FP4_E2M1FN_X2_SCALED_BLOCK16,
+    )
+    expected = dequantize_model_state_dict(quantized)
+    target = torch.nn.Sequential(
+        torch.nn.Linear(3, 2),
+        torch.nn.LayerNorm(2),
+    )
+
+    load_model_state_dict_streaming(target, quantized)
+
+    for name, tensor in target.state_dict().items():
+        _assert_float32_bits_equal(tensor, expected[name])
+
+
+def test_streaming_loader_reports_missing_keys() -> None:
+    quantized = quantize_model_state_dict(
+        {"weight": torch.ones((1, 3), dtype=torch.float32)},
+        FP4_E2M1FN_X2_SCALED_BLOCK16,
+    )
+
+    with pytest.raises(RuntimeError, match="Missing key"):
+        load_model_state_dict_streaming(torch.nn.Linear(3, 1), quantized)
+
+
 def test_agent_init_loads_quantized_checkpoint_as_fp32(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -451,6 +488,96 @@ def test_agent_init_loads_quantized_checkpoint_as_fp32(
 
     assert agent.model.weight.dtype == torch.float32
     _assert_float32_bits_equal(agent.model.weight.detach(), expected_weight)
+
+
+def test_agent_init_creates_model_on_meta_before_streaming_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_weight = torch.tensor([[0.25, 1.75, 5.0]], dtype=torch.float32)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_config_path = tmp_path / "config.yaml"
+    checkpoint_config_path.write_text("unused\n")
+    torch.save({"model": {"weight": source_weight}}, checkpoint_path)
+    created_weight_device: torch.device | None = None
+
+    def fake_create_model(*_args: object, **_kwargs: object) -> torch.nn.Linear:
+        nonlocal created_weight_device
+        model = torch.nn.Linear(3, 1, bias=False)
+        created_weight_device = model.weight.device
+        return model
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(
+        AgentConfig,
+        "from_file",
+        classmethod(lambda _cls, _path: AgentConfig(deterministic=True)),
+    )
+    monkeypatch.setattr(
+        AgentCheckpointConfig,
+        "from_file",
+        classmethod(
+            lambda _cls, _path: AgentCheckpointConfig(
+                env=EnvConfig(obs_spec=EntityBasedConfig(max_entities=64)),
+                model=StatelessTransformerV1Config(),
+            )
+        ),
+    )
+    monkeypatch.setattr("owl.agent.agent.create_model", fake_create_model)
+
+    agent = Agent(
+        checkpoint_config_path=checkpoint_config_path,
+        checkpoint_path=checkpoint_path,
+    )
+
+    assert created_weight_device == torch.device("meta")
+    assert agent.model.weight.device == torch.device("cpu")
+    _assert_float32_bits_equal(agent.model.weight.detach(), source_weight)
+
+
+def test_agent_init_uses_normal_construction_for_recurrent_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_weight = torch.tensor([[0.25, 1.75, 5.0]], dtype=torch.float32)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_config_path = tmp_path / "config.yaml"
+    checkpoint_config_path.write_text("unused\n")
+    torch.save({"model": {"weight": source_weight}}, checkpoint_path)
+    created_weight_device: torch.device | None = None
+
+    def fake_create_model(*_args: object, **_kwargs: object) -> torch.nn.Linear:
+        nonlocal created_weight_device
+        model = torch.nn.Linear(3, 1, bias=False)
+        created_weight_device = model.weight.device
+        return model
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(
+        AgentConfig,
+        "from_file",
+        classmethod(lambda _cls, _path: AgentConfig(deterministic=True)),
+    )
+    monkeypatch.setattr(
+        AgentCheckpointConfig,
+        "from_file",
+        classmethod(
+            lambda _cls, _path: AgentCheckpointConfig(
+                env=EnvConfig(obs_spec=EntityBasedConfig(max_entities=64)),
+                model=RecurrentTransformerV1Config(),
+            )
+        ),
+    )
+    monkeypatch.setattr("owl.agent.agent.create_model", fake_create_model)
+
+    agent = Agent(
+        checkpoint_config_path=checkpoint_config_path,
+        checkpoint_path=checkpoint_path,
+    )
+
+    assert created_weight_device == torch.device("cpu")
+    assert agent.model.weight.device == torch.device("cpu")
+    _assert_float32_bits_equal(agent.model.weight.detach(), source_weight)
 
 
 def _expected_dequantized(values: torch.Tensor, quantization: str) -> torch.Tensor:
