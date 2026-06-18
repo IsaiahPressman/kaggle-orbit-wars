@@ -39,11 +39,12 @@ from owl.rl import (
     encode_python_observation_with_metrics,
 )
 
-from .checkpoint_quantization import dequantize_model_state_dict
+from .checkpoint_quantization import load_model_state_dict_streaming
 from .kaggle_observation import KaggleObservation
 
 AGENT_CONFIG_PATH = Path(__file__).with_name("agent_config.yaml")
 InferenceQuantization: TypeAlias = Literal["int8"]
+_FALLBACK_LOAD_MIN_STEP = 1
 _QUANTIZED_ENGINE_PREFERENCE = ("x86", "fbgemm", "qnnpack", "onednn")
 _OBS_REQUIRED_TENSOR_FIELDS = tuple(
     field
@@ -84,6 +85,8 @@ class AgentCheckpointConfig(BaseConfig):
 
 
 class Agent:
+    _fallback_checkpoint_path: Path | None = None
+
     def __init__(
         self,
         *,
@@ -114,13 +117,18 @@ class Agent:
 
         self.fallback_checkpoint_config: AgentCheckpointConfig | None = None
         self.fallback_model: BaseModelAPI | None = None
+        self._fallback_checkpoint_path = None
         if fallback_checkpoint_config_path is not None:
             assert fallback_checkpoint_path is not None
-            self.fallback_checkpoint_config, self.fallback_model = self._load_model(
+            self.fallback_checkpoint_config = self._load_checkpoint_config(
                 checkpoint_config_path=fallback_checkpoint_config_path,
-                checkpoint_path=fallback_checkpoint_path,
                 allow_recurrent=False,
             )
+            if not fallback_checkpoint_path.is_file():
+                raise ValueError(
+                    f"expected Kaggle checkpoint at {fallback_checkpoint_path}"
+                )
+            self._fallback_checkpoint_path = fallback_checkpoint_path
             if self.config.fallback_min_overage_time is None:
                 print(
                     "warning: fallback model is packaged but "
@@ -129,18 +137,14 @@ class Agent:
                 )
         print(f"init_s={perf_counter() - init_start:.2f} - ", end="", flush=True)
 
-    def _load_model(
+    def _load_checkpoint_config(
         self,
         *,
         checkpoint_config_path: Path,
-        checkpoint_path: Path,
         allow_recurrent: bool = True,
-    ) -> tuple[AgentCheckpointConfig, BaseModelAPI]:
+    ) -> AgentCheckpointConfig:
         if not checkpoint_config_path.is_file():
             raise ValueError(f"expected Kaggle config at {checkpoint_config_path}")
-
-        if not checkpoint_path.is_file():
-            raise ValueError(f"expected Kaggle checkpoint at {checkpoint_path}")
 
         checkpoint_config = AgentCheckpointConfig.from_file(checkpoint_config_path)
         checkpoint_config = apply_max_entities_override(
@@ -155,12 +159,47 @@ class Agent:
             checkpoint_config.model, RecurrentTransformerV1Config
         ):
             raise ValueError("fallback model cannot be recurrent")
+        return checkpoint_config
 
-        model = create_model(
-            checkpoint_config.model,
-            obs_spec=checkpoint_config.env.obs_spec,
-            action_spec=checkpoint_config.env.action_spec,
-        ).to(self.device)
+    def _load_model(
+        self,
+        *,
+        checkpoint_config_path: Path,
+        checkpoint_path: Path,
+        allow_recurrent: bool = True,
+    ) -> tuple[AgentCheckpointConfig, BaseModelAPI]:
+        checkpoint_config = self._load_checkpoint_config(
+            checkpoint_config_path=checkpoint_config_path,
+            allow_recurrent=allow_recurrent,
+        )
+        model = self._load_model_from_config(
+            checkpoint_config=checkpoint_config,
+            checkpoint_path=checkpoint_path,
+        )
+        return checkpoint_config, model
+
+    def _load_model_from_config(
+        self,
+        *,
+        checkpoint_config: AgentCheckpointConfig,
+        checkpoint_path: Path,
+    ) -> BaseModelAPI:
+        if not checkpoint_path.is_file():
+            raise ValueError(f"expected Kaggle checkpoint at {checkpoint_path}")
+        if isinstance(checkpoint_config.model, RecurrentTransformerV1Config):
+            model = create_model(
+                checkpoint_config.model,
+                obs_spec=checkpoint_config.env.obs_spec,
+                action_spec=checkpoint_config.env.action_spec,
+            ).to(self.device)
+        else:
+            with torch.device("meta"):
+                model = create_model(
+                    checkpoint_config.model,
+                    obs_spec=checkpoint_config.env.obs_spec,
+                    action_spec=checkpoint_config.env.action_spec,
+                )
+            model.to_empty(device=self.device)
         checkpoint = torch.load(
             checkpoint_path,
             map_location=self.device,
@@ -171,13 +210,34 @@ class Agent:
                 f"checkpoint must be a dictionary with key 'model': {checkpoint_path}"
             )
 
-        model.load_state_dict(dequantize_model_state_dict(checkpoint["model"]))
+        load_model_state_dict_streaming(model, checkpoint["model"])
         model = _quantize_model_for_inference(
             model,
             self.config.inference_quantization,
         )
         model.eval()
-        return checkpoint_config, model
+        return model
+
+    def _load_fallback_model_if_due(self, step: int) -> None:
+        if self.fallback_model is not None or self._fallback_checkpoint_path is None:
+            return
+        threshold = self.config.fallback_min_overage_time
+        if threshold is None:
+            return
+        if step < _FALLBACK_LOAD_MIN_STEP:
+            return
+
+        assert self.fallback_checkpoint_config is not None
+        fallback_init_start = perf_counter()
+        self.fallback_model = self._load_model_from_config(
+            checkpoint_config=self.fallback_checkpoint_config,
+            checkpoint_path=self._fallback_checkpoint_path,
+        )
+        print(
+            f"fallback_init_s={perf_counter() - fallback_init_start:.2f} - ",
+            end="",
+            flush=True,
+        )
 
     @torch.inference_mode()
     def act(self, observation: Any) -> list[list[float]]:
@@ -194,6 +254,8 @@ class Agent:
         kaggle_obs = KaggleObservation.model_validate(observation)
         if kaggle_obs.remaining_overage_time < self.config.min_overage_time:
             return []
+
+        self._load_fallback_model_if_due(kaggle_obs.step)
 
         model = self.model
         checkpoint_config = self.checkpoint_config

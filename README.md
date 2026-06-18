@@ -76,7 +76,8 @@ quantization format such as
 `nf3_nf4_structured_3p5`, and `nf3_g128_lsq` are also supported; unique prefixes
 such as `fp4` are accepted.
 The default `fp32` leaves checkpoint weights unchanged. The Kaggle agent
-dequantizes quantized slim checkpoints back to fp32 before loading the model.
+loads quantized slim checkpoints by dequantizing and copying one tensor at a
+time into the model, avoiding a full fp32 state-dict copy during startup.
 The checked-in `python/owl/agent/agent_config.yaml`
 sets `inference_quantization: int8`, which converts loaded `nn.Linear` layers
 to PyTorch dynamic int8 CPU inference while keeping final actor/critic output
@@ -84,7 +85,12 @@ heads in fp32; `null` disables serving-time quantization and uses fp32
 inference. Set
 `fallback_min_overage_time` in `python/owl/agent/agent_config.yaml` to switch to
 the fallback model when remaining overage time drops below that threshold;
-`null` disables fallback routing even if the fallback model is packaged.
+`null` disables fallback routing even if the fallback model is packaged. A
+packaged fallback config is validated during startup, but the fallback model
+weights are loaded on the second observed turn rather than during initial agent
+construction. The delayed load still happens even if remaining overage time has
+already fallen below the fallback threshold, preferring to risk that one timeout
+over giving up fallback for the rest of the game.
 
 The Kaggle observation encoder filters fleets smaller than the configured
 `min_fleet_size` while encoding observations. This intentionally trades a small

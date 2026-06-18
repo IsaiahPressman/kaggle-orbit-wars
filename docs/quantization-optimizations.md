@@ -3,9 +3,9 @@
 This is a standing log of checkpoint-compression experiments for Kaggle
 submission models. Checkpoint quantization is separate from the configured
 serving-time inference path: submission checkpoints are compressed to stay under
-the file-size limit, then dequantized back to fp32 before model loading. The
-default Kaggle agent config currently applies PyTorch dynamic int8 CPU inference
-after loading by setting `inference_quantization: int8`.
+the file-size limit, then stream-dequantized into the model tensor by tensor at
+agent startup. The default Kaggle agent config currently applies PyTorch dynamic
+int8 CPU inference after loading by setting `inference_quantization: int8`.
 
 ## Ground Rules
 
@@ -22,7 +22,9 @@ must be treated as experimental until the Kaggle agent can load it.
 Supported custom payloads are strict artifact schemas: packed fp4 and grouped
 normal-float NF3/NF4/NF5 data must have the exact byte length implied by the
 tensor shape and format, and extra trailing bytes are rejected as corrupt or
-stale checkpoint data.
+stale checkpoint data. The agent streaming loader avoids materializing the full
+dequantized fp32 state dict at once, and grouped normal-float decode uses
+in-place scale application to keep temporary memory lower during startup.
 
 ## Measurement Protocol
 

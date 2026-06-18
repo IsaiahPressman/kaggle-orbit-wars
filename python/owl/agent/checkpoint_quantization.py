@@ -263,6 +263,70 @@ def dequantize_model_state_dict(model_state: object) -> dict[str, torch.Tensor]:
     }
 
 
+def load_model_state_dict_streaming(
+    module: torch.nn.Module,
+    model_state: object,
+) -> None:
+    if not _is_quantized_model_state_dict(model_state):
+        if not isinstance(model_state, Mapping):
+            raise ValueError("checkpoint['model'] must be a mapping")
+        module.load_state_dict(_validate_unquantized_model_state(model_state))
+        return
+
+    version = model_state[_QUANTIZED_STATE_MARKER]
+    if version != _QUANTIZED_STATE_VERSION:
+        raise ValueError(f"unsupported quantized model state version: {version}")
+
+    tensors = model_state["tensors"]
+    if not isinstance(tensors, Mapping):
+        raise ValueError("quantized model state 'tensors' must be a mapping")
+
+    destination = module.state_dict()
+    loaded_keys: set[str] = set()
+    unexpected_keys: list[str] = []
+    error_messages: list[str] = []
+    with torch.no_grad():
+        for raw_name, payload in tensors.items():
+            name = _validate_state_key(raw_name)
+            target = destination.get(name)
+            if target is None:
+                unexpected_keys.append(name)
+                continue
+
+            loaded_keys.add(name)
+            tensor = _dequantize_state_tensor(name, payload)
+            if tensor.shape != target.shape:
+                error_messages.append(
+                    f"size mismatch for {name}: copying a param with shape "
+                    f"{tuple(tensor.shape)} from checkpoint, the shape in current "
+                    f"model is {tuple(target.shape)}."
+                )
+                del tensor
+                continue
+            target.copy_(tensor.to(device=target.device))
+            del tensor
+
+    missing_keys = sorted(set(destination) - loaded_keys)
+    if missing_keys:
+        error_messages.append(
+            "Missing key(s) in state_dict: "
+            + ", ".join(repr(key) for key in missing_keys)
+            + "."
+        )
+    if unexpected_keys:
+        error_messages.append(
+            "Unexpected key(s) in state_dict: "
+            + ", ".join(repr(key) for key in sorted(unexpected_keys))
+            + "."
+        )
+    if error_messages:
+        module_name = module.__class__.__name__
+        joined = "\n\t".join(error_messages)
+        raise RuntimeError(
+            f"Error(s) in loading state_dict for {module_name}:\n\t{joined}"
+        )
+
+
 def _quantize_state_tensor(
     name: str,
     tensor: torch.Tensor,
@@ -642,10 +706,11 @@ def _dequantize_normalfloat_g128_lsq(
         )
 
     values = _normalfloat_values_for_bits(bits).to(device=codes.device)
-    group_scale = flat_scale.to(device=codes.device).repeat_interleave(
-        _NORMALFLOAT_GROUP_SIZE
+    dequantized = values[codes.long()].reshape(
+        rows * group_count,
+        _NORMALFLOAT_GROUP_SIZE,
     )
-    dequantized = values[codes.long()] * group_scale
+    dequantized *= flat_scale.to(device=codes.device).reshape(-1, 1)
     return dequantized.reshape(rows, group_count * _NORMALFLOAT_GROUP_SIZE)[
         :, :cols
     ].reshape(shape)
