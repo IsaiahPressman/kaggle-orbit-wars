@@ -15,7 +15,10 @@ from owl.model import (
     ModelConfig,
     ModelHiddenState,
     RecurrentTransformerV1Config,
+    apply_lora_to_stateless_transformer,
     create_model,
+    fold_lora_adapters,
+    lora_config_for_model,
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
@@ -44,6 +47,7 @@ from .kaggle_observation import KaggleObservation
 
 AGENT_CONFIG_PATH = Path(__file__).with_name("agent_config.yaml")
 InferenceQuantization: TypeAlias = Literal["int8"]
+LoRAMode: TypeAlias = Literal["always", "2p", "4p"]
 _FALLBACK_LOAD_MIN_STEP = 1
 _QUANTIZED_ENGINE_PREFERENCE = ("x86", "fbgemm", "qnnpack", "onednn")
 _OBS_REQUIRED_TENSOR_FIELDS = tuple(
@@ -72,6 +76,7 @@ class AgentConfig(BaseConfig):
     max_entities_override: int | None = None
     targeting_mode_override: TargetingMode | None = None
     inference_quantization: InferenceQuantization | None = None
+    lora_mode: LoRAMode = "always"
     min_fleet_size: Literal["match"] | Annotated[int, Field(ge=1)] = "match"
     min_overage_time: float = Field(default=0.0, ge=0.0, le=60.0)
     fallback_min_overage_time: float | None = Field(default=None, ge=0.0, le=60.0)
@@ -94,6 +99,7 @@ class Agent:
         checkpoint_path: Path,
         fallback_checkpoint_config_path: Path | None = None,
         fallback_checkpoint_path: Path | None = None,
+        game_player_count: int | None = None,
     ) -> None:
         init_start = perf_counter()
         if (fallback_checkpoint_config_path is None) != (
@@ -105,6 +111,7 @@ class Agent:
             )
 
         self.config = AgentConfig.from_file(AGENT_CONFIG_PATH)
+        self._game_player_count = game_player_count
         self._last_turn_value = float("nan")
         self._peak_total_ms = 0
         self._peak_entities = 0
@@ -200,6 +207,16 @@ class Agent:
                     action_spec=checkpoint_config.env.action_spec,
                 )
             model.to_empty(device=self.device)
+        lora_config = lora_config_for_model(checkpoint_config.model)
+        use_lora = _should_use_lora_adapters(
+            checkpoint_config=checkpoint_config,
+            agent_config=self.config,
+            game_player_count=self._game_player_count,
+        )
+        if use_lora:
+            if lora_config is None:
+                raise RuntimeError("LoRA mode selected without a LoRA config")
+            apply_lora_to_stateless_transformer(model, lora_config)
         checkpoint = torch.load(
             checkpoint_path,
             map_location=self.device,
@@ -210,7 +227,14 @@ class Agent:
                 f"checkpoint must be a dictionary with key 'model': {checkpoint_path}"
             )
 
-        load_model_state_dict_streaming(model, checkpoint["model"])
+        load_model_state_dict_streaming(
+            model,
+            checkpoint["model"],
+            allow_missing_lora_adapters=use_lora,
+            ignore_unexpected_lora_adapters=lora_config is not None and not use_lora,
+        )
+        if use_lora:
+            fold_lora_adapters(model)
         model = _quantize_model_for_inference(
             model,
             self.config.inference_quantization,
@@ -518,7 +542,29 @@ def _resolve_min_fleet_size(config: AgentConfig, action_spec: ActionConfig) -> i
     return config.min_fleet_size
 
 
-def _observation_player_count(observation: KaggleObservation) -> int:
+def _should_use_lora_adapters(
+    *,
+    checkpoint_config: AgentCheckpointConfig,
+    agent_config: AgentConfig,
+    game_player_count: int | None,
+) -> bool:
+    if lora_config_for_model(checkpoint_config.model) is None:
+        return False
+    match agent_config.lora_mode:
+        case "always":
+            return True
+        case "2p" | "4p":
+            if game_player_count is None:
+                raise ValueError(
+                    f"lora_mode={agent_config.lora_mode!r} requires game_player_count"
+                )
+            expected_player_count = 2 if agent_config.lora_mode == "2p" else 4
+            return game_player_count == expected_player_count
+        case _:
+            assert_never(agent_config.lora_mode)
+
+
+def observation_player_count(observation: KaggleObservation) -> int:
     player_indexes = [observation.player]
     player_indexes.extend(
         owner
@@ -530,6 +576,10 @@ def _observation_player_count(observation: KaggleObservation) -> int:
         if owner >= 0
     )
     return 4 if max(player_indexes) >= 2 else 2
+
+
+def _observation_player_count(observation: KaggleObservation) -> int:
+    return observation_player_count(observation)
 
 
 def _model_actions_to_cpu(actions: ActionBundle) -> ActionBundle:

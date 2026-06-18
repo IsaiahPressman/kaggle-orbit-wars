@@ -16,6 +16,7 @@ from owl.model.factory import create_model
 from owl.model.lora import (
     LoRAApplication,
     apply_lora_to_stateless_transformer,
+    fold_lora_adapters,
     load_model_state_dict_allowing_lora,
     lora_config_for_model,
     lora_parameters,
@@ -75,6 +76,7 @@ __all__ = [
     "apply_lora_to_stateless_transformer",
     "concat_teacher_distillation_targets",
     "create_model",
+    "fold_lora_adapters",
     "index_teacher_distillation_targets",
     "load_model_state_dict_allowing_lora",
     "lora_config_for_model",

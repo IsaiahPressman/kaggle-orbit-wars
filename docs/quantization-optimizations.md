@@ -30,6 +30,11 @@ least-squares scales to the valid group's max absolute value. This keeps
 quantized-then-dequantized tensors exact fixed points of the same quantizer, so
 a later packaging pass serializes the same packed codes and fp16 scales for
 unchanged weights.
+LoRA checkpoints may store adapter tensors with a separate quantization format
+from the frozen base model. If a base quantization format is requested without an
+adapter format, adapters default to bf16. Runtime inference loaders dequantize
+both groups, fold LoRA updates into base linear weights, then apply any int8
+inference emulation/quantization.
 
 ## Measurement Protocol
 

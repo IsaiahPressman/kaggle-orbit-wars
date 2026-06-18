@@ -17,6 +17,7 @@ from owl.model import (
     StatelessTransformerV1,
     StatelessTransformerV1Config,
     apply_lora_to_stateless_transformer,
+    fold_lora_adapters,
     load_model_state_dict_allowing_lora,
 )
 from owl.model.actor.discrete_targets import (
@@ -582,6 +583,24 @@ def test_lora_linear_applies_scaled_low_rank_update() -> None:
     )
 
     assert torch.allclose(wrapped(x), expected, atol=1e-6)
+
+
+def test_fold_lora_adapters_preserves_output_and_removes_wrappers() -> None:
+    base = torch.nn.Linear(8, 6)
+    wrapped = LoRALinear(base, rank=2, alpha=4.0)
+    model = torch.nn.Sequential(wrapped)
+    with torch.no_grad():
+        wrapped.lora_down.copy_(torch.randn(2, 8))
+        wrapped.lora_up.copy_(torch.randn(6, 2))
+    x = torch.randn(3, 8)
+    expected = model(x)
+
+    folded_count = fold_lora_adapters(model)
+
+    assert folded_count == 1
+    assert isinstance(model[0], torch.nn.Linear)
+    assert not isinstance(model[0], LoRALinear)
+    assert torch.allclose(model(x), expected, atol=1e-6)
 
 
 def test_reset_parameters_after_lora_raises() -> None:

@@ -24,6 +24,10 @@ Options:
                      nf5_g128_lsq_policy_last_fp8, nf4_g128_lsq,
                      nf3_nf4_structured_3p5, or nf3_g128_lsq.
                      Unique prefixes such as fp4 are accepted.
+  --lora-quantization FORMAT
+                     Optional LoRA adapter quantization format: fp32, fp16,
+                     bf16, or any --quantization format. Defaults to bf16 when
+                     --quantization is set and the checkpoint has LoRA tensors.
   -h, --help         Show this help.
 EOF
 }
@@ -33,6 +37,7 @@ fallback_checkpoint_path=""
 output_path="submission.tar.gz"
 output_path_set=0
 quantization=""
+lora_quantization=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -63,6 +68,14 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       quantization="$2"
+      shift 2
+      ;;
+    --lora-quantization)
+      if [[ $# -lt 2 ]]; then
+        echo "$1 requires a format argument" >&2
+        exit 2
+      fi
+      lora_quantization="$2"
       shift 2
       ;;
     -*)
@@ -193,6 +206,9 @@ copy_model_bundle() {
   extract_args=(scripts/extract_model_weights.py "$source_checkpoint_path" "$slim_checkpoint_path")
   if [[ -n "$quantization" ]]; then
     extract_args+=(--quantization "$quantization")
+  fi
+  if [[ -n "$lora_quantization" ]]; then
+    extract_args+=(--lora-quantization "$lora_quantization")
   fi
   "${uv_run[@]}" python "${extract_args[@]}"
   cp "$slim_checkpoint_path" "$bundle_dir/checkpoint.pt"

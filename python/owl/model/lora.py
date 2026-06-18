@@ -77,6 +77,10 @@ def lora_parameters(model: nn.Module) -> tuple[nn.Parameter, ...]:
     )
 
 
+def fold_lora_adapters(model: nn.Module) -> int:
+    return _fold_lora_children(model)
+
+
 def roundtrip_lora_base_quantization(
     model: nn.Module,
     config: LoRAConfig,
@@ -244,6 +248,43 @@ def _wrap_subtree_linears(root: nn.Module, config: LoRAConfig) -> int:
         else:
             count += _wrap_subtree_linears(child, config)
     return count
+
+
+def _fold_lora_children(root: nn.Module) -> int:
+    count = 0
+    for name, child in list(root.named_children()):
+        if isinstance(child, LoRALinear):
+            _set_folded_linear(root, name, child)
+            count += 1
+        else:
+            count += _fold_lora_children(child)
+    return count
+
+
+def _set_folded_linear(parent: nn.Module, attribute: str, module: LoRALinear) -> None:
+    folded = nn.Linear(
+        module.in_features,
+        module.out_features,
+        bias=module.bias is not None,
+        device=module.weight.device,
+        dtype=module.weight.dtype,
+    )
+    with torch.no_grad():
+        update = torch.matmul(
+            module.lora_up.to(dtype=torch.float32),
+            module.lora_down.to(dtype=torch.float32),
+        )
+        folded.weight.copy_(
+            module.weight
+            + (update * module.scaling).to(
+                device=module.weight.device,
+                dtype=module.weight.dtype,
+            )
+        )
+        if module.bias is not None:
+            assert folded.bias is not None
+            folded.bias.copy_(module.bias)
+    setattr(parent, attribute, folded)
 
 
 def _set_lora_linear(

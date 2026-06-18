@@ -12,6 +12,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 from owl.int8_emulation import Int8EmulatedLinear
+from owl.model import (
+    LoRAConfig,
+    LoRALinear,
+    StatelessTransformerV1,
+    StatelessTransformerV1Config,
+    apply_lora_to_stateless_transformer,
+    create_model,
+)
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     ActionBundle,
@@ -381,6 +389,67 @@ def test_load_checkpoint_int8_emulation_replaces_non_output_linears(
     assert loaded.model.training is False
     assert isinstance(model.body, Int8EmulatedLinear)
     assert isinstance(model.output, torch.nn.Linear)
+
+
+def test_load_checkpoint_folds_lora_before_inference(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    model_config = StatelessTransformerV1Config(
+        embed_dim=8,
+        depth=1,
+        n_heads=1,
+        lora=LoRAConfig(rank=1, target_modules=("q",), target_block_count=1),
+    )
+    env_config = SimpleNamespace(
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(),
+    )
+    source = create_model(
+        model_config,
+        obs_spec=env_config.obs_spec,
+        action_spec=env_config.action_spec,
+    )
+    assert isinstance(source, StatelessTransformerV1)
+    source.reset_parameters()
+    assert model_config.lora is not None
+    apply_lora_to_stateless_transformer(source, model_config.lora)
+    assert isinstance(source.blocks[0].attn.q, LoRALinear)
+    with torch.no_grad():
+        source.blocks[0].attn.q.lora_down.fill_(0.25)
+        source.blocks[0].attn.q.lora_up.fill_(0.5)
+    expected_q_weight = (
+        source.blocks[0].attn.q.weight
+        + (source.blocks[0].attn.q.lora_up @ source.blocks[0].attn.q.lora_down)
+        * source.blocks[0].attn.q.scaling
+    )
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("unused\n")
+    torch.save({"model": source.state_dict(), "env_steps": 12}, checkpoint_path)
+    config = SimpleNamespace(
+        model=model_config,
+        env=env_config,
+        rl=Namespace(dtype="float32"),
+    )
+    monkeypatch.setattr(
+        benchmark_checkpoints.FullConfig,
+        "from_file",
+        classmethod(lambda _cls, _path: config),
+    )
+
+    loaded = benchmark_checkpoints._load_checkpoint(
+        checkpoint_path,
+        device=torch.device("cpu"),
+    )
+
+    assert isinstance(loaded.model, StatelessTransformerV1)
+    assert isinstance(loaded.model.blocks[0].attn.q, torch.nn.Linear)
+    assert not isinstance(loaded.model.blocks[0].attn.q, LoRALinear)
+    assert not any(
+        name.endswith((".lora_down", ".lora_up")) for name in loaded.model.state_dict()
+    )
+    assert torch.allclose(loaded.model.blocks[0].attn.q.weight, expected_q_weight)
 
 
 def test_actions_for_checkpoints_uses_checkpoint_autocast_context(

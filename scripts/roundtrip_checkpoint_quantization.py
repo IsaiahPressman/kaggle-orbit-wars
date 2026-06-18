@@ -4,24 +4,31 @@ from __future__ import annotations
 import argparse
 import copy
 from collections.abc import Mapping, MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import torch
 from owl.checkpoint_quantization import (
+    BF16,
+    FP16,
+    FP32,
     SUPPORTED_QUANTIZATION_FORMATS,
+    SUPPORTED_TENSOR_QUANTIZATION_FORMATS,
     QuantizationFormat,
+    TensorQuantizationFormat,
     dequantize_model_state_dict,
+    is_lora_adapter_state_key,
     quantize_model_state_dict,
 )
 from owl.utils import ResolvedFormat, parse_format_prefix_arg
 
-TARGET_DTYPES = {
-    "fp16": torch.float16,
-    "bf16": torch.bfloat16,
+TARGET_DTYPES: dict[str, torch.dtype] = {
+    FP16: torch.float16,
+    BF16: torch.bfloat16,
 }
 TARGET_FORMATS = tuple(sorted((*TARGET_DTYPES, *SUPPORTED_QUANTIZATION_FORMATS)))
+LORA_TARGET_FORMATS = tuple(sorted(SUPPORTED_TENSOR_QUANTIZATION_FORMATS))
 
 
 @dataclass(frozen=True)
@@ -36,6 +43,7 @@ class RoundTripResult:
     stats: RoundTripStats
     pre_quantization_model_size_bytes: int
     post_quantization_model_size_bytes: int
+    output_path: Path
 
 
 @dataclass(frozen=True)
@@ -48,22 +56,29 @@ class ModelRoundTripResult:
 def roundtrip_checkpoint_model_dtype(
     checkpoint_path: Path,
     target_format: str,
+    lora_target_format: str | None = None,
 ) -> RoundTripStats:
-    return _roundtrip_checkpoint_model_dtype(checkpoint_path, target_format).stats
+    return _roundtrip_checkpoint_model_dtype(
+        checkpoint_path,
+        target_format,
+        lora_target_format=lora_target_format,
+    ).stats
 
 
 def _roundtrip_checkpoint_model_dtype(
     checkpoint_path: Path,
     target_format: str,
+    *,
+    lora_target_format: str | None = None,
 ) -> RoundTripResult:
     checkpoint_path = checkpoint_path.resolve()
     target_format = _target_format(target_format)
-    output_path = _roundtrip_output_path(checkpoint_path, target_format)
+    lora_target_format = (
+        None if lora_target_format is None else _lora_target_format(lora_target_format)
+    )
 
     if not checkpoint_path.is_file():
         raise ValueError(f"checkpoint does not exist: {checkpoint_path}")
-    if output_path.exists():
-        raise ValueError(f"output path already exists: {output_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, MutableMapping):
@@ -77,10 +92,20 @@ def _roundtrip_checkpoint_model_dtype(
             f"checkpoint['model'] must be a mutable mapping: {checkpoint_path}"
         )
 
+    has_lora_adapters = any(is_lora_adapter_state_key(name) for name in model_state)
+    output_path = _roundtrip_output_path(
+        checkpoint_path,
+        target_format,
+        lora_target_format=lora_target_format if has_lora_adapters else None,
+    )
+    if output_path.exists():
+        raise ValueError(f"output path already exists: {output_path}")
+
     pre_quantization_model_size_bytes = _model_state_storage_bytes(model_state)
     roundtrip_result = _roundtrip_model_state(
         model_state,
         target_format,
+        lora_target_format=lora_target_format,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     converted_checkpoint = copy.copy(checkpoint)
@@ -92,28 +117,154 @@ def _roundtrip_checkpoint_model_dtype(
         post_quantization_model_size_bytes=(
             roundtrip_result.post_quantization_model_size_bytes
         ),
+        output_path=output_path,
     )
 
 
-def _roundtrip_output_path(checkpoint_path: Path, target_format: str) -> Path:
+def _roundtrip_output_path(
+    checkpoint_path: Path,
+    target_format: str,
+    *,
+    lora_target_format: str | None = None,
+) -> Path:
+    lora_suffix = "" if lora_target_format is None else f"_lora_{lora_target_format}"
     return checkpoint_path.with_name(
-        f"{checkpoint_path.stem}_{target_format}_roundtrip{checkpoint_path.suffix}"
+        f"{checkpoint_path.stem}_{target_format}{lora_suffix}_roundtrip"
+        f"{checkpoint_path.suffix}"
     )
 
 
 def _roundtrip_model_state(
     model_state: MutableMapping[str, Any],
     target_format: str,
+    *,
+    lora_target_format: str | None,
 ) -> ModelRoundTripResult:
+    effective_lora_target = _effective_lora_roundtrip_target(
+        model_state,
+        target_format=target_format,
+        lora_target_format=lora_target_format,
+    )
+    converted_model_state = copy.copy(model_state)
+    total_stats = _MutableRoundTripStats()
+    post_quantization_model_size_bytes = 0
+
+    for selected_target, selected_state in _target_state_groups(
+        model_state,
+        target_format=target_format,
+        lora_target_format=effective_lora_target,
+    ):
+        result = _roundtrip_selected_model_state(selected_state, selected_target)
+        total_stats.merge(result.stats)
+        post_quantization_model_size_bytes += result.post_quantization_model_size_bytes
+        converted_model_state.update(result.model_state)
+
+    return ModelRoundTripResult(
+        model_state=converted_model_state,
+        stats=total_stats.freeze(),
+        post_quantization_model_size_bytes=post_quantization_model_size_bytes,
+    )
+
+
+@dataclass
+class _MutableRoundTripStats:
+    converted_tensors: int = 0
+    unchanged_tensors: int = 0
+    original_dtypes: set[str] = field(default_factory=set)
+
+    def merge(self, stats: RoundTripStats) -> None:
+        self.converted_tensors += stats.converted_tensors
+        self.unchanged_tensors += stats.unchanged_tensors
+        self.original_dtypes.update(stats.original_dtypes)
+
+    def freeze(self) -> RoundTripStats:
+        return RoundTripStats(
+            converted_tensors=self.converted_tensors,
+            unchanged_tensors=self.unchanged_tensors,
+            original_dtypes=tuple(sorted(self.original_dtypes)),
+        )
+
+
+def _effective_lora_roundtrip_target(
+    model_state: Mapping[str, Any],
+    *,
+    target_format: str,
+    lora_target_format: str | None,
+) -> str | None:
+    if not any(is_lora_adapter_state_key(name) for name in model_state):
+        return None
+    if lora_target_format is not None:
+        return lora_target_format
+    if target_format != FP32:
+        return BF16
+    return None
+
+
+def _target_state_groups(
+    model_state: MutableMapping[str, Any],
+    *,
+    target_format: str,
+    lora_target_format: str | None,
+) -> tuple[tuple[str, MutableMapping[str, Any]], ...]:
+    base_state: dict[str, Any] = {}
+    lora_state: dict[str, Any] = {}
+    for name, value in model_state.items():
+        if is_lora_adapter_state_key(name):
+            lora_state[name] = value
+        else:
+            base_state[name] = value
+
+    groups: list[tuple[str, MutableMapping[str, Any]]] = []
+    if base_state:
+        groups.append((target_format, base_state))
+    if lora_state:
+        groups.append(
+            (
+                FP32 if lora_target_format is None else lora_target_format,
+                lora_state,
+            )
+        )
+    return tuple(groups)
+
+
+def _roundtrip_selected_model_state(
+    model_state: MutableMapping[str, Any],
+    target_format: str,
+) -> ModelRoundTripResult:
+    if target_format == FP32:
+        return _roundtrip_model_state_fp32(model_state)
     if target_format in TARGET_DTYPES:
         return _roundtrip_model_state_dtype(model_state, TARGET_DTYPES[target_format])
     if target_format in SUPPORTED_QUANTIZATION_FORMATS:
+        quantization = _quantization_format(target_format)
         return _roundtrip_model_state_quantized(
             model_state,
-            _quantization_format(target_format),
+            quantization,
+            lora_quantization=quantization,
         )
-    allowed = ", ".join(TARGET_FORMATS)
+    allowed = ", ".join(LORA_TARGET_FORMATS)
     raise ValueError(f"target format must be one of: {allowed}")
+
+
+def _roundtrip_model_state_fp32(
+    model_state: MutableMapping[str, Any],
+) -> ModelRoundTripResult:
+    unchanged_tensors = 0
+    post_quantization_model_size_bytes = 0
+    for name, value in model_state.items():
+        if not isinstance(value, torch.Tensor):
+            raise ValueError(f"checkpoint['model'][{name!r}] must be a tensor")
+        post_quantization_model_size_bytes += _tensor_storage_bytes(value)
+        unchanged_tensors += 1
+    return ModelRoundTripResult(
+        model_state=copy.copy(model_state),
+        stats=RoundTripStats(
+            converted_tensors=0,
+            unchanged_tensors=unchanged_tensors,
+            original_dtypes=(),
+        ),
+        post_quantization_model_size_bytes=post_quantization_model_size_bytes,
+    )
 
 
 def _roundtrip_model_state_dtype(
@@ -155,6 +306,8 @@ def _roundtrip_model_state_dtype(
 def _roundtrip_model_state_quantized(
     model_state: MutableMapping[str, Any],
     quantization: QuantizationFormat,
+    *,
+    lora_quantization: TensorQuantizationFormat | None = None,
 ) -> ModelRoundTripResult:
     tensor_state: dict[str, torch.Tensor] = {}
     original_dtypes: dict[str, torch.dtype] = {}
@@ -173,7 +326,11 @@ def _roundtrip_model_state_quantized(
         else:
             unchanged_tensors += 1
 
-    quantized_state = quantize_model_state_dict(tensor_state, quantization)
+    quantized_state = quantize_model_state_dict(
+        tensor_state,
+        quantization,
+        lora_quantization=lora_quantization,
+    )
     post_quantization_model_size_bytes = _tensor_payload_storage_bytes(quantized_state)
     dequantized_state = dequantize_model_state_dict(quantized_state)
     converted_model_state = copy.copy(model_state)
@@ -224,11 +381,26 @@ def _target_format(target_format: str) -> str:
     raise ValueError(f"target format must be one of: {allowed}")
 
 
+def _lora_target_format(target_format: str) -> str:
+    if target_format in LORA_TARGET_FORMATS:
+        return target_format
+    allowed = ", ".join(LORA_TARGET_FORMATS)
+    raise ValueError(f"LoRA target format must be one of: {allowed}")
+
+
 def _parse_target_format_arg(target_format: str) -> ResolvedFormat:
     return parse_format_prefix_arg(
         target_format,
         allowed_formats=TARGET_FORMATS,
         label="target format",
+    )
+
+
+def _parse_lora_target_format_arg(target_format: str) -> ResolvedFormat:
+    return parse_format_prefix_arg(
+        target_format,
+        allowed_formats=LORA_TARGET_FORMATS,
+        label="LoRA target format",
     )
 
 
@@ -256,25 +428,43 @@ def _parse_args() -> argparse.Namespace:
             "accepted when unambiguous."
         ),
     )
+    parser.add_argument(
+        "--lora-target-format",
+        type=_parse_lora_target_format_arg,
+        default=None,
+        help=(
+            "Optional LoRA adapter roundtrip format. Choices: "
+            f"{', '.join(LORA_TARGET_FORMATS)}. Unique prefixes are accepted "
+            "when unambiguous. Defaults to bf16 when target_format is not fp32."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
     resolved_target = args.target_format
+    resolved_lora_target = args.lora_target_format
     if resolved_target.inferred_from is not None:
         print(
             f"Inferred target format {resolved_target.value!r} "
             f"from prefix {resolved_target.inferred_from!r}"
         )
+    if (
+        resolved_lora_target is not None
+        and resolved_lora_target.inferred_from is not None
+    ):
+        print(
+            f"Inferred LoRA target format {resolved_lora_target.value!r} "
+            f"from prefix {resolved_lora_target.inferred_from!r}"
+        )
 
     result = _roundtrip_checkpoint_model_dtype(
         checkpoint_path=args.checkpoint_path,
         target_format=resolved_target.value,
-    )
-    output_path = _roundtrip_output_path(
-        args.checkpoint_path.resolve(),
-        resolved_target.value,
+        lora_target_format=(
+            None if resolved_lora_target is None else resolved_lora_target.value
+        ),
     )
     stats = result.stats
     print(
@@ -289,7 +479,7 @@ def main() -> None:
         f"{_format_size_mib(result.post_quantization_model_size_bytes)} "
         "after quantization"
     )
-    print(f"Saved round-tripped checkpoint to {output_path}")
+    print(f"Saved round-tripped checkpoint to {result.output_path}")
 
 
 def _format_original_dtypes(original_dtypes: tuple[str, ...]) -> str:

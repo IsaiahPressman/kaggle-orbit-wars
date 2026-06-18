@@ -294,6 +294,16 @@ initialized base tensors, and fresh checkpoint-initialized launches roundtrip
 after base checkpoint weights are loaded. Existing run resumes load their saved
 checkpoint state without an additional quantization pass.
 
+Checkpoint packaging keeps LoRA adapters as separate tensors. Quantized payloads
+can use one format for base-model tensors and another for adapter tensors; when
+base quantization is requested without an explicit adapter format, adapters
+default to bf16. Inference consumers fold adapters into ordinary `nn.Linear`
+weights after checkpoint dequantization and before int8 emulation/quantization.
+The Kaggle agent controls whether packaged adapters are used with
+`AgentConfig.lora_mode`: `always` folds them for every game, `2p` only for
+two-player games, and `4p` only for four-player games. If a checkpoint has no
+LoRA adapters, this setting is ignored.
+
 ## Recurrent Transformer V1
 
 `RecurrentTransformerV1` reuses the stateless input stems, token layout,

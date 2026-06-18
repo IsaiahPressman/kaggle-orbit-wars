@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 import torch
 from owl.checkpoint_quantization import (
+    BF16,
     FP4_E2M1FN_X2_SCALED_BLOCK16,
     FP8_E4M3FN,
+    FP16,
     NF3_G128_LSQ,
     NF3_NF4_STRUCTURED_3P5,
     NF4_G128_LSQ,
@@ -122,6 +124,58 @@ def test_extract_model_weights_can_quantize_model_state_to_fp4(tmp_path: Path) -
     assert dequantized["linear.weight"].shape == model_state["linear.weight"].shape
 
 
+def test_extract_model_weights_defaults_lora_quantization_to_bf16(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path = tmp_path / "checkpoint_last_best.pt"
+    output_path = tmp_path / "slim.pt"
+    model_state = {
+        "linear.weight": torch.tensor([[0.375, 1.125, 2.5]]),
+        "linear.lora_down": torch.tensor([[0.1, -0.2, 0.3]]),
+    }
+    torch.save({"model": model_state}, checkpoint_path)
+
+    extract_model_weights.extract_model_weights(
+        checkpoint_path,
+        output_path,
+        quantization=FP4_E2M1FN_X2_SCALED_BLOCK16,
+    )
+
+    slim_checkpoint = torch.load(output_path, map_location="cpu", weights_only=True)
+    assert slim_checkpoint["model"]["format"] == FP4_E2M1FN_X2_SCALED_BLOCK16
+    assert slim_checkpoint["model"]["lora_format"] == BF16
+    assert slim_checkpoint["model"]["tensors"]["linear.lora_down"]["format"] == BF16
+    dequantized = dequantize_model_state_dict(slim_checkpoint["model"])
+    expected_lora = model_state["linear.lora_down"].to(torch.bfloat16).to(torch.float32)
+    assert torch.equal(dequantized["linear.lora_down"], expected_lora)
+
+
+def test_extract_model_weights_accepts_explicit_lora_quantization(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path = tmp_path / "checkpoint_last_best.pt"
+    output_path = tmp_path / "slim.pt"
+    model_state = {
+        "linear.weight": torch.tensor([[0.375, 1.125, 2.5]]),
+        "linear.lora_down": torch.tensor([[0.1, -0.2, 0.3]]),
+    }
+    torch.save({"model": model_state}, checkpoint_path)
+
+    extract_model_weights.extract_model_weights(
+        checkpoint_path,
+        output_path,
+        quantization=FP4_E2M1FN_X2_SCALED_BLOCK16,
+        lora_quantization=FP16,
+    )
+
+    slim_checkpoint = torch.load(output_path, map_location="cpu", weights_only=True)
+    assert slim_checkpoint["model"]["lora_format"] == FP16
+    assert slim_checkpoint["model"]["tensors"]["linear.lora_down"]["format"] == FP16
+    dequantized = dequantize_model_state_dict(slim_checkpoint["model"])
+    expected_lora = model_state["linear.lora_down"].to(torch.float16).to(torch.float32)
+    assert torch.equal(dequantized["linear.lora_down"], expected_lora)
+
+
 @pytest.mark.parametrize(
     "quantization",
     [
@@ -224,7 +278,10 @@ def test_main_help_lists_quantization_choices(
     assert exc_info.value.code == 0
     captured = capsys.readouterr()
     assert "--quantization" in captured.out
+    assert "--lora-quantization" in captured.out
     assert extract_model_weights.FP32 in captured.out
+    assert BF16 in captured.out
+    assert FP16 in captured.out
     assert FP8_E4M3FN in captured.out
     assert FP4_E2M1FN_X2_SCALED_BLOCK16 in captured.out
     assert NF5_G128_LSQ_POLICY_LAST_FP8 in captured.out

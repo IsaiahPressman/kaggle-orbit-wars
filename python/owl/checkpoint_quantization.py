@@ -1,31 +1,42 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal, TypeGuard
+from typing import Any, Literal, TypeGuard
 
 import torch
 
 from owl.quantization_formats import (
+    BF16,
     FP4_E2M1FN_X2_SCALED_BLOCK16,
     FP8_E4M3FN,
+    FP16,
+    FP32,
     NF3_G128_LSQ,
     NF3_NF4_STRUCTURED_3P5,
     NF4_G128_LSQ,
     NF5_G128_LSQ_POLICY_LAST_FP8,
     SUPPORTED_QUANTIZATION_FORMATS,
+    SUPPORTED_TENSOR_QUANTIZATION_FORMATS,
     QuantizationFormat,
+    TensorQuantizationFormat,
 )
 
 __all__ = [
+    "BF16",
     "FP4_E2M1FN_X2_SCALED_BLOCK16",
     "FP8_E4M3FN",
+    "FP16",
+    "FP32",
     "NF3_G128_LSQ",
     "NF3_NF4_STRUCTURED_3P5",
     "NF4_G128_LSQ",
     "NF5_G128_LSQ_POLICY_LAST_FP8",
     "SUPPORTED_QUANTIZATION_FORMATS",
+    "SUPPORTED_TENSOR_QUANTIZATION_FORMATS",
     "QuantizationFormat",
+    "TensorQuantizationFormat",
     "dequantize_model_state_dict",
+    "is_lora_adapter_state_key",
     "load_model_state_dict_streaming",
     "quantize_model_state_dict",
 ]
@@ -44,7 +55,6 @@ _TENSOR_CODEBOOK_KEY = "codebook"
 
 _FP4_BLOCK_SIZE = 16
 _NORMALFLOAT_GROUP_SIZE = 128
-_FP16: Literal["fp16"] = "fp16"
 _NORMALFLOAT_CODEBOOK: Literal["nf"] = "nf"
 
 
@@ -219,29 +229,98 @@ def _is_critic_tensor_name(name: str) -> bool:
     return name.startswith("critic_head.") or ".critic_head." in name
 
 
+def is_lora_adapter_state_key(name: str) -> bool:
+    return name.endswith((".lora_down", ".lora_up"))
+
+
 def quantize_model_state_dict(
     model_state: Mapping[str, torch.Tensor],
-    quantization: QuantizationFormat,
+    quantization: QuantizationFormat | None,
+    lora_quantization: TensorQuantizationFormat | None = None,
 ) -> dict[str, object]:
-    if quantization not in SUPPORTED_QUANTIZATION_FORMATS:
+    if quantization is not None and quantization not in SUPPORTED_QUANTIZATION_FORMATS:
         raise ValueError(f"unsupported quantization format: {quantization}")
 
-    normalfloat_bits = _normalfloat_tensor_bits(model_state, quantization)
-    fp8_tensor_names = _policy_fp8_tensor_names(model_state, quantization)
-    return {
+    validated_model_state = _validate_unquantized_model_state(model_state)
+    lora_state = {
+        name: tensor
+        for name, tensor in validated_model_state.items()
+        if is_lora_adapter_state_key(name)
+    }
+    base_state = {
+        name: tensor
+        for name, tensor in validated_model_state.items()
+        if not is_lora_adapter_state_key(name)
+    }
+    effective_lora_quantization = _effective_lora_quantization(
+        has_lora=bool(lora_state),
+        quantization=quantization,
+        lora_quantization=lora_quantization,
+    )
+    if quantization is None and effective_lora_quantization is None:
+        raise ValueError("quantization requires a model or LoRA quantization format")
+
+    normalfloat_bits: dict[str, int] = {}
+    fp8_tensor_names: frozenset[str] = frozenset()
+    if quantization is not None:
+        normalfloat_bits.update(_normalfloat_tensor_bits(base_state, quantization))
+        fp8_tensor_names = fp8_tensor_names | _policy_fp8_tensor_names(
+            base_state,
+            quantization,
+        )
+    if _is_supported_model_quantization(effective_lora_quantization):
+        normalfloat_bits.update(
+            _normalfloat_tensor_bits(lora_state, effective_lora_quantization)
+        )
+        fp8_tensor_names = fp8_tensor_names | _policy_fp8_tensor_names(
+            lora_state,
+            effective_lora_quantization,
+        )
+
+    quantized_state: dict[str, object] = {
         _QUANTIZED_STATE_MARKER: _QUANTIZED_STATE_VERSION,
-        "format": quantization,
+        "format": FP32 if quantization is None else quantization,
         "tensors": {
             name: _quantize_state_tensor(
                 name,
                 tensor,
-                quantization,
+                (
+                    effective_lora_quantization
+                    if is_lora_adapter_state_key(name)
+                    else quantization
+                ),
                 normalfloat_bits.get(name),
                 fp8_tensor_names,
             )
-            for name, tensor in model_state.items()
+            for name, tensor in validated_model_state.items()
         },
     }
+    if lora_state:
+        quantized_state["lora_format"] = (
+            FP32 if effective_lora_quantization is None else effective_lora_quantization
+        )
+    return quantized_state
+
+
+def _effective_lora_quantization(
+    *,
+    has_lora: bool,
+    quantization: QuantizationFormat | None,
+    lora_quantization: TensorQuantizationFormat | None,
+) -> TensorQuantizationFormat | None:
+    if not has_lora:
+        return None
+    if lora_quantization is None:
+        return BF16 if quantization is not None else None
+    if lora_quantization not in SUPPORTED_TENSOR_QUANTIZATION_FORMATS:
+        raise ValueError(f"unsupported LoRA quantization format: {lora_quantization}")
+    return lora_quantization
+
+
+def _is_supported_model_quantization(
+    quantization: TensorQuantizationFormat | None,
+) -> TypeGuard[QuantizationFormat]:
+    return quantization in SUPPORTED_QUANTIZATION_FORMATS
 
 
 def dequantize_model_state_dict(model_state: object) -> dict[str, torch.Tensor]:
@@ -267,11 +346,19 @@ def dequantize_model_state_dict(model_state: object) -> dict[str, torch.Tensor]:
 def load_model_state_dict_streaming(
     module: torch.nn.Module,
     model_state: object,
+    *,
+    allow_missing_lora_adapters: bool = False,
+    ignore_unexpected_lora_adapters: bool = False,
 ) -> None:
     if not _is_quantized_model_state_dict(model_state):
         if not isinstance(model_state, Mapping):
             raise ValueError("checkpoint['model'] must be a mapping")
-        module.load_state_dict(_validate_unquantized_model_state(model_state))
+        _load_unquantized_model_state_dict(
+            module,
+            model_state,
+            allow_missing_lora_adapters=allow_missing_lora_adapters,
+            ignore_unexpected_lora_adapters=ignore_unexpected_lora_adapters,
+        )
         return
 
     version = model_state[_QUANTIZED_STATE_MARKER]
@@ -291,7 +378,10 @@ def load_model_state_dict_streaming(
             name = _validate_state_key(raw_name)
             target = destination.get(name)
             if target is None:
-                unexpected_keys.append(name)
+                if not (
+                    ignore_unexpected_lora_adapters and is_lora_adapter_state_key(name)
+                ):
+                    unexpected_keys.append(name)
                 continue
 
             loaded_keys.add(name)
@@ -307,11 +397,68 @@ def load_model_state_dict_streaming(
             target.copy_(tensor.to(device=target.device))
             del tensor
 
-    missing_keys = sorted(set(destination) - loaded_keys)
+    missing_keys = set(destination) - loaded_keys
+    _extend_state_dict_error_messages(
+        module,
+        error_messages,
+        missing_keys=missing_keys,
+        unexpected_keys=set(unexpected_keys),
+        allow_missing_lora_adapters=allow_missing_lora_adapters,
+        ignore_unexpected_lora_adapters=ignore_unexpected_lora_adapters,
+    )
+    if error_messages:
+        _raise_state_dict_errors(module, error_messages)
+
+
+def _load_unquantized_model_state_dict(
+    module: torch.nn.Module,
+    model_state: Mapping[object, object],
+    *,
+    allow_missing_lora_adapters: bool,
+    ignore_unexpected_lora_adapters: bool,
+) -> None:
+    validated = _validate_unquantized_model_state(model_state)
+    result = module.load_state_dict(validated, strict=False)
+    error_messages: list[str] = []
+    _extend_state_dict_error_messages(
+        module,
+        error_messages,
+        missing_keys=set(result.missing_keys),
+        unexpected_keys=set(result.unexpected_keys),
+        allow_missing_lora_adapters=allow_missing_lora_adapters,
+        ignore_unexpected_lora_adapters=ignore_unexpected_lora_adapters,
+    )
+    if error_messages:
+        _raise_state_dict_errors(module, error_messages)
+
+
+def _extend_state_dict_error_messages(
+    module: torch.nn.Module,
+    error_messages: list[str],
+    *,
+    missing_keys: set[str],
+    unexpected_keys: set[str],
+    allow_missing_lora_adapters: bool,
+    ignore_unexpected_lora_adapters: bool,
+) -> None:
+    if ignore_unexpected_lora_adapters:
+        unexpected_keys = {
+            key for key in unexpected_keys if not is_lora_adapter_state_key(key)
+        }
+
+    if allow_missing_lora_adapters:
+        destination_lora_keys = {
+            name for name in module.state_dict() if is_lora_adapter_state_key(name)
+        }
+        missing_lora_keys = missing_keys & destination_lora_keys
+        provided_lora_keys = destination_lora_keys - missing_lora_keys
+        if not provided_lora_keys:
+            missing_keys = missing_keys - missing_lora_keys
+
     if missing_keys:
         error_messages.append(
             "Missing key(s) in state_dict: "
-            + ", ".join(repr(key) for key in missing_keys)
+            + ", ".join(repr(key) for key in sorted(missing_keys))
             + "."
         )
     if unexpected_keys:
@@ -320,18 +467,21 @@ def load_model_state_dict_streaming(
             + ", ".join(repr(key) for key in sorted(unexpected_keys))
             + "."
         )
-    if error_messages:
-        module_name = module.__class__.__name__
-        joined = "\n\t".join(error_messages)
-        raise RuntimeError(
-            f"Error(s) in loading state_dict for {module_name}:\n\t{joined}"
-        )
+
+
+def _raise_state_dict_errors(
+    module: torch.nn.Module,
+    error_messages: list[str],
+) -> None:
+    module_name = module.__class__.__name__
+    joined = "\n\t".join(error_messages)
+    raise RuntimeError(f"Error(s) in loading state_dict for {module_name}:\n\t{joined}")
 
 
 def _quantize_state_tensor(
     name: str,
     tensor: torch.Tensor,
-    quantization: QuantizationFormat,
+    quantization: TensorQuantizationFormat | None,
     normalfloat_bits: int | None = None,
     fp8_tensor_names: frozenset[str] | None = None,
 ) -> dict[str, object]:
@@ -340,11 +490,21 @@ def _quantize_state_tensor(
         raise ValueError(f"model state '{name}' must be a tensor")
 
     tensor = tensor.detach().cpu().contiguous()
+    if quantization is None or quantization == FP32:
+        return {
+            _TENSOR_QUANTIZED_KEY: False,
+            _TENSOR_DATA_KEY: tensor,
+        }
     if not tensor.dtype.is_floating_point:
         return {
             _TENSOR_QUANTIZED_KEY: False,
             _TENSOR_DATA_KEY: tensor,
         }
+
+    if quantization == FP16:
+        return _quantize_dtype_state_tensor(tensor, "fp16")
+    if quantization == BF16:
+        return _quantize_dtype_state_tensor(tensor, "bf16")
 
     if quantization == FP8_E4M3FN:
         return {
@@ -386,6 +546,20 @@ def _quantize_state_tensor(
     raise ValueError(f"unsupported quantization format: {quantization}")
 
 
+def _quantize_dtype_state_tensor(
+    tensor: torch.Tensor,
+    quantization: Literal["fp16", "bf16"],
+) -> dict[str, object]:
+    dtype = _dtype_for_precision_format(quantization)
+    return {
+        _TENSOR_QUANTIZED_KEY: True,
+        _TENSOR_FORMAT_KEY: quantization,
+        _TENSOR_SHAPE_KEY: tuple(tensor.shape),
+        _TENSOR_SOURCE_DTYPE_KEY: str(tensor.dtype),
+        _TENSOR_DATA_KEY: tensor.to(dtype),
+    }
+
+
 def _dequantize_state_tensor(name: object, payload: object) -> torch.Tensor:
     state_key = _validate_state_key(name)
     if not isinstance(payload, Mapping):
@@ -414,8 +588,12 @@ def _dequantize_state_tensor(name: object, payload: object) -> torch.Tensor:
                 f"quantized model state '{state_key}' scale must be a tensor"
             )
         return _dequantize_fp4_e2m1fn_scaled_block16(data, scale, shape)
-    if quantization == _FP16:
-        return data.to(torch.float16).to(torch.float32).reshape(shape)
+    if quantization in (FP16, BF16):
+        return (
+            data.to(_dtype_for_precision_format(quantization))
+            .to(torch.float32)
+            .reshape(shape)
+        )
     if quantization == NF5_G128_LSQ_POLICY_LAST_FP8:
         scale = payload.get(_TENSOR_SCALE_KEY)
         if not isinstance(scale, torch.Tensor):
@@ -475,6 +653,14 @@ def _dequantize_state_tensor(name: object, payload: object) -> torch.Tensor:
     raise ValueError(
         f"quantized model state '{state_key}' has unsupported format: {quantization}"
     )
+
+
+def _dtype_for_precision_format(quantization: Literal["fp16", "bf16"]) -> torch.dtype:
+    if quantization == FP16:
+        return torch.float16
+    if quantization == BF16:
+        return torch.bfloat16
+    raise AssertionError(f"unsupported precision format: {quantization}")
 
 
 def _quantize_fp8_e4m3fn(tensor: torch.Tensor) -> torch.Tensor:
@@ -592,7 +778,7 @@ def _quantize_nf5_g128_policy_fp8_state_tensor(
     if tensor.ndim != 2:
         return {
             _TENSOR_QUANTIZED_KEY: True,
-            _TENSOR_FORMAT_KEY: _FP16,
+            _TENSOR_FORMAT_KEY: FP16,
             _TENSOR_SHAPE_KEY: tuple(tensor.shape),
             _TENSOR_SOURCE_DTYPE_KEY: str(tensor.dtype),
             _TENSOR_DATA_KEY: tensor.to(torch.float16),
@@ -620,7 +806,7 @@ def _quantize_normalfloat_g128_lsq_state_tensor(
     if tensor.ndim != 2:
         return {
             _TENSOR_QUANTIZED_KEY: True,
-            _TENSOR_FORMAT_KEY: _FP16,
+            _TENSOR_FORMAT_KEY: FP16,
             _TENSOR_SHAPE_KEY: tuple(tensor.shape),
             _TENSOR_SOURCE_DTYPE_KEY: str(tensor.dtype),
             _TENSOR_DATA_KEY: tensor.to(torch.float16),
@@ -920,7 +1106,7 @@ def _is_quantized_model_state_dict(
 
 
 def _validate_unquantized_model_state(
-    model_state: Mapping[object, object],
+    model_state: Mapping[Any, Any],
 ) -> dict[str, torch.Tensor]:
     validated: dict[str, torch.Tensor] = {}
     for name, tensor in model_state.items():
