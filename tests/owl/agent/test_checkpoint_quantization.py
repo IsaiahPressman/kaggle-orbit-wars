@@ -14,7 +14,7 @@ from owl.agent.checkpoint_quantization import (
     load_model_state_dict_streaming,
     quantize_model_state_dict,
 )
-from owl.model import StatelessTransformerV1Config
+from owl.model import RecurrentTransformerV1Config, StatelessTransformerV1Config
 from owl.rl import EntityBasedConfig, EnvConfig
 
 _FP4_E2M1FN_VALUES = torch.tensor(
@@ -531,6 +531,51 @@ def test_agent_init_creates_model_on_meta_before_streaming_checkpoint(
     )
 
     assert created_weight_device == torch.device("meta")
+    assert agent.model.weight.device == torch.device("cpu")
+    _assert_float32_bits_equal(agent.model.weight.detach(), source_weight)
+
+
+def test_agent_init_uses_normal_construction_for_recurrent_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_weight = torch.tensor([[0.25, 1.75, 5.0]], dtype=torch.float32)
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_config_path = tmp_path / "config.yaml"
+    checkpoint_config_path.write_text("unused\n")
+    torch.save({"model": {"weight": source_weight}}, checkpoint_path)
+    created_weight_device: torch.device | None = None
+
+    def fake_create_model(*_args: object, **_kwargs: object) -> torch.nn.Linear:
+        nonlocal created_weight_device
+        model = torch.nn.Linear(3, 1, bias=False)
+        created_weight_device = model.weight.device
+        return model
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(
+        AgentConfig,
+        "from_file",
+        classmethod(lambda _cls, _path: AgentConfig(deterministic=True)),
+    )
+    monkeypatch.setattr(
+        AgentCheckpointConfig,
+        "from_file",
+        classmethod(
+            lambda _cls, _path: AgentCheckpointConfig(
+                env=EnvConfig(obs_spec=EntityBasedConfig(max_entities=64)),
+                model=RecurrentTransformerV1Config(),
+            )
+        ),
+    )
+    monkeypatch.setattr("owl.agent.agent.create_model", fake_create_model)
+
+    agent = Agent(
+        checkpoint_config_path=checkpoint_config_path,
+        checkpoint_path=checkpoint_path,
+    )
+
+    assert created_weight_device == torch.device("cpu")
     assert agent.model.weight.device == torch.device("cpu")
     _assert_float32_bits_equal(agent.model.weight.detach(), source_weight)
 

@@ -88,7 +88,9 @@ the fallback model when remaining overage time drops below that threshold;
 `null` disables fallback routing even if the fallback model is packaged. A
 packaged fallback config is validated during startup, but the fallback model
 weights are loaded on the second observed turn rather than during initial agent
-construction.
+construction. If remaining overage time has already fallen below the fallback
+threshold before the fallback weights are loaded, the agent emits no actions
+instead of spending the remaining budget on a first-time fallback load.
 
 The Kaggle observation encoder filters fleets smaller than the configured
 `min_fleet_size` while encoding observations. This intentionally trades a small

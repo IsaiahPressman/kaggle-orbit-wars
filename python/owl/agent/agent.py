@@ -186,13 +186,20 @@ class Agent:
     ) -> BaseModelAPI:
         if not checkpoint_path.is_file():
             raise ValueError(f"expected Kaggle checkpoint at {checkpoint_path}")
-        with torch.device("meta"):
+        if isinstance(checkpoint_config.model, RecurrentTransformerV1Config):
             model = create_model(
                 checkpoint_config.model,
                 obs_spec=checkpoint_config.env.obs_spec,
                 action_spec=checkpoint_config.env.action_spec,
-            )
-        model.to_empty(device=self.device)
+            ).to(self.device)
+        else:
+            with torch.device("meta"):
+                model = create_model(
+                    checkpoint_config.model,
+                    obs_spec=checkpoint_config.env.obs_spec,
+                    action_spec=checkpoint_config.env.action_spec,
+                )
+            model.to_empty(device=self.device)
         checkpoint = torch.load(
             checkpoint_path,
             map_location=self.device,
@@ -211,12 +218,19 @@ class Agent:
         model.eval()
         return model
 
-    def _load_fallback_model_if_due(self, step: int) -> None:
+    def _load_fallback_model_if_due(
+        self,
+        step: int,
+        remaining_overage_time: float,
+    ) -> None:
         if self.fallback_model is not None or self._fallback_checkpoint_path is None:
             return
-        if self.config.fallback_min_overage_time is None:
+        threshold = self.config.fallback_min_overage_time
+        if threshold is None:
             return
         if step < _FALLBACK_LOAD_MIN_STEP:
+            return
+        if remaining_overage_time < threshold:
             return
 
         assert self.fallback_checkpoint_config is not None
@@ -247,7 +261,13 @@ class Agent:
         if kaggle_obs.remaining_overage_time < self.config.min_overage_time:
             return []
 
-        self._load_fallback_model_if_due(kaggle_obs.step)
+        self._load_fallback_model_if_due(
+            kaggle_obs.step,
+            kaggle_obs.remaining_overage_time,
+        )
+        if self._needs_unloaded_fallback(kaggle_obs.remaining_overage_time):
+            return []
+
         model = self.model
         checkpoint_config = self.checkpoint_config
         hidden_state = self.hidden_state
@@ -343,6 +363,14 @@ class Agent:
     def _should_use_fallback(self, remaining_overage_time: float) -> bool:
         return (
             self.fallback_model is not None
+            and self.config.fallback_min_overage_time is not None
+            and remaining_overage_time < self.config.fallback_min_overage_time
+        )
+
+    def _needs_unloaded_fallback(self, remaining_overage_time: float) -> bool:
+        return (
+            self.fallback_model is None
+            and self._fallback_checkpoint_path is not None
             and self.config.fallback_min_overage_time is not None
             and remaining_overage_time < self.config.fallback_min_overage_time
         )
