@@ -30,6 +30,11 @@ class LoRAConfig(BaseConfig):
                 "lora must target at least one of target_modules, "
                 "target_value_head, or target_policy_head"
             )
+        if self.target_block_count is not None and not self.target_modules:
+            raise ValueError(
+                "lora.target_block_count only selects transformer-block "
+                "projections, so it requires a non-empty target_modules"
+            )
         return self
 
     @property

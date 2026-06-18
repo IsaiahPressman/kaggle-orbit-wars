@@ -357,6 +357,23 @@ def test_model_config_rejects_duplicate_lora_targets() -> None:
         )
 
 
+def test_model_config_rejects_target_block_count_without_target_modules() -> None:
+    # target_block_count only selects transformer-block projections, so it would
+    # silently do nothing without target_modules; reject it rather than ignore it.
+    with pytest.raises(ValueError, match=r"target_block_count only selects"):
+        LoRAConfig(
+            rank=2,
+            target_modules=(),
+            target_block_count=1,
+            target_value_head=True,
+        )
+
+
+def test_lora_config_allows_target_block_count_with_target_modules() -> None:
+    config = LoRAConfig(rank=2, target_modules=("q",), target_block_count=1)
+    assert config.target_block_count == 1
+
+
 def test_apply_lora_wraps_requested_final_block_modules_and_freezes_base() -> None:
     model = StatelessTransformerV1(
         StatelessTransformerV1Config(
@@ -546,6 +563,25 @@ def test_lora_clamps_adapter_rank_for_degenerate_projections() -> None:
     assert torch.allclose(
         critic_out(x), F.linear(x, critic_out.weight, critic_out.bias)
     )
+
+
+def test_lora_linear_applies_scaled_low_rank_update() -> None:
+    torch.manual_seed(0)
+    base = torch.nn.Linear(8, 6)
+    wrapped = LoRALinear(base, rank=2, alpha=4.0)
+    # alpha / rank = 4 / 2 = 2; the scale must reach the final update regardless
+    # of where it is folded internally.
+    assert wrapped.scaling == pytest.approx(2.0)
+    with torch.no_grad():
+        wrapped.lora_down.copy_(torch.randn(2, 8))
+        wrapped.lora_up.copy_(torch.randn(6, 2))
+
+    x = torch.randn(3, 8)
+    expected = F.linear(x, base.weight, base.bias) + wrapped.scaling * F.linear(
+        F.linear(x, wrapped.lora_down), wrapped.lora_up
+    )
+
+    assert torch.allclose(wrapped(x), expected, atol=1e-6)
 
 
 def test_reset_parameters_after_lora_raises() -> None:

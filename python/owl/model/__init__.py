@@ -15,13 +15,13 @@ from owl.model.config import ModelConfig
 from owl.model.factory import create_model
 from owl.model.lora import (
     LoRAApplication,
-    LoRALinear,
     apply_lora_to_stateless_transformer,
     load_model_state_dict_allowing_lora,
     lora_config_for_model,
     lora_parameters,
 )
 from owl.model.lora_config import LoRAConfig
+from owl.model.lora_linear import LoRALinear
 from owl.model.recurrent_transformer_v1 import (
     RecurrentTransformerV1,
     RecurrentTransformerV1Config,

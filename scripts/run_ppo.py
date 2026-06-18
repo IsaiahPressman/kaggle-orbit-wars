@@ -21,6 +21,7 @@ from owl.model import (
     ModelOutput,
     apply_lora_to_stateless_transformer,
     create_model,
+    load_model_state_dict_allowing_lora,
     lora_config_for_model,
 )
 from owl.replay import ReplayRecorder
@@ -799,11 +800,25 @@ def _initial_last_best_model(
 ) -> BaseModelAPI | None:
     if cfg.rl.teacher_mode != "last_best" or cfg.rl.teacher_init is None:
         return None
-    return _load_teacher_init_model(
-        cfg.rl.teacher_init,
-        student_cfg=cfg,
-        device=device,
-    )
+    # last_best is refreshed in place with the student's weights whenever the
+    # student wins, so it must share the student's architecture -- including any
+    # LoRA adapters. Build it from the student config and seed only its base
+    # weights from the teacher_init checkpoint; the adapters keep their
+    # config-initialized no-op values, so last_best initially matches the base
+    # checkpoint exactly. (The fixed-teacher path keeps using the teacher's own
+    # architecture via _load_teacher_init_model, since it is never refreshed.)
+    teacher_init = cfg.rl.teacher_init.resolve()
+    if not teacher_init.is_file():
+        raise ValueError(f"teacher_init checkpoint does not exist: {teacher_init}")
+    # Fail fast with a clear spec error before loading, matching the fixed-teacher
+    # path. Building from the student config still tolerates a non-LoRA base
+    # checkpoint (its adapters initialize from config).
+    teacher_cfg = FullConfig.from_file(_checkpoint_config_path(teacher_init))
+    _validate_teacher_specs(teacher_cfg, student_cfg=cfg, checkpoint_path=teacher_init)
+    model = _create_eval_model_for_config(cfg, device=device)
+    _load_model_weights(model, path=teacher_init, device=device)
+    _compile_eval_model(model, cfg)
+    return model
 
 
 def _checkpoint_config_path(checkpoint_path: Path) -> Path:
@@ -864,7 +879,9 @@ def _load_model_weights(
         raise ValueError(f"checkpoint must be a dictionary: {path}")
     if "model" not in checkpoint:
         raise ValueError(f"checkpoint is missing model weights: {path}")
-    model.load_state_dict(checkpoint["model"])
+    # Tolerate loading a non-LoRA base checkpoint into a LoRA-wrapped model: base
+    # tensors are loaded and the adapters keep their config-initialized values.
+    load_model_state_dict_allowing_lora(model, checkpoint["model"])
     model.eval()
 
 
@@ -1026,7 +1043,7 @@ def _load_model_from_checkpoint(
     if not isinstance(checkpoint, dict):
         raise ValueError(f"checkpoint must be a dictionary: {path}")
     metadata = _checkpoint_metadata(checkpoint, path=path)
-    model.load_state_dict(checkpoint["model"])
+    load_model_state_dict_allowing_lora(model, checkpoint["model"])
     model.eval()
     return metadata
 

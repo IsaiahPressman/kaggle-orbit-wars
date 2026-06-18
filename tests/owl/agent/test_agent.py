@@ -1289,6 +1289,94 @@ def test_agent_peak_metrics_exclude_first_step_total_time() -> None:
     assert agent._update_peak_metrics(step=3, total_ms=11, entity_count=2) == (11, 5)
 
 
+def test_agent_act_excludes_fallback_init_from_total_metrics(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    agent = Agent.__new__(Agent)
+    agent.checkpoint_config = SimpleNamespace(
+        env=SimpleNamespace(
+            obs_spec=EntityBasedConfig(),
+            action_spec=action_spec,
+        ),
+        model=StatelessTransformerV1Config(),
+    )
+    agent.fallback_checkpoint_config = agent.checkpoint_config
+    agent.config = AgentConfig(
+        deterministic=True,
+        fallback_min_overage_time=1.0,
+    )
+    agent.device = torch.device("cpu")
+    agent.hidden_state = None
+    agent.fallback_model = None
+    agent._fallback_checkpoint_path = tmp_path / "fallback_checkpoint.pt"
+    agent._last_turn_value = float("nan")
+    agent._peak_total_ms = 0
+    agent._peak_entities = 0
+
+    times = iter([100.0, 101.0, 111.0, 112.0, 112.0, 113.0, 113.0, 114.0, 115.0])
+    monkeypatch.setattr("owl.agent.agent.perf_counter", lambda: next(times))
+
+    class FakeModel:
+        def initial_hidden_state(
+            self,
+            _batch_size: int,
+            *,
+            device: torch.device,  # noqa: ARG002
+        ) -> None:
+            return None
+
+        def serve(
+            self,
+            obs: object,
+            *,
+            deterministic: bool,
+            hidden_state: object | None,
+        ) -> object:
+            assert deterministic
+            assert hidden_state is None
+            action_shape = (
+                1,
+                4,
+                obs.action_mask.can_act.shape[2],
+                action_spec.max_per_planet_launches,
+            )
+            return SimpleNamespace(
+                actions=PureActions(
+                    launch=torch.zeros(action_shape, dtype=torch.bool),
+                    angle=torch.zeros(action_shape, dtype=torch.float32),
+                    ships=torch.zeros(action_shape, dtype=torch.int64),
+                ),
+                values=torch.tensor([[0.25, -0.5, 0.0, 0.75]]),
+                next_hidden_state=None,
+            )
+
+    agent.model = FakeModel()
+
+    def fake_load_model_from_config(
+        *,
+        checkpoint_config: object,
+        checkpoint_path: Path,
+    ) -> FakeModel:
+        assert checkpoint_config is agent.fallback_checkpoint_config
+        assert checkpoint_path == agent._fallback_checkpoint_path
+        return FakeModel()
+
+    monkeypatch.setattr(agent, "_load_model_from_config", fake_load_model_from_config)
+
+    observation = _raw_observation()
+    observation["step"] = 1
+
+    actions = agent.act(KaggleObservation.model_validate(observation))
+
+    assert actions == []
+    log_line = capsys.readouterr().out
+    assert "fallback_init_s=10.00 - " in log_line
+    assert "total_ms=5000 - peak_total_ms=5000 - " in log_line
+
+
 def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
     action_spec = ActionPureConfig(max_per_planet_launches=1)
     agent = Agent.__new__(Agent)

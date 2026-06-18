@@ -262,15 +262,15 @@ actor heads. Recurrent models reject `lora` fields.
 | `rank` | Required | Low-rank adapter dimension. |
 | `alpha` | `rank` | LoRA scaling numerator; the update is scaled by `alpha / rank`. |
 | `target_modules` | `["q", "v"]` | Transformer block projections to wrap. Supported values are `q`, `k`, `v`, `out`, `up`, `down`, `gate`, and `value`; `gate`/`value` exist only for SwiGLU MLPs. May be empty (`[]`) to wrap only the heads. |
-| `target_block_count` | `null` | If set, wrap only the final N shared transformer blocks; otherwise wrap all shared blocks. |
+| `target_block_count` | `null` | If set, wrap only the final N shared transformer blocks; otherwise wrap all shared blocks. Only selects transformer-block projections, so it requires a non-empty `target_modules`. |
 | `target_value_head` | `false` | Wrap every linear projection in the critic (value) head with LoRA adapters. |
 | `target_policy_head` | `false` | Wrap every linear projection in the actor (policy) head, including its source/target input projections and learned pairwise-bias MLP when enabled, with LoRA adapters. |
 
 LoRA presets live under `configs/model/lora/`. For example,
 `model.lora=2p_200m_qv_r16` resolves
-`configs/model/lora/2p_200m_qv_r16.yaml`, a rank-16 q/v adapter preset intended
-for 200M two-player fine-tuning when the adapter will be merged into the NF4
-base model before packaging with a 1-2M fallback.
+`configs/model/lora/2p_200m_qv_r16.yaml`, a rank-16 q/v plus value/policy-head
+adapter preset intended for 200M two-player fine-tuning when the adapter will be
+merged into the NF4 base model before packaging with a 1-2M fallback.
 
 At least one of `target_modules`, `target_value_head`, or `target_policy_head`
 must select something. Head wrapping is structural: every `nn.Linear` leaf in

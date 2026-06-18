@@ -240,6 +240,68 @@ def test_lora_fresh_launch_rejects_loading_optimizer_state() -> None:
         run_ppo._validate_lora_launch_config(cfg, launch)
 
 
+def test_initial_last_best_model_wraps_lora_and_supports_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: teacher_mode=last_best fine-tuning seeded from a non-LoRA base.
+    # last_best must share the LoRA-wrapped student architecture so that a later
+    # _refresh_eval_model_from_weights can copy the student's adapter-bearing
+    # state dict into it instead of crashing on unexpected LoRA keys.
+    monkeypatch.setattr(run_ppo, "_compile_eval_model", lambda *_a, **_k: None)
+    base_cfg = _full_config()
+    base_model = run_ppo._create_model(
+        base_cfg.model,
+        obs_spec=base_cfg.env.obs_spec,
+        action_spec=base_cfg.env.action_spec,
+    )
+    base_checkpoint = tmp_path / "base_checkpoint.pt"
+    torch.save({"model": base_model.state_dict()}, base_checkpoint)
+    # last_best validation reads the teacher checkpoint's sibling config.yaml.
+    base_cfg.to_file(tmp_path / "config.yaml")
+
+    student_cfg = FullConfig.model_validate(
+        {
+            **base_cfg.model_dump(mode="python"),
+            "model": {
+                **base_cfg.model.model_dump(mode="python"),
+                "lora": {"rank": 2, "target_modules": ["q", "v"]},
+            },
+            "rl": {
+                **base_cfg.rl.model_dump(mode="python"),
+                "teacher_mode": "last_best",
+                "teacher_init": str(base_checkpoint),
+            },
+        }
+    )
+
+    last_best = run_ppo._initial_last_best_model(
+        student_cfg, device=torch.device("cpu")
+    )
+
+    assert last_best is not None
+    # last_best is LoRA-wrapped like the student, and its frozen base weights are
+    # seeded from the non-LoRA base checkpoint (adapters stay at config init).
+    assert isinstance(last_best.blocks[0].attn.q, LoRALinear)
+    last_best_state = last_best.state_dict()
+    for key, value in base_model.state_dict().items():
+        assert torch.equal(last_best_state[key], value)
+
+    # Winning triggers refreshing last_best from the adapter-bearing student; this
+    # is the path that previously raised on unexpected LoRA keys.
+    student = run_ppo._create_model(
+        student_cfg.model,
+        obs_spec=student_cfg.env.obs_spec,
+        action_spec=student_cfg.env.action_spec,
+    )
+    assert run_ppo._apply_lora_for_config(student, student_cfg.model) is not None
+    run_ppo._refresh_eval_model_from_weights(last_best, student)
+
+    refreshed_state = last_best.state_dict()
+    for key, value in student.state_dict().items():
+        assert torch.equal(refreshed_state[key], value)
+
+
 class _FakeLogger:
     def __init__(self, *, run_id: str | None = "run-123") -> None:
         self.closed = False

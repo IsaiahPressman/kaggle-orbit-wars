@@ -149,6 +149,9 @@ class RecurrentTransformerV1(StatelessTransformerV1):
             raise RuntimeError("recurrent transformer critic head is not initialized")
         critic_out = self.critic_head.out
         for layer in self.get_output_layers():
+            # Recurrent models do not support LoRA, so every output layer is a
+            # plain nn.Linear.
+            assert isinstance(layer, nn.Linear)
             gain = (
                 _CRITIC_HEAD_INIT_GAIN if layer is critic_out else _ACTOR_HEAD_INIT_GAIN
             )

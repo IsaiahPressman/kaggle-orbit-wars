@@ -1,0 +1,8 @@
+rank: 16
+alpha: 16.0
+target_modules:
+  - q
+  - v
+target_block_count: null
+target_value_head: true
+target_policy_head: true

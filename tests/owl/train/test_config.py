@@ -202,8 +202,8 @@ def test_full_config_resolves_lora_subconfig_override() -> None:
     assert config.model.lora.alpha == pytest.approx(16.0)
     assert config.model.lora.target_modules == ("q", "v")
     assert config.model.lora.target_block_count is None
-    assert config.model.lora.target_value_head is False
-    assert config.model.lora.target_policy_head is False
+    assert config.model.lora.target_value_head is True
+    assert config.model.lora.target_policy_head is True
     assert config.env.two_player_weight == pytest.approx(1.0)
 
 

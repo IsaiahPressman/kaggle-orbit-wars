@@ -159,7 +159,10 @@ Recurrent models do not support LoRA. Fresh LoRA launches can use
 non-LoRA base checkpoint; missing LoRA adapter tensors are initialized from the
 config while base tensors are loaded from the checkpoint. Fresh LoRA launches
 must use `--load-model-weights-mode model_only`; resume existing LoRA runs to
-restore optimizer state.
+restore optimizer state. `teacher_mode: last_best` also works with LoRA: the
+self-play opponent is built with the student's adapter architecture and seeded
+from the (possibly non-LoRA) `teacher_init` checkpoint, so it can be refreshed
+in place each time the student wins.
 Optimizer configs may set `lr_schedule.schedule` to
 `linear_warmup_cosine_decay` for warmup followed by cosine decay, or `cosine`
 for a repeating LambdaLR multiplier that moves from `1.0` to `lr_min_ratio`

@@ -6,16 +6,20 @@ import pytest
 import torch
 from owl.model import (
     BaseModelAPI,
+    LoRAConfig,
     ModelActionEntropies,
     ModelActionLogProbs,
     ModelEvaluation,
     ModelOutput,
+    RecurrentTransformerV1,
+    RecurrentTransformerV1Config,
     StatelessTransformerV1,
     StatelessTransformerV1Config,
 )
 from owl.rl import (
     ACTION_ENTITY_SLOTS,
     ActionBundle,
+    ActionDiscreteTargetsConfig,
     ActionPureConfig,
     EntityBasedConfig,
     ObsBatch,
@@ -462,6 +466,52 @@ def test_wrap_model_for_distributed_finds_unused_player_count_adapters(
     assert isinstance(wrapped._ddp, _FakeDDP)
     assert wrapped._ddp.find_unused_parameters
     assert wrapped.action_spec == model.action_spec
+
+
+def test_wrap_model_for_distributed_finds_unused_lora_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # LoRA freezes the base and trains only the wrapped adapters, so DDP must use
+    # find_unused_parameters=True to avoid deadlocking on an adapter that does not
+    # receive a gradient on a given backward.
+    monkeypatch.setattr(distributed_module, "DistributedDataParallel", _FakeDDP)
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+            lora=LoRAConfig(rank=2, target_modules=("q", "v")),
+        ),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    context = DistributedContext(
+        device=torch.device("cuda", 0),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=True,
+    )
+
+    wrapped = wrap_model_for_distributed(model, context)
+
+    assert isinstance(wrapped, DistributedModelAdapter)
+    assert isinstance(wrapped._ddp, _FakeDDP)
+    assert wrapped._ddp.find_unused_parameters
+
+
+def test_requires_unused_parameter_detection_handles_recurrent_model() -> None:
+    # RecurrentTransformerV1 subclasses StatelessTransformerV1 but its config has
+    # no `lora` field; LoRA detection must not read `.lora` on it (regression
+    # guard against an AttributeError that would crash every recurrent multi-GPU
+    # launch).
+    model = RecurrentTransformerV1(
+        RecurrentTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2),
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+
+    assert distributed_module._requires_unused_parameter_detection(model) is False
 
 
 def test_distributed_evaluate_actions_forwards_dones_without_hidden_state(

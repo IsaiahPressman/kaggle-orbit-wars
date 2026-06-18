@@ -144,8 +144,8 @@ class DiscreteTargetsActor(nn.Module):
             input_layers = (*input_layers, self.no_launch_target)
         return input_layers
 
-    def get_output_layers(self) -> tuple[nn.Linear, ...]:
-        output_layers: tuple[nn.Linear, ...] = (
+    def get_output_layers(self) -> tuple[nn.Module, ...]:
+        output_layers: tuple[nn.Module, ...] = (
             self.mix_head.out,
             self.mean_head.out,
             self.scale_head.out,

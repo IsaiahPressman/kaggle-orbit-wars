@@ -218,14 +218,14 @@ class Agent:
         model.eval()
         return model
 
-    def _load_fallback_model_if_due(self, step: int) -> None:
+    def _load_fallback_model_if_due(self, step: int) -> float:
         if self.fallback_model is not None or self._fallback_checkpoint_path is None:
-            return
+            return 0.0
         threshold = self.config.fallback_min_overage_time
         if threshold is None:
-            return
+            return 0.0
         if step < _FALLBACK_LOAD_MIN_STEP:
-            return
+            return 0.0
 
         assert self.fallback_checkpoint_config is not None
         fallback_init_start = perf_counter()
@@ -233,11 +233,13 @@ class Agent:
             checkpoint_config=self.fallback_checkpoint_config,
             checkpoint_path=self._fallback_checkpoint_path,
         )
+        fallback_init_s = perf_counter() - fallback_init_start
         print(
-            f"fallback_init_s={perf_counter() - fallback_init_start:.2f} - ",
+            f"fallback_init_s={fallback_init_s:.2f} - ",
             end="",
             flush=True,
         )
+        return fallback_init_s
 
     @torch.inference_mode()
     def act(self, observation: Any) -> list[list[float]]:
@@ -255,7 +257,7 @@ class Agent:
         if kaggle_obs.remaining_overage_time < self.config.min_overage_time:
             return []
 
-        self._load_fallback_model_if_due(kaggle_obs.step)
+        fallback_init_s = self._load_fallback_model_if_due(kaggle_obs.step)
 
         model = self.model
         checkpoint_config = self.checkpoint_config
@@ -287,7 +289,7 @@ class Agent:
         obs = compacted.obs
         device_obs = self._obs_to_device(obs)
         self._synchronize_device()
-        encode_ms = _elapsed_ms(encode_start)
+        encode_ms = _elapsed_ms(encode_start, exclude_s=fallback_init_s)
 
         inference_start = perf_counter()
         if not use_fallback and (kaggle_obs.step == 0 or hidden_state is None):
@@ -322,7 +324,7 @@ class Agent:
             action_spec=checkpoint_config.env.action_spec,
         )
         conversion_ms = _elapsed_ms(conversion_start)
-        total_ms = _elapsed_ms(total_start)
+        total_ms = _elapsed_ms(total_start, exclude_s=fallback_init_s)
         entity_count = obs.entity_mask.shape[1]
         peak_total_ms, peak_entities = self._update_peak_metrics(
             step=kaggle_obs.step,
@@ -439,8 +441,8 @@ class Agent:
         return peak_total_ms, peak_entities
 
 
-def _elapsed_ms(start: float) -> int:
-    return round((perf_counter() - start) * 1000)
+def _elapsed_ms(start: float, *, exclude_s: float = 0.0) -> int:
+    return round((perf_counter() - start - exclude_s) * 1000)
 
 
 def _resolve_agent_device(
