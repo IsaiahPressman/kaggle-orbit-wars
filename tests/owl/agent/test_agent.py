@@ -308,7 +308,9 @@ def test_agent_init_folds_lora_adapters_when_mode_matches(
     assert not any(
         name.endswith((".lora_down", ".lora_up")) for name in agent.model.state_dict()
     )
-    assert torch.allclose(agent.model.blocks[0].attn.q.weight, expected_q_weight)
+    # The agent loads onto its own device (cuda when available); compare on CPU
+    # since expected_q_weight is derived from the CPU source model.
+    assert torch.allclose(agent.model.blocks[0].attn.q.weight.cpu(), expected_q_weight)
 
 
 def test_agent_init_ignores_lora_adapters_when_mode_does_not_match(
@@ -367,7 +369,9 @@ def test_agent_init_ignores_lora_adapters_when_mode_does_not_match(
     assert isinstance(agent.model, StatelessTransformerV1)
     assert isinstance(agent.model.blocks[0].attn.q, torch.nn.Linear)
     assert not isinstance(agent.model.blocks[0].attn.q, LoRALinear)
-    assert torch.equal(agent.model.blocks[0].attn.q.weight, expected_q_weight)
+    # The agent loads onto its own device (cuda when available); compare on CPU
+    # since expected_q_weight is derived from the CPU source model.
+    assert torch.equal(agent.model.blocks[0].attn.q.weight.cpu(), expected_q_weight)
 
 
 def test_agent_init_requires_lora_adapters_when_mode_matches(
