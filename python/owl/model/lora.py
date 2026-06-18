@@ -46,13 +46,18 @@ class LoRALinear(nn.Module):
         super().__init__()
         self.in_features = base.in_features
         self.out_features = base.out_features
-        self.rank = rank
+        # Clamp the adapter rank to min(in, out): a rank above that cannot raise
+        # the update's rank, so it would only add redundant parameters (e.g. the
+        # critic's embed_dim -> 1 output). The adapter stays separate from the
+        # frozen base weight, and the scaling keeps the configured alpha / rank so
+        # every adapter shares the same update scale regardless of clamping.
+        self.rank = min(rank, base.in_features, base.out_features)
         self.scaling = alpha / rank
         self.weight = base.weight
         self.bias = base.bias
         self.lora_down = nn.Parameter(
             torch.empty(
-                rank,
+                self.rank,
                 base.in_features,
                 device=base.weight.device,
                 dtype=base.weight.dtype,
@@ -61,7 +66,7 @@ class LoRALinear(nn.Module):
         self.lora_up = nn.Parameter(
             torch.empty(
                 base.out_features,
-                rank,
+                self.rank,
                 device=base.weight.device,
                 dtype=base.weight.dtype,
             )

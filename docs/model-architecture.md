@@ -275,9 +275,11 @@ base model before packaging with a 1-2M fallback.
 At least one of `target_modules`, `target_value_head`, or `target_policy_head`
 must select something. Head wrapping is structural: every `nn.Linear` leaf in
 the chosen head subtree is wrapped, so it adapts regardless of actor variant.
-Some head output projections are tiny (e.g. the critic's `embed_dim -> 1`
-output), where a low-rank adapter spans the full output space and is
-over-parameterized but harmless; choose `rank` accordingly.
+Each adapter's rank is clamped to `min(rank, in_features, out_features)`, so tiny
+head projections (e.g. the critic's `embed_dim -> 1` output) still adapt without
+wasting parameters on a rank that could not raise the update's rank. The adapter
+always stays separate from the frozen base weight, and the scaling keeps the
+configured `alpha / rank` regardless of clamping.
 
 Fresh launches still reset the base model before LoRA is attached. When
 `--load-model-weights` points at a non-LoRA base checkpoint, missing LoRA

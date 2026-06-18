@@ -514,6 +514,40 @@ def test_apply_lora_policy_head_wraps_pairwise_bias_mlp() -> None:
     )
 
 
+def test_lora_clamps_adapter_rank_for_degenerate_projections() -> None:
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionPureConfig(max_per_planet_launches=1),
+    )
+    model.reset_parameters()
+    apply_lora_to_stateless_transformer(
+        model,
+        LoRAConfig(rank=8, target_modules=(), target_value_head=True),
+    )
+
+    modules = dict(model.named_modules())
+    critic_out = modules["critic_head.out"]
+    critic_up = modules["critic_head.up"]
+    assert isinstance(critic_out, LoRALinear)
+    assert isinstance(critic_up, LoRALinear)
+    # The embed_dim -> 1 output clamps to min(rank=8, in=16, out=1) == 1, so the
+    # adapter is not over-parameterized but still adapts (and stays separate from
+    # the frozen base weight).
+    assert critic_out.rank == 1
+    assert tuple(critic_out.lora_down.shape) == (1, 16)
+    assert tuple(critic_out.lora_up.shape) == (1, 1)
+    # The embed_dim -> embed_dim hidden projection keeps the configured rank.
+    assert critic_up.rank == 8
+    # Scaling stays alpha / configured-rank (alpha defaults to rank -> 1.0).
+    assert critic_out.scaling == pytest.approx(1.0)
+    # The clamped adapter is still an exact no-op at init.
+    x = torch.randn(2, 3, 16)
+    assert torch.allclose(
+        critic_out(x), F.linear(x, critic_out.weight, critic_out.bias)
+    )
+
+
 def test_reset_parameters_after_lora_raises() -> None:
     model = StatelessTransformerV1(
         StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
