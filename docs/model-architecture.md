@@ -264,7 +264,7 @@ actor heads. Recurrent models reject `lora` fields.
 | `target_modules` | `["q", "v"]` | Transformer block projections to wrap. Supported values are `q`, `k`, `v`, `out`, `up`, `down`, `gate`, and `value`; `gate`/`value` exist only for SwiGLU MLPs. May be empty (`[]`) to wrap only the heads. |
 | `target_block_count` | `null` | If set, wrap only the final N shared transformer blocks; otherwise wrap all shared blocks. |
 | `target_value_head` | `false` | Wrap every linear projection in the critic (value) head with LoRA adapters. |
-| `target_policy_head` | `false` | Wrap every linear projection in the actor (policy) head, including its source/target input projections, with LoRA adapters. |
+| `target_policy_head` | `false` | Wrap every linear projection in the actor (policy) head, including its source/target input projections and learned pairwise-bias MLP when enabled, with LoRA adapters. |
 
 LoRA presets live under `configs/model/lora/`. For example,
 `model.lora=2p_200m_qv_r16` resolves

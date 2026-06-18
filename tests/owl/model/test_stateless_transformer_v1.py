@@ -476,6 +476,44 @@ def test_apply_lora_wraps_value_and_policy_heads() -> None:
     )
 
 
+def test_apply_lora_policy_head_wraps_pairwise_bias_mlp() -> None:
+    model = StatelessTransformerV1(
+        StatelessTransformerV1Config(
+            embed_dim=16,
+            depth=1,
+            n_heads=4,
+            actor={"action_spec": "discrete_targets"},
+            use_learned_pairwise_bias=True,
+        ),
+        obs_spec=EntityBasedConfig(max_entities=64),
+        action_spec=ActionDiscreteTargetsConfig(max_per_planet_launches=1),
+    )
+    model.reset_parameters()
+
+    application = apply_lora_to_stateless_transformer(
+        model,
+        LoRAConfig(
+            rank=2,
+            target_modules=(),
+            target_policy_head=True,
+        ),
+    )
+
+    wrapped = {
+        name for name, module in model.named_modules() if isinstance(module, LoRALinear)
+    }
+    assert "source_actor_input_proj" in wrapped
+    assert "target_actor_input_proj" in wrapped
+    assert "pairwise_bias_mlp.up" in wrapped
+    assert "pairwise_bias_mlp.out" in wrapped
+    assert "actor.q" in wrapped
+    assert application.module_count == len(wrapped)
+    assert all(
+        _is_lora_parameter(name) == parameter.requires_grad
+        for name, parameter in model.named_parameters()
+    )
+
+
 def test_reset_parameters_after_lora_raises() -> None:
     model = StatelessTransformerV1(
         StatelessTransformerV1Config(embed_dim=16, depth=1, n_heads=4),

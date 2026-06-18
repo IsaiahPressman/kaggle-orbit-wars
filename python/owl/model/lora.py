@@ -241,6 +241,8 @@ def _wrap_policy_head(model: StatelessTransformerV1, config: LoRAConfig) -> int:
             continue
         _set_lora_linear(model, attribute, projection, config)
         count += 1
+    if model.pairwise_bias_mlp is not None:
+        count += _wrap_subtree_linears(model.pairwise_bias_mlp, config)
     count += _wrap_subtree_linears(actor, config)
     return count
 
