@@ -1,0 +1,66 @@
+env:
+  n_envs: 256
+  obs_spec:
+    obs_spec: entity_based_ext_v2
+    max_entities: 192
+  action_spec:
+    action_spec: discrete_targets
+    min_fleet_size: 3
+    targeting_mode: anything_goes
+  two_player_weight: 1.0
+  pin_memory: true
+
+model:
+  model_arch: stateless_transformer_v1
+  embed_dim: 768
+  depth: 38
+  n_heads: 16
+  mlp_ratio: 2.0
+  n_scratch_tokens: 4
+  activation: gelu
+  force_flash_attn: true
+  actor:
+    action_spec: discrete_targets
+    n_action_mixtures: 8
+    entropy_ship_quantiles: 16
+    scale_min: 0.10
+    scale_max_frac: 0.5
+    scale_max_abs_floor: 8.0
+  lora: 2p_200m_qv_r16
+
+optimizer:
+  optimizer: adamw
+  learning_rate: 2.0e-04
+  betas: [0.9, 0.999]
+  adamw_eps: 1.0e-05
+  weight_decay: 0.0
+  lr_schedule:
+    schedule: linear_warmup_cosine_decay
+    warmup_steps: 500
+    decay_steps: 50_000
+    lr_min_ratio: 0.05
+
+rl:
+  horizon: 64
+  checkpoint_freq: 20_000_000
+  ppo_epochs: 1
+  segments_per_minibatch: 16
+  gradient_accumulation_steps: 1
+  # gamma=1.0 keeps the critic softmax well-defined
+  gamma: 1.0
+  gae_lambda: 0.9
+  clip_coef: 0.2
+  vf_clip_coef: null
+  vf_coef: 2.0
+  ent_coef: 1e-6
+  max_grad_norm: 10.0
+  target_kl: null
+  ppo_clip_mode: per_player
+  normalize_advantages: true
+  eval_replay_games: 8
+  teacher_mode: last_best
+  teacher_kl_coef: 0.005
+  teacher_value_coef: 0.005
+  teacher_segments_per_minibatch: 32
+  compile_mode: default
+  dtype: bfloat16

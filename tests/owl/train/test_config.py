@@ -11,6 +11,7 @@ from owl.model import (
 from owl.model.stateless_transformer_v1 import StatelessTransformerV1Config
 from owl.rl import ActionDiscreteTargetsConfig, ActionPureConfig, EntityBasedConfig
 from owl.train import FullConfig, PPOConfig
+from owl.train.optimizer import AdamWConfig
 from owl.train.utils import (
     autocast_context,
     configure_model_compile,
@@ -204,10 +205,28 @@ def test_full_config_resolves_lora_subconfig_override() -> None:
     assert config.model.lora.rank == 16
     assert config.model.lora.alpha_scale == pytest.approx(1.0)
     assert config.model.lora.target_modules == ("q", "v")
-    assert config.model.lora.target_block_count is None
+    assert config.model.lora.target_block_count == 28
     assert config.model.lora.target_value_head is True
     assert config.model.lora.target_policy_head is True
     assert config.env.two_player_weight == pytest.approx(1.0)
+
+
+def test_stateless_200m_2p_lora_config_uses_lora_finetuning_settings() -> None:
+    config = FullConfig.from_file(_REPO_ROOT / "configs/stateless_200m_2p_lora.yaml")
+
+    assert config.env.two_player_weight == pytest.approx(1.0)
+    assert isinstance(config.model, StatelessTransformerV1Config)
+    assert config.model.embed_dim == 768
+    assert config.model.depth == 38
+    assert config.model.lora is not None
+    assert config.model.lora.rank == 16
+    assert config.model.lora.target_block_count == 28
+    assert config.model.lora.target_value_head is True
+    assert config.model.lora.target_policy_head is True
+    assert isinstance(config.optimizer, AdamWConfig)
+    assert config.optimizer.learning_rate == pytest.approx(2.0e-4)
+    assert config.optimizer.weight_decay == pytest.approx(0.0)
+    assert config.rl.teacher_mode == "last_best"
 
 
 def test_full_config_rejects_lora_without_any_target() -> None:
