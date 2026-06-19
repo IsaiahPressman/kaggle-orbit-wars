@@ -344,20 +344,23 @@ The `/runs` mount must point at a filesystem visible from every node. The
 container image must also be pullable from every allocated node, and the
 cluster network must allow NCCL and the torchrun rendezvous port between those
 nodes. Some clusters require site-specific NCCL settings such as
-`NCCL_SOCKET_IFNAME` or InfiniBand-related environment variables. Export those
-settings before `sbatch` and list their names in `ORBIT_WARS_CONTAINER_ENV` so
+`NCCL_SOCKET_IFNAME` or InfiniBand-related environment variables. The launcher
+forwards `NCCL_SOCKET_IFNAME` into the container automatically when it is set;
+list any additional environment variable names in `ORBIT_WARS_CONTAINER_ENV` so
 Pyxis forwards them into the container:
 
 ```sh
 NCCL_SOCKET_IFNAME=ib0 \
-ORBIT_WARS_CONTAINER_ENV=NCCL_SOCKET_IFNAME \
 sbatch --nodes=2 --ntasks=2 --ntasks-per-node=1 --gres=gpu:b200:4 \
   scripts/slurm/launch-train.sbatch
 ```
 
-On Kander, use `NCCL_SOCKET_IFNAME=^lo,docker0` for multi-node NCCL jobs. DGX
-and RTX nodes use different routable interface names, so excluding loopback and
-Docker interfaces is more portable than naming a single interface.
+On Kander, the launcher defaults to
+`NCCL_SOCKET_IFNAME=^lo,docker0,bmc_redfish0` for multi-node NCCL jobs when
+`NCCL_SOCKET_IFNAME` is unset. DGX and RTX nodes use different routable
+interface names, so excluding loopback, Docker, and DGX BMC link-local
+interfaces is more portable than naming a single interface. Set
+`NCCL_SOCKET_IFNAME` before `sbatch` to override the default.
 
 `EnvConfig.n_envs`, `rl.horizon`, and `rl.segments_per_minibatch` are per rank.
 The effective rollout width is:

@@ -222,6 +222,13 @@ if ((NNODES < 1)); then
     exit 1
 fi
 
+if ((NNODES > 1)) && [[ -z "${NCCL_SOCKET_IFNAME+x}" ]]; then
+    NCCL_SOCKET_IFNAME="^lo,docker0,bmc_redfish0"
+fi
+if [[ -n "${NCCL_SOCKET_IFNAME:-}" ]]; then
+    export NCCL_SOCKET_IFNAME
+fi
+
 GPUS_PER_NODE="${ORBIT_WARS_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-1}}"
 torchrun_cmd=(
     uv run torchrun
@@ -292,6 +299,10 @@ fi
 CONTAINER_ENV="WANDB_API_KEY,NVIDIA_VISIBLE_DEVICES,NVIDIA_DRIVER_CAPABILITIES,UV_COMPILE_BYTECODE,ORBIT_WARS_CONFIG"
 if [[ -n "$EXTRA_CONTAINER_ENV" ]]; then
     CONTAINER_ENV+=",$EXTRA_CONTAINER_ENV"
+fi
+if [[ -n "${NCCL_SOCKET_IFNAME:-}" && \
+    ",$CONTAINER_ENV," != *",NCCL_SOCKET_IFNAME,"* ]]; then
+    CONTAINER_ENV+=",NCCL_SOCKET_IFNAME"
 fi
 
 srun \

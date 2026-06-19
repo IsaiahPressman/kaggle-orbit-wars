@@ -376,6 +376,7 @@ def test_initial_last_best_model_wraps_lora_and_supports_refresh(
         obs_spec=base_cfg.env.obs_spec,
         action_spec=base_cfg.env.action_spec,
     )
+    base_model.reset_parameters()
     base_checkpoint = tmp_path / "base_checkpoint.pt"
     torch.save({"model": base_model.state_dict()}, base_checkpoint)
     # last_best validation reads the teacher checkpoint's sibling config.yaml.
@@ -415,6 +416,7 @@ def test_initial_last_best_model_wraps_lora_and_supports_refresh(
         obs_spec=student_cfg.env.obs_spec,
         action_spec=student_cfg.env.action_spec,
     )
+    student.reset_parameters()
     assert run_ppo._apply_lora_for_config(student, student_cfg.model) is not None
     run_ppo._refresh_eval_model_from_weights(last_best, student)
 
