@@ -193,8 +193,8 @@ def test_lr_multiplier_cosine_oscillates_between_bounds() -> None:
 
 
 def test_lr_multiplier_cosine_config_validation() -> None:
-    config = CosineLRScheduleConfig(full_cycle_steps=2, lr_min_ratio=0.0)
-    assert lr_multiplier(config, 1) == pytest.approx(0.0)
+    config = CosineLRScheduleConfig(full_cycle_steps=2, lr_min_ratio=0.1)
+    assert lr_multiplier(config, 1) == pytest.approx(0.1)
 
     with pytest.raises(ValueError, match="less than 1"):
         CosineLRScheduleConfig(lr_min_ratio=1.0)
@@ -206,7 +206,7 @@ def test_lr_schedule_config_discriminates_allowed_fields() -> None:
     adapter = TypeAdapter(LRScheduleConfig)
 
     cosine_config = adapter.validate_python(
-        {"schedule": "cosine", "full_cycle_steps": 4, "lr_min_ratio": 0.0}
+        {"schedule": "cosine", "full_cycle_steps": 4, "lr_min_ratio": 0.1}
     )
     assert isinstance(cosine_config, CosineLRScheduleConfig)
 

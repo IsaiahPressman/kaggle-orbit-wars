@@ -118,6 +118,16 @@ kaggle-submission model submission="submission" quantization="fp32" *extra_args:
 	  "${docker_args[@]}" \
 	  -v "$(dirname "$output_abs"):/artifacts" \
 	  orbit-wars:kaggle "${submission_args[@]}" "/model/$(basename "$model_abs")" "/artifacts/$(basename "$output_abs")"
+	artifact_limit_bytes=$((100 * 1024 * 1024))
+	artifact_bytes="$(wc -c < "$output_abs" | tr -d '[:space:]')"
+	if (( artifact_bytes > artifact_limit_bytes )); then
+	  warning="WARNING: Kaggle submission artifact exceeds 100MiB: $output_abs is ${artifact_bytes} bytes"
+	  if [[ -t 2 ]]; then
+	    printf '\033[31m%s\033[0m\n' "$warning" >&2
+	  else
+	    printf '%s\n' "$warning" >&2
+	  fi
+	fi
 
 _prepare_base: build rs-format py-format rs-lint py-lint docs-lint py-static rs-test py-test-full
 [group: 'ci']
