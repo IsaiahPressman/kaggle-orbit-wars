@@ -103,12 +103,14 @@ class _FakeDDP(torch.nn.Module):
         device_ids: list[int],
         output_device: int,
         find_unused_parameters: bool = False,
+        broadcast_buffers: bool = True,
     ) -> None:
         super().__init__()
         self.module = module
         self.device_ids = device_ids
         self.output_device = output_device
         self.find_unused_parameters = find_unused_parameters
+        self.broadcast_buffers = broadcast_buffers
         self.no_sync_entries = 0
         self.no_sync_active = False
 
@@ -402,6 +404,7 @@ def test_wrap_model_for_distributed_uses_ddp_adapter(
     assert wrapped._ddp.device_ids == [3]
     assert wrapped._ddp.output_device == 3
     assert not wrapped._ddp.find_unused_parameters
+    assert not wrapped._ddp.broadcast_buffers
 
 
 def test_model_no_sync_context_delegates_for_distributed_adapter(

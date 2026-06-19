@@ -281,6 +281,7 @@ class DistributedModelAdapter(BaseModelAPI):
             device_ids=[context.local_rank],
             output_device=context.local_rank,
             find_unused_parameters=_requires_unused_parameter_detection(model),
+            broadcast_buffers=False,
         )
 
     @property

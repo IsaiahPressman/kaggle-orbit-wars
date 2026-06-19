@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=owl
-#SBATCH --ntasks=1
 #SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:b200:1
 #SBATCH --cpus-per-gpu=28
 #SBATCH --mem-per-gpu=128G
@@ -19,6 +20,9 @@ LOG_MODE="${ORBIT_WARS_LOG_MODE:-wandb}"
 MAX_RUNTIME_HOURS="${ORBIT_WARS_MAX_RUNTIME_HOURS:-23.5}"
 LOAD_MODEL_WEIGHTS="${ORBIT_WARS_LOAD_MODEL_WEIGHTS:-}"
 LOAD_MODEL_WEIGHTS_MODE="${ORBIT_WARS_LOAD_MODEL_WEIGHTS_MODE:-model_only}"
+MASTER_ADDR="${ORBIT_WARS_MASTER_ADDR:-}"
+MASTER_PORT="${ORBIT_WARS_MASTER_PORT:-29500}"
+EXTRA_CONTAINER_ENV="${ORBIT_WARS_CONTAINER_ENV:-}"
 CONFIG_MOUNT_TARGET="/config"
 CONFIG_MOUNT_DIR=""
 MODEL_WEIGHTS_MOUNT_TARGET="/model-weights"
@@ -208,11 +212,53 @@ if [[ "$LOG_MODE" == "wandb" && -z "${WANDB_API_KEY:-}" ]]; then
     exit 1
 fi
 
-train_cmd=(
+NNODES="${SLURM_NNODES:-1}"
+if [[ ! "$NNODES" =~ ^[0-9]+$ ]]; then
+    echo "SLURM_NNODES must be a positive integer, got: $NNODES" >&2
+    exit 1
+fi
+if ((NNODES < 1)); then
+    echo "SLURM_NNODES must be positive, got: $NNODES" >&2
+    exit 1
+fi
+
+GPUS_PER_NODE="${ORBIT_WARS_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-1}}"
+torchrun_cmd=(
     uv run torchrun
-    --standalone
-    --nnodes=1
-    --nproc-per-node="${ORBIT_WARS_GPUS_PER_NODE:-${SLURM_GPUS_ON_NODE:-1}}"
+)
+if ((NNODES > 1)); then
+    if [[ -z "$MASTER_ADDR" ]]; then
+        if [[ -z "${SLURM_JOB_NODELIST:-}" ]]; then
+            echo "SLURM_JOB_NODELIST is required for multi-node torchrun." >&2
+            exit 1
+        fi
+        if ! command -v scontrol >/dev/null 2>&1; then
+            echo "scontrol is required to resolve the multi-node torchrun master address." >&2
+            exit 1
+        fi
+        read -r MASTER_ADDR < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
+    fi
+    if [[ -z "$MASTER_ADDR" ]]; then
+        echo "Failed to resolve the multi-node torchrun master address." >&2
+        exit 1
+    fi
+    torchrun_cmd+=(
+        --nnodes="$NNODES"
+        --nproc-per-node="$GPUS_PER_NODE"
+        --rdzv-backend=c10d
+        --rdzv-endpoint="$MASTER_ADDR:$MASTER_PORT"
+        --rdzv-id="${ORBIT_WARS_RDZV_ID:-${SLURM_JOB_ID:-orbit-wars}}"
+    )
+else
+    torchrun_cmd+=(
+        --standalone
+        --nnodes=1
+        --nproc-per-node="$GPUS_PER_NODE"
+    )
+fi
+
+train_cmd=(
+    "${torchrun_cmd[@]}"
     scripts/run_ppo.py
     --log-mode "$LOG_MODE"
 )
@@ -243,9 +289,17 @@ if [[ -n "$MODEL_WEIGHTS_MOUNT_DIR" ]]; then
     CONTAINER_MOUNTS+=",$MODEL_WEIGHTS_MOUNT_DIR:$MODEL_WEIGHTS_MOUNT_TARGET:ro"
 fi
 
+CONTAINER_ENV="WANDB_API_KEY,NVIDIA_VISIBLE_DEVICES,NVIDIA_DRIVER_CAPABILITIES,UV_COMPILE_BYTECODE,ORBIT_WARS_CONFIG"
+if [[ -n "$EXTRA_CONTAINER_ENV" ]]; then
+    CONTAINER_ENV+=",$EXTRA_CONTAINER_ENV"
+fi
+
 srun \
+    --nodes="$NNODES" \
+    --ntasks="$NNODES" \
+    --ntasks-per-node=1 \
     --container-image="$IMAGE" \
     --container-mounts="$CONTAINER_MOUNTS" \
     --container-workdir=/workspace/orbit-wars \
-    --container-env=WANDB_API_KEY,NVIDIA_VISIBLE_DEVICES,NVIDIA_DRIVER_CAPABILITIES,UV_COMPILE_BYTECODE,ORBIT_WARS_CONFIG \
+    --container-env="$CONTAINER_ENV" \
     "${train_cmd[@]}"

@@ -654,12 +654,9 @@ class PPOTrainer:
                 valid_mask=value_mask,
             ).item()
         )
-        metrics["train/advantage_mean"] = float(
-            self._masked_mean(advantages, policy_mask).item()
-        )
-        metrics["train/advantage_std"] = float(
-            self._masked_std(advantages, policy_mask).item()
-        )
+        advantage_mean, advantage_std = self._masked_mean_std(advantages, policy_mask)
+        metrics["train/advantage_mean"] = float(advantage_mean.item())
+        metrics["train/advantage_std"] = float(advantage_std.item())
         metrics["train/max_entities"] = float(
             self._masked_max(max_entities_seen).item()
         )
@@ -1193,9 +1190,25 @@ class PPOTrainer:
 
     def _masked_std(self, values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         if self.distributed_context.initialized:
-            mean = self._masked_mean(values, mask)
-            return self._masked_mean((values - mean).pow(2), mask).sqrt()
+            return _distributed_masked_mean_std(
+                values,
+                mask,
+                self.distributed_context,
+            )[1]
         return masked_std(values, mask)
+
+    def _masked_mean_std(
+        self,
+        values: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.distributed_context.initialized:
+            return _distributed_masked_mean_std(
+                values,
+                mask,
+                self.distributed_context,
+            )
+        return masked_mean(values, mask), masked_std(values, mask)
 
     def _masked_max(self, value: torch.Tensor) -> torch.Tensor:
         if self.distributed_context.initialized:
@@ -2696,6 +2709,26 @@ def _distributed_weighted_mean(
     )
     totals = all_reduce_sum(totals, context)
     return totals[0] / totals[1].clamp_min(1e-8)
+
+
+def _distributed_masked_mean_std(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    context: DistributedContext,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    weights = mask.to(dtype=values.dtype)
+    totals = torch.stack(
+        [
+            (values * weights).sum(),
+            (values.square() * weights).sum(),
+            weights.sum(),
+        ]
+    )
+    totals = all_reduce_sum(totals, context)
+    count = totals[2].clamp_min(1.0)
+    mean = totals[0] / count
+    variance = totals[1] / count - mean.pow(2)
+    return mean, variance.clamp_min(0.0).sqrt()
 
 
 def _distributed_teacher_value_weighted_mean(

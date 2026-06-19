@@ -803,6 +803,40 @@ def test_distributed_weighted_mean_uses_global_sum_and_count(
     assert actual.item() == pytest.approx(80.6)
 
 
+def test_distributed_masked_mean_std_uses_one_global_sum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = ppo.DistributedContext(
+        device=torch.device("cpu"),
+        rank=0,
+        local_rank=0,
+        world_size=2,
+        initialized=True,
+    )
+    calls: list[torch.Tensor] = []
+
+    def fake_all_reduce_sum(
+        tensor: torch.Tensor,
+        _context: ppo.DistributedContext,
+    ) -> torch.Tensor:
+        assert _context is context
+        calls.append(tensor.detach().clone())
+        return torch.tensor([12.0, 50.0, 3.0], dtype=tensor.dtype)
+
+    monkeypatch.setattr(ppo, "all_reduce_sum", fake_all_reduce_sum)
+
+    mean, std = ppo._distributed_masked_mean_std(
+        torch.tensor([2.0, 4.0]),
+        torch.tensor([True, False]),
+        context,
+    )
+
+    assert len(calls) == 1
+    assert torch.equal(calls[0], torch.tensor([2.0, 4.0, 1.0]))
+    assert mean.item() == pytest.approx(4.0)
+    assert std.item() == pytest.approx((2.0 / 3.0) ** 0.5)
+
+
 def test_distributed_backward_weighted_mean_scales_for_ddp_average(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

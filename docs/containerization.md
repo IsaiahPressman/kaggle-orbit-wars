@@ -315,14 +315,49 @@ training.
 For production jobs, point at `configs/baseline.yaml` or another checked-in
 config, and mount any external data or required settings.
 
-### Multi-GPU PPO
+### Multi-GPU and multi-node PPO
 
-The batch launcher runs PPO through `torchrun` with one process per GPU on a
-single node. Override Slurm GPU resources in the normal `sbatch` position:
+The batch launcher runs PPO through `torchrun` with one process per GPU. For a
+single-node multi-GPU job, override Slurm GPU resources in the normal `sbatch`
+position:
 
 ```sh
 sbatch --gres=gpu:b200:4 scripts/slurm/launch-train.sbatch
 ```
+
+For a multi-node job, request one Slurm task per node and set the total task
+count to the node count. The launcher resolves the first allocated host as the
+c10d rendezvous endpoint and starts one `torchrun` agent on each node:
+
+```sh
+sbatch --nodes=2 --ntasks=2 --ntasks-per-node=1 --gres=gpu:b200:4 \
+  scripts/slurm/launch-train.sbatch
+```
+
+Set `ORBIT_WARS_MASTER_ADDR` to override the rendezvous host, and set
+`ORBIT_WARS_MASTER_PORT` when the default port `29500` is unavailable. Set
+`ORBIT_WARS_RDZV_ID` only when the Slurm job ID is not unique enough for the
+cluster's rendezvous store. `ORBIT_WARS_GPUS_PER_NODE` overrides
+`SLURM_GPUS_ON_NODE` for `torchrun --nproc-per-node`.
+
+The `/runs` mount must point at a filesystem visible from every node. The
+container image must also be pullable from every allocated node, and the
+cluster network must allow NCCL and the torchrun rendezvous port between those
+nodes. Some clusters require site-specific NCCL settings such as
+`NCCL_SOCKET_IFNAME` or InfiniBand-related environment variables. Export those
+settings before `sbatch` and list their names in `ORBIT_WARS_CONTAINER_ENV` so
+Pyxis forwards them into the container:
+
+```sh
+NCCL_SOCKET_IFNAME=ib0 \
+ORBIT_WARS_CONTAINER_ENV=NCCL_SOCKET_IFNAME \
+sbatch --nodes=2 --ntasks=2 --ntasks-per-node=1 --gres=gpu:b200:4 \
+  scripts/slurm/launch-train.sbatch
+```
+
+On Kander, use `NCCL_SOCKET_IFNAME=^lo,docker0` for multi-node NCCL jobs. DGX
+and RTX nodes use different routable interface names, so excluding loopback and
+Docker interfaces is more portable than naming a single interface.
 
 `EnvConfig.n_envs`, `rl.horizon`, and `rl.segments_per_minibatch` are per rank.
 The effective rollout width is:
