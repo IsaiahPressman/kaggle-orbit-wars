@@ -1,4 +1,3 @@
-import json
 import re
 import subprocess
 import sys
@@ -76,7 +75,6 @@ _ASSERT_AGENT_IMPORT_ISOLATED = Path(__file__).with_name(
     "assert_agent_import_isolated.py"
 )
 _REPO_ROOT = Path(__file__).parents[3]
-_REPLAY_FIXTURE_DIR = _REPO_ROOT / "tests" / "fixtures" / "orbit_wars_replays"
 
 
 def test_kaggle_row_index_constants_match_rust_observation_parser() -> None:
@@ -150,21 +148,38 @@ def test_agent_config_rejects_nonpositive_min_fleet_size() -> None:
 
 
 @pytest.mark.parametrize(
-    "fixture_name",
+    ("planets", "expected_player_count"),
     [
-        "replay-75930761.jsonl",
-        "replay-75926553.jsonl",
+        (
+            [
+                [0, -1, 50.0, 50.0, 2.0, 25, 3],
+                [1, 0, 25.0, 50.0, 2.0, 10, 3],
+                [2, 1, 75.0, 50.0, 2.0, 10, 3],
+            ],
+            2,
+        ),
+        (
+            [
+                [0, 0, 25.0, 25.0, 2.0, 10, 3],
+                [1, 1, 75.0, 25.0, 2.0, 10, 3],
+                [2, 2, 75.0, 75.0, 2.0, 10, 3],
+                [3, 3, 25.0, 75.0, 2.0, 10, 3],
+            ],
+            4,
+        ),
     ],
 )
-def test_observation_player_count_matches_real_replay_start_observations(
-    fixture_name: str,
+def test_observation_player_count_matches_start_observations(
+    planets: list[list[int | float]],
+    expected_player_count: int,
 ) -> None:
-    fixture_path = _REPLAY_FIXTURE_DIR / fixture_name
-    with fixture_path.open(encoding="utf-8") as replay_file:
-        row = json.loads(next(replay_file))
-    observation = KaggleObservation.model_validate(row["before"])
-    assert observation.step == 0
-    assert observation_player_count(observation) == row["players"]
+    observation = _raw_observation()
+    observation["planets"] = planets
+    observation["initial_planets"] = planets
+    assert (
+        observation_player_count(KaggleObservation.model_validate(observation))
+        == expected_player_count
+    )
 
 
 def test_observation_player_count_rejects_non_start_observation() -> None:
