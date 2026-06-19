@@ -468,12 +468,11 @@ def test_wrap_model_for_distributed_finds_unused_player_count_adapters(
     assert wrapped.action_spec == model.action_spec
 
 
-def test_wrap_model_for_distributed_finds_unused_lora_adapters(
+def test_wrap_model_for_distributed_disables_unused_detection_for_lora_adapters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # LoRA freezes the base and trains only the wrapped adapters, so DDP must use
-    # find_unused_parameters=True to avoid deadlocking on an adapter that does not
-    # receive a gradient on a given backward.
+    # LoRA adapters are on shared forward/evaluate paths. Leaving
+    # find_unused_parameters=False avoids DDP's extra graph traversal.
     monkeypatch.setattr(distributed_module, "DistributedDataParallel", _FakeDDP)
     model = StatelessTransformerV1(
         StatelessTransformerV1Config(
@@ -497,14 +496,12 @@ def test_wrap_model_for_distributed_finds_unused_lora_adapters(
 
     assert isinstance(wrapped, DistributedModelAdapter)
     assert isinstance(wrapped._ddp, _FakeDDP)
-    assert wrapped._ddp.find_unused_parameters
+    assert not wrapped._ddp.find_unused_parameters
 
 
 def test_requires_unused_parameter_detection_handles_recurrent_model() -> None:
-    # RecurrentTransformerV1 subclasses StatelessTransformerV1 but its config has
-    # no `lora` field; LoRA detection must not read `.lora` on it (regression
-    # guard against an AttributeError that would crash every recurrent multi-GPU
-    # launch).
+    # RecurrentTransformerV1 subclasses StatelessTransformerV1 but does not use
+    # player-count adapters, so it should keep the cheaper DDP reducer path.
     model = RecurrentTransformerV1(
         RecurrentTransformerV1Config(embed_dim=16, depth=1, n_heads=4),
         obs_spec=EntityBasedConfig(max_entities=ACTION_ENTITY_SLOTS + 2),

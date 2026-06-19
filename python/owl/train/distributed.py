@@ -22,7 +22,6 @@ from owl.model import (
     ModelOutput,
     ModelTeacherEvaluation,
     StatelessTransformerV1,
-    lora_config_for_model,
 )
 from owl.rl import ObsBatch
 
@@ -464,16 +463,10 @@ def model_no_sync_context(
 def _requires_unused_parameter_detection(model: BaseModelAPI) -> bool:
     if not isinstance(model, StatelessTransformerV1):
         return False
-    if model.config.player_count_adapters_enabled:
-        return True
-    # LoRA freezes the base model and trains only the wrapped adapters, which may
-    # not all receive a gradient on every backward (e.g. a wrapped actor sub-head
-    # a given minibatch never exercises). With find_unused_parameters=False that
-    # would deadlock the DDP reducer, so enable detection whenever LoRA is active.
-    # The trainable set is tiny under LoRA, so the extra traversal is negligible.
-    # lora_config_for_model encodes which configs can carry LoRA, so this stays
-    # safe for the recurrent subclass whose config has no `lora` field.
-    return lora_config_for_model(model.config) is not None
+    # Player-count adapters are selected conditionally by batch composition, so a
+    # given minibatch can skip some adapter parameters. LoRA adapters are applied
+    # on the shared forward/evaluate paths and should all receive gradients.
+    return model.config.player_count_adapters_enabled
 
 
 def unwrap_model(model: BaseModelAPI) -> BaseModelAPI:
