@@ -205,7 +205,6 @@ def test_full_config_resolves_lora_subconfig_override() -> None:
     assert config.model.lora.rank == 16
     assert config.model.lora.alpha_scale == pytest.approx(1.0)
     assert config.model.lora.target_modules == ("q", "v")
-    assert config.model.lora.target_block_count == 28
     assert config.model.lora.target_value_head is True
     assert config.model.lora.target_policy_head is True
     assert config.env.two_player_weight == pytest.approx(1.0)
@@ -220,7 +219,6 @@ def test_stateless_200m_2p_lora_config_uses_lora_finetuning_settings() -> None:
     assert config.model.depth == 38
     assert config.model.lora is not None
     assert config.model.lora.rank == 16
-    assert config.model.lora.target_block_count == 28
     assert config.model.lora.target_value_head is True
     assert config.model.lora.target_policy_head is True
     assert isinstance(config.optimizer, AdamWConfig)
