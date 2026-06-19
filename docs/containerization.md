@@ -120,43 +120,15 @@ recipe quantization argument is not `fp32`, optionally applies a separate LoRA
 adapter quantization format, and copies `config.yaml` from the same directory to
 `models/primary/config.yaml`. If `--fallback-checkpoint` is
 provided, the fallback checkpoint and adjacent config are packaged under
-`models/fallback/` using the same fixed filenames. Supported quantization
-formats include `fp8_e4m3fn`, `fp4_e2m1fn_x2_scaled_block16`, and
-`nf5_g128_lsq_policy_last_fp8`. Lower-bit normal-float formats `nf4_g128_lsq`,
-`nf3_nf4_structured_3p5`, and `nf3_g128_lsq` are also supported; unique
-quantization prefixes such as `fp4` are accepted. LoRA adapter formats also
-accept `fp32`, `fp16`, and `bf16`. The extraction step validates that fp32 model
-states contain only string keys and tensor values, and custom quantized
-checkpoint payloads are checked before packaging. The checked-in
-`python/owl/agent/agent_config.yaml` configures `inference_quantization: int8`,
-which converts loaded `nn.Linear` layers to PyTorch dynamic int8 CPU inference
-while keeping final actor/critic output heads in fp32; `null` disables
-serving-time quantization and uses fp32 inference. LoRA adapters are dequantized
-and folded into regular `nn.Linear` weights before int8 inference quantization.
-`lora_mode` in the agent config controls whether adapters are folded for every
-game (`always`) or only for two-player or four-player games (`2p` / `4p`).
-Quantized slim checkpoints
-are stream-dequantized into the live model one tensor at a time, so agent
-startup does not hold a complete fp32 dequantized state dict in addition to the
-model. Set
-`fallback_min_overage_time` in
-`python/owl/agent/agent_config.yaml` to switch to the fallback model when
-remaining overage time drops below that threshold; `null` disables fallback
-routing even when the fallback model is packaged. A packaged fallback config is
-validated during startup, but the fallback weights are loaded on the second
-observed turn instead of initial agent construction. The delayed load still
-happens even if remaining overage time has already fallen below the fallback
-threshold, preferring to risk that one timeout over giving up fallback for the
-rest of the game. The image build validates Kaggle-targeted Rust compilation
-directly before artifact generation runs with the mounted checkpoint directory.
-
-The packaged agent's Rust observation encoder filters fleets smaller than the
-configured `min_fleet_size` while encoding Kaggle observations. The tradeoff is
-deliberate: tiny fleets are usually low-impact, but enough of them can
-materially increase inference time and trigger fallback routing. The filter
-keeps one safeguard for player liveness: when a player has no current planets
-and all of their fleets are below the threshold, the encoder keeps that player's
-largest fleet instead of dropping that player from the encoded state entirely.
+`models/fallback/` using the same fixed filenames. The extraction step validates
+that fp32 model states contain only string keys and tensor values, and custom
+quantized checkpoint payloads are checked before packaging. See the
+[README Kaggle submission section](../README.md#kaggle-submission-build) for
+supported quantization formats and packaged-agent runtime settings such as
+`int8_quantization`, `lora_mode`,
+`fallback_min_overage_time`, and `min_fleet_size`. The image build validates
+Kaggle-targeted Rust compilation directly before artifact generation runs with
+the mounted checkpoint directory.
 Use `just kaggle-image` only when you want to rebuild or validate the Kaggle
 image without creating a submission tarball.
 

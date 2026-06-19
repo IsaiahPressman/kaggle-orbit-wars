@@ -1,8 +1,8 @@
 deterministic: true
 max_entities_override: 96
 targeting_mode_override: full_mask
-inference_quantization: int8
-lora_mode: always
+int8_quantization: always
+lora_mode: 2p
 min_fleet_size: match
-min_overage_time: 0.5
-fallback_min_overage_time: 1.5
+min_overage_time: 0.1
+fallback_min_overage_time: 1.0

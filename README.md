@@ -79,10 +79,14 @@ The default `fp32` leaves checkpoint weights unchanged. The Kaggle agent
 loads quantized slim checkpoints by dequantizing and copying one tensor at a
 time into the model, avoiding a full fp32 state-dict copy during startup.
 The checked-in `python/owl/agent/agent_config.yaml`
-sets `inference_quantization: int8`, which converts loaded `nn.Linear` layers
-to PyTorch dynamic int8 CPU inference while keeping final actor/critic output
-heads in fp32; `null` disables serving-time quantization and uses fp32
-inference. Set
+sets `int8_quantization: always`, which converts loaded `nn.Linear` layers to
+PyTorch dynamic int8 CPU inference while keeping final actor/critic output heads
+in fp32. Set it to `2p` or `4p` to use int8 only for that game size, or `never`
+to disable serving-time quantization and use fp32 CPU inference. Set
+`lora_mode` to control whether LoRA adapters are dequantized and folded into
+regular `nn.Linear` weights for every game (`always`) or only for two-player or
+four-player games (`2p` / `4p`); folding happens before int8 inference
+quantization. Set
 `fallback_min_overage_time` in `python/owl/agent/agent_config.yaml` to switch to
 the fallback model when remaining overage time drops below that threshold;
 `null` disables fallback routing even if the fallback model is packaged. A

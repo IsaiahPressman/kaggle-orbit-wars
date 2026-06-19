@@ -1,3 +1,4 @@
+import json
 import re
 import subprocess
 import sys
@@ -6,11 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from owl.agent import Agent, KaggleObservation
+from owl.agent import Agent, KaggleObservation, observation_player_count
 from owl.agent.agent import (
     AGENT_CONFIG_PATH,
     AgentCheckpointConfig,
     AgentConfig,
+    Int8QuantizationMode,
+    _should_use_int8_quantization,
     apply_max_entities_override,
     apply_targeting_mode_override,
     compact_entities,
@@ -73,6 +76,7 @@ _ASSERT_AGENT_IMPORT_ISOLATED = Path(__file__).with_name(
     "assert_agent_import_isolated.py"
 )
 _REPO_ROOT = Path(__file__).parents[3]
+_REPLAY_FIXTURE_DIR = _REPO_ROOT / "tests" / "fixtures" / "orbit_wars_replays"
 
 
 def test_kaggle_row_index_constants_match_rust_observation_parser() -> None:
@@ -145,13 +149,90 @@ def test_agent_config_rejects_nonpositive_min_fleet_size() -> None:
         AgentConfig(deterministic=True, min_fleet_size=0)
 
 
-def test_agent_config_rejects_unknown_inference_quantization() -> None:
-    with pytest.raises(ValueError, match="Input should be 'int8'"):
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "replay-75930761.jsonl",
+        "replay-75926553.jsonl",
+    ],
+)
+def test_observation_player_count_matches_real_replay_start_observations(
+    fixture_name: str,
+) -> None:
+    fixture_path = _REPLAY_FIXTURE_DIR / fixture_name
+    with fixture_path.open(encoding="utf-8") as replay_file:
+        row = json.loads(next(replay_file))
+    observation = KaggleObservation.model_validate(row["before"])
+    assert observation.step == 0
+    assert observation_player_count(observation) == row["players"]
+
+
+def test_observation_player_count_rejects_non_start_observation() -> None:
+    observation = _raw_observation()
+    observation["step"] = 1
+
+    with pytest.raises(
+        ValueError,
+        match="observation_player_count requires a starting observation",
+    ):
+        observation_player_count(KaggleObservation.model_validate(observation))
+
+
+def test_observation_player_count_rejects_malformed_start_observation() -> None:
+    with pytest.raises(
+        ValueError,
+        match="starting observation must expose exactly 2 or 4 active players",
+    ):
+        observation_player_count(KaggleObservation.model_validate(_raw_observation()))
+
+
+def test_agent_config_defaults_to_no_int8_quantization() -> None:
+    assert AgentConfig(deterministic=True).int8_quantization == "never"
+
+
+def test_agent_config_rejects_unknown_int8_quantization() -> None:
+    with pytest.raises(ValueError, match="Input should be"):
         AgentConfig.model_validate(
             {
                 "deterministic": True,
-                "inference_quantization": "fp16",
+                "int8_quantization": "fp16",
             }
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "game_player_count", "expected"),
+    [
+        ("never", None, False),
+        ("always", None, True),
+        ("2p", 2, True),
+        ("2p", 4, False),
+        ("4p", 2, False),
+        ("4p", 4, True),
+    ],
+)
+def test_should_use_int8_quantization_matches_mode(
+    mode: Int8QuantizationMode,
+    game_player_count: int | None,
+    expected: bool,
+) -> None:
+    assert (
+        _should_use_int8_quantization(
+            agent_config=AgentConfig(deterministic=True, int8_quantization=mode),
+            game_player_count=game_player_count,
+        )
+        is expected
+    )
+
+
+def test_should_use_int8_quantization_requires_player_count() -> None:
+    with pytest.raises(
+        ValueError,
+        match="int8_quantization='2p' requires game_player_count",
+    ):
+        _should_use_int8_quantization(
+            agent_config=AgentConfig(deterministic=True, int8_quantization="2p"),
+            game_player_count=None,
         )
 
 
@@ -308,9 +389,7 @@ def test_agent_init_folds_lora_adapters_when_mode_matches(
     assert not any(
         name.endswith((".lora_down", ".lora_up")) for name in agent.model.state_dict()
     )
-    # The agent loads onto its own device (cuda when available); compare on CPU
-    # since expected_q_weight is derived from the CPU source model.
-    assert torch.allclose(agent.model.blocks[0].attn.q.weight.cpu(), expected_q_weight)
+    assert torch.allclose(agent.model.blocks[0].attn.q.weight, expected_q_weight)
 
 
 def test_agent_init_ignores_lora_adapters_when_mode_does_not_match(
@@ -369,9 +448,7 @@ def test_agent_init_ignores_lora_adapters_when_mode_does_not_match(
     assert isinstance(agent.model, StatelessTransformerV1)
     assert isinstance(agent.model.blocks[0].attn.q, torch.nn.Linear)
     assert not isinstance(agent.model.blocks[0].attn.q, LoRALinear)
-    # The agent loads onto its own device (cuda when available); compare on CPU
-    # since expected_q_weight is derived from the CPU source model.
-    assert torch.equal(agent.model.blocks[0].attn.q.weight.cpu(), expected_q_weight)
+    assert torch.equal(agent.model.blocks[0].attn.q.weight, expected_q_weight)
 
 
 def test_agent_init_requires_lora_adapters_when_mode_matches(
@@ -531,13 +608,12 @@ def test_agent_init_quantizes_linear_layers_for_int8_inference(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     agent_config_path = tmp_path / "agent_config.yaml"
     agent_config_path.write_text(
         "\n".join(
             (
                 "deterministic: true",
-                "inference_quantization: int8",
+                "int8_quantization: always",
             )
         ),
         encoding="utf-8",
@@ -568,7 +644,6 @@ def test_agent_init_quantizes_linear_layers_for_int8_inference(
         checkpoint_path=checkpoint_path,
     )
 
-    assert agent.device == torch.device("cpu")
     output_layer_ids = {id(layer) for layer in agent.model.get_output_layers()}
     linear_layer_ids = {
         id(module)
@@ -1005,10 +1080,10 @@ def test_agent_act_logs_rust_filtered_fleet_count(
         deterministic=False,
         min_fleet_size=agent_min_fleet_size,
     )
-    agent.device = torch.device("cpu")
     agent.hidden_state = None
     agent.fallback_model = None
     agent.fallback_checkpoint_config = None
+    agent._last_turn_value = 0.0
     agent._peak_total_ms = 0
     agent._peak_entities = 0
 
@@ -1088,6 +1163,7 @@ def test_agent_act_logs_rust_filtered_fleet_count(
     )
     monkeypatch.setattr("owl.agent.agent.actions_to_kaggle", fake_actions_to_kaggle)
     raw_observation = _raw_observation()
+    raw_observation["step"] = 1
     raw_observation["planets"] = [
         [0, 0, 25.0, 50.0, 2.0, 10, 3],
         [1, 1, 75.0, 50.0, 2.0, 10, 3],
@@ -1115,10 +1191,10 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
         model=StatelessTransformerV1Config(),
     )
     agent.config = AgentConfig(deterministic=False)
-    agent.device = torch.device("cpu")
     agent.hidden_state = None
     agent.fallback_model = None
     agent.fallback_checkpoint_config = None
+    agent._last_turn_value = 0.0
     agent._peak_total_ms = 0
     agent._peak_entities = 0
     action_shape = (1, 4, 1, action_spec.max_per_planet_launches)
@@ -1159,7 +1235,9 @@ def test_agent_act_converts_fake_model_output_to_kaggle_actions() -> None:
 
     agent.model = FakeModel()
 
-    actions = agent.act(KaggleObservation.model_validate(_raw_observation()))
+    raw_observation = _raw_observation()
+    raw_observation["step"] = 1
+    actions = agent.act(KaggleObservation.model_validate(raw_observation))
 
     assert actions == [[0.0, 0.5, float(action_spec.min_fleet_size)]]
 
@@ -1182,10 +1260,10 @@ def test_agent_act_preserves_planet_slots_for_recurrent_include_planets(
         ),
     )
     agent.config = AgentConfig(deterministic=True)
-    agent.device = torch.device("cpu")
     agent.hidden_state = None
     agent.fallback_model = None
     agent.fallback_checkpoint_config = None
+    agent._last_turn_value = 0.0
     agent._peak_total_ms = 0
     agent._peak_entities = 0
 
@@ -1247,7 +1325,9 @@ def test_agent_act_preserves_planet_slots_for_recurrent_include_planets(
     agent.model = FakeModel()
     monkeypatch.setattr("owl.agent.agent.actions_to_kaggle", fake_actions_to_kaggle)
 
-    actions = agent.act(KaggleObservation.model_validate(_raw_observation()))
+    raw_observation = _raw_observation()
+    raw_observation["step"] = 1
+    actions = agent.act(KaggleObservation.model_validate(raw_observation))
 
     assert actions == []
     assert agent.hidden_state == "next"
@@ -1266,10 +1346,10 @@ def test_agent_act_moves_action_bundle_to_cpu_before_kaggle_conversion(
         model=StatelessTransformerV1Config(),
     )
     agent.config = AgentConfig(deterministic=False)
-    agent.device = torch.device("cpu")
     agent.hidden_state = None
     agent.fallback_model = None
     agent.fallback_checkpoint_config = None
+    agent._last_turn_value = 0.0
     agent._peak_total_ms = 0
     agent._peak_entities = 0
 
@@ -1326,7 +1406,9 @@ def test_agent_act_moves_action_bundle_to_cpu_before_kaggle_conversion(
     agent.model = FakeModel()
     monkeypatch.setattr("owl.agent.agent.actions_to_kaggle", fake_actions_to_kaggle)
 
-    actions = agent.act(KaggleObservation.model_validate(_raw_observation()))
+    raw_observation = _raw_observation()
+    raw_observation["step"] = 1
+    actions = agent.act(KaggleObservation.model_validate(raw_observation))
 
     assert actions == []
 
@@ -1348,7 +1430,6 @@ def test_agent_act_uses_fallback_model_below_configured_overage() -> None:
         min_overage_time=1.0,
         fallback_min_overage_time=10.0,
     )
-    agent.device = torch.device("cpu")
     agent.hidden_state = "primary-hidden"
     agent._last_turn_value = float("nan")
     agent._peak_total_ms = 0
@@ -1493,7 +1574,6 @@ def test_agent_act_excludes_fallback_init_from_total_metrics(
         deterministic=True,
         fallback_min_overage_time=1.0,
     )
-    agent.device = torch.device("cpu")
     agent.hidden_state = None
     agent.fallback_model = None
     agent._fallback_checkpoint_path = tmp_path / "fallback_checkpoint.pt"
@@ -1573,10 +1653,10 @@ def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
         model=StatelessTransformerV1Config(),
     )
     agent.config = AgentConfig(deterministic=False)
-    agent.device = torch.device("cpu")
     agent.hidden_state = None
     agent.fallback_model = None
     agent.fallback_checkpoint_config = None
+    agent._last_turn_value = 0.0
     agent._peak_total_ms = 0
     agent._peak_entities = 0
     action_shape = (1, 4, 1, action_spec.max_per_planet_launches)
@@ -1614,11 +1694,13 @@ def test_agent_act_logs_model_values_and_entity_count(capsys) -> None:
 
     agent.model = FakeModel()
 
-    agent.act(KaggleObservation.model_validate(_raw_observation()))
+    raw_observation = _raw_observation()
+    raw_observation["step"] = 1
+    agent.act(KaggleObservation.model_validate(raw_observation))
 
     log_line = capsys.readouterr().out
     assert re.fullmatch(
-        r"step=0 - total_ms=\d+ - peak_total_ms=0 - "
+        r"step=1 - total_ms=\d+ - peak_total_ms=\d+ - "
         r"encode_ms=\d+ - inference_ms=\d+ - "
         r"conversion_ms=\d+ - value_self=0\.250 - advantage=0\.250 - "
         r"values=\[0\.250,-0\.500,0\.000,0\.750\] - "
@@ -1639,7 +1721,6 @@ def test_agent_act_logs_step_and_value_advantage(capsys) -> None:
         model=StatelessTransformerV1Config(),
     )
     agent.config = AgentConfig(deterministic=False)
-    agent.device = torch.device("cpu")
     agent._last_turn_value = float("nan")
     agent.hidden_state = None
     agent.fallback_model = None

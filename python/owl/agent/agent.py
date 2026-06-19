@@ -46,21 +46,10 @@ from owl.rl import (
 from .kaggle_observation import KaggleObservation
 
 AGENT_CONFIG_PATH = Path(__file__).with_name("agent_config.yaml")
-InferenceQuantization: TypeAlias = Literal["int8"]
+Int8QuantizationMode: TypeAlias = Literal["always", "2p", "4p", "never"]
 LoRAMode: TypeAlias = Literal["always", "2p", "4p"]
 _FALLBACK_LOAD_MIN_STEP = 1
 _QUANTIZED_ENGINE_PREFERENCE = ("x86", "fbgemm", "qnnpack", "onednn")
-_OBS_REQUIRED_TENSOR_FIELDS = tuple(
-    field
-    for field in ObsBatch.model_fields
-    if field
-    not in {
-        "action_mask",
-        "player_features",
-        "fleet_target",
-        "target_incoming_features",
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -75,8 +64,8 @@ class AgentConfig(BaseConfig):
     deterministic: bool
     max_entities_override: int | None = None
     targeting_mode_override: TargetingMode | None = None
-    inference_quantization: InferenceQuantization | None = None
-    lora_mode: LoRAMode = "always"
+    int8_quantization: Int8QuantizationMode = "never"
+    lora_mode: LoRAMode = "2p"
     min_fleet_size: Literal["match"] | Annotated[int, Field(ge=1)] = "match"
     min_overage_time: float = Field(default=0.0, ge=0.0, le=60.0)
     fallback_min_overage_time: float | None = Field(default=None, ge=0.0, le=60.0)
@@ -112,10 +101,13 @@ class Agent:
 
         self.config = AgentConfig.from_file(AGENT_CONFIG_PATH)
         self._game_player_count = game_player_count
+        self._use_int8_quantization = _should_use_int8_quantization(
+            agent_config=self.config,
+            game_player_count=game_player_count,
+        )
         self._last_turn_value = float("nan")
         self._peak_total_ms = 0
         self._peak_entities = 0
-        self.device = _resolve_agent_device(self.config.inference_quantization)
         self.checkpoint_config, self.model = self._load_model(
             checkpoint_config_path=checkpoint_config_path,
             checkpoint_path=checkpoint_path,
@@ -198,7 +190,7 @@ class Agent:
                 checkpoint_config.model,
                 obs_spec=checkpoint_config.env.obs_spec,
                 action_spec=checkpoint_config.env.action_spec,
-            ).to(self.device)
+            )
         else:
             with torch.device("meta"):
                 model = create_model(
@@ -206,7 +198,7 @@ class Agent:
                     obs_spec=checkpoint_config.env.obs_spec,
                     action_spec=checkpoint_config.env.action_spec,
                 )
-            model.to_empty(device=self.device)
+            model.to_empty(device="cpu")
         lora_config = lora_config_for_model(checkpoint_config.model)
         use_lora = _should_use_lora_adapters(
             checkpoint_config=checkpoint_config,
@@ -219,7 +211,7 @@ class Agent:
             apply_lora_to_stateless_transformer(model, lora_config)
         checkpoint = torch.load(
             checkpoint_path,
-            map_location=self.device,
+            map_location="cpu",
             weights_only=True,
         )
         if not isinstance(checkpoint, dict) or "model" not in checkpoint:
@@ -242,7 +234,7 @@ class Agent:
             fold_lora_adapters(model)
         model = _quantize_model_for_inference(
             model,
-            self.config.inference_quantization,
+            self._use_int8_quantization,
         )
         model.eval()
         return model
@@ -316,25 +308,22 @@ class Agent:
             compact_planets=_should_compact_planets(checkpoint_config.model),
         )
         obs = compacted.obs
-        device_obs = self._obs_to_device(obs)
-        self._synchronize_device()
         encode_ms = _elapsed_ms(encode_start, exclude_s=fallback_init_s)
 
         inference_start = perf_counter()
         if not use_fallback and (kaggle_obs.step == 0 or hidden_state is None):
-            hidden_state = model.initial_hidden_state(1, device=self.device)
+            hidden_state = model.initial_hidden_state(1, device=obs.planets.device)
         output = model.serve(
-            device_obs,
+            obs,
             deterministic=self.config.deterministic,
             hidden_state=hidden_state,
         )
         if not use_fallback:
             self.hidden_state = output.next_hidden_state
-        self._synchronize_device()
         values = output.values.detach().cpu()[0]
         self_value = float(values[kaggle_obs.player].item())
         if kaggle_obs.step == 0:
-            n_players = _observation_player_count(kaggle_obs)
+            n_players = observation_player_count(kaggle_obs)
             self._last_turn_value = (2.0 - n_players) / n_players
 
         advantage = self_value - self._last_turn_value
@@ -386,34 +375,6 @@ class Agent:
             and self.config.fallback_min_overage_time is not None
             and remaining_overage_time < self.config.fallback_min_overage_time
         )
-
-    def _obs_to_device(self, obs: ObsBatch) -> ObsBatch:
-        return ObsBatch(
-            **{
-                field: getattr(obs, field).to(device=self.device)
-                for field in _OBS_REQUIRED_TENSOR_FIELDS
-            },
-            action_mask=_action_mask_to_device(obs.action_mask, self.device),
-            player_features=(
-                None
-                if obs.player_features is None
-                else obs.player_features.to(device=self.device)
-            ),
-            fleet_target=(
-                None
-                if obs.fleet_target is None
-                else obs.fleet_target.to(device=self.device)
-            ),
-            target_incoming_features=(
-                None
-                if obs.target_incoming_features is None
-                else obs.target_incoming_features.to(device=self.device)
-            ),
-        )
-
-    def _synchronize_device(self) -> None:
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
 
     def log(
         self,
@@ -474,43 +435,31 @@ def _elapsed_ms(start: float, *, exclude_s: float = 0.0) -> int:
     return round((perf_counter() - start - exclude_s) * 1000)
 
 
-def _resolve_agent_device(
-    inference_quantization: InferenceQuantization | None,
-) -> torch.device:
-    if inference_quantization is None:
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if inference_quantization == "int8":
-        return torch.device("cpu")
-    assert_never(inference_quantization)
-
-
 def _quantize_model_for_inference(
     model: BaseModelAPI,
-    inference_quantization: InferenceQuantization | None,
+    use_int8_quantization: bool,
 ) -> BaseModelAPI:
-    if inference_quantization is None:
+    if not use_int8_quantization:
         return model
-    if inference_quantization == "int8":
-        _ensure_dynamic_quantization_engine()
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="torch.ao.quantization is deprecated.*",
-                category=DeprecationWarning,
-            )
-            quantized_model = torch.quantization.quantize_dynamic(
-                model,
-                _dynamic_quantization_qconfig_spec(model),
-                dtype=torch.qint8,
-                inplace=False,
-            )
-        if not isinstance(quantized_model, BaseModelAPI):
-            raise RuntimeError(
-                "int8 inference quantization returned an unexpected model type: "
-                f"{type(quantized_model).__name__}"
-            )
-        return quantized_model
-    assert_never(inference_quantization)
+    _ensure_dynamic_quantization_engine()
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="torch.ao.quantization is deprecated.*",
+            category=DeprecationWarning,
+        )
+        quantized_model = torch.quantization.quantize_dynamic(
+            model,
+            _dynamic_quantization_qconfig_spec(model),
+            dtype=torch.qint8,
+            inplace=False,
+        )
+    if not isinstance(quantized_model, BaseModelAPI):
+        raise RuntimeError(
+            "int8 inference quantization returned an unexpected model type: "
+            f"{type(quantized_model).__name__}"
+        )
+    return quantized_model
 
 
 def _dynamic_quantization_qconfig_spec(model: BaseModelAPI) -> dict[Any, Any]:
@@ -547,6 +496,28 @@ def _resolve_min_fleet_size(config: AgentConfig, action_spec: ActionConfig) -> i
     return config.min_fleet_size
 
 
+def _should_use_int8_quantization(
+    *,
+    agent_config: AgentConfig,
+    game_player_count: int | None,
+) -> bool:
+    match agent_config.int8_quantization:
+        case "never":
+            return False
+        case "always":
+            return True
+        case "2p" | "4p":
+            if game_player_count is None:
+                raise ValueError(
+                    "int8_quantization="
+                    f"{agent_config.int8_quantization!r} requires game_player_count"
+                )
+            expected_player_count = 2 if agent_config.int8_quantization == "2p" else 4
+            return game_player_count == expected_player_count
+        case _:
+            assert_never(agent_config.int8_quantization)
+
+
 def _should_use_lora_adapters(
     *,
     checkpoint_config: AgentCheckpointConfig,
@@ -570,8 +541,10 @@ def _should_use_lora_adapters(
 
 
 def observation_player_count(observation: KaggleObservation) -> int:
-    player_indexes = [observation.player]
-    player_indexes.extend(
+    if observation.step != 0:
+        raise ValueError("observation_player_count requires a starting observation")
+
+    player_indices = [
         owner
         for _, owner, *_ in [
             *observation.initial_planets,
@@ -579,12 +552,13 @@ def observation_player_count(observation: KaggleObservation) -> int:
             *observation.fleets,
         ]
         if owner >= 0
-    )
-    return 4 if max(player_indexes) >= 2 else 2
-
-
-def _observation_player_count(observation: KaggleObservation) -> int:
-    return observation_player_count(observation)
+    ]
+    count = len(set(player_indices))
+    if count not in (2, 4):
+        raise ValueError(
+            "starting observation must expose exactly 2 or 4 active players"
+        )
+    return count
 
 
 def _model_actions_to_cpu(actions: ActionBundle) -> ActionBundle:
@@ -604,20 +578,6 @@ def _model_actions_to_cpu(actions: ActionBundle) -> ActionBundle:
         target=actions.target.cpu(),
         fleet_bin=actions.fleet_bin.cpu(),
     )
-
-
-def _action_mask_to_device(action_mask: ActionMask, device: torch.device) -> ActionMask:
-    if isinstance(action_mask, PureActionMask):
-        return PureActionMask(
-            can_act=action_mask.can_act.to(device=device),
-            max_launch=action_mask.max_launch.to(device=device),
-        )
-    if isinstance(action_mask, DiscreteTargetActionMask):
-        return DiscreteTargetActionMask(
-            can_act=action_mask.can_act.to(device=device),
-            max_launch=action_mask.max_launch.to(device=device),
-        )
-    return DiscreteTargetBinActionMask(can_act=action_mask.can_act.to(device=device))
 
 
 def compact_entities(

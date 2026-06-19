@@ -36,11 +36,12 @@ def agent_fn(observation: Any) -> list[list[float]]:
     global AGENT
     if AGENT is None:
         kaggle_observation = KaggleObservation.model_validate(observation)
+        player_count = observation_player_count(kaggle_observation)
         AGENT = Agent(
             checkpoint_config_path=PRIMARY_MODEL_ROOT / "config.yaml",
             checkpoint_path=PRIMARY_MODEL_ROOT / "checkpoint.pt",
             fallback_checkpoint_config_path=fallback_checkpoint_config_path,
             fallback_checkpoint_path=fallback_checkpoint_path,
-            game_player_count=observation_player_count(kaggle_observation),
+            game_player_count=player_count,
         )
     return AGENT.act(observation)
