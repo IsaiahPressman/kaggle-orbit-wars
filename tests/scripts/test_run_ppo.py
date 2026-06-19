@@ -244,6 +244,43 @@ def test_create_training_model_roundtrip_quantizes_lora_base_model() -> None:
     _assert_quantized_state_equal(actual_quantized, expected_quantized)
 
 
+def test_create_eval_model_can_skip_lora_base_roundtrip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_cfg = _full_config()
+    cfg = FullConfig.model_validate(
+        {
+            **base_cfg.model_dump(mode="python"),
+            "model": {
+                **base_cfg.model.model_dump(mode="python"),
+                "lora": {
+                    "rank": 2,
+                    "target_modules": ["q"],
+                    "roundtrip_quantization": NF4_G128_LSQ,
+                },
+            },
+        }
+    )
+
+    def fail_roundtrip(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("LoRA base roundtrip should be skipped")
+
+    monkeypatch.setattr(
+        run_ppo,
+        "_roundtrip_lora_base_quantization_for_config",
+        fail_roundtrip,
+    )
+
+    model = run_ppo._create_eval_model_for_config(
+        cfg,
+        device=torch.device("cpu"),
+        roundtrip_lora_base=False,
+    )
+
+    assert isinstance(model.blocks[0].attn.q, LoRALinear)
+    assert not model.training
+
+
 def test_load_model_weights_allows_base_checkpoint_for_lora_model(
     tmp_path: Path,
 ) -> None:

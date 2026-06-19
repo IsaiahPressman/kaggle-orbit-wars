@@ -200,7 +200,11 @@ def main() -> None:
             checkpoint_metadata = trainer.load_checkpoint(launch.checkpoint_path)
             resume_run_id = _resume_wandb_run_id(checkpoint_metadata, args.log_mode)
             start_env_steps = checkpoint_metadata.env_steps
-            last_best_model = _create_eval_model_for_config(cfg, device=device)
+            last_best_model = _create_eval_model_for_config(
+                cfg,
+                device=device,
+                roundtrip_lora_base=False,
+            )
             last_best_metadata = _load_model_from_checkpoint(
                 last_best_model,
                 path=launch.last_best_checkpoint_path,
