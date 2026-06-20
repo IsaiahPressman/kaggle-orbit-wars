@@ -298,7 +298,7 @@ checkpoint state without an additional quantization pass.
 Checkpoint packaging keeps LoRA adapters as separate tensors. Quantized payloads
 can use one format for base-model tensors and another for adapter tensors; when
 base quantization is requested without an explicit adapter format, adapters
-default to bf16. Inference consumers fold adapters into ordinary `nn.Linear`
+default to fp16. Inference consumers fold adapters into ordinary `nn.Linear`
 weights after checkpoint dequantization and before int8 emulation/quantization.
 The Kaggle agent controls whether packaged adapters are used with
 `AgentConfig.lora_mode`: `always` folds them for every game, `2p` only for

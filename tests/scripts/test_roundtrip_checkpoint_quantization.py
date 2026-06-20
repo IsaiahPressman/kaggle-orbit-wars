@@ -117,7 +117,7 @@ def test_roundtrip_checkpoint_model_dtype_supports_agent_quantization_formats(
     )
 
 
-def test_roundtrip_checkpoint_model_dtype_defaults_lora_to_bf16(
+def test_roundtrip_checkpoint_model_dtype_defaults_lora_to_fp16(
     tmp_path: Path,
 ) -> None:
     checkpoint_path = tmp_path / "checkpoint.pt"
@@ -140,7 +140,7 @@ def test_roundtrip_checkpoint_model_dtype_defaults_lora_to_bf16(
             FP4_E2M1FN_X2_SCALED_BLOCK16,
         )
     )["linear.weight"]
-    expected_lora = model_state["linear.lora_down"].to(torch.bfloat16).to(torch.float32)
+    expected_lora = model_state["linear.lora_down"].to(torch.float16).to(torch.float32)
     _assert_float32_bits_equal(checkpoint["model"]["linear.weight"], expected_base)
     _assert_float32_bits_equal(checkpoint["model"]["linear.lora_down"], expected_lora)
     assert stats == roundtrip_checkpoint_quantization.RoundTripStats(
@@ -154,7 +154,7 @@ def test_roundtrip_checkpoint_model_dtype_keeps_lora_at_base_dtype(
     tmp_path: Path,
 ) -> None:
     # A dtype-only roundtrip (fp16) is not quantization, so adapters follow the
-    # base dtype and stay fp16 rather than silently defaulting to bf16.
+    # base dtype and stay fp16 rather than following quantized-checkpoint defaults.
     checkpoint_path = tmp_path / "checkpoint.pt"
     output_path = tmp_path / "checkpoint_fp16_roundtrip.pt"
     model_state = {

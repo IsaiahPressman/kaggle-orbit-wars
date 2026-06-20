@@ -105,7 +105,7 @@ def _parse_args() -> argparse.Namespace:
             "Optional LoRA adapter quantization format for adapter tensors. "
             "Choices: "
             f"{', '.join(SUPPORTED_LORA_OUTPUT_MODEL_FORMATS)}. Unique prefixes "
-            "are accepted when unambiguous. Defaults to bf16 when --quantization "
+            "are accepted when unambiguous. Defaults to fp16 when --quantization "
             "is set to a non-fp32 format."
         ),
     )

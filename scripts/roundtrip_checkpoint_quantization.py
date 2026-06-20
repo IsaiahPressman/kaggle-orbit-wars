@@ -196,7 +196,7 @@ def _effective_lora_roundtrip_target(
         return None
     if target_format in SUPPORTED_QUANTIZATION_FORMATS:
         # Real quantization of the base: adapters follow the shared library
-        # default (an explicit override, otherwise bf16).
+        # default (an explicit override, otherwise fp16).
         return effective_lora_quantization(
             has_lora=True,
             quantization=target_format,
@@ -444,7 +444,7 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Optional LoRA adapter roundtrip format. Choices: "
             f"{', '.join(LORA_TARGET_FORMATS)}. Unique prefixes are accepted "
-            "when unambiguous. Defaults to bf16 when target_format is a "
+            "when unambiguous. Defaults to fp16 when target_format is a "
             "quantization format, otherwise matches the base target dtype."
         ),
     )

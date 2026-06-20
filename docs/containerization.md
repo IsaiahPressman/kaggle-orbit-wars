@@ -90,11 +90,11 @@ just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt my-run fp4
 
 For LoRA checkpoints, pass `--lora-quantization` after the existing arguments to
 choose adapter quantization independently from the base model. If the base model
-is quantized and no adapter format is provided, adapter tensors default to bf16:
+is quantized and no adapter format is provided, adapter tensors default to fp16:
 
 ```sh
 just kaggle-submission runs/20260505-120000/checkpoint_last_best.pt my-run fp4 \
-  --lora-quantization bf16
+  --lora-quantization fp16
 ```
 
 Pass an optional fallback checkpoint after the existing arguments to package a

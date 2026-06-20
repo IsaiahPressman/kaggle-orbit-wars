@@ -312,7 +312,7 @@ def effective_lora_quantization(
     if not has_lora:
         return None
     if lora_quantization is None:
-        return BF16 if quantization is not None else None
+        return FP16 if quantization is not None else None
     if lora_quantization not in SUPPORTED_TENSOR_QUANTIZATION_FORMATS:
         raise ValueError(f"unsupported LoRA quantization format: {lora_quantization}")
     return lora_quantization

@@ -26,7 +26,7 @@ Options:
                      Unique prefixes such as fp4 are accepted.
   --lora-quantization FORMAT
                      Optional LoRA adapter quantization format: fp32, fp16,
-                     bf16, or any --quantization format. Defaults to bf16 when
+                     bf16, or any --quantization format. Defaults to fp16 when
                      --quantization is set and the checkpoint has LoRA tensors.
   -h, --help         Show this help.
 EOF

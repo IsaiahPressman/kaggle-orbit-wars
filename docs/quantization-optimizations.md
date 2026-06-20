@@ -32,7 +32,7 @@ a later packaging pass serializes the same packed codes and fp16 scales for
 unchanged weights.
 LoRA checkpoints may store adapter tensors with a separate quantization format
 from the frozen base model. If a base quantization format is requested without an
-adapter format, adapters default to bf16. Runtime inference loaders dequantize
+adapter format, adapters default to fp16. Runtime inference loaders dequantize
 both groups, fold LoRA updates into base linear weights, then apply any int8
 inference emulation/quantization.
 

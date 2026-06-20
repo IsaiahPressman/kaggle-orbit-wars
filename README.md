@@ -164,7 +164,7 @@ LoRA presets under `configs/model/lora/` can be selected with overrides such as
 `-o model.lora=2p_200m_qv_r16`.
 Checkpoint extraction and Kaggle submission packaging accept separate base-model
 and LoRA adapter quantization formats. When base quantization is enabled and no
-LoRA format is provided, adapter tensors default to bf16. Packaged LoRA adapters
+LoRA format is provided, adapter tensors default to fp16. Packaged LoRA adapters
 are folded into the base model before inference int8 quantization/emulation.
 Recurrent models do not support LoRA. Fresh LoRA launches can use
 `--load-model-weights` with a

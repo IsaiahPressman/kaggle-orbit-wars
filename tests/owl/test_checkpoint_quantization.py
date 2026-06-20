@@ -4,7 +4,6 @@ import pytest
 import torch
 from owl.agent.agent import Agent, AgentCheckpointConfig, AgentConfig
 from owl.checkpoint_quantization import (
-    BF16,
     FP4_E2M1FN_X2_SCALED_BLOCK16,
     FP8_E4M3FN,
     FP16,
@@ -306,7 +305,7 @@ def test_nf5_quantization_stores_non_2d_floating_tensors_as_fp16() -> None:
     _assert_float32_bits_equal(dequantized, expected_lowp.to(torch.float32))
 
 
-def test_lora_adapter_tensors_default_to_bf16_when_base_is_quantized() -> None:
+def test_lora_adapter_tensors_default_to_fp16_when_base_is_quantized() -> None:
     base_weight = torch.tensor([[0.25, 1.75, 5.0]], dtype=torch.float32)
     lora_down = torch.tensor([[0.1, -0.2, 0.3]], dtype=torch.float32)
 
@@ -319,13 +318,13 @@ def test_lora_adapter_tensors_default_to_bf16_when_base_is_quantized() -> None:
     )
 
     assert quantized["format"] == FP4_E2M1FN_X2_SCALED_BLOCK16
-    assert quantized["lora_format"] == BF16
+    assert quantized["lora_format"] == FP16
     assert (
         quantized["tensors"]["blocks.0.attn.q.weight"]["format"]
         == FP4_E2M1FN_X2_SCALED_BLOCK16
     )
-    assert quantized["tensors"]["blocks.0.attn.q.lora_down"]["format"] == BF16
-    expected_lora = lora_down.to(torch.bfloat16).to(torch.float32)
+    assert quantized["tensors"]["blocks.0.attn.q.lora_down"]["format"] == FP16
+    expected_lora = lora_down.to(torch.float16).to(torch.float32)
     dequantized = dequantize_model_state_dict(quantized)
     _assert_float32_bits_equal(
         dequantized["blocks.0.attn.q.lora_down"],
