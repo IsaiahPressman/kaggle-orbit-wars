@@ -537,8 +537,8 @@ train against this action spec when the model actor config also uses
 
 | Mode | Target mask | Bad selected target launch |
 | --- | --- | --- |
-| `"full_mask"` | Existing targets except self, plus the simulator's full static-target eligibility filter. | Selected sun-blocked static targets are replaced with no-op. Selected planet-blocked static targets can still fall back to a sun-safe ray. Selected dynamic targets are replaced with no-op when no allowed or fallback ray exists. |
-| `"stop_bad_launch"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Falls back through the target cone for a sun-avoiding ray and is replaced with no-op only when no sun-avoiding target ray exists. |
+| `"full_mask"` | Existing targets except self, plus the simulator's full static-target eligibility filter. | Selected sun-blocked static targets are replaced with no-op. Selected planet-blocked static targets can still fall back to a sun-safe ray, subject to the neutral-intercept gate below. Selected dynamic targets are replaced with no-op when no allowed or gated fallback ray exists. |
+| `"stop_bad_launch"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Falls back through the target cone for a sun-avoiding ray and is replaced with no-op only when no gated fallback ray exists. |
 | `"anything_goes"` | Existing targets except self; static obstruction, sun crossing, and dynamic feasibility are not masked. | Submitted even when the computed ray crosses the sun. Dynamic targets with no target-hit window still become no-ops because no launch angle is defined. |
 
 In `"full_mask"`, static-source to static-target pairs use the reset-time
@@ -590,6 +590,17 @@ use their cached orbit paths or comet path segments up to the selected shot's
 impact horizon. If the sun removes the whole eligible arc, decoding skips
 blocker search and falls back immediately. If blockers cover the whole static
 target cone, selected launches fall back to the closest sun-avoiding angle.
+For `"full_mask"` and `"stop_bad_launch"`, fallback rays are gated when the
+first simulator-ordered intercept before the intended target is an unintended
+neutral object. The decoder mirrors simulator tick order and planet-ID
+collision order. Unintended neutral planet intercepts are submitted only when
+the selected fleet size exceeds that planet's current ships. Unintended neutral
+comet intercepts are submitted only when the selected fleet size exceeds the
+comet's current ships and the comet has enough useful lifetime after capture to
+produce more ships than were spent capturing it; hits on comets that expire
+before combat are no-ops. Fallback intercepts with friendly planets, enemy
+planets, friendly comets, or enemy comets are still submitted. Intended neutral
+targets are not gated by these fallback-intercept rules.
 This selected-launch fallback is separate from the `full_mask` target mask:
 fully planet-blocked static targets are masked out as legal targets, but if one
 is selected anyway it may still fire. If no sun-avoiding angle exists,
@@ -610,7 +621,8 @@ with the same avoidance epsilons, and choose the closest feasible angle for
 that window. Dynamic blockers use the same orbit/comet path sources as dynamic
 targets, sampled at fixed horizon fractions plus radial crossing times. If no
 window has a collision-avoidance angle, decoding falls back to the first
-sun-avoiding, in-bounds target arc. If no such fallback exists,
+sun-avoiding, in-bounds target arc, subject to the same neutral-intercept gate.
+If no such fallback exists,
 `"anything_goes"` fires along the first window midpoint and
 `"full_mask"`/`"stop_bad_launch"` decode the launch as a no-op. Submitted
 discrete-target launches that cannot produce an allowed or defined ray are

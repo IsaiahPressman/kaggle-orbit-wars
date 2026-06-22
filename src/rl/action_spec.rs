@@ -716,6 +716,26 @@ struct TargetCandidate {
 }
 
 #[derive(Clone, Copy, Debug)]
+enum FallbackIntercept {
+    Planet {
+        planet_id: u32,
+        segment_index: usize,
+        expires_before_combat: bool,
+    },
+    Sun,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FallbackBlockerSegment {
+    start: Point,
+    /// `Some(next)` for a blocker that moves `start -> next` over the tick (lerped to
+    /// match the fleet's fractional travel); `None` for a blocker frozen at `start`.
+    next: Option<Point>,
+    check_collision: bool,
+    expires_before_combat: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct TargetWindow {
     start_time: f64,
     end_time: f64,
@@ -879,6 +899,7 @@ fn target_angle(
             state,
             source,
             target,
+            ships,
             speed,
             orbit_target_cache,
             targeting_mode,
@@ -889,6 +910,7 @@ fn target_angle(
         state,
         source,
         target,
+        ships,
         speed,
         orbit_target_cache,
         targeting_mode,
@@ -899,6 +921,7 @@ fn dynamic_target_angle(
     state: &State,
     source: &Planet,
     target: &Planet,
+    ships: i32,
     speed: f64,
     orbit_target_cache: &mut OrbitTargetCache<'_>,
     targeting_mode: TargetingMode,
@@ -913,6 +936,7 @@ fn dynamic_target_angle(
             state,
             source,
             target,
+            ships,
             speed,
             &windows,
             orbit_target_cache,
@@ -925,6 +949,7 @@ fn dynamic_target_angle(
         state,
         source,
         target,
+        ships,
         speed,
         &windows,
         orbit_target_cache,
@@ -957,6 +982,7 @@ fn static_target_angle(
     state: &State,
     source: &Planet,
     target: &Planet,
+    ships: i32,
     speed: f64,
     orbit_target_cache: &mut OrbitTargetCache<'_>,
     targeting_mode: TargetingMode,
@@ -1036,7 +1062,14 @@ fn static_target_angle(
         !goes_out_of_bounds(source, candidate)
             && static_candidate_has_target_margin(source, target, angle, candidate)
     })
-    .map(|relative_angle| normalize_angle(reference_angle + relative_angle));
+    .map(|relative_angle| {
+        static_target_candidate(
+            source,
+            target,
+            normalize_angle(reference_angle + relative_angle),
+            speed,
+        )
+    });
 
     if let Some(relative_angle) = choose_center_first_with(&target_spans, |relative_angle| {
         let angle = normalize_angle(reference_angle + relative_angle);
@@ -1085,9 +1118,22 @@ fn static_target_angle(
     })
     .map(|relative_angle| normalize_angle(reference_angle + relative_angle))
     .or_else(|| {
-        first_sun_avoiding.or_else(|| {
-            matches!(targeting_mode, TargetingMode::AnythingGoes).then_some(reference_angle)
-        })
+        first_sun_avoiding
+            .and_then(|candidate| {
+                fallback_candidate_angle(
+                    state,
+                    source,
+                    target,
+                    ships,
+                    speed,
+                    candidate,
+                    orbit_target_cache,
+                    targeting_mode,
+                )
+            })
+            .or_else(|| {
+                matches!(targeting_mode, TargetingMode::AnythingGoes).then_some(reference_angle)
+            })
     })
 }
 
@@ -1567,10 +1613,12 @@ fn push_distance_linear_roots(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn choose_dynamic_window_angle(
     state: &State,
     source: &Planet,
     target: &Planet,
+    ships: i32,
     speed: f64,
     windows: &[TargetWindow],
     orbit_target_cache: &mut OrbitTargetCache<'_>,
@@ -1624,7 +1672,15 @@ fn choose_dynamic_window_angle(
                 dynamic_window_candidate_for_angle(source, target.radius, speed, *window, angle)
                     .is_some_and(|candidate| !goes_out_of_bounds(source, candidate))
             })
-            .map(|relative_angle| normalize_angle(reference_angle + relative_angle));
+            .and_then(|relative_angle| {
+                dynamic_window_candidate_for_angle(
+                    source,
+                    target.radius,
+                    speed,
+                    *window,
+                    normalize_angle(reference_angle + relative_angle),
+                )
+            });
         }
 
         if let Some(relative_angle) = choose_center_first_with(&target_spans, |relative_angle| {
@@ -1678,13 +1734,188 @@ fn choose_dynamic_window_angle(
         }
     }
 
-    if let Some(angle) = first_sun_avoiding {
-        return Some(angle);
+    if let Some(candidate) = first_sun_avoiding {
+        if let Some(angle) = fallback_candidate_angle(
+            state,
+            source,
+            target,
+            ships,
+            speed,
+            candidate,
+            orbit_target_cache,
+            targeting_mode,
+        ) {
+            return Some(angle);
+        }
     }
     if matches!(targeting_mode, TargetingMode::AnythingGoes) {
         return first_midpoint.map(normalize_angle);
     }
     None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fallback_candidate_angle(
+    state: &State,
+    source: &Planet,
+    target: &Planet,
+    ships: i32,
+    speed: f64,
+    candidate: TargetCandidate,
+    orbit_target_cache: &mut OrbitTargetCache<'_>,
+    targeting_mode: TargetingMode,
+) -> Option<f64> {
+    if matches!(targeting_mode, TargetingMode::AnythingGoes) {
+        return Some(candidate.angle);
+    }
+
+    match fallback_intercept(state, source, speed, candidate, orbit_target_cache) {
+        Some(FallbackIntercept::Sun) => None,
+        Some(FallbackIntercept::Planet {
+            planet_id,
+            segment_index,
+            expires_before_combat,
+        }) => {
+            if planet_id == target.id {
+                return Some(candidate.angle);
+            }
+            // `planet_id` was just produced by `fallback_intercept` iterating `state.planets`,
+            // so the lookup cannot miss.
+            let planet = state
+                .planets
+                .get(planet_id)
+                .expect("fallback intercept planet id comes from state.planets");
+            if planet.owner != -1 {
+                return Some(candidate.angle);
+            }
+            if ships <= planet.ships {
+                return None;
+            }
+            if !state.comet_planet_ids.contains(&planet.id) {
+                return Some(candidate.angle);
+            }
+            if expires_before_combat {
+                return None;
+            }
+            (planet.ships
+                < usable_comet_production_turns_after_capture(
+                    state,
+                    planet,
+                    segment_index,
+                    orbit_target_cache,
+                )?)
+            .then_some(candidate.angle)
+        },
+        None => Some(candidate.angle),
+    }
+}
+
+fn fallback_intercept(
+    state: &State,
+    source: &Planet,
+    speed: f64,
+    candidate: TargetCandidate,
+    orbit_target_cache: &mut OrbitTargetCache<'_>,
+) -> Option<FallbackIntercept> {
+    let start = launch_start(source, candidate.angle);
+    let sun_center = Point::new(CENTER, CENTER);
+    let segment_count = candidate.time.ceil().max(1.0) as usize;
+    for segment_index in 0..segment_count {
+        let Some(fleet) =
+            fleet_tick_segment(start, candidate.angle, speed, segment_index, candidate.time)
+        else {
+            continue;
+        };
+        for planet in state.planets.iter() {
+            let Some(segment) =
+                fallback_planet_segment(state, planet, segment_index, orbit_target_cache)
+            else {
+                continue;
+            };
+            if !segment.check_collision {
+                continue;
+            }
+            let blocker_end = match segment.next {
+                Some(next) => lerp(segment.start, next, fleet.fraction),
+                None => segment.start,
+            };
+            if fleet_segment_hits_circle(fleet, segment.start, blocker_end, planet.radius) {
+                return Some(FallbackIntercept::Planet {
+                    planet_id: planet.id,
+                    segment_index,
+                    expires_before_combat: segment.expires_before_combat,
+                });
+            }
+        }
+        if fleet_segment_hits_circle(
+            fleet,
+            sun_center,
+            sun_center,
+            crate::rules_engine::state::SUN_RADIUS,
+        ) {
+            return Some(FallbackIntercept::Sun);
+        }
+    }
+    None
+}
+
+fn fallback_planet_segment(
+    state: &State,
+    planet: &Planet,
+    segment_index: usize,
+    orbit_target_cache: &mut OrbitTargetCache<'_>,
+) -> Option<FallbackBlockerSegment> {
+    if state.comet_planet_ids.contains(&planet.id) {
+        let path = orbit_target_cache.comet_path_for(planet)?;
+        let &start = path.get(segment_index)?;
+        return Some(match path.get(segment_index + 1) {
+            Some(&next) => FallbackBlockerSegment {
+                start,
+                next: Some(next),
+                check_collision: start.x >= 0.0,
+                expires_before_combat: false,
+            },
+            // The comet despawns on its final path point, frozen in place; a hit here is a
+            // no-op because the comet expires before combat resolves.
+            None => FallbackBlockerSegment {
+                start,
+                next: None,
+                check_collision: true,
+                expires_before_combat: true,
+            },
+        });
+    }
+
+    if is_dynamic_planet_cached(state, planet) {
+        let path = orbit_target_cache.path_for(planet)?;
+        let &start = path.get(segment_index)?;
+        let &next = path.get(segment_index + 1)?;
+        return Some(FallbackBlockerSegment {
+            start,
+            next: Some(next),
+            check_collision: true,
+            expires_before_combat: false,
+        });
+    }
+
+    Some(FallbackBlockerSegment {
+        start: planet.position(),
+        next: None,
+        check_collision: true,
+        expires_before_combat: false,
+    })
+}
+
+fn usable_comet_production_turns_after_capture(
+    state: &State,
+    comet: &Planet,
+    capture_segment_index: usize,
+    orbit_target_cache: &OrbitTargetCache<'_>,
+) -> Option<i32> {
+    let remaining_path_points = orbit_target_cache.comet_path_for(comet)?.len();
+    let usable_turns = remaining_path_points.saturating_sub(capture_segment_index + 2);
+    let capped_turns = usable_turns.min(state.config.episode_steps as usize);
+    i32::try_from(capped_turns).ok()
 }
 
 fn dynamic_window_candidate_for_angle(
@@ -1939,14 +2170,7 @@ fn shot_hits_blocker(
         }
         let path = orbit_target_cache.dynamic_path_for(blocker);
         if path.is_some_and(|path| {
-            shot_hits_moving_circle(
-                source,
-                angle,
-                speed,
-                time,
-                path,
-                blocker.radius + COLLISION_EPS,
-            )
+            shot_hits_dynamic_blocker_path(state, source, angle, speed, time, blocker, path)
         }) {
             return true;
         }
@@ -1974,19 +2198,88 @@ fn shot_hits_dynamic_blocker(
         }
         let path = orbit_target_cache.dynamic_path_for(blocker);
         if path.is_some_and(|path| {
-            shot_hits_moving_circle(
-                source,
-                angle,
-                speed,
-                time,
-                path,
-                blocker.radius + COLLISION_EPS,
-            )
+            shot_hits_dynamic_blocker_path(state, source, angle, speed, time, blocker, path)
         }) {
             return true;
         }
     }
     false
+}
+
+/// Whether the fleet ray hits a cached dynamic blocker along `path`, including the
+/// frozen final point of an expiring comet.
+fn shot_hits_dynamic_blocker_path(
+    state: &State,
+    source: &Planet,
+    angle: f64,
+    speed: f64,
+    time: f64,
+    blocker: &Planet,
+    path: &[Point],
+) -> bool {
+    let radius = blocker.radius + COLLISION_EPS;
+    shot_hits_moving_circle(source, angle, speed, time, path, radius)
+        || (state.comet_planet_ids.contains(&blocker.id)
+            && shot_hits_expiring_comet(source, angle, speed, time, path, radius))
+}
+
+/// Fleet position over tick segment `segment_index`, clamped to `max_time`.
+/// Returns `None` when the clamped segment has no positive duration. `start` is the
+/// fleet's `launch_start`, hoisted by callers so it is computed once per ray.
+fn fleet_tick_segment(
+    start: Point,
+    angle: f64,
+    speed: f64,
+    segment_index: usize,
+    max_time: f64,
+) -> Option<FleetTickSegment> {
+    let start_time = segment_index as f64;
+    let end_time = (start_time + 1.0).min(max_time);
+    if end_time - start_time <= ROOT_EPS {
+        return None;
+    }
+    Some(FleetTickSegment {
+        fraction: end_time - start_time,
+        fleet_start: point_along(start, angle, speed * start_time),
+        fleet_end: point_along(start, angle, speed * end_time),
+    })
+}
+
+#[derive(Clone, Copy)]
+struct FleetTickSegment {
+    fraction: f64,
+    fleet_start: Point,
+    fleet_end: Point,
+}
+
+/// Swept collision between a fleet tick segment and a blocker that moves
+/// `blocker_start -> blocker_end` over the same fraction of the tick.
+fn fleet_segment_hits_circle(
+    fleet: FleetTickSegment,
+    blocker_start: Point,
+    blocker_end: Point,
+    radius: f64,
+) -> bool {
+    if !swept_aabb_overlaps(
+        fleet.fleet_start,
+        fleet.fleet_end,
+        blocker_start,
+        blocker_end,
+        radius,
+    ) {
+        return false;
+    }
+    if blocker_start == blocker_end {
+        point_to_segment_distance(blocker_start, fleet.fleet_start, fleet.fleet_end) <= radius
+    } else {
+        swept_pair_hit(
+            fleet.fleet_start,
+            fleet.fleet_end,
+            blocker_start,
+            blocker_end,
+            radius,
+        )
+    }
 }
 
 fn shot_hits_moving_circle(
@@ -2001,34 +2294,37 @@ fn shot_hits_moving_circle(
         return false;
     }
     let start = launch_start(source, angle);
-    let last_segment = max_time.ceil().max(1.0) as usize;
-    let last_segment = last_segment.min(path.len().saturating_sub(1));
+    let last_segment = (max_time.ceil().max(1.0) as usize).min(path.len().saturating_sub(1));
     for segment_index in 0..last_segment {
-        let start_time = segment_index as f64;
-        let end_time = (segment_index as f64 + 1.0).min(max_time);
-        if end_time - start_time <= ROOT_EPS {
+        let Some(fleet) = fleet_tick_segment(start, angle, speed, segment_index, max_time) else {
             continue;
-        }
-        let fleet_start = point_along(start, angle, speed * start_time);
-        let fleet_end = point_along(start, angle, speed * end_time);
+        };
         let blocker_start = path[segment_index];
-        let blocker_end = lerp(
-            path[segment_index],
-            path[segment_index + 1],
-            end_time - start_time,
-        );
-        if !swept_aabb_overlaps(fleet_start, fleet_end, blocker_start, blocker_end, radius) {
-            continue;
-        }
-        if blocker_start == blocker_end {
-            if point_to_segment_distance(blocker_start, fleet_start, fleet_end) < radius {
-                return true;
-            }
-        } else if swept_pair_hit(fleet_start, fleet_end, blocker_start, blocker_end, radius) {
+        let blocker_end = lerp(path[segment_index], path[segment_index + 1], fleet.fraction);
+        if fleet_segment_hits_circle(fleet, blocker_start, blocker_end, radius) {
             return true;
         }
     }
     false
+}
+
+fn shot_hits_expiring_comet(
+    source: &Planet,
+    angle: f64,
+    speed: f64,
+    max_time: f64,
+    path: &[Point],
+    radius: f64,
+) -> bool {
+    let Some(segment_index) = path.len().checked_sub(1) else {
+        return false;
+    };
+    let start = launch_start(source, angle);
+    let Some(fleet) = fleet_tick_segment(start, angle, speed, segment_index, max_time) else {
+        return false;
+    };
+    let comet_pos = path[segment_index];
+    fleet_segment_hits_circle(fleet, comet_pos, comet_pos, radius)
 }
 
 fn swept_aabb_overlaps(
@@ -2693,13 +2989,30 @@ mod tests {
         target_id: u32,
         ship_count: i32,
     ) -> DecodedDiscreteTargetActions {
+        decode_single_discrete_target_with_mode(
+            state,
+            source_id,
+            target_id,
+            ship_count,
+            TargetingMode::FullMask,
+        )
+    }
+
+    fn decode_single_discrete_target_with_mode(
+        state: &State,
+        source_id: u32,
+        target_id: u32,
+        ship_count: i32,
+        targeting_mode: TargetingMode,
+    ) -> DecodedDiscreteTargetActions {
         let entities = action_entity_slots(state);
         let source_index = entity_index_for_planet(&entities, source_id);
         let target_index = entity_index_for_planet(&entities, target_id);
         let mut launch = vec![false; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
         let mut targets = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
         let mut ships = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
-        let action_index = ACTION_ENTITY_SLOTS + source_index;
+        let source = state.planets.get(source_id).expect("source");
+        let action_index = source.owner as usize * ACTION_ENTITY_SLOTS + source_index;
         launch[action_index] = true;
         targets[action_index] = target_index as i64;
         ships[action_index] = i64::from(ship_count);
@@ -2713,7 +3026,7 @@ mod tests {
             &ships,
             1,
             1,
-            TargetingMode::FullMask,
+            targeting_mode,
         )
         .expect("valid replay discrete target should decode")
     }
@@ -3878,6 +4191,22 @@ mod tests {
     }
 
     #[test]
+    fn fleet_segment_hits_circle_counts_stationary_tangent() {
+        let fleet = FleetTickSegment {
+            fraction: 1.0,
+            fleet_start: Point::new(0.0, 0.0),
+            fleet_end: Point::new(10.0, 0.0),
+        };
+
+        assert!(fleet_segment_hits_circle(
+            fleet,
+            Point::new(5.0, 3.0),
+            Point::new(5.0, 3.0),
+            3.0,
+        ));
+    }
+
+    #[test]
     fn discrete_targets_mask_uses_source_target_square() {
         let mut state = state_from_planets(vec![
             planet(0, 0, 10.0, 80.0, 2.0, 10),
@@ -4283,6 +4612,35 @@ mod tests {
     }
 
     #[test]
+    fn fallback_to_unintended_neutral_planet_undershot_is_no_op() {
+        let state = state_from_planets(vec![
+            planet(0, 0, 10.0, 96.0, 2.0, 100),
+            planet(1, -1, 35.0, 96.0, 8.0, 20),
+            planet(2, -1, 70.0, 96.0, 2.0, 20),
+        ]);
+
+        for targeting_mode in [TargetingMode::FullMask, TargetingMode::StopBadLaunch] {
+            let decoded = decode_single_discrete_target_with_mode(&state, 0, 2, 10, targeting_mode);
+
+            assert_eq!(decoded.launch_failures, 1);
+            assert!(decoded.actions.iter().all(Vec::is_empty));
+        }
+    }
+
+    #[test]
+    fn intended_neutral_target_undershot_still_fires() {
+        let state = state_from_planets(vec![
+            planet(0, 0, 10.0, 96.0, 2.0, 100),
+            planet(1, -1, 35.0, 96.0, 8.0, 20),
+        ]);
+
+        let decoded = decode_single_discrete_target(&state, 0, 1, 10);
+
+        assert_eq!(decoded.launch_failures, 0);
+        assert_eq!(decoded.actions[0].len(), 1);
+    }
+
+    #[test]
     fn full_mask_falls_back_to_sun_safe_blocked_dynamic_target() {
         let mut state = state_from_planets(vec![
             planet(0, 0, 10.0, 96.0, 2.0, 100),
@@ -4315,6 +4673,52 @@ mod tests {
             TargetingMode::FullMask,
         )
         .expect("full_mask should submit a blocker-only dynamic fallback");
+
+        assert_eq!(decoded.launch_failures, 0);
+        assert_eq!(decoded.actions[0].len(), 1);
+        assert!(decoded.actions[0][0].angle.abs() <= 1e-6);
+    }
+
+    fn comet_blocked_static_target_state(comet_path_len: usize, comet_ships: i32) -> State {
+        let mut state = state_from_planets(vec![
+            planet(0, 0, 10.0, 96.0, 2.0, 100),
+            planet(2, -1, 70.0, 96.0, 2.0, 20),
+            planet(10, -1, 35.0, 96.0, 8.0, comet_ships),
+        ]);
+        state.comet_planet_ids = vec![10];
+        state.comets = vec![CometGroup {
+            planet_ids: vec![10],
+            paths: vec![vec![Point::new(35.0, 96.0); comet_path_len]],
+            path_index: 0,
+        }];
+        state
+    }
+
+    #[test]
+    fn fallback_to_unintended_neutral_comet_without_profit_is_no_op() {
+        let state = comet_blocked_static_target_state(10, 5);
+
+        let decoded = decode_single_discrete_target(&state, 0, 2, 10);
+
+        assert_eq!(decoded.launch_failures, 1);
+        assert!(decoded.actions.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn fallback_to_expiring_unintended_neutral_comet_is_no_op() {
+        let state = comet_blocked_static_target_state(8, 0);
+
+        let decoded = decode_single_discrete_target(&state, 0, 2, 10);
+
+        assert_eq!(decoded.launch_failures, 1);
+        assert!(decoded.actions.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn fallback_to_profitable_unintended_neutral_comet_still_fires() {
+        let state = comet_blocked_static_target_state(30, 5);
+
+        let decoded = decode_single_discrete_target(&state, 0, 2, 10);
 
         assert_eq!(decoded.launch_failures, 0);
         assert_eq!(decoded.actions[0].len(), 1);
@@ -4596,7 +5000,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_far_static_target_blocked_by_57_ship_planet_is_masked_for_slow_fleets() {
+    fn replay_far_static_target_blocked_by_neutral_planet_is_no_op_for_slow_fleets() {
         for ship_count in [1, 2, 6] {
             let state = replay_77263963_static_target_state(ship_count);
             assert!(!discrete_target_can_act(
@@ -4607,22 +5011,8 @@ mod tests {
             ));
 
             let decoded = decode_single_discrete_target(&state, 15, 2, ship_count);
-            assert_eq!(decoded.launch_failures, 0);
-            assert_eq!(decoded.actions[1].len(), 1);
-
-            let source = state.planets.get(15).expect("source");
-            let target = state.planets.get(2).expect("target");
-            let outcome = launch_outcome(
-                &state,
-                source,
-                target,
-                decoded.actions[1][0].angle,
-                ship_count,
-            );
-            assert!(
-                matches!(outcome, LaunchOutcome::HitObstacle { planet_id: 7, .. }),
-                "selected masked launch should hit blocker, got {outcome:?}"
-            );
+            assert_eq!(decoded.launch_failures, 1);
+            assert!(decoded.actions.iter().all(Vec::is_empty));
         }
     }
 
