@@ -29,7 +29,14 @@ RUN apt-get update && \
         ca-certificates \
         curl \
         git \
-        pkg-config && \
+        ibverbs-providers \
+        ibverbs-utils \
+        libibverbs1 \
+        libnl-3-200 \
+        libnl-route-3-200 \
+        librdmacm1 \
+        pkg-config \
+        rdma-core && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/orbit-wars
