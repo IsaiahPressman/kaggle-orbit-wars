@@ -320,7 +320,8 @@ class Agent:
         )
         if not use_fallback:
             self.hidden_state = output.next_hidden_state
-        values = output.values.detach().cpu()[0]
+
+        values = output.values[0]
         self_value = float(values[kaggle_obs.player].item())
         if kaggle_obs.step == 0:
             n_players = observation_player_count(kaggle_obs)
@@ -330,15 +331,15 @@ class Agent:
         inference_ms = _elapsed_ms(inference_start)
 
         conversion_start = perf_counter()
-        actions_cpu = expand_actions_to_full_action_slots(
-            _model_actions_to_cpu(output.actions),
+        actions_expanded = expand_actions_to_full_action_slots(
+            output.actions,
             compacted.action_entity_indices,
             action_spec=checkpoint_config.env.action_spec,
         )
         actions = actions_to_kaggle(
             obs_dict,
             kaggle_obs.player,
-            actions_cpu,
+            actions_expanded,
             action_spec=checkpoint_config.env.action_spec,
         )
         conversion_ms = _elapsed_ms(conversion_start)
@@ -559,25 +560,6 @@ def observation_player_count(observation: KaggleObservation) -> int:
             "starting observation must expose exactly 2 or 4 active players"
         )
     return count
-
-
-def _model_actions_to_cpu(actions: ActionBundle) -> ActionBundle:
-    if isinstance(actions, PureActions):
-        return PureActions(
-            launch=actions.launch.cpu(),
-            angle=actions.angle.cpu(),
-            ships=actions.ships.cpu(),
-        )
-    if isinstance(actions, DiscreteTargetActions):
-        return DiscreteTargetActions(
-            launch=actions.launch.cpu(),
-            target=actions.target.cpu(),
-            ships=actions.ships.cpu(),
-        )
-    return DiscreteTargetBinActions(
-        target=actions.target.cpu(),
-        fleet_bin=actions.fleet_bin.cpu(),
-    )
 
 
 def compact_entities(
