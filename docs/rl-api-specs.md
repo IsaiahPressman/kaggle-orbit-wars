@@ -338,6 +338,9 @@ Component production and linear ship channels use the same normalizer as their
 total, so comet plus non-comet production equals total production, and comet
 plus non-comet planet plus fleet linear ships equals total linear ships.
 Inactive outer player slots are zero-filled.
+When standalone/Kaggle observation encoding filters fleets out of the fleet
+entity tensor, these per-player fleet ship and fleet count aggregate channels
+still include the filtered fleets.
 
 ## EntityBasedCrossAttnV1
 

@@ -1526,6 +1526,13 @@ pub fn encode_entity_based_with_player_features<'py>(
         ),
         min_fleet_size,
     );
+    add_filtered_fleet_aggregates_to_player_features(
+        player_features
+            .as_slice_mut()
+            .expect("newly allocated player features array is contiguous"),
+        &filtered_fleets.aggregates,
+        &PlayerMap::identity(),
+    );
     let mut target_max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
     encode_action_spec(
         RlActionSpec::DiscreteTargets {
@@ -1552,7 +1559,7 @@ pub fn encode_entity_based_with_player_features<'py>(
         can_act.into_pyarray(py),
         target_can_act.into_pyarray(py),
         max_launch.into_pyarray(py),
-        filtered_fleets,
+        filtered_fleets.count,
     ))
 }
 
@@ -1722,6 +1729,13 @@ pub fn encode_entity_based_cross_attn<'py>(
         ),
         min_fleet_size,
     );
+    add_filtered_fleet_aggregates_to_player_features(
+        player_features
+            .as_slice_mut()
+            .expect("newly allocated player features array is contiguous"),
+        &filtered_fleets.aggregates,
+        &PlayerMap::identity(),
+    );
     let mut target_max_launch = vec![0; OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS];
     encode_action_spec(
         RlActionSpec::DiscreteTargets {
@@ -1752,12 +1766,37 @@ pub fn encode_entity_based_cross_attn<'py>(
             can_act.into_pyarray(py).into_any(),
             target_can_act.into_pyarray(py).into_any(),
             max_launch.into_pyarray(py).into_any(),
-            filtered_fleets.into_bound_py_any(py)?,
+            filtered_fleets.count.into_bound_py_any(py)?,
         ],
     )
 }
 
-fn filter_fleets_by_min_size(state: &mut State, min_fleet_size: i64) -> usize {
+#[derive(Clone, Debug, Default, PartialEq)]
+struct FleetAggregateSummary {
+    count_by_owner: [usize; OUTER_PLAYER_SLOTS],
+    ships_by_owner: [i64; OUTER_PLAYER_SLOTS],
+}
+
+impl FleetAggregateSummary {
+    fn add_fleet(&mut self, fleet: &Fleet) {
+        let Ok(owner) = usize::try_from(fleet.owner) else {
+            return;
+        };
+        if owner >= OUTER_PLAYER_SLOTS {
+            return;
+        }
+        self.count_by_owner[owner] += 1;
+        self.ships_by_owner[owner] += i64::from(fleet.ships);
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct FilteredFleetSummary {
+    count: usize,
+    aggregates: FleetAggregateSummary,
+}
+
+fn filter_fleets_by_min_size(state: &mut State, min_fleet_size: i64) -> FilteredFleetSummary {
     let original_fleet_count = state.fleets.len();
     let planet_owners = state
         .planets
@@ -1800,10 +1839,49 @@ fn filter_fleets_by_min_size(state: &mut State, min_fleet_size: i64) -> usize {
             .values()
             .map(|(_ships, fleet_id)| *fleet_id),
     );
-    state
-        .fleets
-        .retain(|fleet| kept_fleet_ids.contains(&fleet.id));
-    original_fleet_count - state.fleets.len()
+    let mut aggregates = FleetAggregateSummary::default();
+    state.fleets.retain(|fleet| {
+        let keep = kept_fleet_ids.contains(&fleet.id);
+        if !keep {
+            aggregates.add_fleet(fleet);
+        }
+        keep
+    });
+    FilteredFleetSummary {
+        count: original_fleet_count - state.fleets.len(),
+        aggregates,
+    }
+}
+
+fn add_filtered_fleet_aggregates_to_player_features(
+    player_features: &mut [f32],
+    aggregates: &FleetAggregateSummary,
+    player_map: &PlayerMap,
+) {
+    if player_features.is_empty() {
+        return;
+    }
+    assert_eq!(
+        player_features.len(),
+        OUTER_PLAYER_SLOTS * PLAYER_FEATURE_CHANNELS
+    );
+
+    for internal_owner in 0..OUTER_PLAYER_SLOTS {
+        let ships = aggregates.ships_by_owner[internal_owner];
+        let count = aggregates.count_by_owner[internal_owner];
+        if ships == 0 && count == 0 {
+            continue;
+        }
+        let outer_player = player_map.owner_channel(internal_owner as i32);
+        let row = &mut player_features
+            [outer_player * PLAYER_FEATURE_CHANNELS..(outer_player + 1) * PLAYER_FEATURE_CHANNELS];
+
+        row[3] += normalize_aggregate_ships(ships);
+        row[4] = normalize_aggregate_log_ships(denormalize_aggregate_log_ships(row[4]) + ships);
+        row[9] += normalize_aggregate_ships(ships);
+        row[10] = normalize_aggregate_log_ships(denormalize_aggregate_log_ships(row[10]) + ships);
+        row[13] += normalize_fleet_count(count);
+    }
 }
 
 #[pyfunction]

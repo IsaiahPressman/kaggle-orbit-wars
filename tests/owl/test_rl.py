@@ -1,4 +1,5 @@
 import json
+import math
 
 import numpy as np
 import pytest
@@ -1544,6 +1545,51 @@ def test_encode_python_observation_returns_rust_filtered_fleet_count() -> None:
     )
 
     assert encoded.filtered_fleets == 2
+
+
+def test_encode_python_observation_ext_v2_player_features_include_filtered_fleets() -> (
+    None
+):
+    encoded = encode_python_observation_with_metrics(
+        _python_obs(
+            planets=[
+                [0, 0, 25.0, 50.0, 2.0, 10, 3],
+                [1, 1, 75.0, 50.0, 2.0, 20, 3],
+            ],
+            fleets=[
+                [10, 0, 10.0, 10.0, 0.0, 0, 5],
+                [11, 1, 20.0, 20.0, 0.0, 1, 6],
+                [12, 1, 30.0, 30.0, 0.0, 1, 8],
+            ],
+        ),
+        obs_spec=EntityBasedExtV2Config(max_entities=MAX_PLANETS + MAX_COMETS + 3),
+        action_spec=ActionPureConfig(min_fleet_size=6),
+        fleet_filter_min_size=8,
+    )
+
+    assert encoded.filtered_fleets == 2
+    assert encoded.obs.player_features is not None
+    assert encoded.obs.entity_mask[0, ACTION_ENTITY_SLOTS:].tolist() == [
+        True,
+        False,
+        False,
+    ]
+    assert encoded.obs.fleets[0, 0, 8].item() == pytest.approx(8 / 500)
+
+    player_features = encoded.obs.player_features[0].numpy()
+    assert player_features[0, 3] == pytest.approx((10 + 5) / 5000)
+    assert player_features[0, 4] == pytest.approx(math.log1p(10 + 5) / math.log(1000))
+    assert player_features[0, 9] == pytest.approx(5 / 5000)
+    assert player_features[0, 10] == pytest.approx(math.log1p(5) / math.log(1000))
+    assert player_features[0, 13] == pytest.approx(1 / 100)
+
+    assert player_features[1, 3] == pytest.approx((20 + 6 + 8) / 5000)
+    assert player_features[1, 4] == pytest.approx(
+        math.log1p(20 + 6 + 8) / math.log(1000)
+    )
+    assert player_features[1, 9] == pytest.approx((6 + 8) / 5000)
+    assert player_features[1, 10] == pytest.approx(math.log1p(6 + 8) / math.log(1000))
+    assert player_features[1, 13] == pytest.approx(2 / 100)
 
 
 def test_encode_python_observation_cross_attn_routes_fleet_arrivals() -> None:
