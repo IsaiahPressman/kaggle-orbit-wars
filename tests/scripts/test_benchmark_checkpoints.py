@@ -95,6 +95,60 @@ def test_player_count_counts_uses_two_player_weight() -> None:
     assert benchmark_checkpoints._player_count_counts(9, 0.75) == {2: 7, 4: 2}
 
 
+def test_benchmark_n_envs_caps_to_requested_games() -> None:
+    assert benchmark_checkpoints._benchmark_n_envs(3, 0) == 0
+    assert benchmark_checkpoints._benchmark_n_envs(3, 10) == 3
+    assert benchmark_checkpoints._benchmark_n_envs(10, 3) == 3
+    assert benchmark_checkpoints._benchmark_n_envs(5, 5) == 5
+
+
+def test_benchmark_env_obs_spec_uses_larger_checkpoint_capacity() -> None:
+    obs_spec = benchmark_checkpoints._benchmark_env_obs_spec(
+        _loaded_checkpoint(
+            object(),
+            obs_spec=EntityBasedExtV1Config(
+                max_entities=64,
+                ship_count_one_hot_max=5,
+            ),
+        ),
+        _loaded_checkpoint(
+            object(),
+            obs_spec=EntityBasedConfig(max_entities=128),
+        ),
+    )
+
+    assert isinstance(obs_spec, EntityBasedExtV1Config)
+    assert obs_spec.max_entities == 128
+    assert obs_spec.ship_count_one_hot_max == 5
+
+
+def test_run_benchmark_skips_zero_game_player_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_vectorized_env(**_kwargs: object) -> None:
+        raise AssertionError("VectorizedEnv should not be constructed")
+
+    monkeypatch.setattr(benchmark_checkpoints, "VectorizedEnv", fail_vectorized_env)
+
+    result = benchmark_checkpoints.run_benchmark(
+        checkpoint_a=_loaded_checkpoint(object()),
+        checkpoint_b=_loaded_checkpoint(object()),
+        player_count=2,
+        n_games=0,
+        n_envs=256,
+        device=torch.device("cpu"),
+        determinism=benchmark_checkpoints.CheckpointDeterminism(a=False, b=False),
+        no_progress=True,
+        replay_games=0,
+        replay_output_path=None,
+        replay_rng=benchmark_checkpoints.random.Random(),
+    )
+
+    assert result.games == 0
+    assert result.steps == 0
+    assert result.stats.model_games == [0, 0]
+
+
 def test_validate_args_allows_weighted_odd_game_count() -> None:
     benchmark_checkpoints._validate_args(
         Namespace(

@@ -32,6 +32,7 @@ from owl.rl import (
     DiscreteTargetBinActionMask,
     DiscreteTargetBinActions,
     ObsBatch,
+    ObsConfig,
     PureActionMask,
     PureActions,
     VectorizedEnv,
@@ -161,10 +162,20 @@ def run_benchmark(
     replay_output_path: Path | None,
     replay_rng: random.Random,
 ) -> BenchmarkResult:
+    if n_games == 0:
+        return BenchmarkResult(
+            player_count=player_count,
+            games=0,
+            steps=0,
+            elapsed_seconds=0.0,
+            stats=MatchupStats.empty(),
+        )
+
     cfg = checkpoint_a.config
+    n_envs = _benchmark_n_envs(n_envs, n_games)
     env = VectorizedEnv(
         n_envs=n_envs,
-        obs_spec=cfg.env.obs_spec,
+        obs_spec=_benchmark_env_obs_spec(checkpoint_a, checkpoint_b),
         action_spec=cfg.env.action_spec,
         two_player_weight=1.0 if player_count == 2 else 0.0,
         pin_memory=device.type == "cuda",
@@ -300,6 +311,23 @@ def run_benchmark(
         elapsed_seconds=time.perf_counter() - started_at,
         stats=stats,
     )
+
+
+def _benchmark_n_envs(n_envs: int, n_games: int) -> int:
+    return min(n_envs, n_games)
+
+
+def _benchmark_env_obs_spec(
+    checkpoint_a: LoadedCheckpoint,
+    checkpoint_b: LoadedCheckpoint,
+) -> ObsConfig:
+    obs_spec_a = checkpoint_a.config.env.obs_spec
+    obs_spec_b = checkpoint_b.config.env.obs_spec
+    max_entities = max(obs_spec_a.max_entities, obs_spec_b.max_entities)
+    if obs_spec_a.max_entities == max_entities:
+        return obs_spec_a
+
+    return obs_spec_a.model_copy(update={"max_entities": max_entities})
 
 
 def _benchmark_replay_path(args: argparse.Namespace, player_count: int) -> Path | None:
