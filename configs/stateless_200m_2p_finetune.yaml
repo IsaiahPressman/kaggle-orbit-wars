@@ -2,7 +2,7 @@ env:
   n_envs: 256
   obs_spec:
     obs_spec: entity_based_ext_v2
-    max_entities: 256
+    max_entities: 352
   action_spec:
     action_spec: discrete_targets
     min_fleet_size: 3
