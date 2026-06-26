@@ -1,5 +1,7 @@
 # Scaling Reinforcement Learning to the Stars
 
+## Summary
+
 I trained a single 200-million-parameter transformer for 15 billion steps of self-play reinforcement learning to play both the two-player and four-player modes of Orbit Wars.
 
 ## Motivation
