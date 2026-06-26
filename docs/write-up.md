@@ -76,7 +76,7 @@ I used frequent model checkpointing and occasional warm restarts to adjust hyper
 
 ### Hardware and performance
 
-I ran larger-scale (>=25M-parameter) training experiments on an 8xB200 machine with 2048 parallel environments and 64-step rollouts. In the final days, I trained across four 8xB200 nodes with 8192 parallel environments. Training the 200M-parameter model ran at ~6.3M steps per GPU-hour (~110K tokens per GPU-second); the final model therefore required ~2400 B200-hours.
+For Orbit Wars, I wasn't limited to the single RTX 3090 I'd relied on in past simulation competitions. I ran larger-scale (>=25M-parameter) training experiments on an 8xB200 machine with 2048 parallel environments and 64-step rollouts. In the final days, I trained across four 8xB200 nodes with 8192 parallel environments. Training the 200M-parameter model ran at ~6.3M steps per GPU-hour (~110K tokens per GPU-second); training the final model therefore took ~2400 B200-hours.
 
 ## Things I would do differently
 
@@ -92,4 +92,4 @@ Since the final submission deadline, the four-player to two-player ratio seems t
 
 ## Closing thoughts
 
-I want to thank the organizers, and especially Bovard, for designing a great game and running a fun competition. It’s been delightful watching all of the agents play against one another and trying to analyze the games and make sense of what is and isn’t important. It’s also been wonderful reading the write-ups and taking note of all the clever ideas people have had - I’ve already learned so much that I can’t wait to apply next time!
+I want to thank the organizers, and especially Bovard, for designing a great game and running a fun competition. It’s been delightful watching all of the agents play against one another and trying to analyze the games and make sense of what is and isn’t important. It’s also been wonderful reading all the write-ups - I’ve already learned so much and I can't wait for the next time!
