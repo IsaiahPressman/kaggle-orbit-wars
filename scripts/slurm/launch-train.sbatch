@@ -12,6 +12,7 @@
 
 set -euo pipefail
 
+REPO_ROOT="$(pwd)"
 IMAGE="${ORBIT_WARS_IMAGE:-ghcr.io#isaiahpressman/kaggle-orbit-wars:main}"
 WANDB_ENV_FILE="${ORBIT_WARS_ENV_FILE:-$HOME/.config/orbit-wars/wandb.env}"
 OUTPUT_DIR="${ORBIT_WARS_OUTPUT_DIR:-/data/personal/isaiah/orbit-wars/runs}"
@@ -25,6 +26,10 @@ MASTER_PORT="${ORBIT_WARS_MASTER_PORT:-29500}"
 EXTRA_CONTAINER_ENV="${ORBIT_WARS_CONTAINER_ENV:-}"
 CONFIG_MOUNT_TARGET="/config"
 CONFIG_MOUNT_DIR=""
+PYTHON_MOUNT_DIR="$REPO_ROOT/python"
+PYTHON_MOUNT_TARGET="/workspace/orbit-wars/python"
+SCRIPTS_MOUNT_DIR="$REPO_ROOT/scripts"
+SCRIPTS_MOUNT_TARGET="/workspace/orbit-wars/scripts"
 MODEL_WEIGHTS_MOUNT_TARGET="/model-weights"
 MODEL_WEIGHTS_MOUNT_DIR=""
 MAPPED_MODEL_WEIGHTS_PATH=""
@@ -44,6 +49,15 @@ if [[ ! -f "$WANDB_ENV_FILE" ]]; then
 fi
 
 mkdir -p "$OUTPUT_DIR"
+
+if [[ ! -d "$PYTHON_MOUNT_DIR" ]]; then
+    echo "Missing Python source directory: $PYTHON_MOUNT_DIR" >&2
+    exit 1
+fi
+if [[ ! -d "$SCRIPTS_MOUNT_DIR" ]]; then
+    echo "Missing scripts directory: $SCRIPTS_MOUNT_DIR" >&2
+    exit 1
+fi
 
 if [[ "$USE_DEFAULT_FRESH_LAUNCH" -eq 1 ]]; then
     if [[ -f "$CONFIG" ]]; then
@@ -288,7 +302,7 @@ if [[ "${#RUN_ARGS[@]}" -gt 0 ]]; then
     train_cmd+=("${RUN_ARGS[@]}")
 fi
 
-CONTAINER_MOUNTS="$OUTPUT_DIR:/runs"
+CONTAINER_MOUNTS="$OUTPUT_DIR:/runs,$PYTHON_MOUNT_DIR:$PYTHON_MOUNT_TARGET:ro,$SCRIPTS_MOUNT_DIR:$SCRIPTS_MOUNT_TARGET:ro"
 if [[ -n "$CONFIG_MOUNT_DIR" ]]; then
     CONTAINER_MOUNTS+=",$CONFIG_MOUNT_DIR:$CONFIG_MOUNT_TARGET:ro"
 fi

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REPO_ROOT="$(pwd)"
 IMAGE="${ORBIT_WARS_IMAGE:-ghcr.io#isaiahpressman/kaggle-orbit-wars:main}"
 ENV_FILE="${ORBIT_WARS_ENV_FILE:-$HOME/.config/orbit-wars/wandb.env}"
 OUTPUT_DIR="${ORBIT_WARS_OUTPUT_DIR:-/data/personal/isaiah/orbit-wars/runs}"
@@ -10,6 +11,10 @@ CPUS="${ORBIT_WARS_CPUS:-32}"
 MEM="${ORBIT_WARS_MEM:-128G}"
 TIME="${ORBIT_WARS_TIME:-06:00:00}"
 CONFIG_MOUNT_TARGET="/config"
+PYTHON_MOUNT_DIR="$REPO_ROOT/python"
+PYTHON_MOUNT_TARGET="/workspace/orbit-wars/python"
+SCRIPTS_MOUNT_DIR="$REPO_ROOT/scripts"
+SCRIPTS_MOUNT_TARGET="/workspace/orbit-wars/scripts"
 SRUN_EXTRA_ARGS=()
 
 if [[ $# -gt 0 ]]; then
@@ -23,6 +28,15 @@ if [[ $# -gt 0 ]]; then
 fi
 
 mkdir -p "$OUTPUT_DIR"
+
+if [[ ! -d "$PYTHON_MOUNT_DIR" ]]; then
+    echo "Missing Python source directory: $PYTHON_MOUNT_DIR" >&2
+    exit 1
+fi
+if [[ ! -d "$SCRIPTS_MOUNT_DIR" ]]; then
+    echo "Missing scripts directory: $SCRIPTS_MOUNT_DIR" >&2
+    exit 1
+fi
 
 if [[ -n "$CONFIG_DIR" ]]; then
     if [[ ! -d "$CONFIG_DIR" ]]; then
@@ -48,7 +62,7 @@ fi
 : "${NVIDIA_DRIVER_CAPABILITIES:=compute,utility}"
 export NVIDIA_VISIBLE_DEVICES NVIDIA_DRIVER_CAPABILITIES
 
-CONTAINER_MOUNTS="$OUTPUT_DIR:/runs"
+CONTAINER_MOUNTS="$OUTPUT_DIR:/runs,$PYTHON_MOUNT_DIR:$PYTHON_MOUNT_TARGET:ro,$SCRIPTS_MOUNT_DIR:$SCRIPTS_MOUNT_TARGET:ro"
 if [[ -n "$CONFIG_DIR" ]]; then
     CONTAINER_MOUNTS+=",$CONFIG_DIR:$CONFIG_MOUNT_TARGET:ro"
 fi

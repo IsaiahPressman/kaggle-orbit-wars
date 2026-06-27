@@ -67,6 +67,9 @@ container runtime exposing the GPU devices into the container.
 
 The image installs the Rust toolchain declared in `rust-toolchain.toml`, so local
 and container builds use the same compiler channel.
+The default image also keeps a copy of the compiled `owl.rs` extension outside
+the source tree so Slurm launch wrappers can bind-mount host Python sources
+without hiding the image-built native module.
 
 Create a Kaggle submission tarball on the host:
 
@@ -218,6 +221,10 @@ SHA.
 `configs/baseline.yaml`. The batch script expects to be run from the repository
 root by default, mounts `./configs` read-only at `/config`, and runs training
 with `/config/baseline.yaml`.
+It also mounts this checkout's `python/` and `scripts/` directories read-only
+over `/workspace/orbit-wars/python` and `/workspace/orbit-wars/scripts`, so
+local Python and script edits are visible to the container without rebuilding
+the image. Rebuild the image for Rust extension or dependency changes.
 
 To use a different host-edited config without rebuilding the image, set
 `ORBIT_WARS_CONFIG` to another host YAML file:
@@ -412,9 +419,12 @@ uv run python scripts/run_ppo.py configs/baseline.yaml /runs \
 ```
 
 The helper mounts `ORBIT_WARS_OUTPUT_DIR` as `/runs`, sources the optional W&B
-env file, and passes `WANDB_API_KEY` into the container when present. It also
-mounts `ORBIT_WARS_CONFIG_DIR`, defaulting to `./configs`, read-only at
-`/config` and exports `ORBIT_WARS_CONFIG_DIR=/config` inside the shell:
+env file, and passes `WANDB_API_KEY` into the container when present. It mounts
+this checkout's `python/` and `scripts/` directories read-only over the
+in-container source paths, so local Python and script edits are visible without
+rebuilding the image. It also mounts `ORBIT_WARS_CONFIG_DIR`, defaulting to
+`./configs`, read-only at `/config` and exports `ORBIT_WARS_CONFIG_DIR=/config`
+inside the shell:
 
 ```sh
 ORBIT_WARS_CONFIG_DIR=/path/to/configs \

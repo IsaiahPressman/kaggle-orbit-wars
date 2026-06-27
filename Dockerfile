@@ -74,6 +74,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/workspace/orbit-wars/target \
     just prepare-container
 
-ENV UV_COMPILE_BYTECODE=0
+RUN mkdir -p /opt/orbit-wars-native/owl && \
+    cp python/owl/rs*.so /opt/orbit-wars-native/owl/
+
+ENV UV_COMPILE_BYTECODE=0 \
+    OWL_NATIVE_MODULE_DIR=/opt/orbit-wars-native/owl
 
 CMD ["bash"]
