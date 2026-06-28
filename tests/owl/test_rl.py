@@ -704,6 +704,12 @@ def test_vectorized_env_terminal_snapshot_preserves_pre_reset_state() -> None:
     assert terminal_snapshot["step"] > obs.global_features[0, 0].item()
     assert terminal_snapshot["player_count"] == 2
 
+    truncated_obs = env.truncate_envs(np.array([True], dtype=np.bool_))
+
+    assert truncated_obs is env.observations
+    assert env.terminal_snapshot(0) is None
+    assert env.terminal_metrics(0) is None
+
 
 def test_two_player_sample_marks_unused_player_slots_done() -> None:
     env = VectorizedEnv(
@@ -771,6 +777,19 @@ def test_env_config_requires_even_env_count() -> None:
 
     with pytest.raises(ValueError, match="n_envs must be even"):
         EnvConfig(n_envs=1)
+
+
+def test_vectorized_env_accepts_reward_mode_config() -> None:
+    config = EnvConfig(reward_mode="ship_ratio")
+    env = VectorizedEnv(
+        n_envs=1,
+        obs_spec=config.obs_spec,
+        action_spec=config.action_spec,
+        reward_mode=config.reward_mode,
+        pin_memory=False,
+    )
+
+    assert env.reward_mode == "ship_ratio"
 
 
 def test_discrete_targets_config_and_env_shapes() -> None:

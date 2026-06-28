@@ -228,6 +228,7 @@ class DiscreteTargetBinActions:
 
 
 ActionBundle: TypeAlias = PureActions | DiscreteTargetActions | DiscreteTargetBinActions
+RewardMode: TypeAlias = Literal["win_loss", "ship_ratio"]
 
 
 @dataclass
@@ -265,6 +266,7 @@ class EnvConfig(BaseConfig):
     obs_spec: ObsConfig = Field(default_factory=EntityBasedConfig)
     action_spec: ActionConfig = Field(default_factory=ActionPureConfig)
     two_player_weight: float = Field(default=0.5, ge=0.0, le=1.0)
+    reward_mode: RewardMode = "win_loss"
     pin_memory: bool = True
 
     @field_validator("n_envs")
@@ -305,10 +307,12 @@ class VectorizedEnv:
         obs_spec: ObsConfig,
         action_spec: ActionConfig,
         two_player_weight: float = 0.5,
+        reward_mode: RewardMode = "win_loss",
         pin_memory: bool = True,
     ) -> None:
         self.obs_spec = obs_spec
         self.action_spec = action_spec
+        self.reward_mode = reward_mode
         self._rust = _RustRlVecEnv(
             n_envs,
             two_player_weight,
@@ -320,6 +324,7 @@ class VectorizedEnv:
             self.action_spec.min_fleet_size,
             _n_action_bins(self.action_spec),
             _targeting_mode(self.action_spec),
+            reward_mode,
         )
         if pin_memory and not torch.cuda.is_available():
             warnings.warn(
@@ -402,6 +407,25 @@ class VectorizedEnv:
                 self._fleet_target_np,
                 self._target_incoming_features_np,
             )
+        return self.observations
+
+    def truncate_envs(self, truncate_mask: np.ndarray | torch.Tensor) -> ObsBatch:
+        mask_array = _truncate_mask_to_numpy(truncate_mask, self.n_envs)
+        self._rust.truncate_envs(
+            mask_array,
+            self._planet_obs_np,
+            self._orbiting_planet_obs_np,
+            self._fleet_obs_np,
+            self._comet_obs_np,
+            self._entity_mask_np,
+            self._still_playing_np,
+            self._global_obs_np,
+            self._can_act_np,
+            self._max_launch_np,
+            self._player_features_np,
+            self._fleet_target_np,
+            self._target_incoming_features_np,
+        )
         return self.observations
 
     def state_snapshot(self, env_index: int) -> dict[str, Any]:
@@ -1264,6 +1288,25 @@ def _actions_to_numpy(
     else:
         raise TypeError(f"{name} must be a NumPy array or Torch tensor")
     return np.ascontiguousarray(actions)
+
+
+def _truncate_mask_to_numpy(mask: np.ndarray | torch.Tensor, n_envs: int) -> np.ndarray:
+    if isinstance(mask, torch.Tensor):
+        if mask.device.type != "cpu":
+            raise ValueError("truncate_mask must be on CPU")
+        if mask.dtype != torch.bool:
+            raise ValueError(
+                f"truncate_mask must have dtype torch.bool, got {mask.dtype}"
+            )
+        mask = mask.detach().numpy()
+    elif isinstance(mask, np.ndarray):
+        if mask.dtype != np.dtype(np.bool_):
+            raise ValueError(f"truncate_mask must have dtype bool, got {mask.dtype}")
+    else:
+        raise TypeError("truncate_mask must be a NumPy array or Torch tensor")
+    if mask.shape != (n_envs,):
+        raise ValueError(f"truncate_mask must have shape {(n_envs,)}, got {mask.shape}")
+    return np.ascontiguousarray(mask)
 
 
 def _encoded_observation_to_batch(

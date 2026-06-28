@@ -16,6 +16,7 @@ env = VectorizedEnv(
     n_envs=128,
     obs_spec=EntityBasedConfig(max_entities=256),
     action_spec=ActionPureConfig(max_per_planet_launches=1),
+    reward_mode="win_loss",
 )
 ```
 
@@ -747,6 +748,44 @@ count, owner IDs remapped into outer player slots, the internal/outer player map
 outer-slot `player_finished`, action entity slot planet IDs, planets, fleets,
 comet groups, and comet paths. Neutral ownership remains `-1`, and each planet
 or fleet also includes `internal_owner` when the engine-owned ID is needed.
+
+## Reward Modes
+
+The vectorized environment supports two reward shapes, selected by the
+`VectorizedEnv(..., reward_mode=...)` constructor argument or `EnvConfig`
+field. Non-terminal active-player transitions still reward `0`, and a player
+eliminated mid-game still receives `done=True` on the step it is eliminated.
+
+- `"win_loss"` (default): the scheme described above for submitted actions — a
+  sole winner receives `+1`, losers receive `-1`, and tied winners split the
+  reward via `(1 - (winner_count - 1)) / winner_count`.
+- `"ship_ratio"`: each winning player (the player or players with the maximum
+  total ship count) receives `winner_ships / total_player_ships`, where
+  `total_player_ships` is the summed planet-and-fleet ship count across all
+  active players, excluding neutral ships. Every non-winner receives `0`, with no
+  `-1` loss penalty, including players eliminated before terminal game reset.
+  Tied winners each receive the same ratio because they share the maximum score.
+  When no active player has any ships, all rewards are `0`.
+
+## Manual Truncation
+
+`VectorizedEnv.truncate_envs(truncate_mask)` resets a chosen subset of sub-envs,
+for training loops that impose a time limit shorter than a game's natural
+termination. `truncate_mask` is a length-`n_envs` boolean array or CPU boolean
+tensor; each `True` env is reset to a fresh game and its observation rows are
+overwritten with the reset observation exactly as a terminal auto-reset would,
+while `False` env rows are left untouched. The raw Rust
+`RlVecEnv.truncate_envs(truncate_mask, ...obs buffers...)` method accepts the
+same observation buffers as `reset(...)`, with `max_launch=None` for action specs
+that do not expose a max-launch tensor.
+
+Unlike a terminal step, truncation emits no rewards, `dones`, terminal metrics,
+or terminal snapshot — the caller decides how to treat the truncated transition.
+The intended use is value bootstrapping: read a to-be-truncated env's current
+observation and evaluate the critic on it first, so the truncated trajectory can
+bootstrap from the predicted value instead of a real terminal reward. Because
+`truncate_envs` overwrites the observation buffers for the truncated envs,
+capture any needed bootstrap inputs before calling it.
 
 ## Episode Metrics
 

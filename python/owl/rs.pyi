@@ -21,6 +21,7 @@ class RlVecEnv:
         min_fleet_size: int = ...,
         n_bins: int = ...,
         targeting_mode: str = ...,
+        reward_mode: str = ...,
     ) -> None: ...
     def reset(
         self,
@@ -47,6 +48,22 @@ class RlVecEnv:
         still_playing: np.ndarray,
         global_obs: np.ndarray,
         can_act: np.ndarray,
+        player_features: np.ndarray | None = ...,
+        fleet_target: np.ndarray | None = ...,
+        target_incoming_features: np.ndarray | None = ...,
+    ) -> None: ...
+    def truncate_envs(
+        self,
+        truncate_mask: np.ndarray,
+        planet_obs: np.ndarray,
+        orbiting_planet_obs: np.ndarray,
+        fleet_obs: np.ndarray,
+        comet_obs: np.ndarray,
+        entity_mask: np.ndarray,
+        still_playing: np.ndarray,
+        global_obs: np.ndarray,
+        can_act: np.ndarray,
+        max_launch: np.ndarray | None = ...,
         player_features: np.ndarray | None = ...,
         fleet_target: np.ndarray | None = ...,
         target_incoming_features: np.ndarray | None = ...,
