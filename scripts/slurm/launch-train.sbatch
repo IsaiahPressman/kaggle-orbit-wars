@@ -36,6 +36,19 @@ MAPPED_MODEL_WEIGHTS_PATH=""
 RUN_ARGS=("$@")
 USE_DEFAULT_FRESH_LAUNCH=0
 
+# Resume the most recent run directory under ORBIT_WARS_OUTPUT_DIR. Used to chain
+# a follow-up job after a time-limited run without knowing the timestamped run
+# dir at submission time. Only applies when no explicit run target was passed.
+if [[ "${ORBIT_WARS_RESUME_LATEST:-0}" == "1" && "${#RUN_ARGS[@]}" -eq 0 ]]; then
+    resume_run_dir="$(ls -dt "$OUTPUT_DIR"/*/ 2>/dev/null | head -1)"
+    if [[ -z "$resume_run_dir" ]]; then
+        echo "ORBIT_WARS_RESUME_LATEST=1 but no run directory found under $OUTPUT_DIR" >&2
+        exit 1
+    fi
+    RUN_ARGS=("${resume_run_dir%/}")
+    echo "ORBIT_WARS_RESUME_LATEST=1 resuming latest run directory: ${RUN_ARGS[0]}"
+fi
+
 if [[ "${#RUN_ARGS[@]}" -eq 0 ]]; then
     USE_DEFAULT_FRESH_LAUNCH=1
 elif [[ "${RUN_ARGS[0]}" == -* ]]; then
