@@ -42,11 +42,18 @@ for entry in "${experiments[@]}"; do
     out_dir="$OUTPUT_BASE/$name"
     mkdir -p "$out_dir"
 
+    # UV_NO_SYNC=1 (forwarded into the container via ORBIT_WARS_CONTAINER_ENV)
+    # stops `uv run` from rebuilding owl at job start. This branch's mounted
+    # python/ differs from the image, which would otherwise trigger a maturin
+    # editable rebuild that fails writing rs.abi3.so into the read-only python/
+    # mount. The image-built Rust extension stays importable via
+    # OWL_NATIVE_MODULE_DIR, and this branch only changes Python (no Rust/dep
+    # changes vs the image), so skipping the sync is correct.
     jid1=$(sbatch --parsable \
         --job-name="${name}-j1" \
         --time="$TIME_LIMIT" \
         --gres="$GRES" \
-        --export="ALL,ORBIT_WARS_CONFIG=$config,ORBIT_WARS_MAX_RUNTIME_HOURS=$MAX_RUNTIME_HOURS,ORBIT_WARS_OUTPUT_DIR=$out_dir" \
+        --export="ALL,UV_NO_SYNC=1,ORBIT_WARS_CONTAINER_ENV=UV_NO_SYNC,ORBIT_WARS_CONFIG=$config,ORBIT_WARS_MAX_RUNTIME_HOURS=$MAX_RUNTIME_HOURS,ORBIT_WARS_OUTPUT_DIR=$out_dir" \
         "$SBATCH_SCRIPT")
 
     jid2=$(sbatch --parsable \
@@ -54,7 +61,7 @@ for entry in "${experiments[@]}"; do
         --time="$TIME_LIMIT" \
         --gres="$GRES" \
         --dependency="afterany:$jid1" \
-        --export="ALL,ORBIT_WARS_RESUME_LATEST=1,ORBIT_WARS_MAX_RUNTIME_HOURS=$MAX_RUNTIME_HOURS,ORBIT_WARS_OUTPUT_DIR=$out_dir" \
+        --export="ALL,UV_NO_SYNC=1,ORBIT_WARS_CONTAINER_ENV=UV_NO_SYNC,ORBIT_WARS_RESUME_LATEST=1,ORBIT_WARS_MAX_RUNTIME_HOURS=$MAX_RUNTIME_HOURS,ORBIT_WARS_OUTPUT_DIR=$out_dir" \
         "$SBATCH_SCRIPT")
 
     echo "$name: job1=$jid1 (fresh) -> job2=$jid2 (resume after $jid1) | out=$out_dir"
