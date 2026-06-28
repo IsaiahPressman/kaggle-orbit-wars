@@ -976,7 +976,9 @@ class PPOTrainer:
             truncated[idx] = True
             rewards[idx] = 0.0
             dones[idx] = True
-            self.env.truncate_envs(trunc_mask)
+            # VectorizedEnv.truncate_envs requires a CPU bool mask (it refuses to
+            # silently sync a device tensor to host).
+            self.env.truncate_envs(trunc_mask.to(device="cpu"))
             self._env_step_count[idx] = 0
             self._resample_truncation_games(trunc_mask)
         return truncated, bootstrap_values
