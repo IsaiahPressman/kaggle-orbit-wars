@@ -228,6 +228,7 @@ class DiscreteTargetBinActions:
 
 
 ActionBundle: TypeAlias = PureActions | DiscreteTargetActions | DiscreteTargetBinActions
+RewardMode: TypeAlias = Literal["win_loss", "ship_ratio"]
 
 
 @dataclass
@@ -258,9 +259,6 @@ class DiscreteTargetBinActionMask:
 ActionMask: TypeAlias = (
     PureActionMask | DiscreteTargetActionMask | DiscreteTargetBinActionMask
 )
-
-
-RewardMode = Literal["win_loss", "ship_ratio"]
 
 
 class EnvConfig(BaseConfig):
@@ -411,22 +409,10 @@ class VectorizedEnv:
             )
         return self.observations
 
-    def truncate_envs(self, truncate_mask: torch.Tensor) -> ObsBatch:
-        """Reset the sub-envs selected by ``truncate_mask`` to fresh games.
-
-        ``truncate_mask`` is a length-``n_envs`` boolean tensor. Selected envs are
-        reset and their observation rows are overwritten in place; all other env
-        rows are left untouched. This produces no rewards/dones/metrics — the
-        training loop owns how the truncated transition is treated (e.g. value
-        bootstrapping). Returns ``self.observations`` for convenience.
-        """
-        if self._max_launch_np is None:
-            raise NotImplementedError(
-                "truncate_envs does not support the discrete_target_bins action spec"
-            )
-        mask_np = truncate_mask.detach().to(device="cpu", dtype=torch.bool).contiguous()
+    def truncate_envs(self, truncate_mask: np.ndarray | torch.Tensor) -> ObsBatch:
+        mask_array = _truncate_mask_to_numpy(truncate_mask, self.n_envs)
         self._rust.truncate_envs(
-            mask_np.numpy(),
+            mask_array,
             self._planet_obs_np,
             self._orbiting_planet_obs_np,
             self._fleet_obs_np,
@@ -1302,6 +1288,25 @@ def _actions_to_numpy(
     else:
         raise TypeError(f"{name} must be a NumPy array or Torch tensor")
     return np.ascontiguousarray(actions)
+
+
+def _truncate_mask_to_numpy(mask: np.ndarray | torch.Tensor, n_envs: int) -> np.ndarray:
+    if isinstance(mask, torch.Tensor):
+        if mask.device.type != "cpu":
+            raise ValueError("truncate_mask must be on CPU")
+        if mask.dtype != torch.bool:
+            raise ValueError(
+                f"truncate_mask must have dtype torch.bool, got {mask.dtype}"
+            )
+        mask = mask.detach().numpy()
+    elif isinstance(mask, np.ndarray):
+        if mask.dtype != np.dtype(np.bool_):
+            raise ValueError(f"truncate_mask must have dtype bool, got {mask.dtype}")
+    else:
+        raise TypeError("truncate_mask must be a NumPy array or Torch tensor")
+    if mask.shape != (n_envs,):
+        raise ValueError(f"truncate_mask must have shape {(n_envs,)}, got {mask.shape}")
+    return np.ascontiguousarray(mask)
 
 
 def _encoded_observation_to_batch(

@@ -552,7 +552,7 @@ impl PyRlVecEnv {
         still_playing,
         global_obs,
         can_act,
-        max_launch,
+        max_launch=None,
         player_features=None,
         fleet_target=None,
         target_incoming_features=None
@@ -569,12 +569,12 @@ impl PyRlVecEnv {
         still_playing: PyReadwriteArrayDyn<'_, bool>,
         global_obs: PyReadwriteArrayDyn<'_, f32>,
         can_act: PyReadwriteArrayDyn<'_, bool>,
-        max_launch: PyReadwriteArrayDyn<'_, i64>,
+        max_launch: Option<PyReadwriteArrayDyn<'_, i64>>,
         player_features: Option<PyReadwriteArrayDyn<'_, f32>>,
         fleet_target: Option<PyReadwriteArrayDyn<'_, i64>>,
         target_incoming_features: Option<PyReadwriteArrayDyn<'_, f32>>,
     ) -> PyResult<()> {
-        self.require_obs_shapes(
+        self.require_obs_shapes_without_max_launch(
             &planet_obs,
             &orbiting_planet_obs,
             &fleet_obs,
@@ -586,8 +586,19 @@ impl PyRlVecEnv {
             fleet_target.as_ref(),
             target_incoming_features.as_ref(),
             &can_act,
-            &max_launch,
         )?;
+        if self.action_spec.max_launch_len() > 0 {
+            let Some(max_launch) = max_launch.as_ref() else {
+                return Err(PyValueError::new_err(
+                    "max_launch is required for this action_spec",
+                ));
+            };
+            require_shape(
+                "max_launch",
+                max_launch.shape(),
+                &[self.n_envs, OUTER_PLAYER_SLOTS, ACTION_ENTITY_SLOTS],
+            )?;
+        }
 
         let truncate_slice = truncate_mask.as_slice()?;
         if truncate_slice.len() != self.n_envs {
@@ -620,7 +631,7 @@ impl PyRlVecEnv {
         let player_features_per_env = OUTER_PLAYER_SLOTS * self.player_feature_channels;
         let target_incoming_per_env = ACTION_ENTITY_SLOTS * self.target_incoming_channels;
         let action_masks_per_env = self.action_spec.can_act_len();
-        let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
+        let max_launch_per_env = self.action_spec.max_launch_len();
         let n_envs = self.n_envs;
         let two_player_weight = self.two_player_weight;
         let max_fleets = self.max_fleets;
@@ -638,7 +649,10 @@ impl PyRlVecEnv {
         let still_playing_slice = still_playing.as_slice_mut()?;
         let global_slice = global_obs.as_slice_mut()?;
         let can_act_slice = can_act.as_slice_mut()?;
-        let max_launch_slice = max_launch.as_slice_mut()?;
+        let mut max_launch_slice = match max_launch.as_mut() {
+            Some(array) => Some(array.as_slice_mut()?),
+            None => None,
+        };
         let mut player_features_slice = match player_features.as_mut() {
             Some(array) => Some(array.as_slice_mut()?),
             None => None,
@@ -659,6 +673,8 @@ impl PyRlVecEnv {
             let (new_state, new_player_map) = reset_one_env(two_player_weight);
             self.player_finished[env_index].fill(false);
             self.episode_stats[env_index] = EpisodeStats::default();
+            self.last_terminal_metrics[env_index] = None;
+            self.last_terminal_snapshots[env_index] = None;
             let mut new_action_slots = action_entity_slots(&new_state);
 
             let player_features_chunk = player_features_slice.as_deref_mut().map(|slice| {
@@ -671,6 +687,9 @@ impl PyRlVecEnv {
             let target_incoming_chunk = target_incoming_slice.as_deref_mut().map(|slice| {
                 &mut slice
                     [env_index * target_incoming_per_env..(env_index + 1) * target_incoming_per_env]
+            });
+            let max_launch_chunk = max_launch_slice.as_deref_mut().map(|slice| {
+                &mut slice[env_index * max_launch_per_env..(env_index + 1) * max_launch_per_env]
             });
 
             write_one_obs(
@@ -699,10 +718,7 @@ impl PyRlVecEnv {
                 target_incoming_chunk,
                 &mut can_act_slice
                     [env_index * action_masks_per_env..(env_index + 1) * action_masks_per_env],
-                Some(
-                    &mut max_launch_slice
-                        [env_index * max_launch_per_env..(env_index + 1) * max_launch_per_env],
-                ),
+                max_launch_chunk,
             );
 
             self.states[env_index] = new_state;

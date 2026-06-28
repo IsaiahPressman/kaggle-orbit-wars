@@ -842,7 +842,7 @@ def test_fixed_teacher_fresh_launch_leaves_last_best_unseeded(
             obs_spec: object,
             action_spec: object,
             two_player_weight: float,
-            reward_mode: str,
+            reward_mode: object,
             pin_memory: bool,
         ) -> None:
             del two_player_weight, reward_mode, pin_memory
@@ -972,7 +972,7 @@ def test_fresh_launch_from_checkpoint_uses_starting_checkpoint_as_teacher(
             obs_spec: object,
             action_spec: object,
             two_player_weight: float,
-            reward_mode: str,
+            reward_mode: object,
             pin_memory: bool,
         ) -> None:
             del two_player_weight, reward_mode, pin_memory
