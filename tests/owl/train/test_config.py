@@ -335,6 +335,54 @@ def test_full_config_rejects_more_eval_replays_than_envs() -> None:
         )
 
 
+def test_full_config_rejects_independent_critic_with_value_distillation() -> None:
+    with pytest.raises(ValueError, match=r"critic_mode='independent'"):
+        FullConfig.model_validate(
+            {
+                "env": {"n_envs": 2},
+                "model": {
+                    "model_arch": "stateless_transformer_v1",
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                    "critic_mode": "independent",
+                },
+                "optimizer": {"optimizer": "adamw", "learning_rate": 0.001},
+                "rl": {"horizon": 4, "teacher_value_coef": 0.005},
+            }
+        )
+
+
+def test_full_config_accepts_independent_critic_without_value_distillation() -> None:
+    config = FullConfig.model_validate(
+        {
+            "env": {"n_envs": 2, "reward_mode": "ship_ratio"},
+            "model": {
+                "model_arch": "stateless_transformer_v1",
+                "embed_dim": 32,
+                "depth": 1,
+                "n_heads": 4,
+                "critic_mode": "independent",
+            },
+            "optimizer": {"optimizer": "adamw", "learning_rate": 0.001},
+            "rl": {"horizon": 4, "teacher_value_coef": 0.0},
+        }
+    )
+    assert config.env.reward_mode == "ship_ratio"
+    assert config.rl.teacher_value_coef == 0.0
+
+
+def test_ppo_config_rejects_truncation_prob_without_step() -> None:
+    with pytest.raises(ValueError, match=r"truncation_step is required"):
+        PPOConfig.model_validate({"truncation_prob": 0.9})
+
+
+def test_ppo_config_accepts_truncation_step_and_prob() -> None:
+    config = PPOConfig.model_validate({"truncation_step": 200, "truncation_prob": 0.9})
+    assert config.truncation_step == 200
+    assert config.truncation_prob == pytest.approx(0.9)
+
+
 def test_full_config_accepts_adam_optimizer_config() -> None:
     config = FullConfig.model_validate(
         {

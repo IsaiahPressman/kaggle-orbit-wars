@@ -155,6 +155,7 @@ def main() -> None:
             obs_spec=cfg.env.obs_spec,
             action_spec=cfg.env.action_spec,
             two_player_weight=cfg.env.two_player_weight,
+            reward_mode=cfg.env.reward_mode,
             pin_memory=cfg.env.pin_memory,
         )
         model, lora_application = _create_training_model_for_config(
@@ -1270,6 +1271,7 @@ def _evaluate_games(
         obs_spec=cfg.env.obs_spec,
         action_spec=cfg.env.action_spec,
         two_player_weight=cfg.env.two_player_weight,
+        reward_mode=cfg.env.reward_mode,
         pin_memory=device.type == "cuda",
     )
     obs = env.reset()

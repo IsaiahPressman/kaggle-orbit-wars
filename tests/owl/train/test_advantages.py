@@ -18,6 +18,45 @@ def test_compute_gae_matches_recurrence() -> None:
     assert torch.allclose(returns, advantages + torch.tensor([[0.5, 0.25, 0.0]]))
 
 
+def test_compute_gae_truncation_bootstraps_from_critic_value() -> None:
+    # Game truncated at t=1 (done set, no reward), bootstrapping from value 0.7;
+    # t=2 is a fresh game bootstrapped from last_values. gamma=lambda=1.
+    _advantages, returns = compute_gae(
+        values=torch.tensor([[0.2, 0.4, 0.6]]),
+        rewards=torch.tensor([[0.0, 0.0, 0.0]]),
+        dones=torch.tensor([[False, True, False]]),
+        last_values=torch.tensor([0.9]),
+        gamma=1.0,
+        gae_lambda=1.0,
+        truncated=torch.tensor([[False, True, False]]),
+        bootstrap_values=torch.tensor([[0.0, 0.7, 0.0]]),
+    )
+    assert torch.allclose(returns, torch.tensor([[0.7, 0.7, 0.9]]))
+
+
+def test_compute_gae_zero_truncation_matches_plain_gae() -> None:
+    advantages_plain, returns_plain = compute_gae(
+        values=torch.tensor([[0.5, 0.25, 0.0]]),
+        rewards=torch.tensor([[1.0, 1.0, 1.0]]),
+        dones=torch.tensor([[False, False, True]]),
+        last_values=torch.tensor([10.0]),
+        gamma=0.9,
+        gae_lambda=0.8,
+    )
+    advantages_explicit, returns_explicit = compute_gae(
+        values=torch.tensor([[0.5, 0.25, 0.0]]),
+        rewards=torch.tensor([[1.0, 1.0, 1.0]]),
+        dones=torch.tensor([[False, False, True]]),
+        last_values=torch.tensor([10.0]),
+        gamma=0.9,
+        gae_lambda=0.8,
+        truncated=torch.zeros(1, 3, dtype=torch.bool),
+        bootstrap_values=torch.zeros(1, 3),
+    )
+    assert torch.equal(advantages_plain, advantages_explicit)
+    assert torch.equal(returns_plain, returns_explicit)
+
+
 def test_compute_gae_uses_bootstrap_value() -> None:
     advantages, _returns = compute_gae(
         values=torch.tensor([[0.0, 0.0]]),

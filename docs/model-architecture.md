@@ -38,6 +38,7 @@ configs may contain either architecture.
 | `activation` | `"gelu"` | FFN activation: `"gelu"`, `"silu"`, or `"swiglu"`. |
 | `force_flash_attn` | `False` | Require packed varlen flash-attn; raise an error instead of falling back when tensors are not flash-compatible. |
 | `use_learned_pairwise_bias` | `False` | Enable an auxiliary source-target feature MLP for discrete target selection. Only valid with `"discrete_targets"` and `"discrete_target_bins"` actors. |
+| `critic_mode` | `"softmax"` | `"softmax"`: winner-probability critic (`value = 2*p - 1`). `"independent"`: per-player sigmoid value in `[0, 1]` for non-zero-sum rewards (e.g. ship-ratio); requires `rl.teacher_value_coef=0`. |
 | `n_scratch_tokens` | `4` | Learned shared scratch tokens appended to the trunk sequence. |
 | `actor` | `{"action_spec": "pure"}` | Discriminated actor-head config. Supported actor specs are `"pure"`, `"discrete_targets"`, and `"discrete_target_bins"`. |
 | `lora` | `null` | Optional LoRA fine-tuning config used by `scripts/run_ppo.py` for stateless transformer models. |
@@ -393,6 +394,14 @@ value = 2 * winner_probability - 1
 ```
 
 This gives `0 -> -1`, `0.5 -> 0`, and `1 -> 1`.
+
+With `critic_mode="independent"`, the same per-player logits are instead passed
+through a sigmoid and masked to `0` for inactive slots, giving an independent
+per-player value in `[0, 1]` with no cross-player normalization. This represents
+non-zero-sum returns such as the ship-ratio reward, which the winner-probability
+softmax cannot. The winner-probability value distillation
+(`_critic_distillation`) is softmax-only, so independent mode requires
+`rl.teacher_value_coef=0`; teacher action-KL distillation is unaffected.
 
 `still_playing` is explicit in `ObsBatch`. It should not be inferred from
 `can_act`, since a player can be alive without having a launchable entity on a

@@ -39,6 +39,11 @@ class FullConfig(BaseConfig):
             )
         if self.rl.eval_replay_games > self.env.n_envs:
             raise ValueError("rl.eval_replay_games must be <= env.n_envs")
+        if self.model.critic_mode == "independent" and self.rl.teacher_value_coef > 0.0:
+            raise ValueError(
+                "model.critic_mode='independent' is incompatible with the "
+                "winner-probability value distillation; set rl.teacher_value_coef=0"
+            )
         return self
 
     @classmethod

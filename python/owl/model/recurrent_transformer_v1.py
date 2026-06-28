@@ -65,6 +65,9 @@ class RecurrentTransformerV1Config(BaseConfig):
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
     force_flash_attn: bool = False
     use_learned_pairwise_bias: bool = False
+    # Recurrent models only support the softmax winner-probability critic; the
+    # field exists so the shared StatelessTransformerV1 critic code can read it.
+    critic_mode: Literal["softmax"] = "softmax"
     recurrence_mode: Literal["global_only", "include_planets"] = "global_only"
     actor: ActorDiscreteTargetsConfig = Field(
         default_factory=ActorDiscreteTargetsConfig

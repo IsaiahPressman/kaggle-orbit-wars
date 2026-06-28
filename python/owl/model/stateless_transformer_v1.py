@@ -154,6 +154,11 @@ class StatelessTransformerV1Config(BaseConfig):
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
     force_flash_attn: bool = False
     use_learned_pairwise_bias: bool = False
+    # "softmax": winner-probability critic (zero-sum-style, value = 2*p - 1).
+    # "independent": per-player sigmoid value in [0, 1], for non-zero-sum rewards
+    # such as ship-ratio. Independent mode is incompatible with the winner-
+    # probability teacher value distillation, so it requires teacher_value_coef=0.
+    critic_mode: Literal["softmax", "independent"] = "softmax"
     actor: ActorConfig = Field(default_factory=ActorPureConfig)
     lora: LoRAConfig | None = None
 
@@ -1471,6 +1476,13 @@ class StatelessTransformerV1(BaseModelAPI):
         adapter: PlayerCountAdapter | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         logits = self._critic_logits(player_hidden, still_playing, adapter=adapter)
+        if self.config.critic_mode == "independent":
+            # Per-player value in [0, 1]; inactive slots are masked to 0. There is
+            # no cross-player normalization, so non-zero-sum returns (e.g. the
+            # ship-ratio reward) are representable. The second tuple element is
+            # not a probability distribution, but matches the softmax tuple shape.
+            values = torch.sigmoid(logits).masked_fill(~still_playing, 0.0)
+            return values, values
         probabilities = masked_softmax(logits, still_playing, dim=-1)
         values = 2.0 * probabilities - 1.0
         return values, probabilities
@@ -1482,6 +1494,11 @@ class StatelessTransformerV1(BaseModelAPI):
         *,
         adapter: PlayerCountAdapter | None = None,
     ) -> _ValueDistillationOutput:
+        if self.config.critic_mode != "softmax":
+            raise RuntimeError(
+                "winner-probability value distillation requires critic_mode='softmax'; "
+                "set rl.teacher_value_coef=0 when using an independent critic"
+            )
         logits = self._critic_logits(player_hidden, still_playing, adapter=adapter)
         masked_logits = logits.masked_fill(
             ~still_playing,

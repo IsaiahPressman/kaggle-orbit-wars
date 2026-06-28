@@ -159,11 +159,26 @@ class PPOConfig(BaseConfig):
     model_compile: _ModelCompileTarget = "trunk"
     model_compile_mode: _ModelCompileMode = "max-autotune-no-cudagraphs"
     dtype: _TrainingDType = "float32"
+    # Time-limit truncation with critic bootstrapping. When truncation_prob > 0,
+    # each new game is independently selected for truncation with that
+    # probability; a selected game still alive at game-step truncation_step is
+    # reset, with the critic's value of the truncated state used as the GAE
+    # bootstrap (reward 0, no terminal). Currently stateless-model only.
+    truncation_step: int | None = Field(default=None, ge=1)
+    truncation_prob: float = Field(default=0.0, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def _validate_teacher_config(self) -> Self:
         if self.teacher_mode == "fixed" and self.teacher_init is None:
             raise ValueError("rl.teacher_init is required when rl.teacher_mode='fixed'")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_truncation_config(self) -> Self:
+        if self.truncation_prob > 0.0 and self.truncation_step is None:
+            raise ValueError(
+                "rl.truncation_step is required when rl.truncation_prob > 0"
+            )
         return self
 
 
@@ -209,6 +224,8 @@ class _PPORolloutSegments:
     values: torch.Tensor
     rewards: torch.Tensor
     dones: torch.Tensor
+    truncated: torch.Tensor | None = None
+    bootstrap_values: torch.Tensor | None = None
     entity_logp: torch.Tensor | None = None
     initial_hidden_state: ModelHiddenState | None = None
 
@@ -430,6 +447,16 @@ class _PPORolloutBuffer:
             dtype=torch.bool,
             device=device,
         )
+        self.truncated = torch.zeros(
+            (horizon, n_envs, OUTER_PLAYER_SLOTS),
+            dtype=torch.bool,
+            device=device,
+        )
+        self.bootstrap_values = torch.zeros(
+            (horizon, n_envs, OUTER_PLAYER_SLOTS),
+            dtype=torch.float32,
+            device=device,
+        )
         self.initial_hidden_state: ModelHiddenState | None = None
 
     def write_step(
@@ -443,6 +470,8 @@ class _PPORolloutBuffer:
         values: torch.Tensor,
         rewards: torch.Tensor,
         dones: torch.Tensor,
+        truncated: torch.Tensor | None = None,
+        bootstrap_values: torch.Tensor | None = None,
     ) -> None:
         if not 0 <= step < self.horizon:
             raise ValueError(f"step must be in 0..{self.horizon - 1}, got {step}")
@@ -456,6 +485,14 @@ class _PPORolloutBuffer:
         self.values[step].copy_(values)
         self.rewards[step].copy_(rewards)
         self.dones[step].copy_(dones)
+        if truncated is None:
+            self.truncated[step].zero_()
+        else:
+            self.truncated[step].copy_(truncated)
+        if bootstrap_values is None:
+            self.bootstrap_values[step].zero_()
+        else:
+            self.bootstrap_values[step].copy_(bootstrap_values)
 
     def segment_major(self) -> _PPORolloutSegments:
         """Return contiguous segment-major/time-second rollout tensors [N, T, ...]."""
@@ -467,6 +504,8 @@ class _PPORolloutBuffer:
             values=self.values.transpose(0, 1).contiguous(),
             rewards=self.rewards.transpose(0, 1).contiguous(),
             dones=self.dones.transpose(0, 1).contiguous(),
+            truncated=self.truncated.transpose(0, 1).contiguous(),
+            bootstrap_values=self.bootstrap_values.transpose(0, 1).contiguous(),
             initial_hidden_state=self.initial_hidden_state,
         )
 
@@ -520,6 +559,29 @@ class PPOTrainer:
             non_blocking=self._non_blocking_env_to_device,
         )
         self._hidden_state = model.initial_hidden_state(env.n_envs, device=device)
+        self._truncation_enabled = (
+            config.truncation_prob > 0.0 and config.truncation_step is not None
+        )
+        if self._truncation_enabled and self._hidden_state is not None:
+            raise NotImplementedError(
+                "rl.truncation is currently only supported for stateless models"
+            )
+        # Per-env game-step counter for the observation currently in self._obs
+        # (0 right after a reset), and whether each in-progress game was selected
+        # for truncation. Both persist across rollout segments since a game can
+        # span multiple horizons. Allocated on the training device only when
+        # truncation is enabled; left as empty placeholders otherwise so a
+        # CUDA-device trainer without truncation does not touch the GPU here.
+        if self._truncation_enabled:
+            self._env_step_count = torch.zeros(
+                env.n_envs, dtype=torch.long, device=device
+            )
+            self._is_truncation_game = (
+                torch.rand(env.n_envs, device=device) < config.truncation_prob
+            )
+        else:
+            self._env_step_count = torch.zeros(0, dtype=torch.long)
+            self._is_truncation_game = torch.zeros(0, dtype=torch.bool)
         self.teacher_model: BaseModelAPI | None = None
         self.teacher_active = False
         self.rollout = _PPORolloutBuffer(
@@ -626,6 +688,8 @@ class PPOTrainer:
             last_values=last_values,
             gamma=self.config.gamma,
             gae_lambda=self.config.gae_lambda,
+            truncated=segments.truncated,
+            bootstrap_values=segments.bootstrap_values,
         )
         update_start = perf_counter()
         metrics, sampled_segments = self._update(
@@ -813,6 +877,12 @@ class PPOTrainer:
                     self.device,
                     non_blocking=self._non_blocking_env_to_device,
                 )
+                truncated: torch.Tensor | None = None
+                bootstrap_values: torch.Tensor | None = None
+                if self._truncation_enabled:
+                    truncated, bootstrap_values = self._apply_truncation(
+                        next_obs, rewards, dones
+                    )
                 self.rollout.write_step(
                     step,
                     obs=self._obs,
@@ -822,6 +892,8 @@ class PPOTrainer:
                     values=_output_values(output),
                     rewards=rewards,
                     dones=dones,
+                    truncated=truncated,
+                    bootstrap_values=bootstrap_values,
                 )
                 self._hidden_state = self.model.reset_hidden_state(
                     self._hidden_state,
@@ -840,6 +912,74 @@ class PPOTrainer:
                 )
             self._last_env_metrics = env_metrics
             return last_values.detach()
+
+    def _resample_truncation_games(self, env_mask: torch.Tensor) -> None:
+        """Redraw the per-game truncation flag for envs that started a new game."""
+        if not bool(env_mask.any()):
+            return
+        draws = (
+            torch.rand(self.n_envs, device=self.device) < self.config.truncation_prob
+        )
+        self._is_truncation_game = torch.where(
+            env_mask, draws, self._is_truncation_game
+        )
+
+    def _apply_truncation(
+        self,
+        next_obs: ObsBatch,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Time-limit truncation with critic bootstrapping.
+
+        Advances per-env step counters, redraws truncation flags for naturally
+        reset games, then for each selected game that just reached
+        ``truncation_step`` (and did not naturally terminate): evaluates the
+        critic on the truncated state to use as the GAE bootstrap, zeros the
+        reward, marks ``dones`` so the trajectory is cut and the env is reset.
+        ``rewards`` and ``dones`` are modified in place. Returns per-step
+        ``truncated`` flags and ``bootstrap_values`` for the rollout buffer.
+        """
+        truncation_step = self.config.truncation_step
+        assert truncation_step is not None  # guaranteed by _truncation_enabled
+        env_done = dones.all(dim=1)
+        self._env_step_count += 1
+        self._env_step_count[env_done] = 0
+        self._resample_truncation_games(env_done)
+
+        trunc_mask = (
+            (self._env_step_count >= truncation_step)
+            & self._is_truncation_game
+            & ~env_done
+        )
+        truncated = torch.zeros(
+            (self.n_envs, OUTER_PLAYER_SLOTS), dtype=torch.bool, device=self.device
+        )
+        bootstrap_values = torch.zeros(
+            (self.n_envs, OUTER_PLAYER_SLOTS),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        if bool(trunc_mask.any()):
+            idx = trunc_mask.nonzero(as_tuple=False).flatten()
+            # next_obs lives on the env (host) device; index there, then move the
+            # small truncated subset to the model device for the value forward.
+            # This must happen before truncate_envs overwrites those obs rows.
+            trunc_obs = _obs_to_device(
+                _obs_index(next_obs, idx.to(device="cpu")),
+                self.device,
+                non_blocking=self._non_blocking_env_to_device,
+            )
+            with _autocast_context(self.config, self.device):
+                boot = _model_compute_value(self.model, trunc_obs, hidden_state=None)
+            bootstrap_values[idx] = boot.to(bootstrap_values.dtype)
+            truncated[idx] = True
+            rewards[idx] = 0.0
+            dones[idx] = True
+            self.env.truncate_envs(trunc_mask)
+            self._env_step_count[idx] = 0
+            self._resample_truncation_games(trunc_mask)
+        return truncated, bootstrap_values
 
     def _precompute_teacher_targets(
         self,

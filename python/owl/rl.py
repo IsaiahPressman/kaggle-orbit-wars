@@ -260,11 +260,15 @@ ActionMask: TypeAlias = (
 )
 
 
+RewardMode = Literal["win_loss", "ship_ratio"]
+
+
 class EnvConfig(BaseConfig):
     n_envs: int = Field(default=2, ge=1)
     obs_spec: ObsConfig = Field(default_factory=EntityBasedConfig)
     action_spec: ActionConfig = Field(default_factory=ActionPureConfig)
     two_player_weight: float = Field(default=0.5, ge=0.0, le=1.0)
+    reward_mode: RewardMode = "win_loss"
     pin_memory: bool = True
 
     @field_validator("n_envs")
@@ -305,10 +309,12 @@ class VectorizedEnv:
         obs_spec: ObsConfig,
         action_spec: ActionConfig,
         two_player_weight: float = 0.5,
+        reward_mode: RewardMode = "win_loss",
         pin_memory: bool = True,
     ) -> None:
         self.obs_spec = obs_spec
         self.action_spec = action_spec
+        self.reward_mode = reward_mode
         self._rust = _RustRlVecEnv(
             n_envs,
             two_player_weight,
@@ -320,6 +326,7 @@ class VectorizedEnv:
             self.action_spec.min_fleet_size,
             _n_action_bins(self.action_spec),
             _targeting_mode(self.action_spec),
+            reward_mode,
         )
         if pin_memory and not torch.cuda.is_available():
             warnings.warn(
@@ -402,6 +409,37 @@ class VectorizedEnv:
                 self._fleet_target_np,
                 self._target_incoming_features_np,
             )
+        return self.observations
+
+    def truncate_envs(self, truncate_mask: torch.Tensor) -> ObsBatch:
+        """Reset the sub-envs selected by ``truncate_mask`` to fresh games.
+
+        ``truncate_mask`` is a length-``n_envs`` boolean tensor. Selected envs are
+        reset and their observation rows are overwritten in place; all other env
+        rows are left untouched. This produces no rewards/dones/metrics — the
+        training loop owns how the truncated transition is treated (e.g. value
+        bootstrapping). Returns ``self.observations`` for convenience.
+        """
+        if self._max_launch_np is None:
+            raise NotImplementedError(
+                "truncate_envs does not support the discrete_target_bins action spec"
+            )
+        mask_np = truncate_mask.detach().to(device="cpu", dtype=torch.bool).contiguous()
+        self._rust.truncate_envs(
+            mask_np.numpy(),
+            self._planet_obs_np,
+            self._orbiting_planet_obs_np,
+            self._fleet_obs_np,
+            self._comet_obs_np,
+            self._entity_mask_np,
+            self._still_playing_np,
+            self._global_obs_np,
+            self._can_act_np,
+            self._max_launch_np,
+            self._player_features_np,
+            self._fleet_target_np,
+            self._target_incoming_features_np,
+        )
         return self.observations
 
     def state_snapshot(self, env_index: int) -> dict[str, Any]:
