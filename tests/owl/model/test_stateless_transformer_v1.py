@@ -884,6 +884,27 @@ def test_cross_attention_observation_spec_ignores_force_flash_attn(
     assert output.values.shape == (2, OUTER_PLAYER_SLOTS)
 
 
+def test_independent_critic_value_is_float32_under_bf16_autocast() -> None:
+    # Regression: the softmax critic returns float32 (softmax is autocast-forced
+    # to fp32), so the independent critic must too. Otherwise the PPO update's
+    # float32 value index-put fails with a bf16 source under a bfloat16 autocast.
+    torch.manual_seed(27)
+    obs_spec = EntityBasedConfig()
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    model = _model(
+        StatelessTransformerV1Config(
+            embed_dim=16, depth=1, n_heads=4, critic_mode="independent"
+        ),
+        obs_spec=obs_spec,
+        action_spec=action_spec,
+    )
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        output = model(obs)
+    assert output.values.dtype == torch.float32
+    assert output.values.shape == (2, OUTER_PLAYER_SLOTS)
+
+
 def test_model_outputs_do_not_change_with_extra_masked_fleets() -> None:
     torch.manual_seed(148)
     action_spec = ActionPureConfig(max_per_planet_launches=1)

@@ -1481,7 +1481,10 @@ class StatelessTransformerV1(BaseModelAPI):
             # no cross-player normalization, so non-zero-sum returns (e.g. the
             # ship-ratio reward) are representable. The second tuple element is
             # not a probability distribution, but matches the softmax tuple shape.
-            values = torch.sigmoid(logits).masked_fill(~still_playing, 0.0)
+            # Compute in float32 so the value dtype matches the softmax critic
+            # (softmax is autocast-forced to float32); downstream value buffers
+            # and index-puts assume float32 even under a bfloat16 autocast.
+            values = torch.sigmoid(logits.float()).masked_fill(~still_playing, 0.0)
             return values, values
         probabilities = masked_softmax(logits, still_playing, dim=-1)
         values = 2.0 * probabilities - 1.0
