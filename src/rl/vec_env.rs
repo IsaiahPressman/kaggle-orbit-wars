@@ -7,7 +7,7 @@ use pyo3::types::{PyDict, PyList};
 use pyo3::IntoPyObjectExt;
 use rayon::prelude::*;
 
-use crate::rules_engine::env::{reset, step, PlayerAction};
+use crate::rules_engine::env::{player_ship_scores, reset, step, PlayerAction};
 use crate::rules_engine::state::{
     FleetLossStats, LaunchAction, PlayerResult, ResetConfig, State, StaticTargetCache, BOARD_SIZE,
     CENTER, SUN_RADIUS,
@@ -38,10 +38,32 @@ struct ObsBufferSpec {
     ship_count_one_hot_max: Option<i32>,
 }
 
+/// Terminal reward shaping for the vectorized environment.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RewardMode {
+    /// Sole winner `+1`, losers `-1`, tied winners share via `split_won_reward`.
+    WinLoss,
+    /// Winner(s) receive `winner_ships / total_player_ships`; everyone else `0`.
+    ShipRatio,
+}
+
+impl RewardMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "win_loss" => Ok(Self::WinLoss),
+            "ship_ratio" => Ok(Self::ShipRatio),
+            other => Err(format!(
+                "unknown reward_mode '{other}'; expected 'win_loss' or 'ship_ratio'"
+            )),
+        }
+    }
+}
+
 #[pyclass(name = "RlVecEnv")]
 pub struct PyRlVecEnv {
     n_envs: usize,
     two_player_weight: f64,
+    reward_mode: RewardMode,
     max_entities: usize,
     max_fleets: usize,
     planet_channels: usize,
@@ -66,7 +88,7 @@ pub struct PyRlVecEnv {
 #[pymethods]
 impl PyRlVecEnv {
     #[new]
-    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="entity_based", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, ship_count_one_hot_max=0, max_per_planet_launches=1, min_fleet_size=1, n_bins=0, targeting_mode="full_mask"))]
+    #[pyo3(signature = (n_envs, two_player_weight=0.5, obs_spec="entity_based", action_spec="pure", max_entities=DEFAULT_MAX_ENTITIES, ship_count_one_hot_max=0, max_per_planet_launches=1, min_fleet_size=1, n_bins=0, targeting_mode="full_mask", reward_mode="win_loss"))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         n_envs: usize,
@@ -79,6 +101,7 @@ impl PyRlVecEnv {
         min_fleet_size: i64,
         n_bins: usize,
         targeting_mode: &str,
+        reward_mode: &str,
     ) -> PyResult<Self> {
         if n_envs == 0 {
             return Err(PyValueError::new_err("n_envs must be positive"));
@@ -86,6 +109,7 @@ impl PyRlVecEnv {
         if !(0.0..=1.0).contains(&two_player_weight) {
             return Err(PyValueError::new_err("two_player_weight must be in [0, 1]"));
         }
+        let reward_mode = RewardMode::parse(reward_mode).map_err(PyValueError::new_err)?;
         let obs_buffers =
             parse_obs_spec_for_buffers(obs_spec, max_entities, ship_count_one_hot_max)?;
         let action_spec = RlActionSpec::parse(action_spec, n_bins, targeting_mode)
@@ -111,6 +135,7 @@ impl PyRlVecEnv {
         Ok(Self {
             n_envs,
             two_player_weight,
+            reward_mode,
             max_entities: obs_buffers.max_entities,
             max_fleets: obs_buffers.max_fleets,
             planet_channels: obs_buffers.planet_channels,
@@ -505,6 +530,186 @@ impl PyRlVecEnv {
 
         self.last_terminal_metrics.fill(None);
         self.last_terminal_snapshots.fill(None);
+        Ok(())
+    }
+
+    /// Manually reset (truncate) a subset of sub-envs, writing fresh reset
+    /// observations into the caller-owned buffers only for the selected envs.
+    ///
+    /// `truncate_mask` is a length-`n_envs` boolean array. Envs whose flag is
+    /// `true` are reset to a fresh game and their observation rows are
+    /// overwritten with the reset observation; all other env rows are left
+    /// untouched. Unlike a terminal auto-reset, this produces no terminal
+    /// metrics or snapshot, so callers that bootstrap a truncated state must
+    /// read its observation before calling this method.
+    #[pyo3(signature = (
+        truncate_mask,
+        planet_obs,
+        orbiting_planet_obs,
+        fleet_obs,
+        comet_obs,
+        entity_mask,
+        still_playing,
+        global_obs,
+        can_act,
+        max_launch,
+        player_features=None,
+        fleet_target=None,
+        target_incoming_features=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn truncate_envs(
+        &mut self,
+        truncate_mask: PyReadonlyArrayDyn<'_, bool>,
+        planet_obs: PyReadwriteArrayDyn<'_, f32>,
+        orbiting_planet_obs: PyReadwriteArrayDyn<'_, bool>,
+        fleet_obs: PyReadwriteArrayDyn<'_, f32>,
+        comet_obs: PyReadwriteArrayDyn<'_, f32>,
+        entity_mask: PyReadwriteArrayDyn<'_, bool>,
+        still_playing: PyReadwriteArrayDyn<'_, bool>,
+        global_obs: PyReadwriteArrayDyn<'_, f32>,
+        can_act: PyReadwriteArrayDyn<'_, bool>,
+        max_launch: PyReadwriteArrayDyn<'_, i64>,
+        player_features: Option<PyReadwriteArrayDyn<'_, f32>>,
+        fleet_target: Option<PyReadwriteArrayDyn<'_, i64>>,
+        target_incoming_features: Option<PyReadwriteArrayDyn<'_, f32>>,
+    ) -> PyResult<()> {
+        self.require_obs_shapes(
+            &planet_obs,
+            &orbiting_planet_obs,
+            &fleet_obs,
+            &comet_obs,
+            &entity_mask,
+            &still_playing,
+            &global_obs,
+            player_features.as_ref(),
+            fleet_target.as_ref(),
+            target_incoming_features.as_ref(),
+            &can_act,
+            &max_launch,
+        )?;
+
+        let truncate_slice = truncate_mask.as_slice()?;
+        if truncate_slice.len() != self.n_envs {
+            return Err(PyValueError::new_err(format!(
+                "truncate_mask must have length {}, got {}",
+                self.n_envs,
+                truncate_slice.len()
+            )));
+        }
+
+        let mut planet_obs = planet_obs;
+        let mut orbiting_planet_obs = orbiting_planet_obs;
+        let mut fleet_obs = fleet_obs;
+        let mut comet_obs = comet_obs;
+        let mut entity_mask = entity_mask;
+        let mut still_playing = still_playing;
+        let mut global_obs = global_obs;
+        let mut player_features = player_features;
+        let mut fleet_target = fleet_target;
+        let mut target_incoming_features = target_incoming_features;
+        let mut can_act = can_act;
+        let mut max_launch = max_launch;
+
+        let planets_per_env = MAX_PLANETS * self.planet_channels;
+        let orbiting_planets_per_env = MAX_PLANETS;
+        let fleets_per_env = self.max_fleets * self.fleet_channels;
+        let comets_per_env = MAX_COMETS * COMET_CHANNELS;
+        let entity_mask_per_env = self.max_entities;
+        let global_channels = self.global_channels;
+        let player_features_per_env = OUTER_PLAYER_SLOTS * self.player_feature_channels;
+        let target_incoming_per_env = ACTION_ENTITY_SLOTS * self.target_incoming_channels;
+        let action_masks_per_env = self.action_spec.can_act_len();
+        let max_launch_per_env = OUTER_PLAYER_SLOTS * ACTION_ENTITY_SLOTS;
+        let n_envs = self.n_envs;
+        let two_player_weight = self.two_player_weight;
+        let max_fleets = self.max_fleets;
+        let planet_channels = self.planet_channels;
+        let fleet_channels = self.fleet_channels;
+        let ship_count_one_hot_max = self.ship_count_one_hot_max;
+        let min_fleet_size = self.min_fleet_size;
+        let action_spec = self.action_spec;
+
+        let planet_slice = planet_obs.as_slice_mut()?;
+        let orbiting_slice = orbiting_planet_obs.as_slice_mut()?;
+        let fleet_slice = fleet_obs.as_slice_mut()?;
+        let comet_slice = comet_obs.as_slice_mut()?;
+        let entity_mask_slice = entity_mask.as_slice_mut()?;
+        let still_playing_slice = still_playing.as_slice_mut()?;
+        let global_slice = global_obs.as_slice_mut()?;
+        let can_act_slice = can_act.as_slice_mut()?;
+        let max_launch_slice = max_launch.as_slice_mut()?;
+        let mut player_features_slice = match player_features.as_mut() {
+            Some(array) => Some(array.as_slice_mut()?),
+            None => None,
+        };
+        let mut fleet_target_slice = match fleet_target.as_mut() {
+            Some(array) => Some(array.as_slice_mut()?),
+            None => None,
+        };
+        let mut target_incoming_slice = match target_incoming_features.as_mut() {
+            Some(array) => Some(array.as_slice_mut()?),
+            None => None,
+        };
+
+        for env_index in 0..n_envs {
+            if !truncate_slice[env_index] {
+                continue;
+            }
+            let (new_state, new_player_map) = reset_one_env(two_player_weight);
+            self.player_finished[env_index].fill(false);
+            self.episode_stats[env_index] = EpisodeStats::default();
+            let mut new_action_slots = action_entity_slots(&new_state);
+
+            let player_features_chunk = player_features_slice.as_deref_mut().map(|slice| {
+                &mut slice
+                    [env_index * player_features_per_env..(env_index + 1) * player_features_per_env]
+            });
+            let fleet_target_chunk = fleet_target_slice
+                .as_deref_mut()
+                .map(|slice| &mut slice[env_index * max_fleets..(env_index + 1) * max_fleets]);
+            let target_incoming_chunk = target_incoming_slice.as_deref_mut().map(|slice| {
+                &mut slice
+                    [env_index * target_incoming_per_env..(env_index + 1) * target_incoming_per_env]
+            });
+
+            write_one_obs(
+                &new_state,
+                &new_player_map,
+                &mut new_action_slots,
+                &self.player_finished[env_index],
+                action_spec,
+                max_fleets,
+                planet_channels,
+                fleet_channels,
+                ship_count_one_hot_max,
+                min_fleet_size,
+                &mut planet_slice[env_index * planets_per_env..(env_index + 1) * planets_per_env],
+                &mut orbiting_slice[env_index * orbiting_planets_per_env
+                    ..(env_index + 1) * orbiting_planets_per_env],
+                &mut fleet_slice[env_index * fleets_per_env..(env_index + 1) * fleets_per_env],
+                &mut comet_slice[env_index * comets_per_env..(env_index + 1) * comets_per_env],
+                &mut entity_mask_slice
+                    [env_index * entity_mask_per_env..(env_index + 1) * entity_mask_per_env],
+                &mut still_playing_slice
+                    [env_index * OUTER_PLAYER_SLOTS..(env_index + 1) * OUTER_PLAYER_SLOTS],
+                &mut global_slice[env_index * global_channels..(env_index + 1) * global_channels],
+                player_features_chunk,
+                fleet_target_chunk,
+                target_incoming_chunk,
+                &mut can_act_slice
+                    [env_index * action_masks_per_env..(env_index + 1) * action_masks_per_env],
+                Some(
+                    &mut max_launch_slice
+                        [env_index * max_launch_per_env..(env_index + 1) * max_launch_per_env],
+                ),
+            );
+
+            self.states[env_index] = new_state;
+            self.player_maps[env_index] = new_player_map;
+            self.action_slots[env_index] = new_action_slots;
+        }
+
         Ok(())
     }
 
@@ -1329,6 +1534,7 @@ impl PyRlVecEnv {
         let fleet_channels = self.fleet_channels;
         let ship_count_one_hot_max = self.ship_count_one_hot_max;
         let two_player_weight = self.two_player_weight;
+        let reward_mode = self.reward_mode;
         let action_spec = self.action_spec;
 
         let env_results = self
@@ -1414,6 +1620,7 @@ impl PyRlVecEnv {
                         done_chunk,
                         max_fleets,
                         two_player_weight,
+                        reward_mode,
                     );
                     write_one_obs(
                         state,
@@ -1583,6 +1790,7 @@ impl PyRlVecEnv {
         let fleet_channels = self.fleet_channels;
         let ship_count_one_hot_max = self.ship_count_one_hot_max;
         let two_player_weight = self.two_player_weight;
+        let reward_mode = self.reward_mode;
         let action_spec = self.action_spec;
 
         let env_results = self
@@ -1670,6 +1878,7 @@ impl PyRlVecEnv {
                         done_chunk,
                         max_fleets,
                         two_player_weight,
+                        reward_mode,
                     );
                     write_one_obs(
                         state,
@@ -1827,6 +2036,7 @@ impl PyRlVecEnv {
         let fleet_channels = self.fleet_channels;
         let ship_count_one_hot_max = self.ship_count_one_hot_max;
         let two_player_weight = self.two_player_weight;
+        let reward_mode = self.reward_mode;
         let action_spec = self.action_spec;
 
         let env_results = self
@@ -1904,6 +2114,7 @@ impl PyRlVecEnv {
                     done_chunk,
                     max_fleets,
                     two_player_weight,
+                    reward_mode,
                 );
                 write_one_obs(
                     state,
@@ -2092,6 +2303,7 @@ impl PyRlVecEnv {
         let fleet_channels = self.fleet_channels;
         let ship_count_one_hot_max = self.ship_count_one_hot_max;
         let two_player_weight = self.two_player_weight;
+        let reward_mode = self.reward_mode;
         let action_spec = self.action_spec;
 
         let env_results = if let Some(max_launch) = max_launch.as_mut() {
@@ -2190,6 +2402,7 @@ impl PyRlVecEnv {
                         ship_count_one_hot_max,
                         min_fleet_size,
                         two_player_weight,
+                        reward_mode,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()
@@ -2284,6 +2497,7 @@ impl PyRlVecEnv {
                         ship_count_one_hot_max,
                         min_fleet_size,
                         two_player_weight,
+                        reward_mode,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()
@@ -3128,6 +3342,7 @@ fn step_one_decoded_env(
     ship_count_one_hot_max: Option<i32>,
     min_fleet_size: i64,
     two_player_weight: f64,
+    reward_mode: RewardMode,
 ) -> Result<StepOneOutput, String> {
     let decoded = dense_decoded_actions_to_player_actions(
         state,
@@ -3149,6 +3364,7 @@ fn step_one_decoded_env(
         done_chunk,
         max_fleets,
         two_player_weight,
+        reward_mode,
     );
     write_one_obs(
         state,
@@ -3964,6 +4180,7 @@ fn step_one_env(
     done_chunk: &mut [bool],
     max_fleets: usize,
     two_player_weight: f64,
+    reward_mode: RewardMode,
 ) -> TerminalStep {
     episode_stats.record_turn(state, decoded);
     let result = step(state, decoded);
@@ -3979,18 +4196,30 @@ fn step_one_env(
     episode_stats.record_fleets_lost_in_combat(result.fleets_lost_in_combat);
     episode_stats.record_ships_lost_in_combat(result.ships_lost_in_combat);
     let should_reset = result_is_terminal(&result.player_results);
-    let won_reward = split_won_reward(
-        result
-            .player_results
-            .iter()
-            .filter(|result| matches!(result, PlayerResult::Won))
-            .count(),
-    );
+    // `winner_reward` is only consumed by `PlayerResult::Won` arms, which only
+    // appear on terminal steps, so the ship-ratio branch is gated on terminal
+    // to avoid summing ships on every non-terminal step.
+    let winner_reward = match reward_mode {
+        RewardMode::WinLoss => split_won_reward(
+            result
+                .player_results
+                .iter()
+                .filter(|result| matches!(result, PlayerResult::Won))
+                .count(),
+        ),
+        RewardMode::ShipRatio if should_reset => ship_ratio_winner_reward(state),
+        RewardMode::ShipRatio => 0.0,
+    };
 
     reward_chunk.fill(0.0);
     done_chunk.fill(true);
     for (player_index, result) in result.player_results.iter().enumerate() {
-        let (reward, done) = player_reward_done(*result, player_finished[player_index], won_reward);
+        let (reward, done) = player_reward_done(
+            *result,
+            player_finished[player_index],
+            winner_reward,
+            reward_mode,
+        );
         let outer_player = player_map.internal_to_outer(player_index);
         reward_chunk[outer_player] = reward;
         done_chunk[outer_player] = done;
@@ -4049,18 +4278,38 @@ fn split_won_reward(winner_count: usize) -> f32 {
     (2.0 - winner_count as f32) / winner_count as f32
 }
 
+/// Winner reward for `RewardMode::ShipRatio`: the maximum player ship score
+/// divided by the total ship count across all active players. Tied winners all
+/// share the max score, so each receives the same ratio. Returns `0.0` when no
+/// player has any ships (no winner).
+fn ship_ratio_winner_reward(state: &State) -> f32 {
+    let scores = player_ship_scores(state);
+    let active_scores = &scores[..state.config.player_count];
+    let max_score = active_scores.iter().copied().max().unwrap_or(0);
+    let total_score: i64 = active_scores.iter().map(|score| i64::from(*score)).sum();
+    if total_score > 0 {
+        max_score as f32 / total_score as f32
+    } else {
+        0.0
+    }
+}
+
 fn player_reward_done(
     result: PlayerResult,
     previously_finished: bool,
-    won_reward: f32,
+    winner_reward: f32,
+    reward_mode: RewardMode,
 ) -> (f32, bool) {
     if previously_finished {
         return (0.0, true);
     }
     match result {
         PlayerResult::Active => (0.0, false),
-        PlayerResult::Lost => (-1.0, true),
-        PlayerResult::Won => (won_reward, true),
+        PlayerResult::Lost => match reward_mode {
+            RewardMode::WinLoss => (-1.0, true),
+            RewardMode::ShipRatio => (0.0, true),
+        },
+        PlayerResult::Won => (winner_reward, true),
     }
 }
 
@@ -4218,6 +4467,7 @@ mod tests {
             done_chunk,
             usize::MAX,
             0.0,
+            RewardMode::WinLoss,
         )
         .metrics
     }
@@ -4325,6 +4575,77 @@ mod tests {
         assert_eq!(metrics["win_rate_player_3"], vec![1.0]);
         assert_eq!(metrics["terminal_planet_occupancy_rate_4p"], vec![1.0]);
         assert_eq!(metrics["fleets_lost_per_game_mean"], vec![0.0]);
+    }
+
+    #[test]
+    fn ship_ratio_winner_reward_divides_max_by_total() {
+        let mut state = state_with_all_players_alive();
+        state.planets[0].ships = 30;
+        // scores = [30, 10, 10, 10] -> max 30, total 60.
+        assert!((ship_ratio_winner_reward(&state) - 0.5).abs() <= f32::EPSILON);
+
+        for planet in state.planets.iter_mut() {
+            planet.ships = 0;
+        }
+        assert_eq!(ship_ratio_winner_reward(&state), 0.0);
+    }
+
+    #[test]
+    fn player_reward_done_ship_ratio_zeros_losers_and_pays_winner() {
+        assert_eq!(
+            player_reward_done(PlayerResult::Won, false, 0.4, RewardMode::ShipRatio),
+            (0.4, true)
+        );
+        assert_eq!(
+            player_reward_done(PlayerResult::Lost, false, 0.4, RewardMode::ShipRatio),
+            (0.0, true)
+        );
+        assert_eq!(
+            player_reward_done(PlayerResult::Active, false, 0.4, RewardMode::ShipRatio),
+            (0.0, false)
+        );
+        assert_eq!(
+            player_reward_done(PlayerResult::Won, true, 0.4, RewardMode::ShipRatio),
+            (0.0, true)
+        );
+        // win_loss is unchanged: losers are still penalized -1.
+        assert_eq!(
+            player_reward_done(PlayerResult::Lost, false, 1.0, RewardMode::WinLoss),
+            (-1.0, true)
+        );
+    }
+
+    #[test]
+    fn ship_ratio_mode_pays_only_winners_at_terminal() {
+        let actions = vec![Vec::new(); 4];
+        let mut state = state_with_player_three_eliminated();
+        let mut player_map = PlayerMap::identity();
+        state.step = state.config.episode_steps.saturating_sub(2);
+        let mut finished = vec![false; 4];
+        let mut rewards = vec![99.0; 4];
+        let mut dones = vec![false; 4];
+        let mut episode_stats = EpisodeStats::default();
+
+        step_one_env(
+            &mut state,
+            &mut player_map,
+            &mut finished,
+            &mut episode_stats,
+            &actions,
+            &mut rewards,
+            &mut dones,
+            usize::MAX,
+            0.0,
+            RewardMode::ShipRatio,
+        );
+
+        // Players 0, 1, 2 survive with equal ships (tied winners); player 3 is
+        // eliminated. Each winner gets 1/3 of total ships, the loser gets 0.
+        assert!((rewards[0] - 1.0 / 3.0).abs() <= 1e-6);
+        assert!((rewards[1] - 1.0 / 3.0).abs() <= 1e-6);
+        assert!((rewards[2] - 1.0 / 3.0).abs() <= 1e-6);
+        assert_eq!(rewards[3], 0.0);
+        assert_eq!(dones, vec![true; 4]);
     }
 
     #[test]

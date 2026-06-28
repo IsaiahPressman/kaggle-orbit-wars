@@ -718,6 +718,22 @@ fn resolve_combats(state: &mut State, combat_lists: CombatLists) -> CaptureStats
     captures
 }
 
+/// Total ship count (planets plus fleets) owned by each active player slot.
+/// Neutral planets and comets are excluded. Slots beyond `player_count` are 0.
+pub fn player_ship_scores(state: &State) -> [i32; MAX_PLAYERS] {
+    let player_count = state.config.player_count;
+    let mut scores = [0_i32; MAX_PLAYERS];
+    for planet in state.planets.iter() {
+        if let Some(owner) = valid_planet_owner(planet, player_count) {
+            scores[owner] += planet.ships;
+        }
+    }
+    for fleet in &state.fleets {
+        scores[valid_fleet_owner(fleet, player_count)] += fleet.ships;
+    }
+    scores
+}
+
 fn player_results(state: &State) -> Vec<PlayerResult> {
     let player_count = state.config.player_count;
     let mut alive_players = [false; MAX_PLAYERS];
@@ -746,16 +762,7 @@ fn player_results(state: &State) -> Vec<PlayerResult> {
             .collect();
     }
 
-    let mut scores = [0_i32; MAX_PLAYERS];
-    for planet in state.planets.iter() {
-        if let Some(owner) = valid_planet_owner(planet, player_count) {
-            scores[owner] += planet.ships;
-        }
-    }
-    for fleet in &state.fleets {
-        scores[valid_fleet_owner(fleet, player_count)] += fleet.ships;
-    }
-
+    let scores = player_ship_scores(state);
     let active_scores = &scores[..player_count];
     let max_score = active_scores.iter().copied().max().unwrap_or(0);
     active_scores

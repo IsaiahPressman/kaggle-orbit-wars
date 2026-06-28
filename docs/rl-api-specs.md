@@ -748,6 +748,41 @@ outer-slot `player_finished`, action entity slot planet IDs, planets, fleets,
 comet groups, and comet paths. Neutral ownership remains `-1`, and each planet
 or fleet also includes `internal_owner` when the engine-owned ID is needed.
 
+## Reward Modes
+
+The vectorized environment supports two terminal reward shapes, selected by the
+`reward_mode` constructor argument (default `"win_loss"`). Reward mode only
+changes the values assigned at a game's terminal step; non-terminal transitions
+still reward `0`, and a player eliminated mid-game still receives its reward and
+`done=True` on the step it is eliminated.
+
+- `"win_loss"` (default): the scheme described above for submitted actions — a
+  sole winner receives `+1`, losers receive `-1`, and tied winners split the
+  reward via `(1 - (winner_count - 1)) / winner_count`.
+- `"ship_ratio"`: each winning player (the player or players with the maximum
+  total ship count) receives `winner_ships / total_player_ships`, where
+  `total_player_ships` is the summed planet-and-fleet ship count across all
+  active players, excluding neutral ships. Every non-winner receives `0`, with no
+  `-1` loss penalty. Tied winners each receive the same ratio because they share
+  the maximum score. When no active player has any ships, all rewards are `0`.
+
+## Manual Truncation
+
+`truncate_envs(truncate_mask, ...obs buffers...)` resets a chosen subset of
+sub-envs, for training loops that impose a time limit shorter than a game's
+natural termination. `truncate_mask` is a length-`n_envs` boolean array; each
+`True` env is reset to a fresh game and its observation rows are overwritten with
+the reset observation exactly as a terminal auto-reset would, while `False` env
+rows are left untouched. The obs-buffer arguments match `reset(...)`.
+
+Unlike a terminal step, truncation emits no rewards, `dones`, terminal metrics,
+or terminal snapshot — the caller decides how to treat the truncated transition.
+The intended use is value bootstrapping: read a to-be-truncated env's current
+observation and evaluate the critic on it first, so the truncated trajectory can
+bootstrap from the predicted value instead of a real terminal reward. Because
+`truncate_envs` overwrites the observation buffers for the truncated envs,
+capture any needed bootstrap inputs before calling it.
+
 ## Episode Metrics
 
 `episode_metrics` is a `dict[str, list[float]]` populated only for sub-envs that

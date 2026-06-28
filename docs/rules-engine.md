@@ -62,6 +62,11 @@ players `Lost` immediately so the RL adapter can emit early loss/done signals
 before widening results to fixed outer player slots for tensor observations,
 rewards, and dones.
 
+Terminal win/loss is decided by total per-player ship count (planets plus
+fleets, neutral excluded). `player_ship_scores` exposes that per-player tally so
+the RL adapter can derive ship-count-based terminal rewards (see the RL API
+spec's reward modes) without recomputing ownership.
+
 ## Current Status
 
 Implemented:
