@@ -33,8 +33,10 @@ rl:
   horizon: 64
   checkpoint_freq: 20_000_000
   ppo_epochs: 1
-  segments_per_minibatch: 16
-  gradient_accumulation_steps: 1
+  # 8x2 (product 16, same 16 optimizer steps/iter) from the memory smoke: keeps
+  # the 50M at ~44% of a B200 (vs ~80% at 16/1) for fleet-spam headroom.
+  segments_per_minibatch: 8
+  gradient_accumulation_steps: 2
   # gamma=1.0 keeps the critic softmax well-defined
   gamma: 1.0
   gae_lambda: 0.9

@@ -311,6 +311,13 @@ if [[ -n "$MAX_RUNTIME_HOURS" ]]; then
     train_cmd+=(--max-runtime-hours "$MAX_RUNTIME_HOURS")
 fi
 
+# Step-count stop that also applies to resume jobs (unlike a positional run_ppo
+# arg, which the ORBIT_WARS_RESUME_LATEST run-dir handling would displace). Lets
+# a chained set of time-limited jobs stop once the global env-step target is hit.
+if [[ -n "${ORBIT_WARS_MAX_ENV_STEPS:-}" ]]; then
+    train_cmd+=(--max-env-steps "$ORBIT_WARS_MAX_ENV_STEPS")
+fi
+
 if [[ "${#RUN_ARGS[@]}" -gt 0 ]]; then
     train_cmd+=("${RUN_ARGS[@]}")
 fi
