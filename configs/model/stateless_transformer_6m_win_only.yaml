@@ -1,0 +1,11 @@
+model_arch: stateless_transformer_v1
+embed_dim: 256
+depth: 6
+n_heads: 8
+mlp_ratio: 2.0
+n_scratch_tokens: 4
+force_flash_attn: true
+# value = p (the winner probability) instead of 2*p-1, so the critic shares the
+# [0, 1] space of the win_only reward and the categorical cross-entropy value loss.
+value_mode: win_only
+actor: discrete_targets

@@ -45,7 +45,7 @@ from owl.rl import (
     PureActions,
     VectorizedEnv,
 )
-from owl.train.advantages import compile_compute_gae
+from owl.train.advantages import compile_compute_gae, compute_winner_lambda_targets
 from owl.train.distributed import (
     DistributedContext,
     all_gather_object,
@@ -92,6 +92,11 @@ CompileMode = Literal[
     "max-autotune-no-cudagraphs",
 ]
 PPOClipMode = Literal["per_player", "per_entity"]
+ValueLoss = Literal["mse", "winner_ce"]
+# Floor for student winner probabilities before log() in the cross-entropy value
+# loss. Inactive player slots carry zero target mass, so this only guards log(0)
+# for active slots the critic has driven toward zero probability.
+_WINNER_CE_PROB_FLOOR = 1e-8
 TeacherMode = Literal["last_best", "fixed"]
 _TeacherScheduleMode = Literal["none", "linear_decay"]
 
@@ -141,6 +146,10 @@ class PPOConfig(BaseConfig):
     clip_coef: float = Field(default=0.2, ge=0.0)
     vf_clip_coef: float | None = Field(default=0.2, gt=0.0)
     vf_coef: float = Field(default=0.5, ge=0.0)
+    # "mse": regression of the scalar value toward the GAE return. "winner_ce":
+    # categorical cross-entropy of the winner-probability critic toward the
+    # distributional GAE(lambda) winner target (requires win_only reward).
+    value_loss: ValueLoss = "mse"
     ent_coef: float = Field(default=0.01, ge=0.0)
     max_grad_norm: float = Field(default=0.5, gt=0.0)
     target_kl: float | None = Field(default=0.03, gt=0.0)
@@ -691,6 +700,7 @@ class PPOTrainer:
             truncated=segments.truncated,
             bootstrap_values=segments.bootstrap_values,
         )
+        winner_targets = self._compute_winner_targets(segments, last_values)
         update_start = perf_counter()
         metrics, sampled_segments = self._update(
             segments,
@@ -699,6 +709,7 @@ class PPOTrainer:
             policy_mask,
             value_mask,
             teacher_targets,
+            winner_targets,
         )
         update_elapsed = max(perf_counter() - update_start, 1e-12)
         player_returns, player_return_mask = _player_segment_returns(
@@ -1026,6 +1037,38 @@ class PPOTrainer:
                 )
         return concat_teacher_distillation_targets(chunks)
 
+    def _compute_winner_targets(
+        self,
+        segments: _PPORolloutSegments,
+        last_values: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if self.config.value_loss != "winner_ce":
+            return None
+        truncated = (
+            segments.truncated
+            if segments.truncated is not None
+            else torch.zeros_like(segments.dones)
+        )
+        bootstrap_values = (
+            segments.bootstrap_values
+            if segments.bootstrap_values is not None
+            else torch.zeros_like(segments.values)
+        )
+        # value_mode='win_only' makes segments.values the per-step winner
+        # distribution and segments.rewards the terminal winner distribution, so
+        # the distributional GAE(lambda) target reuses the rollout tensors. The
+        # masks are whole-game (a single joint distribution per state) rather than
+        # per-player like the scalar advantage GAE.
+        return compute_winner_lambda_targets(
+            winner_probabilities=segments.values,
+            terminal_winner=segments.rewards,
+            game_done=segments.dones.all(dim=-1),
+            game_truncated=truncated.any(dim=-1),
+            last_winner_probabilities=last_values,
+            bootstrap_winner_probabilities=bootstrap_values,
+            gae_lambda=self.config.gae_lambda,
+        )
+
     def _update(
         self,
         segments: _PPORolloutSegments,
@@ -1034,6 +1077,7 @@ class PPOTrainer:
         policy_mask: torch.Tensor,
         value_mask: torch.Tensor,
         teacher_targets: CachedTeacherDistillationTargets | None,
+        winner_targets: torch.Tensor | None,
     ) -> tuple[dict[str, float], int]:
         loss_metrics: list[_PPOLossMetrics] = []
         grad_norms: list[torch.Tensor] = []
@@ -1061,6 +1105,7 @@ class PPOTrainer:
                     value_mask,
                     sample_indices,
                     teacher_targets=teacher_targets,
+                    winner_targets=winner_targets,
                     value_clip_anchor=current_values,
                     loss_scale=1.0 / accumulation_steps,
                     step_optimizer=False,
@@ -1114,6 +1159,7 @@ class PPOTrainer:
         indices: torch.Tensor,
         *,
         teacher_targets: CachedTeacherDistillationTargets | None = None,
+        winner_targets: torch.Tensor | None = None,
         value_clip_anchor: torch.Tensor,
         loss_scale: float = 1.0,
         step_optimizer: bool = True,
@@ -1269,6 +1315,12 @@ class PPOTrainer:
             loss_kwargs["teacher_value_loss_values"] = teacher_value_loss_values
         if batch_entity_policy_weight is not None:
             loss_kwargs["entity_policy_weight"] = batch_entity_policy_weight
+        if self.config.value_loss == "winner_ce":
+            if winner_targets is None:
+                raise RuntimeError(
+                    "winner_ce value loss requires precomputed winner targets"
+                )
+            loss_kwargs["winner_targets"] = winner_targets[idx]
         metrics, backward_loss = self._ppo_loss(**loss_kwargs)
         metrics = replace(
             metrics,
@@ -1451,6 +1503,7 @@ def _compile_ppo_loss(
         teacher_value_loss_values: torch.Tensor | None = None,
         context: DistributedContext | None = None,
         entity_policy_weight: torch.Tensor | None = None,
+        winner_targets: torch.Tensor | None = None,
     ) -> tuple[_PPOLossMetrics, torch.Tensor]:
         return _ppo_loss(
             new_logp=new_logp,
@@ -1470,6 +1523,7 @@ def _compile_ppo_loss(
             context=context,
             loss_components=compiled_loss_components,
             entity_policy_weight=entity_policy_weight,
+            winner_targets=winner_targets,
         )
 
     return compiled_ppo_loss
@@ -1494,6 +1548,7 @@ def _ppo_loss(
     context: DistributedContext | None = None,
     loss_components: Callable[..., tuple[torch.Tensor, ...]] | None = None,
     entity_policy_weight: torch.Tensor | None = None,
+    winner_targets: torch.Tensor | None = None,
 ) -> tuple[_PPOLossMetrics, torch.Tensor]:
     if loss_components is None:
         loss_components = _ppo_loss_components
@@ -1518,6 +1573,7 @@ def _ppo_loss(
             config.vf_clip_coef,
             config.ppo_clip_mode,
             entity_policy_weight,
+            winner_targets,
         ),
         policy_weight=policy_weight,
         value_weight=value_weight,
@@ -1795,6 +1851,7 @@ def _ppo_loss_components(
     vf_clip_coef: float | None,
     ppo_clip_mode: PPOClipMode,
     entity_policy_weight: torch.Tensor | None,
+    winner_targets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ...]:
     if ppo_clip_mode == "per_entity":
         if entity_policy_weight is None:
@@ -1828,7 +1885,21 @@ def _ppo_loss_components(
     if entity_weight is not None:
         entropy = _sum_masked_entities(entropy, entity_weight)
 
-    if vf_clip_coef:
+    if winner_targets is not None:
+        # Categorical cross-entropy of the winner-probability critic toward the
+        # distributional winner target. With value_mode='win_only', new_values is
+        # the per-player winner probability p; the clamp guards log(0) on inactive
+        # slots, whose target mass is zero. These per-player values weight by
+        # value_weight downstream like the scalar value loss: the numerator is the
+        # full per-state cross-entropy (off-support target mass is zero), but the
+        # denominator is the active-player-slot count rather than the state count,
+        # so the reported scale is ~1/avg-players of a per-state mean and varies
+        # mildly with each minibatch's player-count mix. Gradient direction is
+        # unaffected; vf_coef likely needs retuning for this loss.
+        value_loss_values = (
+            -winner_targets * new_values.clamp_min(_WINNER_CE_PROB_FLOOR).log()
+        )
+    elif vf_clip_coef:
         value_clipped = old_values + torch.clamp(
             new_values - old_values,
             -vf_clip_coef,

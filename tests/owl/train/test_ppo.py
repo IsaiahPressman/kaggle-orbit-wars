@@ -1669,6 +1669,7 @@ def test_ppo_epoch_one_uses_shuffled_single_pass_minibatches(
         indices: torch.Tensor,
         *,
         teacher_targets: ppo.CachedTeacherDistillationTargets | None = None,  # noqa: ARG001
+        winner_targets: torch.Tensor | None = None,  # noqa: ARG001
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
         loss_scale: float = 1.0,  # noqa: ARG001
         step_optimizer: bool = True,  # noqa: ARG001
@@ -1690,6 +1691,7 @@ def test_ppo_epoch_one_uses_shuffled_single_pass_minibatches(
         returns,
         policy_mask,
         value_mask,
+        None,
         None,
     )
 
@@ -1754,6 +1756,7 @@ def test_update_uses_no_sync_for_gradient_accumulation_microbatches(
         indices: torch.Tensor,
         *,
         teacher_targets: ppo.CachedTeacherDistillationTargets | None = None,  # noqa: ARG001
+        winner_targets: torch.Tensor | None = None,  # noqa: ARG001
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
         loss_scale: float = 1.0,  # noqa: ARG001
         step_optimizer: bool = True,  # noqa: ARG001
@@ -1777,6 +1780,7 @@ def test_update_uses_no_sync_for_gradient_accumulation_microbatches(
         returns,
         policy_mask,
         value_mask,
+        None,
         None,
     )
 
@@ -1818,6 +1822,7 @@ def test_update_reports_target_kl_guard_when_exceeded(
         indices: torch.Tensor,
         *,
         teacher_targets: ppo.CachedTeacherDistillationTargets | None = None,  # noqa: ARG001
+        winner_targets: torch.Tensor | None = None,  # noqa: ARG001
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
         loss_scale: float = 1.0,  # noqa: ARG001
         step_optimizer: bool = True,  # noqa: ARG001
@@ -1842,6 +1847,7 @@ def test_update_reports_target_kl_guard_when_exceeded(
         returns,
         policy_mask,
         value_mask,
+        None,
         None,
     )
 
@@ -1879,6 +1885,7 @@ def test_train_iteration_update_sps_uses_actual_segments_when_target_kl_stops_up
         indices: torch.Tensor,
         *,
         teacher_targets: ppo.CachedTeacherDistillationTargets | None = None,  # noqa: ARG001
+        winner_targets: torch.Tensor | None = None,  # noqa: ARG001
         value_clip_anchor: torch.Tensor,  # noqa: ARG001
         loss_scale: float = 1.0,  # noqa: ARG001
         step_optimizer: bool = True,  # noqa: ARG001

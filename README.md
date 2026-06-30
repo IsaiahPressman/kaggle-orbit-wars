@@ -208,6 +208,15 @@ fractional or config-invalid.
 When `env.reward_mode` is `win_only`, set `model.value_mode` to `win_only` so
 critic values train against raw winner probabilities; other reward modes require
 the default `win_loss` value mode.
+`rl.value_loss` selects the critic objective. The default `mse` regresses the
+scalar value toward the GAE return. `winner_ce` instead trains the
+winner-probability softmax as a classifier, using the categorical cross-entropy
+toward a distributional GAE(lambda) winner target (the same lambda-return
+recursion carried on the per-player winner distribution, resolving to the
+terminal winner distribution and bootstrapping the critic's distribution on
+time-limit truncation). It requires `env.reward_mode: win_only` (hence
+`model.value_mode: win_only`), `model.critic_mode: softmax`, `rl.gamma: 1.0`, and
+`rl.vf_clip_coef: null`; see `configs/winner_ce_6m.yaml`.
 When `rl.normalize_advantages` is enabled under distributed PPO, advantage mean
 and variance are computed over the masked global minibatch across ranks.
 `rl.eval_replay_games` must be no larger than `env.n_envs` because evaluation

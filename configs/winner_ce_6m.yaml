@@ -1,0 +1,68 @@
+# Winner cross-entropy value-loss experiment: the baseline 6M pipeline, but the
+# value function is trained as a classifier (categorical cross-entropy of the
+# winner-probability critic toward the distributional GAE(lambda) winner target)
+# instead of regressing the scalar return. Requires the win_only reward (terminal
+# reward = the winner distribution, summing to 1) and value_mode='win_only'
+# (value = p), so everything stays in [0, 1] winner-probability space.
+#
+# Everything else matches configs/baseline.yaml, so this is a clean value-loss
+# ablation vs. the baseline/truncation runs. Launch like the truncation
+# experiments (chained <=12h dev B200 jobs) to the full 1.5B env steps.
+#
+# NB: vf_coef is inherited from the baseline (tuned for MSE); the cross-entropy
+# value loss has a different magnitude, so vf_coef may want retuning.
+env:
+  n_envs: 512
+  obs_spec:
+    obs_spec: entity_based_ext_v2
+    max_entities: 256
+  action_spec:
+    action_spec: discrete_targets
+    min_fleet_size: 3
+    targeting_mode: anything_goes
+  two_player_weight: 0.5
+  reward_mode: win_only
+  pin_memory: true
+
+model: stateless_transformer_6m_win_only
+
+optimizer:
+  optimizer: muon
+  adamw_lr: 0.0001
+  adamw_eps: 1.0e-05
+  weight_decay: 0.0
+  muon_lr: 0.002
+  muon_weight_decay: 0.05
+  muon_momentum: 0.95
+  lr_schedule:
+    schedule: linear_warmup_cosine_decay
+    warmup_steps: 200
+    decay_steps: 150_000
+    lr_min_ratio: 0.02
+
+rl:
+  horizon: 128
+  checkpoint_freq: 20_000_000
+  ppo_epochs: 1
+  segments_per_minibatch: 32
+  gradient_accumulation_steps: 1
+  # gamma=1.0 keeps the critic softmax well-defined and the winner target a valid
+  # probability distribution (required by value_loss='winner_ce').
+  gamma: 1.0
+  gae_lambda: 0.9
+  clip_coef: 0.2
+  vf_clip_coef: null
+  vf_coef: 2.0
+  value_loss: winner_ce
+  ent_coef: 1e-6
+  max_grad_norm: 10.0
+  target_kl: null
+  ppo_clip_mode: per_player
+  normalize_advantages: true
+  eval_replay_games: 8
+  teacher_mode: last_best
+  teacher_kl_coef: 0.005
+  teacher_value_coef: 0.005
+  teacher_segments_per_minibatch: 256
+  compile_mode: default
+  dtype: bfloat16

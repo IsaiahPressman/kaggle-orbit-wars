@@ -398,6 +398,16 @@ This gives `0 -> -1`, `0.5 -> 0`, and `1 -> 1`.
 For `win_only` training, set `value_mode: win_only`; the critic skips this
 linear remapping and returns the raw winner probabilities in `[0, 1]`.
 
+The critic's value loss is selected by `rl.value_loss`. The default `"mse"`
+regresses the scalar value toward the GAE return. `"winner_ce"` instead trains
+the winner-probability softmax as a classifier: categorical cross-entropy toward
+a distributional GAE(lambda) winner target (`advantages.compute_winner_lambda_targets`,
+which carries the same lambda-return recursion on the per-player winner
+distribution, bottoming out at the terminal winner distribution and bootstrapping
+the critic's distribution on time-limit truncation). It requires the `win_only`
+reward (hence `value_mode='win_only'`), `critic_mode='softmax'`, `gamma=1.0`, and
+`vf_clip_coef=null` (value clipping has no cross-entropy analogue).
+
 With `critic_mode="independent"`, the same per-player logits are instead passed
 through a sigmoid and masked to `0` for inactive slots, giving an independent
 per-player value in `[0, 1]` with no cross-player normalization. This represents

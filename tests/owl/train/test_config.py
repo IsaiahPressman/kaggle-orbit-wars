@@ -413,6 +413,74 @@ def test_full_config_rejects_more_eval_replays_than_envs() -> None:
         )
 
 
+def _winner_ce_config_payload() -> dict[str, object]:
+    return {
+        "env": {"n_envs": 2, "reward_mode": "win_only"},
+        "model": {
+            "model_arch": "stateless_transformer_v1",
+            "embed_dim": 32,
+            "depth": 1,
+            "n_heads": 4,
+            "value_mode": "win_only",
+        },
+        "optimizer": {"optimizer": "adamw", "learning_rate": 0.001},
+        "rl": {
+            "horizon": 4,
+            "value_loss": "winner_ce",
+            "gamma": 1.0,
+            "vf_clip_coef": None,
+        },
+    }
+
+
+def test_full_config_accepts_winner_ce_with_win_only_reward() -> None:
+    config = FullConfig.model_validate(_winner_ce_config_payload())
+    assert config.rl.value_loss == "winner_ce"
+
+
+def test_full_config_rejects_winner_ce_without_win_only_reward() -> None:
+    payload = _winner_ce_config_payload()
+    payload["env"] = {"n_envs": 2}
+    payload["model"] = {  # value_mode defaults to win_loss for non-win_only reward
+        "model_arch": "stateless_transformer_v1",
+        "embed_dim": 32,
+        "depth": 1,
+        "n_heads": 4,
+    }
+    with pytest.raises(
+        ValueError, match=r"value_loss='winner_ce' requires env\.reward_mode='win_only'"
+    ):
+        FullConfig.model_validate(payload)
+
+
+def test_full_config_rejects_winner_ce_with_nonunit_gamma() -> None:
+    payload = _winner_ce_config_payload()
+    payload["rl"] = {
+        "horizon": 4,
+        "value_loss": "winner_ce",
+        "gamma": 0.99,
+        "vf_clip_coef": None,
+    }
+    with pytest.raises(
+        ValueError, match=r"value_loss='winner_ce' requires rl\.gamma=1"
+    ):
+        FullConfig.model_validate(payload)
+
+
+def test_full_config_rejects_winner_ce_with_value_clipping() -> None:
+    payload = _winner_ce_config_payload()
+    payload["rl"] = {
+        "horizon": 4,
+        "value_loss": "winner_ce",
+        "gamma": 1.0,
+        "vf_clip_coef": 0.2,
+    }
+    with pytest.raises(
+        ValueError, match=r"value_loss='winner_ce' requires rl\.vf_clip_coef=null"
+    ):
+        FullConfig.model_validate(payload)
+
+
 def test_full_config_rejects_independent_critic_with_value_distillation() -> None:
     with pytest.raises(ValueError, match=r"critic_mode='independent'"):
         FullConfig.model_validate(

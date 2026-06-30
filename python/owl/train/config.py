@@ -39,6 +39,27 @@ class FullConfig(BaseConfig):
             raise ValueError(
                 "model.value_mode='win_only' requires env.reward_mode='win_only'"
             )
+        if self.rl.value_loss == "winner_ce":
+            # The cross-entropy value loss trains the winner-probability softmax
+            # directly against a distributional winner target. That target is a
+            # valid probability distribution only with the undiscounted, sum-to-one
+            # win_only reward (value_mode='win_only' follows from it above), and the
+            # softmax critic; value clipping has no cross-entropy analogue.
+            if self.env.reward_mode != "win_only":
+                raise ValueError(
+                    "rl.value_loss='winner_ce' requires env.reward_mode='win_only'"
+                )
+            if self.model.critic_mode != "softmax":
+                raise ValueError(
+                    "rl.value_loss='winner_ce' requires model.critic_mode='softmax'"
+                )
+            if self.rl.gamma != 1.0:
+                raise ValueError("rl.value_loss='winner_ce' requires rl.gamma=1.0")
+            if self.rl.vf_clip_coef is not None:
+                raise ValueError(
+                    "rl.value_loss='winner_ce' requires rl.vf_clip_coef=null; value "
+                    "clipping has no cross-entropy analogue"
+                )
         divisor = self.rl.segments_per_minibatch * self.rl.gradient_accumulation_steps
         if self.env.n_envs % divisor != 0:
             raise ValueError(
