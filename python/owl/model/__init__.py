@@ -35,6 +35,7 @@ from owl.model.stateless_transformer_v1 import (
     CachedTeacherDistillationTargets,
     StatelessTransformerV1,
     StatelessTransformerV1Config,
+    ValueMode,
     concat_teacher_distillation_targets,
     index_teacher_distillation_targets,
 )
@@ -73,6 +74,7 @@ __all__ = [
     "RecurrentTransformerV1Config",
     "StatelessTransformerV1",
     "StatelessTransformerV1Config",
+    "ValueMode",
     "apply_lora_to_stateless_transformer",
     "concat_teacher_distillation_targets",
     "create_model",

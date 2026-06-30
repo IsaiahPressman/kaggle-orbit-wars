@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, Self, TypeVar, assert_never, cast
+from typing import Literal, Self, TypeAlias, TypeVar, assert_never, cast
 
 import torch
 import torch.nn.functional as F
@@ -98,6 +98,7 @@ __all__ = [
     "PureActorInputs",
     "StatelessTransformerV1",
     "StatelessTransformerV1Config",
+    "ValueMode",
     "binary_entropy_from_logits",
     "build_packed_sequence",
     "build_pairwise_action_features",
@@ -140,6 +141,7 @@ _PLAYER_COUNT_ADAPTER_COUNTS = tuple(range(2, OUTER_PLAYER_SLOTS + 1))
 _ActorInputs = DiscreteActorInputs | PureActorInputs
 _MIN_PLAYER_COUNT_ADAPTER_COUNT = _PLAYER_COUNT_ADAPTER_COUNTS[0]
 _T = TypeVar("_T")
+ValueMode: TypeAlias = Literal["win_loss", "win_only"]
 
 
 class StatelessTransformerV1Config(BaseConfig):
@@ -159,6 +161,7 @@ class StatelessTransformerV1Config(BaseConfig):
     # such as ship-ratio. Independent mode is incompatible with the winner-
     # probability teacher value distillation, so it requires teacher_value_coef=0.
     critic_mode: Literal["softmax", "independent"] = "softmax"
+    value_mode: ValueMode = "win_loss"
     actor: ActorConfig = Field(default_factory=ActorPureConfig)
     lora: LoRAConfig | None = None
 
@@ -1487,8 +1490,20 @@ class StatelessTransformerV1(BaseModelAPI):
             values = torch.sigmoid(logits.float()).masked_fill(~still_playing, 0.0)
             return values, values
         probabilities = masked_softmax(logits, still_playing, dim=-1)
-        values = 2.0 * probabilities - 1.0
+        values = self._critic_values_from_probabilities(probabilities)
         return values, probabilities
+
+    def _critic_values_from_probabilities(
+        self,
+        probabilities: torch.Tensor,
+    ) -> torch.Tensor:
+        match self.config.value_mode:
+            case "win_loss":
+                return 2.0 * probabilities - 1.0
+            case "win_only":
+                return probabilities
+            case _:
+                assert_never(self.config.value_mode)
 
     def _critic_distillation(
         self,
@@ -1510,7 +1525,7 @@ class StatelessTransformerV1(BaseModelAPI):
         winner_log_probabilities = F.log_softmax(masked_logits, dim=-1)
         winner_probabilities = winner_log_probabilities.exp()
         return _ValueDistillationOutput(
-            values=2.0 * winner_probabilities - 1.0,
+            values=self._critic_values_from_probabilities(winner_probabilities),
             winner_probabilities=winner_probabilities,
             winner_log_probabilities=winner_log_probabilities,
         )

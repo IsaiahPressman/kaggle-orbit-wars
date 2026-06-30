@@ -27,6 +27,7 @@ from owl.model.stateless_transformer_v1 import (
     PackedSequence,
     StatelessTransformerV1,
     TransformerBlock,
+    ValueMode,
     _action_entity_slots_from_mask,
     _init_input_layer,
     _init_linear,
@@ -68,6 +69,7 @@ class RecurrentTransformerV1Config(BaseConfig):
     # Recurrent models only support the softmax winner-probability critic; the
     # field exists so the shared StatelessTransformerV1 critic code can read it.
     critic_mode: Literal["softmax"] = "softmax"
+    value_mode: ValueMode = "win_loss"
     recurrence_mode: Literal["global_only", "include_planets"] = "global_only"
     actor: ActorDiscreteTargetsConfig = Field(
         default_factory=ActorDiscreteTargetsConfig

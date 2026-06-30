@@ -43,6 +43,8 @@ struct ObsBufferSpec {
 enum RewardMode {
     /// Sole winner `+1`, losers `-1`, tied winners share via `split_won_reward`.
     WinLoss,
+    /// Winner probability target: tied winners split one unit; everyone else `0`.
+    WinOnly,
     /// Winner(s) receive `winner_ships / total_player_ships`; everyone else `0`.
     ShipRatio,
 }
@@ -51,9 +53,10 @@ impl RewardMode {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "win_loss" => Ok(Self::WinLoss),
+            "win_only" => Ok(Self::WinOnly),
             "ship_ratio" => Ok(Self::ShipRatio),
             other => Err(format!(
-                "unknown reward_mode '{other}'; expected 'win_loss' or 'ship_ratio'"
+                "unknown reward_mode '{other}'; expected 'win_loss', 'win_only', or 'ship_ratio'"
             )),
         }
     }
@@ -4223,6 +4226,13 @@ fn step_one_env(
                 .filter(|result| matches!(result, PlayerResult::Won))
                 .count(),
         ),
+        RewardMode::WinOnly => win_only_winner_reward(
+            result
+                .player_results
+                .iter()
+                .filter(|result| matches!(result, PlayerResult::Won))
+                .count(),
+        ),
         RewardMode::ShipRatio if should_reset => ship_ratio_winner_reward(state),
         RewardMode::ShipRatio => 0.0,
     };
@@ -4294,6 +4304,13 @@ fn split_won_reward(winner_count: usize) -> f32 {
     (2.0 - winner_count as f32) / winner_count as f32
 }
 
+fn win_only_winner_reward(winner_count: usize) -> f32 {
+    if winner_count <= 1 {
+        return 1.0;
+    }
+    1.0 / winner_count as f32
+}
+
 /// Winner reward for `RewardMode::ShipRatio`: the maximum player ship score
 /// divided by the total ship count across all active players. Tied winners all
 /// share the max score, so each receives the same ratio. Returns `0.0` when no
@@ -4323,6 +4340,7 @@ fn player_reward_done(
         PlayerResult::Active => (0.0, false),
         PlayerResult::Lost => match reward_mode {
             RewardMode::WinLoss => (-1.0, true),
+            RewardMode::WinOnly => (0.0, true),
             RewardMode::ShipRatio => (0.0, true),
         },
         PlayerResult::Won => (winner_reward, true),
@@ -4559,6 +4577,15 @@ mod tests {
     }
 
     #[test]
+    fn win_only_winner_reward_splits_tied_probability_mass() {
+        assert_eq!(win_only_winner_reward(0), 1.0);
+        assert_eq!(win_only_winner_reward(1), 1.0);
+        assert_eq!(win_only_winner_reward(2), 0.5);
+        assert!((win_only_winner_reward(3) - (1.0 / 3.0)).abs() <= f32::EPSILON);
+        assert_eq!(win_only_winner_reward(4), 0.25);
+    }
+
+    #[test]
     fn tied_terminal_winners_get_split_reward() {
         let actions = vec![Vec::new(); 4];
         let mut state = state_with_all_players_alive();
@@ -4629,6 +4656,55 @@ mod tests {
             player_reward_done(PlayerResult::Lost, false, 1.0, RewardMode::WinLoss),
             (-1.0, true)
         );
+    }
+
+    #[test]
+    fn player_reward_done_win_only_zeros_losers_and_pays_winner() {
+        assert_eq!(
+            player_reward_done(PlayerResult::Won, false, 1.0, RewardMode::WinOnly),
+            (1.0, true)
+        );
+        assert_eq!(
+            player_reward_done(PlayerResult::Lost, false, 1.0, RewardMode::WinOnly),
+            (0.0, true)
+        );
+        assert_eq!(
+            player_reward_done(PlayerResult::Active, false, 1.0, RewardMode::WinOnly),
+            (0.0, false)
+        );
+        assert_eq!(
+            player_reward_done(PlayerResult::Won, true, 1.0, RewardMode::WinOnly),
+            (0.0, true)
+        );
+    }
+
+    #[test]
+    fn win_only_mode_pays_only_terminal_winner_probability() {
+        let actions = vec![Vec::new(); 4];
+        let mut state = state_with_all_players_alive();
+        let mut player_map = PlayerMap::identity();
+        state.planets[0].ships = 30;
+        state.step = state.config.episode_steps.saturating_sub(2);
+        let mut finished = vec![false; 4];
+        let mut rewards = vec![99.0; 4];
+        let mut dones = vec![false; 4];
+        let mut episode_stats = EpisodeStats::default();
+
+        step_one_env(
+            &mut state,
+            &mut player_map,
+            &mut finished,
+            &mut episode_stats,
+            &actions,
+            &mut rewards,
+            &mut dones,
+            usize::MAX,
+            0.0,
+            RewardMode::WinOnly,
+        );
+
+        assert_eq!(rewards, vec![1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(dones, vec![true; 4]);
     }
 
     #[test]

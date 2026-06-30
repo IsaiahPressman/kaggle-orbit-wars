@@ -751,7 +751,7 @@ or fleet also includes `internal_owner` when the engine-owned ID is needed.
 
 ## Reward Modes
 
-The vectorized environment supports two reward shapes, selected by the
+The vectorized environment supports three reward shapes, selected by the
 `VectorizedEnv(..., reward_mode=...)` constructor argument or `EnvConfig`
 field. Non-terminal active-player transitions still reward `0`, and a player
 eliminated mid-game still receives `done=True` on the step it is eliminated.
@@ -759,6 +759,10 @@ eliminated mid-game still receives `done=True` on the step it is eliminated.
 - `"win_loss"` (default): the scheme described above for submitted actions — a
   sole winner receives `+1`, losers receive `-1`, and tied winners split the
   reward via `(1 - (winner_count - 1)) / winner_count`.
+- `"win_only"`: a sole winner receives `1` at terminal and every non-winner
+  receives `0`, including players eliminated before terminal game reset. Tied
+  winners split one unit of winner-probability mass evenly, so each tied winner
+  receives `1 / winner_count`.
 - `"ship_ratio"`: each winning player (the player or players with the maximum
   total ship count) receives `winner_ships / total_player_ships`, where
   `total_player_ships` is the summed planet-and-fleet ship count across all

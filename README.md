@@ -200,6 +200,9 @@ with a different GPU count derive an equivalent per-rank config by scaling
 `rl.segments_per_minibatch` at or below the saved value, so the per-minibatch
 training batch does not increase; resume fails if the scaled values are
 fractional or config-invalid.
+When `env.reward_mode` is `win_only`, set `model.value_mode` to `win_only` so
+critic values train against raw winner probabilities; other reward modes require
+the default `win_loss` value mode.
 When `rl.normalize_advantages` is enabled under distributed PPO, advantage mean
 and variance are computed over the masked global minibatch across ranks.
 `rl.eval_replay_games` must be no larger than `env.n_envs` because evaluation
