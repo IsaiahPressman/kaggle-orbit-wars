@@ -779,8 +779,9 @@ def test_env_config_requires_even_env_count() -> None:
         EnvConfig(n_envs=1)
 
 
-def test_vectorized_env_accepts_reward_mode_config() -> None:
-    config = EnvConfig(reward_mode="ship_ratio")
+@pytest.mark.parametrize("reward_mode", ["ship_ratio", "win_only"])
+def test_vectorized_env_accepts_reward_mode_config(reward_mode: str) -> None:
+    config = EnvConfig(reward_mode=reward_mode)
     env = VectorizedEnv(
         n_envs=1,
         obs_spec=config.obs_spec,
@@ -789,7 +790,7 @@ def test_vectorized_env_accepts_reward_mode_config() -> None:
         pin_memory=False,
     )
 
-    assert env.reward_mode == "ship_ratio"
+    assert env.reward_mode == reward_mode
 
 
 def test_discrete_targets_config_and_env_shapes() -> None:

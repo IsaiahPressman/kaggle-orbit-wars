@@ -27,6 +27,7 @@ from owl.model.stateless_transformer_v1 import (
     PackedSequence,
     StatelessTransformerV1,
     TransformerBlock,
+    ValueMode,
     _action_entity_slots_from_mask,
     _init_input_layer,
     _init_linear,
@@ -65,6 +66,7 @@ class RecurrentTransformerV1Config(BaseConfig):
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
     force_flash_attn: bool = False
     use_learned_pairwise_bias: bool = False
+    value_mode: ValueMode = "win_loss"
     recurrence_mode: Literal["global_only", "include_planets"] = "global_only"
     actor: ActorDiscreteTargetsConfig = Field(
         default_factory=ActorDiscreteTargetsConfig

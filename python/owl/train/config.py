@@ -31,6 +31,14 @@ class FullConfig(BaseConfig):
             and self.model.actor.n_bins != self.env.action_spec.n_bins
         ):
             raise ValueError("model actor n_bins must match env action_spec n_bins")
+        if self.env.reward_mode == "win_only" and self.model.value_mode != "win_only":
+            raise ValueError(
+                "env.reward_mode='win_only' requires model.value_mode='win_only'"
+            )
+        if self.env.reward_mode != "win_only" and self.model.value_mode == "win_only":
+            raise ValueError(
+                "model.value_mode='win_only' requires env.reward_mode='win_only'"
+            )
         divisor = self.rl.segments_per_minibatch * self.rl.gradient_accumulation_steps
         if self.env.n_envs % divisor != 0:
             raise ValueError(

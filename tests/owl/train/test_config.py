@@ -191,6 +191,84 @@ def test_full_config_accepts_nested_discriminated_configs() -> None:
     assert config.runtime.n_runtime_gpus == 1
 
 
+def test_full_config_accepts_win_only_reward_with_matching_value_mode() -> None:
+    config = FullConfig.model_validate(
+        {
+            "env": {
+                "n_envs": 2,
+                "reward_mode": "win_only",
+            },
+            "model": {
+                "model_arch": "stateless_transformer_v1",
+                "embed_dim": 32,
+                "depth": 1,
+                "n_heads": 4,
+                "value_mode": "win_only",
+            },
+            "optimizer": {
+                "optimizer": "adamw",
+                "learning_rate": 0.001,
+            },
+            "rl": {
+                "horizon": 4,
+            },
+        }
+    )
+
+    assert config.env.reward_mode == "win_only"
+    assert config.model.value_mode == "win_only"
+
+
+def test_full_config_rejects_win_only_reward_without_matching_value_mode() -> None:
+    with pytest.raises(ValueError, match=r"requires model\.value_mode='win_only'"):
+        FullConfig.model_validate(
+            {
+                "env": {
+                    "n_envs": 2,
+                    "reward_mode": "win_only",
+                },
+                "model": {
+                    "model_arch": "stateless_transformer_v1",
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                },
+                "optimizer": {
+                    "optimizer": "adamw",
+                    "learning_rate": 0.001,
+                },
+                "rl": {
+                    "horizon": 4,
+                },
+            }
+        )
+
+
+def test_full_config_rejects_win_only_value_mode_for_other_rewards() -> None:
+    with pytest.raises(ValueError, match=r"requires env\.reward_mode='win_only'"):
+        FullConfig.model_validate(
+            {
+                "env": {
+                    "n_envs": 2,
+                },
+                "model": {
+                    "model_arch": "stateless_transformer_v1",
+                    "embed_dim": 32,
+                    "depth": 1,
+                    "n_heads": 4,
+                    "value_mode": "win_only",
+                },
+                "optimizer": {
+                    "optimizer": "adamw",
+                    "learning_rate": 0.001,
+                },
+                "rl": {
+                    "horizon": 4,
+                },
+            }
+        )
+
+
 def test_full_config_resolves_lora_subconfig_override() -> None:
     config = FullConfig.from_file(
         _REPO_ROOT / "configs/stateless_200m.yaml",

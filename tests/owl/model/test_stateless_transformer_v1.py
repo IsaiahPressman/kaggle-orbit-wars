@@ -2411,6 +2411,28 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     assert torch.allclose(evaluation.winner_probabilities, output.winner_probabilities)
 
 
+def test_win_only_value_mode_returns_winner_probabilities_as_values() -> None:
+    torch.manual_seed(40)
+    obs_spec = EntityBasedConfig(max_entities=MAX_PLANETS + MAX_COMETS + 2)
+    action_spec = ActionPureConfig(max_per_planet_launches=1)
+    config = StatelessTransformerV1Config(
+        embed_dim=32,
+        depth=1,
+        n_heads=4,
+        value_mode="win_only",
+    )
+    model = _model(config, obs_spec=obs_spec, action_spec=action_spec)
+    obs = _obs_batch(batch_size=2, obs_spec=obs_spec, action_spec=action_spec)
+    obs.still_playing = torch.tensor(
+        [[True, True, False, False], [True, True, True, False]]
+    )
+
+    output = model(obs)
+
+    assert torch.allclose(output.values, output.winner_probabilities)
+    assert torch.all((output.values >= 0.0) & (output.values <= 1.0))
+
+
 def test_discrete_targets_actor_outputs_targets_and_replays_log_probs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

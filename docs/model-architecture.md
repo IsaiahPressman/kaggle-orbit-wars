@@ -386,13 +386,16 @@ applies a masked softmax using `obs.still_playing` with shape `(batch, 4)`.
 With per-player-count adapters enabled, the branch selected by each row's
 still-playing player count owns the critic head for that row.
 
-The resulting winner probabilities are mapped linearly into value targets:
+By default, the resulting winner probabilities are mapped linearly into
+`win_loss` value targets:
 
 ```text
 value = 2 * winner_probability - 1
 ```
 
 This gives `0 -> -1`, `0.5 -> 0`, and `1 -> 1`.
+For `win_only` training, set `value_mode: win_only`; the critic skips this
+linear remapping and returns the raw winner probabilities in `[0, 1]`.
 
 `still_playing` is explicit in `ObsBatch`. It should not be inferred from
 `can_act`, since a player can be alive without having a launchable entity on a

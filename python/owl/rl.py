@@ -228,7 +228,7 @@ class DiscreteTargetBinActions:
 
 
 ActionBundle: TypeAlias = PureActions | DiscreteTargetActions | DiscreteTargetBinActions
-RewardMode: TypeAlias = Literal["win_loss", "ship_ratio"]
+RewardMode: TypeAlias = Literal["win_loss", "win_only", "ship_ratio"]
 
 
 @dataclass
