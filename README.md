@@ -138,6 +138,11 @@ Training presets live in `configs/`:
   stateless transformer presets.
 - `model/stateless_transformer_28m.yaml`: larger SwiGLU stateless transformer
   preset with a discrete-target actor.
+- `model/stateless_transformer_12m.yaml`,
+  `model/stateless_transformer_25m.yaml`, and
+  `model/stateless_transformer_50m.yaml`: a GELU `mlp_ratio=2.0`
+  discrete-target ladder scaling width at a fixed `head_dim=32`
+  (`320x10`, `448x11`, `512x19`).
 - `model/stateless_transformer_200m_d38.yaml`,
   and `model/stateless_transformer_200m_d60.yaml`: depth-specific 200M stateless
   transformer presets with discrete-target actors.
