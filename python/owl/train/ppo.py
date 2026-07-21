@@ -93,10 +93,6 @@ CompileMode = Literal[
 ]
 PPOClipMode = Literal["per_player", "per_entity"]
 ValueLoss = Literal["mse", "winner_ce"]
-# Floor for student winner probabilities before log() in the cross-entropy value
-# loss. Inactive player slots carry zero target mass, so this only guards log(0)
-# for active slots the critic has driven toward zero probability.
-_WINNER_CE_PROB_FLOOR = 1e-8
 TeacherMode = Literal["last_best", "fixed"]
 _TeacherScheduleMode = Literal["none", "linear_decay"]
 
@@ -1260,6 +1256,11 @@ class PPOTrainer:
         )
         entropy_components = _output_entropy_components(output, segments.logp[idx])
         new_values = _output_values(output).view_as(batch_old_values)
+        winner_log_probabilities = output.winner_log_probabilities
+        if winner_log_probabilities is not None:
+            winner_log_probabilities = winner_log_probabilities.view_as(
+                batch_old_values
+            )
         if teacher_model is None:
             teacher_kl = torch.zeros_like(batch_policy_weight)
             teacher_kl_components: dict[str, torch.Tensor] = {}
@@ -1320,7 +1321,12 @@ class PPOTrainer:
                 raise RuntimeError(
                     "winner_ce value loss requires precomputed winner targets"
                 )
+            if winner_log_probabilities is None:
+                raise RuntimeError(
+                    "winner_ce value loss requires winner log-probabilities"
+                )
             loss_kwargs["winner_targets"] = winner_targets[idx]
+            loss_kwargs["winner_log_probabilities"] = winner_log_probabilities
         metrics, backward_loss = self._ppo_loss(**loss_kwargs)
         metrics = replace(
             metrics,
@@ -1504,6 +1510,7 @@ def _compile_ppo_loss(
         context: DistributedContext | None = None,
         entity_policy_weight: torch.Tensor | None = None,
         winner_targets: torch.Tensor | None = None,
+        winner_log_probabilities: torch.Tensor | None = None,
     ) -> tuple[_PPOLossMetrics, torch.Tensor]:
         return _ppo_loss(
             new_logp=new_logp,
@@ -1524,6 +1531,7 @@ def _compile_ppo_loss(
             loss_components=compiled_loss_components,
             entity_policy_weight=entity_policy_weight,
             winner_targets=winner_targets,
+            winner_log_probabilities=winner_log_probabilities,
         )
 
     return compiled_ppo_loss
@@ -1549,6 +1557,7 @@ def _ppo_loss(
     loss_components: Callable[..., tuple[torch.Tensor, ...]] | None = None,
     entity_policy_weight: torch.Tensor | None = None,
     winner_targets: torch.Tensor | None = None,
+    winner_log_probabilities: torch.Tensor | None = None,
 ) -> tuple[_PPOLossMetrics, torch.Tensor]:
     if loss_components is None:
         loss_components = _ppo_loss_components
@@ -1574,6 +1583,7 @@ def _ppo_loss(
             config.ppo_clip_mode,
             entity_policy_weight,
             winner_targets,
+            winner_log_probabilities,
         ),
         policy_weight=policy_weight,
         value_weight=value_weight,
@@ -1852,6 +1862,7 @@ def _ppo_loss_components(
     ppo_clip_mode: PPOClipMode,
     entity_policy_weight: torch.Tensor | None,
     winner_targets: torch.Tensor | None = None,
+    winner_log_probabilities: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ...]:
     if ppo_clip_mode == "per_entity":
         if entity_policy_weight is None:
@@ -1886,19 +1897,14 @@ def _ppo_loss_components(
         entropy = _sum_masked_entities(entropy, entity_weight)
 
     if winner_targets is not None:
-        # Categorical cross-entropy of the winner-probability critic toward the
-        # distributional winner target. With value_mode='win_only', new_values is
-        # the per-player winner probability p; the clamp guards log(0) on inactive
-        # slots, whose target mass is zero. These per-player values weight by
-        # value_weight downstream like the scalar value loss: the numerator is the
-        # full per-state cross-entropy (off-support target mass is zero), but the
-        # denominator is the active-player-slot count rather than the state count,
-        # so the reported scale is ~1/avg-players of a per-state mean and varies
-        # mildly with each minibatch's player-count mix. Gradient direction is
-        # unaffected; vf_coef likely needs retuning for this loss.
-        value_loss_values = (
-            -winner_targets * new_values.clamp_min(_WINNER_CE_PROB_FLOOR).log()
-        )
+        if winner_log_probabilities is None:
+            raise ValueError(
+                "winner_log_probabilities are required with winner_targets"
+            )
+        # Categorical cross-entropy toward the distributional winner target.
+        # The critic computes these log-probabilities directly with masked
+        # log_softmax, preserving gradients even for extremely unlikely targets.
+        value_loss_values = -winner_targets * winner_log_probabilities
     elif vf_clip_coef:
         value_clipped = old_values + torch.clamp(
             new_values - old_values,

@@ -61,6 +61,7 @@ def test_ppo_loss_matches_clipped_objectives() -> None:
 def test_ppo_loss_winner_ce_uses_cross_entropy_value_loss() -> None:
     # value_mode='win_only' makes new_values the per-player winner probability p.
     new_values = torch.tensor([[0.7, 0.3]])
+    winner_log_probabilities = new_values.log()
     winner_targets = torch.tensor([[0.8, 0.2]])
     returns = torch.tensor([[0.6, 0.4]])  # ignored by the cross-entropy value loss
 
@@ -76,9 +77,10 @@ def test_ppo_loss_winner_ce_uses_cross_entropy_value_loss() -> None:
         value_weight=torch.ones((1, 2)),
         config=PPOConfig(value_loss="winner_ce", vf_clip_coef=None, vf_coef=2.0),
         winner_targets=winner_targets,
+        winner_log_probabilities=winner_log_probabilities,
     )
 
-    expected_value = (-winner_targets * new_values.clamp_min(1e-8).log()).mean()
+    expected_value = (-winner_targets * winner_log_probabilities).mean()
     assert torch.allclose(metrics.value_loss, expected_value)
     # The cross-entropy loss must not fall back to the regression target.
     assert not torch.allclose(
@@ -100,6 +102,7 @@ def test_compiled_ppo_loss_forwards_winner_targets(
     compiled = ppo._compile_ppo_loss("default")
 
     new_values = torch.tensor([[0.7, 0.3]])
+    winner_log_probabilities = new_values.log()
     winner_targets = torch.tensor([[0.8, 0.2]])
     metrics, _backward_loss = compiled(
         new_logp=torch.zeros((1, 2)),
@@ -113,10 +116,35 @@ def test_compiled_ppo_loss_forwards_winner_targets(
         value_weight=torch.ones((1, 2)),
         config=PPOConfig(value_loss="winner_ce", vf_clip_coef=None, vf_coef=2.0),
         winner_targets=winner_targets,
+        winner_log_probabilities=winner_log_probabilities,
     )
 
-    expected_value = (-winner_targets * new_values.clamp_min(1e-8).log()).mean()
+    expected_value = (-winner_targets * winner_log_probabilities).mean()
     assert torch.allclose(metrics.value_loss, expected_value)
+
+
+def test_ppo_loss_winner_ce_preserves_gradient_for_tiny_target_probability() -> None:
+    logits = torch.tensor([[-20.0, 0.0]], requires_grad=True)
+    winner_log_probabilities = logits.log_softmax(dim=-1)
+
+    _metrics, backward_loss = _ppo_loss(
+        new_logp=torch.zeros((1, 2)),
+        entropy=torch.zeros((1, 2)),
+        new_values=logits.softmax(dim=-1),
+        old_logp=torch.zeros((1, 2)),
+        old_values=torch.full((1, 2), 0.5),
+        returns=torch.zeros((1, 2)),
+        advantages=torch.zeros((1, 2)),
+        policy_weight=torch.ones((1, 2)),
+        value_weight=torch.ones((1, 2)),
+        config=PPOConfig(value_loss="winner_ce", vf_clip_coef=None),
+        winner_targets=torch.tensor([[1.0, 0.0]]),
+        winner_log_probabilities=winner_log_probabilities,
+    )
+    backward_loss.backward()
+
+    assert logits.grad is not None
+    assert logits.grad[0, 0] < 0.0
 
 
 def test_ppo_loss_can_clip_per_entity_before_summing() -> None:

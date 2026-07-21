@@ -411,6 +411,9 @@ distribution, bottoming out at the terminal winner distribution and bootstrappin
 the critic's distribution on time-limit truncation). It requires the `win_only`
 reward (hence `value_mode='win_only'`), `critic_mode='softmax'`, `gamma=1.0`, and
 `vf_clip_coef=null` (value clipping has no cross-entropy analogue).
+`evaluate_actions` returns the critic's masked-`log_softmax` winner
+log-probabilities so this loss does not need to take the logarithm of rounded or
+underflowed probabilities.
 
 With `critic_mode="independent"`, the same per-player logits are instead passed
 through a sigmoid and masked to `0` for inactive slots, giving an independent

@@ -304,7 +304,11 @@ class RecurrentTransformerV1(StatelessTransformerV1):
             sequence_shape=sequence_shape,
             dones=flat_dones,
         )
-        values, winner_probabilities = self._value_from_encoded(encoded, flat_obs)
+        values, winner_probabilities, winner_log_probabilities = (
+            self._value_evaluation_from_encoded(encoded, flat_obs)
+        )
+        if winner_log_probabilities is None:
+            raise RuntimeError("recurrent critic requires winner log-probabilities")
         log_probs, entropies = self._actor_log_prob(
             encoded,
             flat_obs,
@@ -317,6 +321,10 @@ class RecurrentTransformerV1(StatelessTransformerV1):
                 winner_probabilities,
                 sequence_shape,
             )
+            winner_log_probabilities = _unflatten_time_tensor(
+                winner_log_probabilities,
+                sequence_shape,
+            )
             log_probs = _unflatten_log_probs(log_probs, sequence_shape)
             entropies = _unflatten_entropies(entropies, sequence_shape)
         return ModelEvaluation(
@@ -324,6 +332,7 @@ class RecurrentTransformerV1(StatelessTransformerV1):
             entropies=entropies,
             values=values,
             winner_probabilities=winner_probabilities,
+            winner_log_probabilities=winner_log_probabilities,
             next_hidden_state=next_state,
         )
 

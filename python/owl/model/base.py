@@ -59,6 +59,7 @@ class ModelEvaluation:
     entropies: ModelActionEntropies
     values: torch.Tensor
     winner_probabilities: torch.Tensor
+    winner_log_probabilities: torch.Tensor | None = None
     next_hidden_state: ModelHiddenState | None = None
 
 

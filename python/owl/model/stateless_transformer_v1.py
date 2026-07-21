@@ -950,7 +950,9 @@ class StatelessTransformerV1(BaseModelAPI):
             obs,
             action_entity_slots=_action_entity_slots_from_mask(obs.action_mask),
         )
-        values, winner_probabilities = self._value_from_encoded(encoded, obs)
+        values, winner_probabilities, winner_log_probabilities = (
+            self._value_evaluation_from_encoded(encoded, obs)
+        )
         log_probs, entropies = self._actor_log_prob(
             encoded,
             obs,
@@ -962,6 +964,7 @@ class StatelessTransformerV1(BaseModelAPI):
             entropies=entropies,
             values=values,
             winner_probabilities=winner_probabilities,
+            winner_log_probabilities=winner_log_probabilities,
         )
 
     def evaluate_actions_with_teacher(
@@ -1069,10 +1072,11 @@ class StatelessTransformerV1(BaseModelAPI):
                 student_value_output.winner_log_probabilities
             )
         else:
-            student_values, student_winner_probabilities = self._value_from_encoded(
-                student_encoded,
-                flat_obs,
-            )
+            (
+                student_values,
+                student_winner_probabilities,
+                student_winner_log_probabilities,
+            ) = self._value_evaluation_from_encoded(student_encoded, flat_obs)
         student_actor_inputs = (
             self._actor_inputs_for_encoded(student_encoded, flat_obs)
             if compute_action_kl and not self.player_count_adapters
@@ -1090,6 +1094,7 @@ class StatelessTransformerV1(BaseModelAPI):
             entropies=student_entropies,
             values=student_values,
             winner_probabilities=student_winner_probabilities,
+            winner_log_probabilities=student_winner_log_probabilities,
             next_hidden_state=student_next_state,
         )
         return _StudentDistillationEval(
@@ -1398,6 +1403,21 @@ class StatelessTransformerV1(BaseModelAPI):
         if self.player_count_adapters:
             return self._value_by_player_count(encoded, obs)
         return self._critic(encoded.critic_value_hidden, obs.still_playing)
+
+    def _value_evaluation_from_encoded(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        if self.config.critic_mode == "independent":
+            values, probabilities = self._value_from_encoded(encoded, obs)
+            return values, probabilities, None
+        output = self._value_distillation_from_encoded(encoded, obs)
+        return (
+            output.values,
+            output.winner_probabilities,
+            output.winner_log_probabilities,
+        )
 
     def _value_distillation_from_encoded(
         self,
@@ -2672,6 +2692,14 @@ def _unflatten_evaluation(
         winner_probabilities=_unflatten_time_tensor(
             evaluation.winner_probabilities,
             sequence_shape,
+        ),
+        winner_log_probabilities=(
+            None
+            if evaluation.winner_log_probabilities is None
+            else _unflatten_time_tensor(
+                evaluation.winner_log_probabilities,
+                sequence_shape,
+            )
         ),
         next_hidden_state=evaluation.next_hidden_state,
     )

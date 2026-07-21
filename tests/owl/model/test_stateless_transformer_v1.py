@@ -2430,6 +2430,11 @@ def test_actor_critic_outputs_action_tensors_log_probs_and_values() -> None:
     )
     assert torch.allclose(evaluation.values, output.values)
     assert torch.allclose(evaluation.winner_probabilities, output.winner_probabilities)
+    assert evaluation.winner_log_probabilities is not None
+    assert torch.allclose(
+        evaluation.winner_log_probabilities.exp(),
+        output.winner_probabilities,
+    )
 
 
 def test_win_only_value_mode_returns_winner_probabilities_as_values() -> None:
