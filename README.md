@@ -6,11 +6,10 @@
    - [Rust](https://www.rust-lang.org/tools/install)
    - [uv](https://docs.astral.sh/uv/getting-started/installation/)
    - [just](https://github.com/casey/just)
-2. Add nightly toolchain for `rustfmt`:
+2. Install the repository's pinned Rust toolchain and `rustfmt` component:
 
 ```sh
-rustup update nightly
-rustup component add rustfmt --toolchain nightly
+rustup toolchain install nightly-2026-04-18 --component rustfmt
 ```
 
 3. Generate replay fixtures:
@@ -119,7 +118,8 @@ uv run python -c 'from importlib import import_module; from pathlib import Path;
 
 Training presets live in `configs/`:
 
-- `baseline.yaml`: vanilla PPO with the 20m stateless transformer preset,
+- `baseline.yaml`: PPO with last-best teacher stabilization and the 6m GELU
+  stateless transformer preset,
   discrete-target actions, `max_entities=256`, one PPO epoch per rollout,
   larger rollout/minibatch sizing, Muon/AdamW optimizer rates, periodic
   checkpoints every 20M environment steps, `torch.compile` default mode for PPO
@@ -130,9 +130,9 @@ Training presets live in `configs/`:
   epsilon, no weight decay, and the same warmup/cosine scheduler shape.
 - `baseline_adamw.yaml`: AdamW optimizer variant matching `baseline_adam.yaml`
   except for decoupled `0.01` weight decay.
-- `model/stateless_transformer_21m_swiglu.yaml`: larger stateless transformer
-  model config used by `baseline.yaml`, with an inline discrete-target actor
-  override using eight action mixtures.
+- `model/stateless_transformer_21m_swiglu.yaml`: larger SwiGLU stateless
+  transformer config with an inline discrete-target actor override using eight
+  action mixtures.
 - `model/stateless_transformer_6m.yaml`, `model/stateless_transformer_11m.yaml`,
   and `model/stateless_transformer_21m_gelu.yaml`: GELU variants of the
   stateless transformer presets.
@@ -232,6 +232,8 @@ action spec. The current discrete-target actor requires
 Both discrete target specs default to `targeting_mode: full_mask`; set
 `stop_bad_launch` or `anything_goes` to expose loose target masks while
 controlling whether sun-crossing decoded launches are replaced with no-ops.
+`RecurrentTransformerV1` supports only `discrete_targets` with
+`launch_mode: binary` and `max_per_planet_launches: 1`.
 Set `rl.teacher_mode` to `fixed` or `last_best` to add student-teacher
 stabilization losses. `fixed` requires `rl.teacher_init`, while `last_best`
 uses the current last-best snapshot. On randomly initialized fresh launches
@@ -243,9 +245,10 @@ evaluation against last-best follows the same checkpoint lifecycle as a run
 without a teacher. `rl.teacher_init` points at a training checkpoint whose
 adjacent `config.yaml` is used to construct the teacher model before loading
 weights.
-The teacher architecture may differ from the student. Observation specs must
-match except for `max_entities`, where the teacher model uses the student
-capacity for rollout tensors; action specs must match exactly. Actor
+For a fixed teacher, the architecture may differ from the student. A last-best
+teacher always uses the student's architecture so it can be refreshed in place.
+Observation specs must match except for `max_entities`, where the teacher model
+uses the student capacity for rollout tensors; action specs must match exactly. Actor
 factorization details such as discrete-target launch mode or target-bin count
 must be compatible. Teacher models must be stateless; recurrent teachers are
 rejected because PPO teacher inference runs only from stored rollout segments.
@@ -416,7 +419,7 @@ count, step, normalized numeric player action triples from
 `steps[t][player].action`, per-player Kaggle `status` and `reward`, the input
 observation from `steps[t - 1][0].observation`, and the expected state from
 `steps[t][0].observation`. `cargo test` discovers all `replay-*.jsonl` files in
-the fixture directory and fails if none are present.
+the fixture directory and fails by default if none are present.
 
 Supported test environment variables:
 
@@ -425,11 +428,12 @@ Supported test environment variables:
 - `REQUIRE_PARITY_FIXTURES=0`: skip replay parity, and skip generation parity
   only when generation fixtures are missing. Missing fixtures fail by default.
 
-When the upstream rules change, keep the test code stable: download replacement
-episodes as JSONL fixtures, move them into the fixture directory if needed,
-update the reference episode id list in this README and
-`docs/rules-engine.md`, and run the parity tests against the fixture
-directory.
+When the upstream rules change without replacing the reference episode set,
+keep the replay test code stable. When replacing episodes, download replacement
+JSONL fixtures, update `REQUIRED_REPLAY_COVERAGE` in
+`src/rules_engine/replay_tests.rs` with each episode's id, player count, and row
+count, and update the episode lists in this README, `docs/rules-engine.md`, and
+`docs/rules-parity-coverage.md` before running the parity tests.
 
 ## Generation parity
 
@@ -470,8 +474,8 @@ installed Python environment. Replay tests also validate the documented
 reference episode player counts and row counts, so update the required coverage
 in `src/rules_engine/replay_tests.rs` when replacing the episode set.
 
-3. Update the documented episode IDs in this README and
-   `docs/rules-engine.md`.
+3. Update the documented episode IDs in this README, `docs/rules-engine.md`,
+   and `docs/rules-parity-coverage.md`.
 
 4. Run the full checks with the new fixtures present:
 

@@ -5,13 +5,13 @@ repo-pinned Rust toolchain, Cargo dependencies, Python dependencies, and the
 compiled `maturin` extension.
 
 For Kaggle submission builds, use `Dockerfile.kaggle`. It starts from Kaggle's
-CPU Python image, verifies the competition Python/package versions, installs the
-repo-pinned Rust toolchain, creates a uv build venv for `maturin`, compiles the
-PyO3 extension in release mode with the same native CPU optimization used by
+CPU Python image, verifies that its Python version is at least 3.11, installs
+the repo-pinned Rust toolchain, creates a uv build venv for `maturin`, compiles
+the PyO3 extension using the repository's release profile, as in
 `just prepare-rl`, and packages the importable `owl` package plus the requested
-model checkpoint and adjacent model config into `submission.tar.gz`. The
-checkpoint is slimmed into a temporary file before packaging so the original
-training checkpoint is not overwritten.
+model checkpoint and adjacent model config into `submission.tar.gz`.
+The checkpoint is slimmed into a temporary file before packaging so the
+original training checkpoint is not overwritten.
 
 ## When this helps
 
@@ -256,6 +256,13 @@ forwarded as additional `scripts/run_ppo.py` flags for that default fresh run:
 sbatch --exclude=gpu-node-01 scripts/slurm/launch-train.sbatch \
   --overrides env.n_envs=1024 rl.horizon=256
 ```
+
+For chained jobs, set `ORBIT_WARS_RESUME_LATEST=1` with no positional target to
+resume the most recently modified run directory under `ORBIT_WARS_OUTPUT_DIR`.
+Set `ORBIT_WARS_MAX_ENV_STEPS` to forward a global environment-step limit to
+fresh or resumed runs; this lets a time-limited chain stop at a shared training
+target. The checked-in scaling and truncation launchers use these variables to
+submit dependent jobs.
 
 To initialize a fresh Slurm run from existing model weights without resuming the
 old optimizer, scheduler, config, or W&B run, set
