@@ -18,21 +18,28 @@ uv run python -c 'from importlib import import_module; from pathlib import Path;
 - Python/Kaggle-compatible action parsing stays outside the simulator.
 - Floating-point state uses `f64`. Parity tests compare floats with
   `math.isclose`-style tolerances, while ids, owners, ship counts, removals, and
-  termination state must match exactly.
+  other discrete state match exactly. Global termination and final win/loss
+  must match exactly, while nonterminal eliminated-player status intentionally
+  differs as described below.
 - Procedural generation does not need to match from the same integer seed across
   Python and Rust RNGs. It should match when driven by the same stream of random
   integers/floats. The `RandomSource::uniform` contract follows Python's
   inclusive `random.uniform(a, b)` endpoint behavior, including `a == b`.
 - The engine supports both 2-player and 4-player games from the start.
 
-## Public API
+## Primary Gameplay API
 
-The core Rust API is intentionally small:
+The primary Rust gameplay entry points are:
 
 ```rust
 pub fn reset(config: ResetConfig) -> State;
 pub fn step(state: &mut State, actions: &[PlayerAction]) -> StepResult;
 ```
+
+Deterministic fixture and test variants with injected random sources or comet
+data are also public, as are player ship-score and alive-flag helpers. The
+`generation` and `state` modules expose the lower-level types used by these
+entry points.
 
 `State` owns planets, fleets, comet metadata, the current step, the player
 count, generation constants, and ids needed for deterministic progression.
@@ -78,11 +85,11 @@ Implemented:
 - Generation parity over ignored Python-reference fixtures.
 - Replay parity over ignored Kaggle JSONL fixtures.
 - Python RL observation/action wrappers and vectorized environment.
+- Mechanical mapped-doc freshness checks through `just docs-fresh`.
 
 Open follow-up work:
 
 - Benchmarks and data-structure optimization for training throughput.
-- Mechanical doc freshness checks beyond `docs/pr-checklist.md`.
 - CI-owned parity fixture cache or checked-in minimal parity fixtures.
 
 ## Rules-Change Workflow
@@ -148,9 +155,11 @@ Replay parity tests:
   `tests/fixtures/orbit_wars_replays` by default. If no fixtures are present,
   the test fails by default. Set `REQUIRE_PARITY_FIXTURES=0` to skip replay
   parity, including when local replay fixtures are present but intentionally
-  stale. When rules change, download new Kaggle episodes as JSONL fixtures,
-  update the episode id list below, and leave the test code unchanged unless
-  the fixture schema itself changes.
+  stale. When rules change without replacing the reference episode set, leave
+  replay test code unchanged. When replacing episodes, update
+  `REQUIRED_REPLAY_COVERAGE` in `src/rules_engine/replay_tests.rs` with each
+  episode id, player count, and row count, and update the episode lists below,
+  in the README, and in `docs/rules-parity-coverage.md`.
 - Replay parity validates the required documented coverage set in
   `src/rules_engine/replay_tests.rs`: episode id, player count, and transition
   row count must match the list below so coverage cannot silently shrink.

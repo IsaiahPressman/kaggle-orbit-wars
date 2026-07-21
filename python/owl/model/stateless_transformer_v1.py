@@ -156,6 +156,11 @@ class StatelessTransformerV1Config(BaseConfig):
     activation: Literal["gelu", "silu", "swiglu"] = "gelu"
     force_flash_attn: bool = False
     use_learned_pairwise_bias: bool = False
+    # "softmax": winner-probability critic (zero-sum-style, value = 2*p - 1).
+    # "independent": per-player sigmoid value in [0, 1], for non-zero-sum rewards
+    # such as ship-ratio. Independent mode is incompatible with the winner-
+    # probability teacher value distillation, so it requires teacher_value_coef=0.
+    critic_mode: Literal["softmax", "independent"] = "softmax"
     value_mode: ValueMode = "win_loss"
     actor: ActorConfig = Field(default_factory=ActorPureConfig)
     lora: LoRAConfig | None = None
@@ -945,7 +950,9 @@ class StatelessTransformerV1(BaseModelAPI):
             obs,
             action_entity_slots=_action_entity_slots_from_mask(obs.action_mask),
         )
-        values, winner_probabilities = self._value_from_encoded(encoded, obs)
+        values, winner_probabilities, winner_log_probabilities = (
+            self._value_evaluation_from_encoded(encoded, obs)
+        )
         log_probs, entropies = self._actor_log_prob(
             encoded,
             obs,
@@ -957,6 +964,7 @@ class StatelessTransformerV1(BaseModelAPI):
             entropies=entropies,
             values=values,
             winner_probabilities=winner_probabilities,
+            winner_log_probabilities=winner_log_probabilities,
         )
 
     def evaluate_actions_with_teacher(
@@ -1064,10 +1072,11 @@ class StatelessTransformerV1(BaseModelAPI):
                 student_value_output.winner_log_probabilities
             )
         else:
-            student_values, student_winner_probabilities = self._value_from_encoded(
-                student_encoded,
-                flat_obs,
-            )
+            (
+                student_values,
+                student_winner_probabilities,
+                student_winner_log_probabilities,
+            ) = self._value_evaluation_from_encoded(student_encoded, flat_obs)
         student_actor_inputs = (
             self._actor_inputs_for_encoded(student_encoded, flat_obs)
             if compute_action_kl and not self.player_count_adapters
@@ -1085,6 +1094,7 @@ class StatelessTransformerV1(BaseModelAPI):
             entropies=student_entropies,
             values=student_values,
             winner_probabilities=student_winner_probabilities,
+            winner_log_probabilities=student_winner_log_probabilities,
             next_hidden_state=student_next_state,
         )
         return _StudentDistillationEval(
@@ -1394,6 +1404,21 @@ class StatelessTransformerV1(BaseModelAPI):
             return self._value_by_player_count(encoded, obs)
         return self._critic(encoded.critic_value_hidden, obs.still_playing)
 
+    def _value_evaluation_from_encoded(
+        self,
+        encoded: EncodedObservations,
+        obs: ObsBatch,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        if self.config.critic_mode == "independent":
+            values, probabilities = self._value_from_encoded(encoded, obs)
+            return values, probabilities, None
+        output = self._value_distillation_from_encoded(encoded, obs)
+        return (
+            output.values,
+            output.winner_probabilities,
+            output.winner_log_probabilities,
+        )
+
     def _value_distillation_from_encoded(
         self,
         encoded: EncodedObservations,
@@ -1474,6 +1499,16 @@ class StatelessTransformerV1(BaseModelAPI):
         adapter: PlayerCountAdapter | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         logits = self._critic_logits(player_hidden, still_playing, adapter=adapter)
+        if self.config.critic_mode == "independent":
+            # Per-player value in [0, 1]; inactive slots are masked to 0. There is
+            # no cross-player normalization, so non-zero-sum returns (e.g. the
+            # ship-ratio reward) are representable. The second tuple element is
+            # not a probability distribution, but matches the softmax tuple shape.
+            # Compute in float32 so the value dtype matches the softmax critic
+            # (softmax is autocast-forced to float32); downstream value buffers
+            # and index-puts assume float32 even under a bfloat16 autocast.
+            values = torch.sigmoid(logits.float()).masked_fill(~still_playing, 0.0)
+            return values, values
         probabilities = masked_softmax(logits, still_playing, dim=-1)
         values = self._critic_values_from_probabilities(probabilities)
         return values, probabilities
@@ -1497,6 +1532,11 @@ class StatelessTransformerV1(BaseModelAPI):
         *,
         adapter: PlayerCountAdapter | None = None,
     ) -> _ValueDistillationOutput:
+        if self.config.critic_mode != "softmax":
+            raise RuntimeError(
+                "winner-probability value distillation requires critic_mode='softmax'; "
+                "set rl.teacher_value_coef=0 when using an independent critic"
+            )
         logits = self._critic_logits(player_hidden, still_playing, adapter=adapter)
         masked_logits = logits.masked_fill(
             ~still_playing,
@@ -2652,6 +2692,14 @@ def _unflatten_evaluation(
         winner_probabilities=_unflatten_time_tensor(
             evaluation.winner_probabilities,
             sequence_shape,
+        ),
+        winner_log_probabilities=(
+            None
+            if evaluation.winner_log_probabilities is None
+            else _unflatten_time_tensor(
+                evaluation.winner_log_probabilities,
+                sequence_shape,
+            )
         ),
         next_hidden_state=evaluation.next_hidden_state,
     )

@@ -36,6 +36,26 @@ MAPPED_MODEL_WEIGHTS_PATH=""
 RUN_ARGS=("$@")
 USE_DEFAULT_FRESH_LAUNCH=0
 
+# Resume the most recent run directory under ORBIT_WARS_OUTPUT_DIR. Used to chain
+# a follow-up job after a time-limited run without knowing the timestamped run
+# dir at submission time. Only applies when no explicit run target was passed.
+if [[ "${ORBIT_WARS_RESUME_LATEST:-0}" == "1" && "${#RUN_ARGS[@]}" -eq 0 ]]; then
+    resume_run_dir=""
+    shopt -s nullglob
+    for candidate in "$OUTPUT_DIR"/*/; do
+        if [[ -z "$resume_run_dir" || "$candidate" -nt "$resume_run_dir" ]]; then
+            resume_run_dir="$candidate"
+        fi
+    done
+    shopt -u nullglob
+    if [[ -z "$resume_run_dir" ]]; then
+        echo "ORBIT_WARS_RESUME_LATEST=1 but no run directory found under $OUTPUT_DIR" >&2
+        exit 1
+    fi
+    RUN_ARGS=("${resume_run_dir%/}")
+    echo "ORBIT_WARS_RESUME_LATEST=1 resuming latest run directory: ${RUN_ARGS[0]}"
+fi
+
 if [[ "${#RUN_ARGS[@]}" -eq 0 ]]; then
     USE_DEFAULT_FRESH_LAUNCH=1
 elif [[ "${RUN_ARGS[0]}" == -* ]]; then
@@ -296,6 +316,13 @@ fi
 
 if [[ -n "$MAX_RUNTIME_HOURS" ]]; then
     train_cmd+=(--max-runtime-hours "$MAX_RUNTIME_HOURS")
+fi
+
+# Step-count stop that also applies to resume jobs (unlike a positional run_ppo
+# arg, which the ORBIT_WARS_RESUME_LATEST run-dir handling would displace). Lets
+# a chained set of time-limited jobs stop once the global env-step target is hit.
+if [[ -n "${ORBIT_WARS_MAX_ENV_STEPS:-}" ]]; then
+    train_cmd+=(--max-env-steps "$ORBIT_WARS_MAX_ENV_STEPS")
 fi
 
 if [[ "${#RUN_ARGS[@]}" -gt 0 ]]; then

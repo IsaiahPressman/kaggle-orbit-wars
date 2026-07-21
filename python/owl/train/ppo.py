@@ -45,7 +45,7 @@ from owl.rl import (
     PureActions,
     VectorizedEnv,
 )
-from owl.train.advantages import compile_compute_gae
+from owl.train.advantages import compile_compute_gae, compute_winner_lambda_targets
 from owl.train.distributed import (
     DistributedContext,
     all_gather_object,
@@ -92,6 +92,7 @@ CompileMode = Literal[
     "max-autotune-no-cudagraphs",
 ]
 PPOClipMode = Literal["per_player", "per_entity"]
+ValueLoss = Literal["mse", "winner_ce"]
 TeacherMode = Literal["last_best", "fixed"]
 _TeacherScheduleMode = Literal["none", "linear_decay"]
 
@@ -141,6 +142,10 @@ class PPOConfig(BaseConfig):
     clip_coef: float = Field(default=0.2, ge=0.0)
     vf_clip_coef: float | None = Field(default=0.2, gt=0.0)
     vf_coef: float = Field(default=0.5, ge=0.0)
+    # "mse": regression of the scalar value toward the GAE return. "winner_ce":
+    # categorical cross-entropy of the winner-probability critic toward the
+    # distributional GAE(lambda) winner target (requires win_only reward).
+    value_loss: ValueLoss = "mse"
     ent_coef: float = Field(default=0.01, ge=0.0)
     max_grad_norm: float = Field(default=0.5, gt=0.0)
     target_kl: float | None = Field(default=0.03, gt=0.0)
@@ -159,11 +164,26 @@ class PPOConfig(BaseConfig):
     model_compile: _ModelCompileTarget = "trunk"
     model_compile_mode: _ModelCompileMode = "max-autotune-no-cudagraphs"
     dtype: _TrainingDType = "float32"
+    # Time-limit truncation with critic bootstrapping. When truncation_prob > 0,
+    # each new game is independently selected for truncation with that
+    # probability; a selected game still alive at game-step truncation_step is
+    # reset, with the critic's value of the truncated state used as the GAE
+    # bootstrap (reward 0, no terminal). Currently stateless-model only.
+    truncation_step: int | None = Field(default=None, ge=1)
+    truncation_prob: float = Field(default=0.0, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def _validate_teacher_config(self) -> Self:
         if self.teacher_mode == "fixed" and self.teacher_init is None:
             raise ValueError("rl.teacher_init is required when rl.teacher_mode='fixed'")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_truncation_config(self) -> Self:
+        if self.truncation_prob > 0.0 and self.truncation_step is None:
+            raise ValueError(
+                "rl.truncation_step is required when rl.truncation_prob > 0"
+            )
         return self
 
 
@@ -209,6 +229,8 @@ class _PPORolloutSegments:
     values: torch.Tensor
     rewards: torch.Tensor
     dones: torch.Tensor
+    truncated: torch.Tensor | None = None
+    bootstrap_values: torch.Tensor | None = None
     entity_logp: torch.Tensor | None = None
     initial_hidden_state: ModelHiddenState | None = None
 
@@ -430,6 +452,16 @@ class _PPORolloutBuffer:
             dtype=torch.bool,
             device=device,
         )
+        self.truncated = torch.zeros(
+            (horizon, n_envs, OUTER_PLAYER_SLOTS),
+            dtype=torch.bool,
+            device=device,
+        )
+        self.bootstrap_values = torch.zeros(
+            (horizon, n_envs, OUTER_PLAYER_SLOTS),
+            dtype=torch.float32,
+            device=device,
+        )
         self.initial_hidden_state: ModelHiddenState | None = None
 
     def write_step(
@@ -443,6 +475,8 @@ class _PPORolloutBuffer:
         values: torch.Tensor,
         rewards: torch.Tensor,
         dones: torch.Tensor,
+        truncated: torch.Tensor | None = None,
+        bootstrap_values: torch.Tensor | None = None,
     ) -> None:
         if not 0 <= step < self.horizon:
             raise ValueError(f"step must be in 0..{self.horizon - 1}, got {step}")
@@ -456,6 +490,14 @@ class _PPORolloutBuffer:
         self.values[step].copy_(values)
         self.rewards[step].copy_(rewards)
         self.dones[step].copy_(dones)
+        if truncated is None:
+            self.truncated[step].zero_()
+        else:
+            self.truncated[step].copy_(truncated)
+        if bootstrap_values is None:
+            self.bootstrap_values[step].zero_()
+        else:
+            self.bootstrap_values[step].copy_(bootstrap_values)
 
     def segment_major(self) -> _PPORolloutSegments:
         """Return contiguous segment-major/time-second rollout tensors [N, T, ...]."""
@@ -467,6 +509,8 @@ class _PPORolloutBuffer:
             values=self.values.transpose(0, 1).contiguous(),
             rewards=self.rewards.transpose(0, 1).contiguous(),
             dones=self.dones.transpose(0, 1).contiguous(),
+            truncated=self.truncated.transpose(0, 1).contiguous(),
+            bootstrap_values=self.bootstrap_values.transpose(0, 1).contiguous(),
             initial_hidden_state=self.initial_hidden_state,
         )
 
@@ -520,6 +564,29 @@ class PPOTrainer:
             non_blocking=self._non_blocking_env_to_device,
         )
         self._hidden_state = model.initial_hidden_state(env.n_envs, device=device)
+        self._truncation_enabled = (
+            config.truncation_prob > 0.0 and config.truncation_step is not None
+        )
+        if self._truncation_enabled and self._hidden_state is not None:
+            raise NotImplementedError(
+                "rl.truncation is currently only supported for stateless models"
+            )
+        # Per-env game-step counter for the observation currently in self._obs
+        # (0 right after a reset), and whether each in-progress game was selected
+        # for truncation. Both persist across rollout segments since a game can
+        # span multiple horizons. Allocated on the training device only when
+        # truncation is enabled; left as empty placeholders otherwise so a
+        # CUDA-device trainer without truncation does not touch the GPU here.
+        if self._truncation_enabled:
+            self._env_step_count = torch.zeros(
+                env.n_envs, dtype=torch.long, device=device
+            )
+            self._is_truncation_game = (
+                torch.rand(env.n_envs, device=device) < config.truncation_prob
+            )
+        else:
+            self._env_step_count = torch.zeros(0, dtype=torch.long)
+            self._is_truncation_game = torch.zeros(0, dtype=torch.bool)
         self.teacher_model: BaseModelAPI | None = None
         self.teacher_active = False
         self.rollout = _PPORolloutBuffer(
@@ -626,7 +693,10 @@ class PPOTrainer:
             last_values=last_values,
             gamma=self.config.gamma,
             gae_lambda=self.config.gae_lambda,
+            truncated=segments.truncated,
+            bootstrap_values=segments.bootstrap_values,
         )
+        winner_targets = self._compute_winner_targets(segments, last_values)
         update_start = perf_counter()
         metrics, sampled_segments = self._update(
             segments,
@@ -635,6 +705,7 @@ class PPOTrainer:
             policy_mask,
             value_mask,
             teacher_targets,
+            winner_targets,
         )
         update_elapsed = max(perf_counter() - update_start, 1e-12)
         player_returns, player_return_mask = _player_segment_returns(
@@ -813,6 +884,12 @@ class PPOTrainer:
                     self.device,
                     non_blocking=self._non_blocking_env_to_device,
                 )
+                truncated: torch.Tensor | None = None
+                bootstrap_values: torch.Tensor | None = None
+                if self._truncation_enabled:
+                    truncated, bootstrap_values = self._apply_truncation(
+                        next_obs, rewards, dones
+                    )
                 self.rollout.write_step(
                     step,
                     obs=self._obs,
@@ -822,6 +899,8 @@ class PPOTrainer:
                     values=_output_values(output),
                     rewards=rewards,
                     dones=dones,
+                    truncated=truncated,
+                    bootstrap_values=bootstrap_values,
                 )
                 self._hidden_state = self.model.reset_hidden_state(
                     self._hidden_state,
@@ -840,6 +919,76 @@ class PPOTrainer:
                 )
             self._last_env_metrics = env_metrics
             return last_values.detach()
+
+    def _resample_truncation_games(self, env_mask: torch.Tensor) -> None:
+        """Redraw the per-game truncation flag for envs that started a new game."""
+        if not bool(env_mask.any()):
+            return
+        draws = (
+            torch.rand(self.n_envs, device=self.device) < self.config.truncation_prob
+        )
+        self._is_truncation_game = torch.where(
+            env_mask, draws, self._is_truncation_game
+        )
+
+    def _apply_truncation(
+        self,
+        next_obs: ObsBatch,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Time-limit truncation with critic bootstrapping.
+
+        Advances per-env step counters, redraws truncation flags for naturally
+        reset games, then for each selected game that just reached
+        ``truncation_step`` (and did not naturally terminate): evaluates the
+        critic on the truncated state to use as the GAE bootstrap, zeros the
+        reward, marks ``dones`` so the trajectory is cut and the env is reset.
+        ``rewards`` and ``dones`` are modified in place. Returns per-step
+        ``truncated`` flags and ``bootstrap_values`` for the rollout buffer.
+        """
+        truncation_step = self.config.truncation_step
+        assert truncation_step is not None  # guaranteed by _truncation_enabled
+        env_done = dones.all(dim=1)
+        self._env_step_count += 1
+        self._env_step_count[env_done] = 0
+        self._resample_truncation_games(env_done)
+
+        trunc_mask = (
+            (self._env_step_count >= truncation_step)
+            & self._is_truncation_game
+            & ~env_done
+        )
+        truncated = torch.zeros(
+            (self.n_envs, OUTER_PLAYER_SLOTS), dtype=torch.bool, device=self.device
+        )
+        bootstrap_values = torch.zeros(
+            (self.n_envs, OUTER_PLAYER_SLOTS),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        if bool(trunc_mask.any()):
+            idx = trunc_mask.nonzero(as_tuple=False).flatten()
+            # next_obs lives on the env (host) device; index there, then move the
+            # small truncated subset to the model device for the value forward.
+            # This must happen before truncate_envs overwrites those obs rows.
+            trunc_obs = _obs_to_device(
+                _obs_index(next_obs, idx.to(device="cpu")),
+                self.device,
+                non_blocking=self._non_blocking_env_to_device,
+            )
+            with _autocast_context(self.config, self.device):
+                boot = _model_compute_value(self.model, trunc_obs, hidden_state=None)
+            bootstrap_values[idx] = boot.to(bootstrap_values.dtype)
+            truncated[idx] = True
+            rewards[idx] = 0.0
+            dones[idx] = True
+            # VectorizedEnv.truncate_envs requires a CPU bool mask (it refuses to
+            # silently sync a device tensor to host).
+            self.env.truncate_envs(trunc_mask.to(device="cpu"))
+            self._env_step_count[idx] = 0
+            self._resample_truncation_games(trunc_mask)
+        return truncated, bootstrap_values
 
     def _precompute_teacher_targets(
         self,
@@ -884,6 +1033,38 @@ class PPOTrainer:
                 )
         return concat_teacher_distillation_targets(chunks)
 
+    def _compute_winner_targets(
+        self,
+        segments: _PPORolloutSegments,
+        last_values: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if self.config.value_loss != "winner_ce":
+            return None
+        truncated = (
+            segments.truncated
+            if segments.truncated is not None
+            else torch.zeros_like(segments.dones)
+        )
+        bootstrap_values = (
+            segments.bootstrap_values
+            if segments.bootstrap_values is not None
+            else torch.zeros_like(segments.values)
+        )
+        # value_mode='win_only' makes segments.values the per-step winner
+        # distribution and segments.rewards the terminal winner distribution, so
+        # the distributional GAE(lambda) target reuses the rollout tensors. The
+        # masks are whole-game (a single joint distribution per state) rather than
+        # per-player like the scalar advantage GAE.
+        return compute_winner_lambda_targets(
+            winner_probabilities=segments.values,
+            terminal_winner=segments.rewards,
+            game_done=segments.dones.all(dim=-1),
+            game_truncated=truncated.any(dim=-1),
+            last_winner_probabilities=last_values,
+            bootstrap_winner_probabilities=bootstrap_values,
+            gae_lambda=self.config.gae_lambda,
+        )
+
     def _update(
         self,
         segments: _PPORolloutSegments,
@@ -892,6 +1073,7 @@ class PPOTrainer:
         policy_mask: torch.Tensor,
         value_mask: torch.Tensor,
         teacher_targets: CachedTeacherDistillationTargets | None,
+        winner_targets: torch.Tensor | None,
     ) -> tuple[dict[str, float], int]:
         loss_metrics: list[_PPOLossMetrics] = []
         grad_norms: list[torch.Tensor] = []
@@ -919,6 +1101,7 @@ class PPOTrainer:
                     value_mask,
                     sample_indices,
                     teacher_targets=teacher_targets,
+                    winner_targets=winner_targets,
                     value_clip_anchor=current_values,
                     loss_scale=1.0 / accumulation_steps,
                     step_optimizer=False,
@@ -972,6 +1155,7 @@ class PPOTrainer:
         indices: torch.Tensor,
         *,
         teacher_targets: CachedTeacherDistillationTargets | None = None,
+        winner_targets: torch.Tensor | None = None,
         value_clip_anchor: torch.Tensor,
         loss_scale: float = 1.0,
         step_optimizer: bool = True,
@@ -1072,6 +1256,11 @@ class PPOTrainer:
         )
         entropy_components = _output_entropy_components(output, segments.logp[idx])
         new_values = _output_values(output).view_as(batch_old_values)
+        winner_log_probabilities = output.winner_log_probabilities
+        if winner_log_probabilities is not None:
+            winner_log_probabilities = winner_log_probabilities.view_as(
+                batch_old_values
+            )
         if teacher_model is None:
             teacher_kl = torch.zeros_like(batch_policy_weight)
             teacher_kl_components: dict[str, torch.Tensor] = {}
@@ -1127,6 +1316,17 @@ class PPOTrainer:
             loss_kwargs["teacher_value_loss_values"] = teacher_value_loss_values
         if batch_entity_policy_weight is not None:
             loss_kwargs["entity_policy_weight"] = batch_entity_policy_weight
+        if self.config.value_loss == "winner_ce":
+            if winner_targets is None:
+                raise RuntimeError(
+                    "winner_ce value loss requires precomputed winner targets"
+                )
+            if winner_log_probabilities is None:
+                raise RuntimeError(
+                    "winner_ce value loss requires winner log-probabilities"
+                )
+            loss_kwargs["winner_targets"] = winner_targets[idx]
+            loss_kwargs["winner_log_probabilities"] = winner_log_probabilities
         metrics, backward_loss = self._ppo_loss(**loss_kwargs)
         metrics = replace(
             metrics,
@@ -1309,6 +1509,8 @@ def _compile_ppo_loss(
         teacher_value_loss_values: torch.Tensor | None = None,
         context: DistributedContext | None = None,
         entity_policy_weight: torch.Tensor | None = None,
+        winner_targets: torch.Tensor | None = None,
+        winner_log_probabilities: torch.Tensor | None = None,
     ) -> tuple[_PPOLossMetrics, torch.Tensor]:
         return _ppo_loss(
             new_logp=new_logp,
@@ -1328,6 +1530,8 @@ def _compile_ppo_loss(
             context=context,
             loss_components=compiled_loss_components,
             entity_policy_weight=entity_policy_weight,
+            winner_targets=winner_targets,
+            winner_log_probabilities=winner_log_probabilities,
         )
 
     return compiled_ppo_loss
@@ -1352,6 +1556,8 @@ def _ppo_loss(
     context: DistributedContext | None = None,
     loss_components: Callable[..., tuple[torch.Tensor, ...]] | None = None,
     entity_policy_weight: torch.Tensor | None = None,
+    winner_targets: torch.Tensor | None = None,
+    winner_log_probabilities: torch.Tensor | None = None,
 ) -> tuple[_PPOLossMetrics, torch.Tensor]:
     if loss_components is None:
         loss_components = _ppo_loss_components
@@ -1363,22 +1569,32 @@ def _ppo_loss(
         teacher_kl_coef = config.teacher_kl_coef
     if teacher_value_coef is None:
         teacher_value_coef = config.teacher_value_coef
+    components = loss_components(
+        new_logp,
+        entropy,
+        new_values,
+        old_logp,
+        old_values,
+        returns,
+        advantages,
+        config.clip_coef,
+        config.vf_clip_coef,
+        config.ppo_clip_mode,
+        entity_policy_weight,
+        winner_targets,
+        winner_log_probabilities,
+    )
+    value_loss_weight = value_weight
+    if winner_targets is not None:
+        value_loss_weight = _value_state_weight(
+            value_weight,
+            dtype=components[1].dtype,
+        )
     return _ppo_loss_metrics_from_components(
-        loss_components(
-            new_logp,
-            entropy,
-            new_values,
-            old_logp,
-            old_values,
-            returns,
-            advantages,
-            config.clip_coef,
-            config.vf_clip_coef,
-            config.ppo_clip_mode,
-            entity_policy_weight,
-        ),
+        components,
         policy_weight=policy_weight,
         value_weight=value_weight,
+        value_loss_weight=value_loss_weight,
         teacher_kl_values=teacher_kl,
         teacher_value_loss_values=teacher_value_loss_values,
         teacher_kl_coef=teacher_kl_coef,
@@ -1394,6 +1610,7 @@ def _ppo_loss_metrics_from_components(
     *,
     policy_weight: torch.Tensor,
     value_weight: torch.Tensor,
+    value_loss_weight: torch.Tensor,
     teacher_kl_values: torch.Tensor,
     teacher_value_loss_values: torch.Tensor,
     teacher_kl_coef: float,
@@ -1411,6 +1628,11 @@ def _ppo_loss_metrics_from_components(
         ratio,
         logratio,
     ) = components
+    if value_loss_values.shape != value_loss_weight.shape:
+        raise ValueError(
+            "value loss values must have shape "
+            f"{tuple(value_loss_weight.shape)}, got {tuple(value_loss_values.shape)}"
+        )
     if context is None or not context.initialized:
         return _local_ppo_loss_metrics(
             policy_loss_values,
@@ -1422,6 +1644,7 @@ def _ppo_loss_metrics_from_components(
             logratio,
             policy_weight=policy_weight,
             value_weight=value_weight,
+            value_loss_weight=value_loss_weight,
             teacher_kl_values=teacher_kl_values,
             teacher_value_loss_values=teacher_value_loss_values,
             teacher_kl_coef=teacher_kl_coef,
@@ -1439,6 +1662,7 @@ def _ppo_loss_metrics_from_components(
         logratio,
         policy_weight=policy_weight,
         value_weight=value_weight,
+        value_loss_weight=value_loss_weight,
         teacher_kl_values=teacher_kl_values,
         teacher_value_loss_values=teacher_value_loss_values,
         teacher_kl_coef=teacher_kl_coef,
@@ -1460,6 +1684,7 @@ def _local_ppo_loss_metrics(
     *,
     policy_weight: torch.Tensor,
     value_weight: torch.Tensor,
+    value_loss_weight: torch.Tensor,
     teacher_kl_values: torch.Tensor,
     teacher_value_loss_values: torch.Tensor,
     teacher_kl_coef: float,
@@ -1468,7 +1693,7 @@ def _local_ppo_loss_metrics(
     ent_coef: float,
 ) -> tuple[_PPOLossMetrics, torch.Tensor]:
     policy_loss = weighted_mean(policy_loss_values, policy_weight)
-    value_loss = weighted_mean(value_loss_values, value_weight)
+    value_loss = weighted_mean(value_loss_values, value_loss_weight)
     entropy_mean = weighted_mean(entropy_values, policy_weight)
     teacher_kl = weighted_mean(teacher_kl_values, policy_weight)
     teacher_value_cross_entropy = _teacher_value_weighted_mean(
@@ -1518,6 +1743,7 @@ def _distributed_ppo_loss_metrics(
     *,
     policy_weight: torch.Tensor,
     value_weight: torch.Tensor,
+    value_loss_weight: torch.Tensor,
     teacher_kl_values: torch.Tensor,
     teacher_value_loss_values: torch.Tensor,
     teacher_kl_coef: float,
@@ -1526,7 +1752,7 @@ def _distributed_ppo_loss_metrics(
     ent_coef: float,
     context: DistributedContext,
 ) -> tuple[_PPOLossMetrics, torch.Tensor]:
-    teacher_value_weight = _teacher_value_state_weight(
+    teacher_value_weight = _value_state_weight(
         value_weight,
         dtype=teacher_value_loss_values.dtype,
     )
@@ -1537,13 +1763,13 @@ def _distributed_ppo_loss_metrics(
             f"got {tuple(teacher_value_loss_values.shape)}"
         )
     policy_denominator_local = policy_weight.sum().to(dtype=policy_loss_values.dtype)
-    value_denominator_local = value_weight.sum().to(dtype=value_loss_values.dtype)
+    value_denominator_local = value_loss_weight.sum().to(dtype=value_loss_values.dtype)
     teacher_value_denominator_local = teacher_value_weight.sum()
     reduced_sums = all_reduce_sum(
         torch.stack(
             [
                 (policy_loss_values.detach() * policy_weight).sum(),
-                (value_loss_values.detach() * value_weight).sum(),
+                (value_loss_values.detach() * value_loss_weight).sum(),
                 (entropy_values.detach() * policy_weight).sum(),
                 (teacher_kl_values.detach() * policy_weight).sum(),
                 (teacher_value_loss_values.detach() * teacher_value_weight).sum(),
@@ -1594,7 +1820,7 @@ def _distributed_ppo_loss_metrics(
         / policy_denominator
     )
     backward_value_loss = (
-        (value_loss_values * value_weight).sum()
+        (value_loss_values * value_loss_weight).sum()
         * context.world_size
         / value_denominator
     )
@@ -1653,6 +1879,8 @@ def _ppo_loss_components(
     vf_clip_coef: float | None,
     ppo_clip_mode: PPOClipMode,
     entity_policy_weight: torch.Tensor | None,
+    winner_targets: torch.Tensor | None = None,
+    winner_log_probabilities: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ...]:
     if ppo_clip_mode == "per_entity":
         if entity_policy_weight is None:
@@ -1686,7 +1914,16 @@ def _ppo_loss_components(
     if entity_weight is not None:
         entropy = _sum_masked_entities(entropy, entity_weight)
 
-    if vf_clip_coef:
+    if winner_targets is not None:
+        if winner_log_probabilities is None:
+            raise ValueError(
+                "winner_log_probabilities are required with winner_targets"
+            )
+        # Categorical cross-entropy toward the distributional winner target.
+        # The critic computes these log-probabilities directly with masked
+        # log_softmax, preserving gradients even for extremely unlikely targets.
+        value_loss_values = (-winner_targets * winner_log_probabilities).sum(dim=-1)
+    elif vf_clip_coef:
         value_clipped = old_values + torch.clamp(
             new_values - old_values,
             -vf_clip_coef,
@@ -2687,7 +2924,7 @@ def _teacher_value_weighted_mean(
     values: torch.Tensor,
     value_weight: torch.Tensor,
 ) -> torch.Tensor:
-    state_weight = _teacher_value_state_weight(value_weight, dtype=values.dtype)
+    state_weight = _value_state_weight(value_weight, dtype=values.dtype)
     if values.shape != state_weight.shape:
         raise ValueError(
             "teacher value loss values must have shape "
@@ -2736,7 +2973,7 @@ def _distributed_teacher_value_weighted_mean(
     value_weight: torch.Tensor,
     context: DistributedContext,
 ) -> torch.Tensor:
-    state_weight = _teacher_value_state_weight(value_weight, dtype=values.dtype)
+    state_weight = _value_state_weight(value_weight, dtype=values.dtype)
     if values.shape != state_weight.shape:
         raise ValueError(
             "teacher value loss values must have shape "
@@ -2760,7 +2997,7 @@ def _distributed_backward_teacher_value_weighted_mean(
     value_weight: torch.Tensor,
     context: DistributedContext,
 ) -> torch.Tensor:
-    state_weight = _teacher_value_state_weight(value_weight, dtype=values.dtype)
+    state_weight = _value_state_weight(value_weight, dtype=values.dtype)
     if values.shape != state_weight.shape:
         raise ValueError(
             "teacher value loss values must have shape "
@@ -2769,7 +3006,7 @@ def _distributed_backward_teacher_value_weighted_mean(
     return _distributed_backward_weighted_mean(values, state_weight, context)
 
 
-def _teacher_value_state_weight(
+def _value_state_weight(
     value_weight: torch.Tensor,
     *,
     dtype: torch.dtype,

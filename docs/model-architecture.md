@@ -38,6 +38,8 @@ configs may contain either architecture.
 | `activation` | `"gelu"` | FFN activation: `"gelu"`, `"silu"`, or `"swiglu"`. |
 | `force_flash_attn` | `False` | Require packed varlen flash-attn; raise an error instead of falling back when tensors are not flash-compatible. |
 | `use_learned_pairwise_bias` | `False` | Enable an auxiliary source-target feature MLP for discrete target selection. Only valid with `"discrete_targets"` and `"discrete_target_bins"` actors. |
+| `critic_mode` | `"softmax"` | `"softmax"`: winner-probability critic (`value = 2*p - 1`). `"independent"`: per-player sigmoid value in `[0, 1]` for non-zero-sum rewards (e.g. ship-ratio); requires `rl.teacher_value_coef=0`. |
+| `value_mode` | `"win_loss"` | For the softmax critic, `"win_loss"` maps winner probability to `[-1, 1]`; `"win_only"` returns raw probability in `[0, 1]`. `win_only` is required with `env.reward_mode="win_only"`; all other reward modes require `win_loss`. |
 | `n_scratch_tokens` | `4` | Learned shared scratch tokens appended to the trunk sequence. |
 | `actor` | `{"action_spec": "pure"}` | Discriminated actor-head config. Supported actor specs are `"pure"`, `"discrete_targets"`, and `"discrete_target_bins"`. |
 | `lora` | `null` | Optional LoRA fine-tuning config used by `scripts/run_ppo.py` for stateless transformer models. |
@@ -254,6 +256,7 @@ wraps the selected linear projections with low-rank adapters, and optimizes only
 the LoRA parameters. By default only transformer-block projections are wrapped;
 `target_value_head` / `target_policy_head` extend adaptation to the critic and
 actor heads. Recurrent models reject `lora` fields.
+LoRA fine-tuning also rejects models with player-count adapters enabled.
 
 `LoRAConfig` fields:
 
@@ -356,9 +359,11 @@ recurrent tokens do not scatter back and their recurrent state is zeroed.
 
 ## Initialization
 
-Models expose `reset_parameters()` through `BaseModelAPI`. Fresh training calls
-this method explicitly before optimizer construction; checkpoint-loading paths
-construct the module and load saved weights without resetting first.
+Models expose `reset_parameters()` through `BaseModelAPI`. Fresh training,
+including fresh launches using `--load-model-weights`, calls this method
+explicitly before optimizer construction; the checkpoint then overwrites model
+weights. Resume and evaluation checkpoint-loading paths construct the module and
+load saved weights without resetting first.
 
 Linear layers use orthogonal initialization with zero biases. Only the first
 linear layer in each observation stem is treated as an input projection and
@@ -397,6 +402,27 @@ This gives `0 -> -1`, `0.5 -> 0`, and `1 -> 1`.
 For `win_only` training, set `value_mode: win_only`; the critic skips this
 linear remapping and returns the raw winner probabilities in `[0, 1]`.
 
+The critic's value loss is selected by `rl.value_loss`. The default `"mse"`
+regresses the scalar value toward the GAE return. `"winner_ce"` instead trains
+the winner-probability softmax as a classifier: categorical cross-entropy toward
+a distributional GAE(lambda) winner target (`advantages.compute_winner_lambda_targets`,
+which carries the same lambda-return recursion on the per-player winner
+distribution, bottoming out at the terminal winner distribution and bootstrapping
+the critic's distribution on time-limit truncation). It requires the `win_only`
+reward (hence `value_mode='win_only'`), `critic_mode='softmax'`, `gamma=1.0`, and
+`vf_clip_coef=null` (value clipping has no cross-entropy analogue).
+`evaluate_actions` returns the critic's masked-`log_softmax` winner
+log-probabilities so this loss does not need to take the logarithm of rounded or
+underflowed probabilities.
+
+With `critic_mode="independent"`, the same per-player logits are instead passed
+through a sigmoid and masked to `0` for inactive slots, giving an independent
+per-player value in `[0, 1]` with no cross-player normalization. This represents
+non-zero-sum returns such as the ship-ratio reward, which the winner-probability
+softmax cannot. The winner-probability value distillation
+(`_critic_distillation`) is softmax-only, so independent mode requires
+`rl.teacher_value_coef=0`; teacher action-KL distillation is unaffected.
+
 `still_playing` is explicit in `ObsBatch`. It should not be inferred from
 `can_act`, since a player can be alive without having a launchable entity on a
 specific turn.
@@ -414,16 +440,17 @@ For regular training and vector-env evaluation this is the fixed 44-slot API
 layout. For compacted Kaggle serving, the same actor heads operate on a smaller
 runtime slot count while preserving the compact planet-then-comet order.
 
-Both actor heads start from the same shared transformer trunk. For each
+All actor heads start from the same shared transformer trunk. For each
 `(batch, player, action_entity)` position, the actor combines:
 
 - source entity hidden state
 - player hidden token
-- the actor plan token for that player, for the discrete-target actor
+- the actor plan token for that player
 
 The final action head is selected by `config.actor.action_spec`. The concrete
 heads live under `python/owl/model/actor/`: `PureActor` for raw angles and
-`DiscreteTargetsActor` for target slots.
+`DiscreteTargetsActor` for target slots, and `DiscreteTargetBinsActor` for
+target-plus-fleet-bin actions.
 With per-player-count adapters enabled, the selected branch owns these actor
 input projections and action heads for its rows.
 

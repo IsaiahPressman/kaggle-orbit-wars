@@ -134,7 +134,9 @@ planet rows have `158` channels and fleet rows have `129` channels by default.
 
 ### Planet Tensor
 
-Shape per env: `(MAX_PLANETS, 107)`.
+Shape per env: `(MAX_PLANETS, 108 + N)`, where `N` is
+`ship_count_one_hot_max`. The default `N=50` gives a width of `158`; the base
+`EntityBased` width before the ExtV1 appendix is `107`.
 
 Only non-comet planets are included. If more than `MAX_PLANETS` non-comet
 planets exist, the encoder panics. Generated games currently produce up to
@@ -178,7 +180,9 @@ row is orbiting, else `False`. Inactive rows are `False`.
 
 ### Fleet Tensor
 
-Shape per env: `(max_fleets, 79)`.
+Shape per env: `(max_fleets, 79 + N)`, where `N` is
+`ship_count_one_hot_max`. The default `N=50` gives a width of `129`; the base
+`EntityBased` width before the ExtV1 appendix is `79`.
 
 The low-level `encode_entity_based` Rust API filters fleets smaller than its
 fleet-filter threshold before writing fleet rows. The default threshold is
@@ -237,7 +241,7 @@ This matches the comet portion of the action entity axis.
 | `6` | normalized log ships |
 | `7..27` | neutral comet ship-count basis, else `0` |
 | `27..51` | player-owned comet ship-count basis, else `0` |
-| `51` | remaining path steps divided by `MAX_COMET_PATH_LENGTH` |
+| `51` | remaining stored path points, including the current point, divided by `MAX_COMET_PATH_LENGTH` |
 | `52` | current normalized `x` from the path |
 | `53` | current normalized `y` from the path |
 | `54..96` | current Cartesian Fourier, polar, angular-harmonic, and radial Fourier spatial features |
@@ -292,7 +296,8 @@ The spec adds:
 | `global_features` | `float32` | `(n_envs, 17)` |
 | `player_features` | `float32` | `(n_envs, 4, 14)` |
 
-For non-v2 specs, `ObsBatch.player_features` is `None`.
+For `entity_based` and `entity_based_ext_v1`, `ObsBatch.player_features` is
+`None`. `EntityBasedExtV2` and `EntityBasedCrossAttnV1` provide player features.
 
 V2 appends fourteen channels after the three base global channels. The
 neutral features are for planets that are still neutral in the current
@@ -742,6 +747,10 @@ that sub-env did not terminate on that step. Terminal snapshots are captured
 after the terminal transition and before the vectorized env auto-resets the
 sub-env.
 
+`VectorizedEnv.terminal_metrics(env_index)` returns scalar metrics for that
+sub-env's most recent terminal transition, or `None` if it did not terminate on
+the latest step. Reset and manual truncation clear the saved terminal metrics.
+
 Snapshots are intended for replay rendering and debugging, not model input. They
 include raw board-space values: board constants, step/config fields, player
 count, owner IDs remapped into outer player slots, the internal/outer player map,
@@ -794,9 +803,12 @@ capture any needed bootstrap inputs before calling it.
 ## Episode Metrics
 
 `episode_metrics` is a `dict[str, list[float]]` populated only for sub-envs that
-terminated during this step. Empty steps return `{}`. Each list contains one
-value per terminal episode for that metric, so Python training can aggregate
-across the rollout before logging W&B scalars under `train/`.
+terminated during this step. Empty steps return `{}`. Most entries append one
+value for each terminal episode to which the metric applies. Player-slot
+win-rate keys omit episodes where that outer slot is inactive, and
+launch-conditioned means omit launchless episodes. Loss-rate and neutral-
+undershot-rate keys are singleton aggregate ratios over all terminal episodes
+returned by the step.
 
 Terminal episode metrics:
 
@@ -816,14 +828,15 @@ Terminal episode metrics:
 | `neutral_planet_undershot_rate` | Neutral non-comet planet capture undershots divided by successful neutral non-comet planet captures plus those undershots. An undershot is a neutral arrival whose surviving incoming ships are less than or equal to the neutral planet ship count. Omitted when no neutral non-comet planet capture or undershot occurred. |
 | `neutral_comet_undershot_rate` | Neutral comet capture undershots divided by successful neutral comet captures plus those undershots. An undershot is a neutral arrival whose surviving incoming ships are less than or equal to the neutral comet ship count. Omitted when no neutral comet capture or undershot occurred. |
 | `launch_failures_per_game` | Submitted discrete-target launches skipped because no valid selected ray exists, including static targets with no sun-avoiding ray and dynamic targets with no intercept, no allowed fallback, or out-of-bounds impact points. Python training logs this as `train/launch_failures_per_game`. |
+| `launches_per_game` | Total successfully decoded and executed launches in the terminal episode. |
 | `launches_per_turn` | Mean launches per player per turn. |
 | `fleet_size_max` | Largest fleet launched during the episode. |
 | `fleet_size_min` | Smallest fleet launched during the episode, or `0.0` when no fleets launched. |
 | `fleet_size_std` | Population standard deviation of launched fleet sizes during the episode. |
 | `win_rate_player_0`..`win_rate_player_3` | `1.0` for a winning model-visible outer player slot, `0.0` otherwise; inactive outer slots have no value in 2-player games. |
 | `launches_per_planet_mean` | Per-game mean launches per occupied non-comet planet per turn. |
-| `launches_per_launch_mean` | Mean launches from a planet on planet-turns where that planet launched at least once. |
-| `ships_per_launch_mean` | Mean submitted ship count per launch action. |
+| `launches_per_launch_mean` | Mean launches from a planet on planet-turns where that planet launched at least once; omitted when no launches execute. |
+| `ships_per_launch_mean` | Mean ship count across successfully decoded and executed launches; omitted when none execute. |
 | `ships_lost_in_combat_per_game` | Ships destroyed during fleet-vs-fleet and fleet-vs-planet combat resolution. |
 | `ships_lost_per_game_mean` | Ships removed by combat, sun, or out-of-bounds fleet loss. |
 | `ships_lost_in_sun_per_game_mean` | Ships removed by sun fleet loss. |

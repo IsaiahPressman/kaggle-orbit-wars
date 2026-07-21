@@ -55,14 +55,15 @@ The generated fixture currently covers:
 
 - planet generation from seed `42`
 - current Python-reference random static and fill phases, including the
-  reference fourfold symmetry ordering and inclusive `uniform(a, b)` endpoint
-  behavior for degenerate equal bounds
+  reference fourfold symmetry ordering
 - full reset for 2-player and 4-player games, including angular velocity,
   planet generation, initial planets, and current random-group home assignment
 - comet paths at spawn steps `50`, `150`, `250`, `350`, and `450`
 - comet path generation with existing comet ids excluded
 - comet path generation where failed attempts occur before success
 - comet ship sampling
+- step-limit no-op terminal tie status/reward mapping, where all tied players
+  win
 
 ## Covered By Unit Tests
 
@@ -70,6 +71,8 @@ Rust unit tests cover focused rules behavior that is hard to isolate from full
 replays:
 
 - geometry helpers
+- Python-compatible inclusive `RandomSource::uniform` behavior, including equal
+  bounds
 - RL discrete-target launch-angle selection for static target cones, dynamic
   target-hit windows, sun avoidance, static and dynamic blocker arc
   subtraction, strict static arc caching, full-mask masking for fully blocked
@@ -87,6 +90,13 @@ replays:
 - comet movement and expiry
 - comet planet/path alignment when only part of a comet group expires
 - terminal score ties where all tied players win
+- invalid owner and planet-ID invariant rejection
+- immediate nonterminal elimination and result cardinality matching the actual
+  player count
+- replay accepted-action filtering with exact planet-ID matching and no numeric
+  ID truncation
+- replay skip-spawn injection that keeps step parity isolated from RNG-backed
+  comet generation
 
 ## Known Boundaries
 
@@ -102,8 +112,9 @@ harness mirrors Python's accepted-action filtering only to turn historical
 Kaggle replay actions into typed Rust actions.
 
 Floating-point parity uses close comparisons rather than bit-for-bit equality.
-Discrete ids, owners, ship counts, production, removals, and player statuses
-must match exactly.
+Discrete ids, owners, ship counts, production, and removals match exactly. Final
+terminal statuses match exactly; on nonterminal rows the harness permits Rust's
+intentional early `Lost` status while requiring the game remain nonterminal.
 
 The Rust state stores planets and initial planets in ID-indexed slots. Parity
 comparison iterates live slots in ID order, which matches generated and fixture

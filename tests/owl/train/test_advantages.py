@@ -1,7 +1,7 @@
 import owl.train.advantages as advantages_module
 import pytest
 import torch
-from owl.train.advantages import compute_gae
+from owl.train.advantages import compute_gae, compute_winner_lambda_targets
 
 
 def test_compute_gae_matches_recurrence() -> None:
@@ -16,6 +16,45 @@ def test_compute_gae_matches_recurrence() -> None:
 
     assert torch.allclose(advantages, torch.tensor([[1.7834, 1.47, 1.0]]))
     assert torch.allclose(returns, advantages + torch.tensor([[0.5, 0.25, 0.0]]))
+
+
+def test_compute_gae_truncation_bootstraps_from_critic_value() -> None:
+    # Game truncated at t=1 (done set, no reward), bootstrapping from value 0.7;
+    # t=2 is a fresh game bootstrapped from last_values. gamma=lambda=1.
+    _advantages, returns = compute_gae(
+        values=torch.tensor([[0.2, 0.4, 0.6]]),
+        rewards=torch.tensor([[0.0, 0.0, 0.0]]),
+        dones=torch.tensor([[False, True, False]]),
+        last_values=torch.tensor([0.9]),
+        gamma=1.0,
+        gae_lambda=1.0,
+        truncated=torch.tensor([[False, True, False]]),
+        bootstrap_values=torch.tensor([[0.0, 0.7, 0.0]]),
+    )
+    assert torch.allclose(returns, torch.tensor([[0.7, 0.7, 0.9]]))
+
+
+def test_compute_gae_zero_truncation_matches_plain_gae() -> None:
+    advantages_plain, returns_plain = compute_gae(
+        values=torch.tensor([[0.5, 0.25, 0.0]]),
+        rewards=torch.tensor([[1.0, 1.0, 1.0]]),
+        dones=torch.tensor([[False, False, True]]),
+        last_values=torch.tensor([10.0]),
+        gamma=0.9,
+        gae_lambda=0.8,
+    )
+    advantages_explicit, returns_explicit = compute_gae(
+        values=torch.tensor([[0.5, 0.25, 0.0]]),
+        rewards=torch.tensor([[1.0, 1.0, 1.0]]),
+        dones=torch.tensor([[False, False, True]]),
+        last_values=torch.tensor([10.0]),
+        gamma=0.9,
+        gae_lambda=0.8,
+        truncated=torch.zeros(1, 3, dtype=torch.bool),
+        bootstrap_values=torch.zeros(1, 3),
+    )
+    assert torch.equal(advantages_plain, advantages_explicit)
+    assert torch.equal(returns_plain, returns_explicit)
 
 
 def test_compute_gae_uses_bootstrap_value() -> None:
@@ -130,3 +169,78 @@ def test_compiled_compute_gae_matches_uncompiled_result(
     assert calls == ["_compute_gae_tensors"]
     assert torch.equal(advantages, torch.tensor([[16.0, 15.0, 13.0]]))
     assert torch.equal(returns, torch.tensor([[16.0, 15.0, 13.0]]))
+
+
+def _winner_targets_kwargs() -> dict[str, torch.Tensor]:
+    return {
+        "winner_probabilities": torch.tensor([[[0.3, 0.7], [0.6, 0.4], [0.5, 0.5]]]),
+        "terminal_winner": torch.tensor([[[0.0, 0.0], [0.0, 0.0], [1.0, 0.0]]]),
+        "game_done": torch.tensor([[False, False, True]]),
+        "game_truncated": torch.zeros(1, 3, dtype=torch.bool),
+        "last_winner_probabilities": torch.tensor([[0.5, 0.5]]),
+        "bootstrap_winner_probabilities": torch.zeros(1, 3, 2),
+    }
+
+
+def test_winner_lambda_targets_match_per_player_scalar_gae() -> None:
+    # value_mode="win_only" makes the critic value equal p, so the distributional
+    # target's per-player value must equal the scalar GAE return on the same
+    # terminal-only inputs (gamma=1). This pins the recursion to compute_gae.
+    kwargs = _winner_targets_kwargs()
+    targets = compute_winner_lambda_targets(gae_lambda=0.8, **kwargs)
+
+    assert torch.allclose(targets.sum(dim=-1), torch.ones(1, 3))
+    assert torch.allclose(
+        targets, torch.tensor([[[0.84, 0.16], [0.9, 0.1], [1.0, 0.0]]]), atol=1e-6
+    )
+
+    rewards = torch.zeros(1, 3, 2)
+    rewards[:, 2] = kwargs["terminal_winner"][:, 2]
+    for player in range(2):
+        _adv, returns = compute_gae(
+            values=kwargs["winner_probabilities"][..., player],
+            rewards=rewards[..., player],
+            dones=kwargs["game_done"],
+            last_values=kwargs["last_winner_probabilities"][..., player],
+            gamma=1.0,
+            gae_lambda=0.8,
+        )
+        assert torch.allclose(targets[..., player], returns, atol=1e-6)
+
+
+def test_winner_lambda_targets_lambda_one_is_monte_carlo_winner() -> None:
+    targets = compute_winner_lambda_targets(gae_lambda=1.0, **_winner_targets_kwargs())
+    # Every state in the completed game targets the realized winner one-hot.
+    assert torch.allclose(targets, torch.tensor([[[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]]))
+
+
+def test_winner_lambda_targets_lambda_zero_is_one_step_bootstrap() -> None:
+    targets = compute_winner_lambda_targets(gae_lambda=0.0, **_winner_targets_kwargs())
+    # Non-terminal steps bootstrap one step from p(s_{t+1}); terminal resolves.
+    assert torch.allclose(targets, torch.tensor([[[0.6, 0.4], [0.5, 0.5], [1.0, 0.0]]]))
+
+
+def test_winner_lambda_targets_truncation_uses_critic_bootstrap() -> None:
+    targets = compute_winner_lambda_targets(
+        winner_probabilities=torch.tensor([[[0.3, 0.7], [0.6, 0.4], [0.5, 0.5]]]),
+        terminal_winner=torch.zeros(1, 3, 2),
+        game_done=torch.tensor([[False, True, False]]),
+        game_truncated=torch.tensor([[False, True, False]]),
+        last_winner_probabilities=torch.tensor([[0.5, 0.5]]),
+        bootstrap_winner_probabilities=torch.tensor(
+            [[[0.0, 0.0], [0.8, 0.2], [0.0, 0.0]]]
+        ),
+        gae_lambda=0.8,
+    )
+    # t=1 truncated -> critic bootstrap; t=2 fresh game -> segment bootstrap;
+    # t=0 blends p(s1) with the truncation bootstrap (no leak across the cut).
+    assert torch.allclose(targets[:, 1], torch.tensor([[0.8, 0.2]]))
+    assert torch.allclose(targets[:, 2], torch.tensor([[0.5, 0.5]]))
+    assert torch.allclose(targets[:, 0], torch.tensor([[0.76, 0.24]]))
+
+
+def test_winner_lambda_targets_rejects_bad_mask_shape() -> None:
+    kwargs = _winner_targets_kwargs()
+    kwargs["game_done"] = torch.zeros(1, 2, dtype=torch.bool)
+    with pytest.raises(ValueError, match="game_done must have shape"):
+        compute_winner_lambda_targets(gae_lambda=0.8, **kwargs)

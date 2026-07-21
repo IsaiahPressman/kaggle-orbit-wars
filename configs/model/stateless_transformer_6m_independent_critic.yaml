@@ -1,0 +1,12 @@
+model_arch: stateless_transformer_v1
+embed_dim: 256
+depth: 6
+n_heads: 8
+mlp_ratio: 2.0
+n_scratch_tokens: 4
+force_flash_attn: true
+actor: discrete_targets
+# Per-player sigmoid value head in [0, 1] for non-zero-sum (ship-ratio) rewards.
+# Requires rl.teacher_value_coef=0 (winner-probability value distillation is
+# incompatible with an independent critic).
+critic_mode: independent
