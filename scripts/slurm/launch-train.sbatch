@@ -40,7 +40,14 @@ USE_DEFAULT_FRESH_LAUNCH=0
 # a follow-up job after a time-limited run without knowing the timestamped run
 # dir at submission time. Only applies when no explicit run target was passed.
 if [[ "${ORBIT_WARS_RESUME_LATEST:-0}" == "1" && "${#RUN_ARGS[@]}" -eq 0 ]]; then
-    resume_run_dir="$(ls -dt "$OUTPUT_DIR"/*/ 2>/dev/null | head -1)"
+    resume_run_dir=""
+    shopt -s nullglob
+    for candidate in "$OUTPUT_DIR"/*/; do
+        if [[ -z "$resume_run_dir" || "$candidate" -nt "$resume_run_dir" ]]; then
+            resume_run_dir="$candidate"
+        fi
+    done
+    shopt -u nullglob
     if [[ -z "$resume_run_dir" ]]; then
         echo "ORBIT_WARS_RESUME_LATEST=1 but no run directory found under $OUTPUT_DIR" >&2
         exit 1

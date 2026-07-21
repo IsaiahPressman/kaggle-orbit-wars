@@ -39,8 +39,10 @@ experiments=(
 for entry in "${experiments[@]}"; do
     IFS='|' read -r name config gres steps njobs <<< "$entry"
     [ -f "$config" ] || { echo "missing config: $config" >&2; exit 1; }
-    out_dir="$OUTPUT_BASE/$name"
-    mkdir -p "$out_dir"
+    experiment_root="$OUTPUT_BASE/$name"
+    mkdir -p "$experiment_root"
+    out_dir="$(mktemp -d \
+        "$experiment_root/chain-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")"
     prev=""
     chain=""
     for i in $(seq 1 "$njobs"); do

@@ -39,8 +39,10 @@ for entry in "${experiments[@]}"; do
         echo "Missing config: $config" >&2
         exit 1
     fi
-    out_dir="$OUTPUT_BASE/$name"
-    mkdir -p "$out_dir"
+    experiment_root="$OUTPUT_BASE/$name"
+    mkdir -p "$experiment_root"
+    out_dir="$(mktemp -d \
+        "$experiment_root/chain-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")"
 
     # UV_NO_SYNC=1 (forwarded into the container via ORBIT_WARS_CONTAINER_ENV)
     # stops `uv run` from rebuilding owl at job start. This branch's mounted
