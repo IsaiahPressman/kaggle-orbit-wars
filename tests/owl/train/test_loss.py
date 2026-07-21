@@ -80,7 +80,7 @@ def test_ppo_loss_winner_ce_uses_cross_entropy_value_loss() -> None:
         winner_log_probabilities=winner_log_probabilities,
     )
 
-    expected_value = (-winner_targets * winner_log_probabilities).mean()
+    expected_value = (-winner_targets * winner_log_probabilities).sum(dim=-1).mean()
     assert torch.allclose(metrics.value_loss, expected_value)
     # The cross-entropy loss must not fall back to the regression target.
     assert not torch.allclose(
@@ -119,8 +119,63 @@ def test_compiled_ppo_loss_forwards_winner_targets(
         winner_log_probabilities=winner_log_probabilities,
     )
 
-    expected_value = (-winner_targets * winner_log_probabilities).mean()
+    expected_value = (-winner_targets * winner_log_probabilities).sum(dim=-1).mean()
     assert torch.allclose(metrics.value_loss, expected_value)
+
+
+@pytest.mark.parametrize("distributed", [False, True])
+def test_ppo_loss_winner_ce_averages_over_states_not_player_slots(
+    monkeypatch: pytest.MonkeyPatch,
+    distributed: bool,
+) -> None:
+    winner_log_probabilities = torch.tensor(
+        [
+            [[0.75, 0.25, 1.0, 1.0]],
+            [[0.4, 0.3, 0.2, 0.1]],
+        ]
+    ).log()
+    winner_targets = torch.tensor(
+        [
+            [[1.0, 0.0, 0.0, 0.0]],
+            [[0.0, 1.0, 0.0, 0.0]],
+        ]
+    )
+    value_weight = torch.tensor(
+        [
+            [[1.0, 1.0, 0.0, 0.0]],
+            [[1.0, 1.0, 1.0, 1.0]],
+        ]
+    )
+    context = None
+    if distributed:
+        context = ppo.DistributedContext(
+            device=torch.device("cpu"),
+            rank=0,
+            local_rank=0,
+            world_size=1,
+            initialized=True,
+        )
+        monkeypatch.setattr(ppo, "all_reduce_sum", lambda tensor, _context: tensor)
+        monkeypatch.setattr(ppo, "all_reduce_max", lambda tensor, _context: tensor)
+
+    metrics, _backward_loss = _ppo_loss(
+        new_logp=torch.zeros((2, 1, 4)),
+        entropy=torch.zeros((2, 1, 4)),
+        new_values=winner_log_probabilities.exp(),
+        old_logp=torch.zeros((2, 1, 4)),
+        old_values=torch.zeros((2, 1, 4)),
+        returns=torch.zeros((2, 1, 4)),
+        advantages=torch.zeros((2, 1, 4)),
+        policy_weight=value_weight,
+        value_weight=value_weight,
+        config=PPOConfig(value_loss="winner_ce", vf_clip_coef=None),
+        context=context,
+        winner_targets=winner_targets,
+        winner_log_probabilities=winner_log_probabilities,
+    )
+
+    per_state_cross_entropy = (-winner_targets * winner_log_probabilities).sum(dim=-1)
+    assert torch.allclose(metrics.value_loss, per_state_cross_entropy.mean())
 
 
 def test_ppo_loss_winner_ce_preserves_gradient_for_tiny_target_probability() -> None:

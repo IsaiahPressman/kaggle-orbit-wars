@@ -1569,24 +1569,32 @@ def _ppo_loss(
         teacher_kl_coef = config.teacher_kl_coef
     if teacher_value_coef is None:
         teacher_value_coef = config.teacher_value_coef
+    components = loss_components(
+        new_logp,
+        entropy,
+        new_values,
+        old_logp,
+        old_values,
+        returns,
+        advantages,
+        config.clip_coef,
+        config.vf_clip_coef,
+        config.ppo_clip_mode,
+        entity_policy_weight,
+        winner_targets,
+        winner_log_probabilities,
+    )
+    value_loss_weight = value_weight
+    if winner_targets is not None:
+        value_loss_weight = _value_state_weight(
+            value_weight,
+            dtype=components[1].dtype,
+        )
     return _ppo_loss_metrics_from_components(
-        loss_components(
-            new_logp,
-            entropy,
-            new_values,
-            old_logp,
-            old_values,
-            returns,
-            advantages,
-            config.clip_coef,
-            config.vf_clip_coef,
-            config.ppo_clip_mode,
-            entity_policy_weight,
-            winner_targets,
-            winner_log_probabilities,
-        ),
+        components,
         policy_weight=policy_weight,
         value_weight=value_weight,
+        value_loss_weight=value_loss_weight,
         teacher_kl_values=teacher_kl,
         teacher_value_loss_values=teacher_value_loss_values,
         teacher_kl_coef=teacher_kl_coef,
@@ -1602,6 +1610,7 @@ def _ppo_loss_metrics_from_components(
     *,
     policy_weight: torch.Tensor,
     value_weight: torch.Tensor,
+    value_loss_weight: torch.Tensor,
     teacher_kl_values: torch.Tensor,
     teacher_value_loss_values: torch.Tensor,
     teacher_kl_coef: float,
@@ -1619,6 +1628,11 @@ def _ppo_loss_metrics_from_components(
         ratio,
         logratio,
     ) = components
+    if value_loss_values.shape != value_loss_weight.shape:
+        raise ValueError(
+            "value loss values must have shape "
+            f"{tuple(value_loss_weight.shape)}, got {tuple(value_loss_values.shape)}"
+        )
     if context is None or not context.initialized:
         return _local_ppo_loss_metrics(
             policy_loss_values,
@@ -1630,6 +1644,7 @@ def _ppo_loss_metrics_from_components(
             logratio,
             policy_weight=policy_weight,
             value_weight=value_weight,
+            value_loss_weight=value_loss_weight,
             teacher_kl_values=teacher_kl_values,
             teacher_value_loss_values=teacher_value_loss_values,
             teacher_kl_coef=teacher_kl_coef,
@@ -1647,6 +1662,7 @@ def _ppo_loss_metrics_from_components(
         logratio,
         policy_weight=policy_weight,
         value_weight=value_weight,
+        value_loss_weight=value_loss_weight,
         teacher_kl_values=teacher_kl_values,
         teacher_value_loss_values=teacher_value_loss_values,
         teacher_kl_coef=teacher_kl_coef,
@@ -1668,6 +1684,7 @@ def _local_ppo_loss_metrics(
     *,
     policy_weight: torch.Tensor,
     value_weight: torch.Tensor,
+    value_loss_weight: torch.Tensor,
     teacher_kl_values: torch.Tensor,
     teacher_value_loss_values: torch.Tensor,
     teacher_kl_coef: float,
@@ -1676,7 +1693,7 @@ def _local_ppo_loss_metrics(
     ent_coef: float,
 ) -> tuple[_PPOLossMetrics, torch.Tensor]:
     policy_loss = weighted_mean(policy_loss_values, policy_weight)
-    value_loss = weighted_mean(value_loss_values, value_weight)
+    value_loss = weighted_mean(value_loss_values, value_loss_weight)
     entropy_mean = weighted_mean(entropy_values, policy_weight)
     teacher_kl = weighted_mean(teacher_kl_values, policy_weight)
     teacher_value_cross_entropy = _teacher_value_weighted_mean(
@@ -1726,6 +1743,7 @@ def _distributed_ppo_loss_metrics(
     *,
     policy_weight: torch.Tensor,
     value_weight: torch.Tensor,
+    value_loss_weight: torch.Tensor,
     teacher_kl_values: torch.Tensor,
     teacher_value_loss_values: torch.Tensor,
     teacher_kl_coef: float,
@@ -1734,7 +1752,7 @@ def _distributed_ppo_loss_metrics(
     ent_coef: float,
     context: DistributedContext,
 ) -> tuple[_PPOLossMetrics, torch.Tensor]:
-    teacher_value_weight = _teacher_value_state_weight(
+    teacher_value_weight = _value_state_weight(
         value_weight,
         dtype=teacher_value_loss_values.dtype,
     )
@@ -1745,13 +1763,13 @@ def _distributed_ppo_loss_metrics(
             f"got {tuple(teacher_value_loss_values.shape)}"
         )
     policy_denominator_local = policy_weight.sum().to(dtype=policy_loss_values.dtype)
-    value_denominator_local = value_weight.sum().to(dtype=value_loss_values.dtype)
+    value_denominator_local = value_loss_weight.sum().to(dtype=value_loss_values.dtype)
     teacher_value_denominator_local = teacher_value_weight.sum()
     reduced_sums = all_reduce_sum(
         torch.stack(
             [
                 (policy_loss_values.detach() * policy_weight).sum(),
-                (value_loss_values.detach() * value_weight).sum(),
+                (value_loss_values.detach() * value_loss_weight).sum(),
                 (entropy_values.detach() * policy_weight).sum(),
                 (teacher_kl_values.detach() * policy_weight).sum(),
                 (teacher_value_loss_values.detach() * teacher_value_weight).sum(),
@@ -1802,7 +1820,7 @@ def _distributed_ppo_loss_metrics(
         / policy_denominator
     )
     backward_value_loss = (
-        (value_loss_values * value_weight).sum()
+        (value_loss_values * value_loss_weight).sum()
         * context.world_size
         / value_denominator
     )
@@ -1904,7 +1922,7 @@ def _ppo_loss_components(
         # Categorical cross-entropy toward the distributional winner target.
         # The critic computes these log-probabilities directly with masked
         # log_softmax, preserving gradients even for extremely unlikely targets.
-        value_loss_values = -winner_targets * winner_log_probabilities
+        value_loss_values = (-winner_targets * winner_log_probabilities).sum(dim=-1)
     elif vf_clip_coef:
         value_clipped = old_values + torch.clamp(
             new_values - old_values,
@@ -2906,7 +2924,7 @@ def _teacher_value_weighted_mean(
     values: torch.Tensor,
     value_weight: torch.Tensor,
 ) -> torch.Tensor:
-    state_weight = _teacher_value_state_weight(value_weight, dtype=values.dtype)
+    state_weight = _value_state_weight(value_weight, dtype=values.dtype)
     if values.shape != state_weight.shape:
         raise ValueError(
             "teacher value loss values must have shape "
@@ -2955,7 +2973,7 @@ def _distributed_teacher_value_weighted_mean(
     value_weight: torch.Tensor,
     context: DistributedContext,
 ) -> torch.Tensor:
-    state_weight = _teacher_value_state_weight(value_weight, dtype=values.dtype)
+    state_weight = _value_state_weight(value_weight, dtype=values.dtype)
     if values.shape != state_weight.shape:
         raise ValueError(
             "teacher value loss values must have shape "
@@ -2979,7 +2997,7 @@ def _distributed_backward_teacher_value_weighted_mean(
     value_weight: torch.Tensor,
     context: DistributedContext,
 ) -> torch.Tensor:
-    state_weight = _teacher_value_state_weight(value_weight, dtype=values.dtype)
+    state_weight = _value_state_weight(value_weight, dtype=values.dtype)
     if values.shape != state_weight.shape:
         raise ValueError(
             "teacher value loss values must have shape "
@@ -2988,7 +3006,7 @@ def _distributed_backward_teacher_value_weighted_mean(
     return _distributed_backward_weighted_mean(values, state_weight, context)
 
 
-def _teacher_value_state_weight(
+def _value_state_weight(
     value_weight: torch.Tensor,
     *,
     dtype: torch.dtype,
